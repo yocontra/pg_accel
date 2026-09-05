@@ -21,6 +21,12 @@ required_patterns=(
 missing=0
 for pattern in "${required_patterns[@]}"; do
     if ! rg -q -F "$pattern" "$checklist"; then
+        # External evidence ledgers may retain the original row title. Both
+        # spellings name the same mandatory CI gate; neither may be omitted.
+        if [ "$pattern" = "Required hosted CI ship-bar jobs pass" ] && \
+            rg -q -F "Required CI ship-bar jobs pass" "$checklist"; then
+            continue
+        fi
         echo "missing checklist item matching: $pattern" >&2
         missing=1
     fi

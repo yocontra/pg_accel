@@ -66,6 +66,18 @@ class ReleaseChecklistAuditTests(unittest.TestCase):
         self.assertIn(f"missing checklist item matching: {required_item}", completed.stderr)
         self.assertNotIn("release checklist audit: PASS", completed.stdout)
 
+    def test_external_ledger_with_original_ci_title_passes(self) -> None:
+        checklist = self.completed_checklist().replace(
+            "Required hosted CI ship-bar jobs pass", "Required CI ship-bar jobs pass"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Path(directory) / "original-ci-title-checklist.md"
+            ledger.write_text(checklist, encoding="utf-8")
+            completed = self.run_audit(ledger)
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn(f"release checklist audit: PASS ({ledger})", completed.stdout)
+
     def test_default_tracked_template_remains_red(self) -> None:
         completed = self.run_audit()
 
