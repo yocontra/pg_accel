@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -13,11 +14,15 @@ TRACKED_CHECKLIST = REPO_ROOT / "docs" / "release-checklist-1.0.md"
 
 
 class ReleaseChecklistAuditTests(unittest.TestCase):
-    def run_audit(self, evidence_path: Path | None = None) -> subprocess.CompletedProcess[str]:
+    def run_audit(
+        self, evidence_path: Path | None = None, *, executable_path: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env.pop("RELEASE_CHECKLIST_EVIDENCE_PATH", None)
         if evidence_path is not None:
             env["RELEASE_CHECKLIST_EVIDENCE_PATH"] = str(evidence_path)
+        if executable_path is not None:
+            env["PATH"] = executable_path
         return subprocess.run(
             ["bash", str(AUDIT_SCRIPT)],
             cwd=REPO_ROOT,
@@ -74,6 +79,23 @@ class ReleaseChecklistAuditTests(unittest.TestCase):
             ledger = Path(directory) / "original-ci-title-checklist.md"
             ledger.write_text(checklist, encoding="utf-8")
             completed = self.run_audit(ledger)
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn(f"release checklist audit: PASS ({ledger})", completed.stdout)
+
+    def test_completed_ledger_passes_with_only_standard_shell_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable_dir = root / "bin"
+            executable_dir.mkdir()
+            for command in ("bash", "grep", "sed", "wc", "tr"):
+                executable = shutil.which(command)
+                self.assertIsNotNone(executable, command)
+                (executable_dir / command).symlink_to(executable)
+            self.assertIsNone(shutil.which("rg", path=str(executable_dir)))
+            ledger = root / "standard-tools-checklist.md"
+            ledger.write_text(self.completed_checklist(), encoding="utf-8")
+            completed = self.run_audit(ledger, executable_path=str(executable_dir))
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn(f"release checklist audit: PASS ({ledger})", completed.stdout)

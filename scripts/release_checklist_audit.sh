@@ -20,11 +20,11 @@ required_patterns=(
 
 missing=0
 for pattern in "${required_patterns[@]}"; do
-    if ! rg -q -F "$pattern" "$checklist"; then
+    if ! grep -q -F -- "$pattern" "$checklist"; then
         # External evidence ledgers may retain the original row title. Both
         # spellings name the same mandatory CI gate; neither may be omitted.
         if [ "$pattern" = "Required hosted CI ship-bar jobs pass" ] && \
-            rg -q -F "Required CI ship-bar jobs pass" "$checklist"; then
+            grep -q -F -- "Required CI ship-bar jobs pass" "$checklist"; then
             continue
         fi
         echo "missing checklist item matching: $pattern" >&2
@@ -32,8 +32,8 @@ for pattern in "${required_patterns[@]}"; do
     fi
 done
 
-placeholder_matches="$(rg -n '<(sha-or-url|url|sha|name)>|<release-url>' "$checklist" || true)"
-unchecked_matches="$(rg -n '^- \[ \]' "$checklist" || true)"
+placeholder_matches="$(grep -n -E -- '<(sha-or-url|url|sha|name)>|<release-url>' "$checklist" || true)"
+unchecked_matches="$(grep -n -- '^- \[ \]' "$checklist" || true)"
 if [ -n "$placeholder_matches" ]; then
     printf '%s\n' "$placeholder_matches" >&2
 fi

@@ -508,6 +508,15 @@ jobs:
             --expected-commit "$EXPECTED_CANDIDATE_SHA" \
             --output "$LINUX_NO_GPU_ARTIFACT_DIR/candidate-provenance.json"
 
+      - name: Test release checklist audit
+        if: matrix.pg == 18
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 -m unittest scripts/tests/test_release_checklist_audit.py -v \
+            2>&1 | tee "$LINUX_NO_GPU_ARTIFACT_DIR/release-checklist-audit-tests.log"
+
       - name: Load pinned AdaptiveCpp SHA
         shell: bash
         run: |
@@ -688,8 +697,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          just release-checklist-audit-test 2>&1 | \
-            tee "$LINUX_NO_GPU_ARTIFACT_DIR/release-checklist-audit-tests.log"
           cargo test -p pg_accel_bench --locked 2>&1 | \
             tee "$LINUX_NO_GPU_ARTIFACT_DIR/benchmark-harness-tests.log"
 
