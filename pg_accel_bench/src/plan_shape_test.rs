@@ -2062,7 +2062,16 @@ fn plan_shape_parallel_full_sort_stays_native() {
 
     c.simple_query("SELECT pg_accel_reset_stats()")
         .expect("reset stats");
-    let plan = explain(&mut c, "SELECT * FROM bench_f32_10m ORDER BY v");
+    // PG19 legitimately prefers a serial scan for the bare three-column
+    // projection under default costs.  Keep this a no-LIMIT, full-output
+    // sort while adding enough parallel-safe projection work for both
+    // supported majors to choose their native Gather Merge path without
+    // planner-cost overrides.
+    let plan = explain(
+        &mut c,
+        "SELECT id, v, dim, md5(id::text) AS digest \
+         FROM bench_f32_10m ORDER BY v",
+    );
     assert!(
         plan.contains("gather"),
         "sort plan missing any Gather variant:\n{plan}"

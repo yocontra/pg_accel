@@ -12,6 +12,12 @@
 //! (`pg_accel_bench run`) can execute it; the zero-crash / 20-iteration
 //! assertion lives in `parallel_stress_test.rs` and is invoked from the
 //! library unit-test runner.
+//!
+//! PostgreSQL accumulates `SUM(real)` in `real`, so parallel partial-aggregate
+//! merge order can change the rounded result even when pg_accel stays entirely
+//! native. The fixture values and their total are below 2^53; accumulating the
+//! sum in `double precision` therefore keeps the correctness oracle exact and
+//! independent of worker scheduling.
 
 use super::Workload;
 
@@ -65,7 +71,7 @@ impl Workload for ParallelStress {
     }
 
     fn query_sql(&self) -> String {
-        "SELECT round(SUM(v)::numeric, -9) AS sum_v, \
+        "SELECT round(SUM(v::double precision)::numeric, -9) AS sum_v, \
                 COUNT(v) AS count_v, \
                 MIN(v) AS min_v, \
                 MAX(v) AS max_v, \
@@ -111,7 +117,7 @@ impl Workload for ParallelStressGrouped {
 
     fn query_sql(&self) -> String {
         "SELECT dim, \
-                round(SUM(v)::numeric, -7) AS sum_v, \
+                round(SUM(v::double precision)::numeric, -7) AS sum_v, \
                 round(AVG(v)::numeric, 0) AS avg_v \
          FROM bench_f32_10m \
          GROUP BY dim \
@@ -216,19 +222,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn grouped_stress_query_is_deterministic_and_float_tolerant() {
+    fn grouped_stress_query_uses_deterministic_float8_sum() {
         let sql = ParallelStressGrouped.query_sql();
 
-        assert!(sql.contains("round(SUM(v)::numeric, -7)"));
+        assert!(sql.contains("round(SUM(v::double precision)::numeric, -7)"));
+        assert!(!sql.contains("SUM(v)::numeric"));
         assert!(sql.contains("round(AVG(v)::numeric, 0)"));
         assert!(sql.contains("ORDER BY dim"));
     }
 
     #[test]
-    fn reduce_stress_query_is_float_tolerant() {
+    fn reduce_stress_query_uses_deterministic_float8_sum() {
         let sql = ParallelStress.query_sql();
 
-        assert!(sql.contains("round(SUM(v)::numeric, -9)"));
+        assert!(sql.contains("round(SUM(v::double precision)::numeric, -9)"));
+        assert!(!sql.contains("SUM(v)::numeric"));
         assert!(sql.contains("round(AVG(v)::numeric, 0)"));
         assert!(sql.contains("round(STDDEV(v)::numeric, 0)"));
     }

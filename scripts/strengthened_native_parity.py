@@ -47,6 +47,18 @@ except ImportError:  # Direct script execution has no package context.
 EXPECTED_WARMUPS = 5
 EXPECTED_PAIRS = 30
 ENUMERATION_STRATEGY = "meet_in_the_middle_exact_count"
+SETUP_QUIESCENCE_SCHEMA_VERSION = 1
+CHECKPOINTER_COUNTER_FIELDS = (
+    "num_timed",
+    "num_requested",
+    "num_done",
+    "restartpoints_timed",
+    "restartpoints_requested",
+    "restartpoints_done",
+    "buffers_written",
+    "slru_written",
+)
+CHECKPOINTER_TIME_FIELDS = ("write_time_ms", "sync_time_ms")
 
 
 def _signed_sums(values: list[float]) -> list[float]:
@@ -138,6 +150,54 @@ def extract_native_arms(row: dict[str, Any], label: str) -> tuple[list[float], l
     }
 
 
+def validate_setup_quiescence(row: dict[str, Any], label: str) -> dict[str, Any]:
+    audit = row.get("setup_quiescence")
+    if not isinstance(audit, dict):
+        raise AnalysisError(f"{label}: setup quiescence audit is missing")
+    if audit.get("schema_version") != SETUP_QUIESCENCE_SCHEMA_VERSION:
+        raise AnalysisError(f"{label}: setup quiescence schema is unsupported")
+    if audit.get("checkpoint_completed") is not True:
+        raise AnalysisError(f"{label}: setup checkpoint completion is not proven")
+    for field in ("checkpoint_completed_at", "measurement_completed_at"):
+        value = audit.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise AnalysisError(f"{label}: setup quiescence {field} is missing")
+    for field in ("checkpoint_wal_lsn", "measurement_completed_wal_lsn"):
+        value = audit.get(field)
+        if not isinstance(value, str) or len(value.split("/")) != 2:
+            raise AnalysisError(f"{label}: setup quiescence {field} is malformed")
+        try:
+            for component in value.split("/"):
+                int(component, 16)
+        except ValueError as error:
+            raise AnalysisError(
+                f"{label}: setup quiescence {field} is malformed"
+            ) from error
+
+    before = audit.get("checkpointer_before")
+    after = audit.get("checkpointer_after")
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        raise AnalysisError(f"{label}: checkpointer boundary snapshots are missing")
+    for snapshot_name, snapshot in (("before", before), ("after", after)):
+        for field in CHECKPOINTER_COUNTER_FIELDS:
+            value = snapshot.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise AnalysisError(
+                    f"{label}: checkpointer {snapshot_name} counter {field} is invalid"
+                )
+        for field in CHECKPOINTER_TIME_FIELDS:
+            value = snapshot.get(field)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                raise AnalysisError(
+                    f"{label}: checkpointer {snapshot_name} time {field} is invalid"
+                )
+    if before != after:
+        raise AnalysisError(f"{label}: checkpointer changed during measured timing")
+    if audit.get("checkpointer_unchanged") is not True:
+        raise AnalysisError(f"{label}: checkpointer quiescence verdict is not a pass")
+    return audit
+
+
 def evaluate_native_parity(enabled: list[float], disabled: list[float]) -> dict[str, Any]:
     enabled_median = percentile(enabled, 50.0)
     disabled_median = percentile(disabled, 50.0)
@@ -224,6 +284,7 @@ def analyze_cell(root: Path, matrix_row: dict[str, str]) -> dict[str, Any]:
             f"the registered reason {expected_reason!r}"
         )
 
+    setup_quiescence = validate_setup_quiescence(row, label)
     enabled, disabled, order = extract_mirrored_native_arms(row, label)
     validate_reported_native_statistics(row, enabled, disabled, label)
     result = evaluate_native_parity(enabled, disabled)
@@ -245,6 +306,7 @@ def analyze_cell(root: Path, matrix_row: dict[str, str]) -> dict[str, Any]:
         workload=workload,
         rows=rows,
         decline_reason=decline.get("reason"),
+        setup_quiescence=setup_quiescence,
         arm_order=order,
         no_dispatch_audit=audit_result,
     )

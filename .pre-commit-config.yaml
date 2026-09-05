@@ -120,16 +120,16 @@ repos:
 
       # --- Rust: slow checks deferred to pre-push ---------------------------
       - id: cargo-check
-        name: cargo check --workspace --features pg18 --all-targets
-        entry: cargo check --workspace --features pg18 --all-targets
+        name: exact PostgreSQL 18 workspace check
+        entry: just check 18
         language: system
         types_or: [rust]
         pass_filenames: false
         stages: [pre-push]
 
       - id: cargo-clippy
-        name: cargo clippy --workspace --features pg18 --all-targets
-        entry: cargo clippy --workspace --features pg18 --all-targets -- -D warnings
+        name: exact PostgreSQL 18 workspace clippy
+        entry: just lint 18
         language: system
         types_or: [rust]
         pass_filenames: false

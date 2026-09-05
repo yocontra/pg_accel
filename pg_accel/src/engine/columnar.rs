@@ -586,7 +586,7 @@ pub fn pg_type_to_val_tag(type_oid: pgrx::pg_sys::Oid) -> Option<PgaccelValTag> 
     }
 }
 
-#[cfg(feature = "pg_test")]
+#[cfg(any(test, feature = "pg_test"))]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
@@ -1331,5 +1331,123 @@ mod tests {
         let copied = tag;
         assert_eq!(tag, cloned);
         assert_eq!(tag, copied);
+    }
+}
+
+#[cfg(test)]
+mod complete_column_contract_tests {
+    use super::*;
+
+    #[test]
+    fn selection_and_null_metadata_lengths_cover_compact_and_explicit_forms() {
+        let all_rows = BatchSelection::AllRows;
+        let selected = BatchSelection::Mask(vec![1, 0, 1]);
+        assert_eq!(all_rows.len(7), 7);
+        assert_eq!(selected.len(3), 3);
+
+        let all_valid = ColumnarNulls::AllValid;
+        let nullable = ColumnarNulls::Mask(vec![0, 1, 0]);
+        assert_eq!(all_valid.len(7), 7);
+        assert!(!all_valid.is_empty(7));
+        assert_eq!(nullable.len(3), 3);
+        assert!(!nullable.is_empty(3));
+        assert!(ColumnarNulls::AllValid.is_empty(0));
+    }
+
+    #[test]
+    fn every_column_storage_variant_reports_its_exact_abi_contract() {
+        let columns = [
+            (
+                ColumnarColumnData::Bool(vec![1]),
+                PgaccelValTag::Bool,
+                std::mem::size_of::<u8>(),
+                std::mem::align_of::<u8>(),
+            ),
+            (
+                ColumnarColumnData::Int32(vec![2]),
+                PgaccelValTag::Int32,
+                std::mem::size_of::<i32>(),
+                std::mem::align_of::<i32>(),
+            ),
+            (
+                ColumnarColumnData::Int64(vec![3]),
+                PgaccelValTag::Int64,
+                std::mem::size_of::<i64>(),
+                std::mem::align_of::<i64>(),
+            ),
+            (
+                ColumnarColumnData::Float32(vec![4.0]),
+                PgaccelValTag::Float32,
+                std::mem::size_of::<f32>(),
+                std::mem::align_of::<f32>(),
+            ),
+            (
+                ColumnarColumnData::Float64(vec![5.0]),
+                PgaccelValTag::Float64,
+                std::mem::size_of::<f64>(),
+                std::mem::align_of::<f64>(),
+            ),
+            (
+                ColumnarColumnData::Date(vec![6]),
+                PgaccelValTag::Date,
+                std::mem::size_of::<i32>(),
+                std::mem::align_of::<i32>(),
+            ),
+            (
+                ColumnarColumnData::Timestamp(vec![7]),
+                PgaccelValTag::Timestamp,
+                std::mem::size_of::<i64>(),
+                std::mem::align_of::<i64>(),
+            ),
+        ];
+
+        for (column, tag, size, align) in columns {
+            assert_eq!(column.tag(), tag);
+            assert_eq!(column.len(), 1);
+            assert!(!column.is_empty());
+            assert_eq!(column.element_size(), size);
+            assert_eq!(column.element_align(), align);
+            assert_eq!(column.byte_len(), size);
+            assert!(!column.as_ptr().is_null());
+        }
+
+        let empty = ColumnarColumnData::Bool(Vec::new());
+        assert!(empty.is_empty());
+        assert!(ColumnarColumnData::Int32(vec![1]).as_f32_slice().is_none());
+        assert!(
+            ColumnarColumnData::Float64(vec![1.0])
+                .as_i64_slice()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn dormant_bool_date_and_timestamp_helpers_preserve_types_and_nulls() {
+        let mut owner = ColumnarBatchOwner::new(2, 3);
+        owner.add_col_bool_all_valid(vec![true, false]);
+        owner.add_col_date(vec![20_000, 20_001], vec![0, 1]);
+        owner.add_col_timestamp(vec![1_000, 2_000], vec![1, 0]);
+
+        assert_eq!(
+            owner.column(0).expect("bool column").tag(),
+            PgaccelValTag::Bool
+        );
+        assert!(owner.column(0).expect("bool column").nulls().is_none());
+        assert_eq!(
+            owner.column(1).expect("date column").tag(),
+            PgaccelValTag::Date
+        );
+        assert_eq!(
+            owner.column(1).expect("date column").nulls(),
+            Some(&[0, 1][..])
+        );
+        assert_eq!(
+            owner.column(2).expect("timestamp column").tag(),
+            PgaccelValTag::Timestamp
+        );
+        assert_eq!(
+            owner.column(2).expect("timestamp column").nulls(),
+            Some(&[1, 0][..])
+        );
     }
 }

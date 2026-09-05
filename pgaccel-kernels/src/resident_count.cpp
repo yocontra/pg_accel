@@ -348,3 +348,42 @@ extern "C" const int64_t* pgaccel_agg_get_counts(const pgaccel_agg_state* state)
 extern "C" void pgaccel_agg_free(pgaccel_agg_state* state) {
   delete state;
 }
+
+#if defined(PGACCEL_TEST_HOOKS)
+// Keep the private layout implementation internal while allowing boundary
+// values to be driven from the standalone test translation unit.
+extern "C" bool pgacceltest_resident_count_checked_add(size_t a, size_t b, size_t* out) {
+  return checked_add(a, b, out);
+}
+extern "C" bool pgacceltest_resident_count_checked_mul(size_t a, size_t b, size_t* out) {
+  return checked_mul(a, b, out);
+}
+extern "C" bool pgacceltest_resident_count_align_up(size_t value, size_t alignment, size_t* out) {
+  return align_up(value, alignment, out);
+}
+extern "C" bool pgacceltest_resident_count_next_power_of_two(size_t value, size_t* out) {
+  return next_power_of_two(value, out);
+}
+extern "C" bool pgacceltest_resident_count_append_region(size_t count, size_t width,
+                                                         size_t alignment, size_t* cursor,
+                                                         size_t* out_offset) {
+  return append_region(count, width, alignment, cursor, out_offset);
+}
+extern "C" bool pgacceltest_resident_count_null_layout_rejected(size_t capacity,
+                                                                size_t max_distinct) {
+  return !make_slab_layout(capacity, max_distinct, nullptr);
+}
+extern "C" bool pgacceltest_resident_count_slab_layout(size_t capacity, size_t max_distinct,
+                                                       size_t* offsets_and_bytes) {
+  if (offsets_and_bytes == nullptr)
+    return false;
+  ResidentCountSlabLayout layout;
+  if (!make_slab_layout(capacity, max_distinct, &layout))
+    return false;
+  offsets_and_bytes[0] = layout.owners_offset;
+  offsets_and_bytes[1] = layout.counts_offset;
+  offsets_and_bytes[2] = layout.output_keys_offset;
+  offsets_and_bytes[3] = layout.bytes;
+  return true;
+}
+#endif

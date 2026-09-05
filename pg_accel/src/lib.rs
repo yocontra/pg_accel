@@ -432,15 +432,12 @@ mod tests;
 #[path = "tests/phase2_bridge.rs"]
 mod phase2_bridge_tests;
 
-// macOS Sequoia+ (26.x) eagerly resolves undefined data symbols at dyld
-// load time, which aborts pgrx lib unit test binaries before any tests
-// run. build.rs generates a file of `#[no_mangle] pub static NAME: u8`
-// stubs for every global symbol in the `postgres` executable so the
-// loader finds a definition for each PG reference. Stubs are compiled
-// into the test binary ONLY (never the production cdylib that postgres
-// dlopens) and are never actually executed — all real PG functionality
-// is provided by postgres itself at runtime.
-#[cfg(all(test, target_os = "macos"))]
+// Standalone pgrx library-test executables have no PostgreSQL process to
+// provide the PG function/data symbols referenced by the crate. build.rs
+// generates test-only definitions from the exact selected postgres binary on
+// macOS and Linux. Production cdylibs never compile this module; pgrx tests
+// loaded by postgres resolve the genuine process definitions first.
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 #[path = "pg_stubs.rs"]
 mod pg_stubs;
 

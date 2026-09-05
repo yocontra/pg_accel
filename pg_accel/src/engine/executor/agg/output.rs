@@ -3,7 +3,7 @@
 use std::ffi::CString;
 use std::rc::Rc;
 
-use pgrx::pg_sys;
+use pgrx::{AnyNumeric, IntoDatum, pg_sys};
 
 use super::artifact::{GroupDatum, GroupDomain};
 use crate::engine::spec::{
@@ -373,19 +373,57 @@ impl DescriptorAggOutput {
             return Ok((pg_sys::Datum::from(0_usize), true));
         }
 
+        if kind == AggregateKind::Avg {
+            if !matches!(source_type_oid, INT2OID | INT4OID) {
+                return Err(MaterializeError::invalid(format!(
+                    "exact integer AVG does not support source type OID {source_type_oid}"
+                )));
+            }
+            let sum = self
+                .storage
+                .measure_i64_at(measure_index, GroupedAggStateLane::Sum, group)
+                .map_err(|error| {
+                    MaterializeError::invalid(format!(
+                        "could not read I64 AVG sum state for measure {measure_index}: {error}"
+                    ))
+                })?;
+            let count =
+                i64::try_from(nonnull_count).map_err(|_| MaterializeError::CountOverflow {
+                    measure_index,
+                    count: nonnull_count,
+                })?;
+            let average = AnyNumeric::from(sum) / AnyNumeric::from(count);
+            let datum = average.into_datum().ok_or_else(|| {
+                MaterializeError::invalid("PostgreSQL numeric division returned NULL for AVG")
+            })?;
+            return Ok((datum, false));
+        }
+
         let lane = match kind {
             AggregateKind::Sum => GroupedAggStateLane::Sum,
             AggregateKind::Min => GroupedAggStateLane::Min,
             AggregateKind::Max => GroupedAggStateLane::Max,
             AggregateKind::Count => unreachable!("COUNT returned above"),
-            AggregateKind::Avg | AggregateKind::StddevSamp => {
+            AggregateKind::Avg => unreachable!("AVG returned above"),
+            AggregateKind::StddevSamp => {
                 return Err(MaterializeError::invalid(
-                    "Phase 5D output supports only COUNT, SUM, MIN, and MAX",
+                    "Phase 5D output does not materialize STDDEV_SAMP",
                 ));
             }
         };
 
         match source_type_oid {
+            INT2OID if kind == AggregateKind::Sum => {
+                let value = self
+                    .storage
+                    .measure_i64_at(measure_index, lane, group)
+                    .map_err(|error| {
+                        MaterializeError::invalid(format!(
+                            "could not read I64 aggregate state for measure {measure_index}: {error}"
+                        ))
+                    })?;
+                Ok((pg_sys::Datum::from(value), false))
+            }
             INT2OID if matches!(kind, AggregateKind::Min | AggregateKind::Max) => {
                 let value = self
                     .storage

@@ -3,6 +3,7 @@ mod gpu_reduce_scaling;
 mod gpu_reduce_sum;
 mod reduce_variants;
 // --- GPU HashAgg ---
+mod aggregate_filter_grouped_agg_int4;
 mod and_range_predicate_expression_grouped_agg_int4;
 mod case_when_expression_grouped_agg;
 mod case_when_in_expression_grouped_agg;
@@ -19,6 +20,12 @@ mod grouped_agg;
 mod grouped_agg_high_card;
 mod grouped_agg_int4;
 mod grouped_count_bool_candidate;
+mod grouped_count_date_candidate;
+mod grouped_count_float_candidate;
+mod grouped_count_int2_candidate;
+mod grouped_count_int8_candidate;
+mod grouped_count_timestamp_candidate;
+mod grouped_integer_sum_avg_candidate;
 mod hashagg_sweep;
 mod predicate_expression_grouped_agg_int4;
 mod predicate_filter_expression_grouped_agg;
@@ -34,6 +41,7 @@ mod gpu_hashjoin_large_build;
 mod gpu_nlj_between;
 mod hash_join;
 mod hashjoin_sweep;
+mod weighted_global_count_int4;
 // --- GPU Spatial ---
 mod index_recheck;
 mod proximity;
@@ -101,6 +109,7 @@ mod tpch;
 mod window_full_output_decline;
 mod window_reducing_decline;
 
+pub use aggregate_filter_grouped_agg_int4::AggregateFilterGroupedAggInt4;
 pub use aggregate_semantic_modifier_decline::{
     AggregateOrderedSetDecline, AggregateSemanticModifierDecline,
 };
@@ -133,6 +142,16 @@ pub use grouped_agg::GroupedAgg;
 pub use grouped_agg_high_card::GroupedAggHighCard;
 pub use grouped_agg_int4::GroupedAggInt4;
 pub use grouped_count_bool_candidate::GroupedCountBoolCandidate;
+pub use grouped_count_date_candidate::GroupedCountDateCandidate;
+pub use grouped_count_float_candidate::{GroupedCountFloat4Candidate, GroupedCountFloat8Candidate};
+pub use grouped_count_int2_candidate::GroupedCountInt2Candidate;
+pub use grouped_count_int8_candidate::GroupedCountInt8Candidate;
+pub use grouped_count_timestamp_candidate::{
+    GroupedCountTimestampCandidate, GroupedCountTimestamptzCandidate,
+};
+pub use grouped_integer_sum_avg_candidate::{
+    GroupedInt2SumAvgCandidate, GroupedInt4SumAvgCandidate,
+};
 pub use h3_bulk::H3Bulk;
 pub use h3_cell_to_parent::H3CellToParent;
 pub use h3_grid_distance::H3GridDistance;
@@ -181,6 +200,7 @@ pub use ssbm::{
 pub use timeseries_sensor_rollup::TimeseriesSensorRollup;
 pub use topk_wide::TopkWide;
 pub use tpch::{TpchQ1, TpchQ6, TpchQ12};
+pub use weighted_global_count_int4::WeightedGlobalCountInt4;
 pub use window_analytics::WindowAnalytics;
 pub use window_full_output_decline::WindowFullOutputDecline;
 pub use window_reducing_decline::WindowReducingDecline;
@@ -320,6 +340,15 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(GroupedAgg),
         Box::new(GroupedAggInt4),
         Box::new(GroupedCountBoolCandidate),
+        Box::new(GroupedCountDateCandidate),
+        Box::new(GroupedCountFloat4Candidate),
+        Box::new(GroupedCountFloat8Candidate),
+        Box::new(GroupedCountInt2Candidate),
+        Box::new(GroupedCountInt8Candidate),
+        Box::new(GroupedCountTimestampCandidate),
+        Box::new(GroupedCountTimestamptzCandidate),
+        Box::new(GroupedInt2SumAvgCandidate),
+        Box::new(GroupedInt4SumAvgCandidate),
         Box::new(GroupedAggHighCard),
         Box::new(GpuHashaggMedCard),
         Box::new(TimeseriesSensorRollup),
@@ -327,6 +356,7 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(ExpressionGroupedAgg),
         Box::new(PredicateFilterExpressionGroupedAgg),
         Box::new(PredicateExpressionGroupedAggInt4),
+        Box::new(AggregateFilterGroupedAggInt4),
         Box::new(AndRangePredicateExpressionGroupedAggInt4),
         Box::new(CaseWhenExpressionGroupedAgg),
         Box::new(CaseWhenRangeExpressionGroupedAgg),
@@ -372,6 +402,7 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(sort_variants::SORT_FLOAT8),
         // --- GPU HashJoin (original) ---
         Box::new(HashJoin),
+        Box::new(WeightedGlobalCountInt4),
         Box::new(GpuHashjoinLargeBuild),
         Box::new(GpuHashjoinFilter),
         Box::new(GpuNljBetween),
@@ -951,6 +982,60 @@ const RELEASED_ENVELOPE_CONTRACTS: &[ReleasedEnvelopeContract] = &[
         family: ReleasedPathFamily::GroupedAggregate,
     },
     ReleasedEnvelopeContract {
+        workload: "grouped_count_date_candidate",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "grouped_count_float4_candidate",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "grouped_count_float8_candidate",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "grouped_count_timestamp_candidate",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "grouped_count_timestamptz_candidate",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "grouped_count_int2_candidate",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "grouped_count_int8_candidate",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "grouped_int2_sum_avg_candidate",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "grouped_int4_sum_avg_candidate",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
         workload: "predicate_expression_grouped_agg_int4",
         min_rows: GROUPAGG_WINNER_MIN_ROWS,
         max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
@@ -963,20 +1048,44 @@ const RELEASED_ENVELOPE_CONTRACTS: &[ReleasedEnvelopeContract] = &[
         family: ReleasedPathFamily::GroupedAggregate,
     },
     ReleasedEnvelopeContract {
+        workload: "aggregate_filter_grouped_agg_int4",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
         workload: "hash_join",
         min_rows: PREAGG_WINNER_MIN_ROWS,
         max_rows: usize::MAX,
         family: ReleasedPathFamily::StarJoin,
     },
     ReleasedEnvelopeContract {
-        workload: "gpu_hashjoin_large_build",
-        min_rows: HASHJOIN_MIN_BUILD_ROWS,
-        max_rows: HASHJOIN_MAX_BUILD_ROWS,
+        workload: "weighted_global_count_int4",
+        min_rows: 1_000_000,
+        max_rows: 1_000_000,
         family: ReleasedPathFamily::StarJoin,
     },
     ReleasedEnvelopeContract {
         workload: "hashjoin_10k_1m",
         min_rows: 1_000_000,
+        max_rows: usize::MAX,
+        family: ReleasedPathFamily::StarJoin,
+    },
+    ReleasedEnvelopeContract {
+        workload: "hashjoin_100_1m",
+        min_rows: 1_000_000,
+        max_rows: usize::MAX,
+        family: ReleasedPathFamily::StarJoin,
+    },
+    ReleasedEnvelopeContract {
+        workload: "hashjoin_1k_1m",
+        min_rows: 1_000_000,
+        max_rows: usize::MAX,
+        family: ReleasedPathFamily::StarJoin,
+    },
+    ReleasedEnvelopeContract {
+        workload: "hashjoin_100k_1m",
+        min_rows: 10_000_000,
         max_rows: usize::MAX,
         family: ReleasedPathFamily::StarJoin,
     },
@@ -1124,11 +1233,51 @@ pub const METAL_SHIP_GATE_CELLS: &[MetalShipGateCell] = &[
         rows: 1_000_000,
     },
     MetalShipGateCell {
+        workload: "grouped_count_date_candidate",
+        rows: 1_000_000,
+    },
+    MetalShipGateCell {
+        workload: "grouped_count_float4_candidate",
+        rows: 1_000_000,
+    },
+    MetalShipGateCell {
+        workload: "grouped_count_float8_candidate",
+        rows: 1_000_000,
+    },
+    MetalShipGateCell {
+        workload: "grouped_count_timestamp_candidate",
+        rows: 1_000_000,
+    },
+    MetalShipGateCell {
+        workload: "grouped_count_timestamptz_candidate",
+        rows: 1_000_000,
+    },
+    MetalShipGateCell {
+        workload: "grouped_count_int2_candidate",
+        rows: 1_000_000,
+    },
+    MetalShipGateCell {
+        workload: "grouped_count_int8_candidate",
+        rows: 1_000_000,
+    },
+    MetalShipGateCell {
+        workload: "grouped_int2_sum_avg_candidate",
+        rows: 1_000_000,
+    },
+    MetalShipGateCell {
+        workload: "grouped_int4_sum_avg_candidate",
+        rows: 1_000_000,
+    },
+    MetalShipGateCell {
         workload: "predicate_expression_grouped_agg_int4",
         rows: 1_000_000,
     },
     MetalShipGateCell {
         workload: "and_range_predicate_expression_grouped_agg_int4",
+        rows: 1_000_000,
+    },
+    MetalShipGateCell {
+        workload: "aggregate_filter_grouped_agg_int4",
         rows: 1_000_000,
     },
     MetalShipGateCell {
@@ -1152,6 +1301,14 @@ pub const METAL_SHIP_GATE_CELLS: &[MetalShipGateCell] = &[
         rows: 1_000_000,
     },
 ];
+
+/// Separately versioned release cell for the counted-dimension global COUNT(*)
+/// path. It is intentionally not appended to [`METAL_SHIP_GATE_CELLS`]: that
+/// nineteen-cell contract already has independently sealed candidate evidence.
+pub const WEIGHTED_COUNT_SHIP_GATE_CELL: MetalShipGateCell = MetalShipGateCell {
+    workload: "weighted_global_count_int4",
+    rows: 1_000_000,
+};
 
 #[must_use]
 pub fn benchmark_threshold_matrix_entry(
@@ -1226,11 +1383,7 @@ pub fn benchmark_native_decline_names() -> Vec<&'static str> {
         .collect()
 }
 
-const REDUCE_F32_BREAK_EVEN_ROWS: usize = 25_000;
 const REDUCE_F64_BREAK_EVEN_ROWS: usize = 50_000;
-const REDUCE_I64_BREAK_EVEN_ROWS: usize = 75_000;
-const HASHJOIN_MIN_BUILD_ROWS: usize = 5_000;
-const HASHJOIN_MAX_BUILD_ROWS: usize = 99_999;
 const SPATIAL_MIN_VERTICES: usize = 100;
 const SPATIAL_BREAK_EVEN_VERTS_X_ROWS: u64 = 500_000_000;
 const SPATIAL_MAX_VERTS_X_ROWS: u64 = 50_000_000_000;
@@ -1380,6 +1533,96 @@ fn groupagg_threshold_matrix_entry(
             "bool key, COUNT(bool)",
             "exact nullable boolean resident grouped COUNT warm winner matrix",
         ),
+        "grouped_count_int2_candidate" => (
+            "resident_dictionary_groupagg_nullable_int2_count",
+            "nullable bool group key + nullable int2 COUNT input",
+            "three boolean SQL groups: false, true, and NULL",
+            "100% input rows grouped; NULL measures ignored and the NULL-key group is all-NULL",
+            "exactly three grouped rows at release scale".to_owned(),
+            "nullable bool key + nullable int2 measure",
+            "bool key, COUNT(int2)",
+            "exact nullable INT2 resident grouped COUNT warm winner matrix",
+        ),
+        "grouped_count_int8_candidate" => (
+            "resident_dictionary_groupagg_nullable_int8_count",
+            "nullable bool group key + nullable int8 COUNT input",
+            "three boolean SQL groups: false, true, and NULL",
+            "100% input rows grouped; NULL measures ignored and the NULL-key group is all-NULL",
+            "exactly three grouped rows at release scale".to_owned(),
+            "nullable bool key + nullable int8 measure",
+            "bool key, COUNT(int8)",
+            "exact nullable INT8 resident grouped COUNT warm winner matrix",
+        ),
+        "grouped_int2_sum_avg_candidate" => (
+            "resident_dictionary_groupagg_nullable_int2_sum_avg",
+            "nullable bool group key + nullable int2 SUM/AVG input",
+            "three boolean SQL groups: false, true, and NULL",
+            "100% input rows grouped; NULL measures ignored and the NULL-key group is all-NULL",
+            "exactly three grouped rows at release scale".to_owned(),
+            "nullable bool key + nullable int2 measure",
+            "bool key, exact SUM(int2), NUMERIC AVG(int2), COUNT(*)",
+            "exact nullable INT2 resident grouped SUM/AVG/COUNT warm winner matrix",
+        ),
+        "grouped_int4_sum_avg_candidate" => (
+            "resident_dictionary_groupagg_nullable_int4_sum_avg",
+            "nullable bool group key + nullable int4 SUM/AVG input",
+            "three boolean SQL groups: false, true, and NULL",
+            "100% input rows grouped; NULL measures ignored and the NULL-key group is all-NULL",
+            "exactly three grouped rows at release scale".to_owned(),
+            "nullable bool key + nullable int4 measure",
+            "bool key, exact SUM(int4), NUMERIC AVG(int4), COUNT(*)",
+            "exact nullable INT4 resident grouped SUM/AVG/COUNT warm winner matrix",
+        ),
+        "grouped_count_date_candidate" => (
+            "resident_dictionary_groupagg_nullable_date_count",
+            "nullable bool group key + nullable date COUNT input",
+            "three boolean SQL groups: false, true, and NULL",
+            "100% input rows grouped; NULL measures ignored and the NULL-key group is all-NULL",
+            "exactly three grouped rows at release scale".to_owned(),
+            "nullable bool key + nullable date measure",
+            "bool key, COUNT(date)",
+            "exact nullable DATE resident grouped COUNT warm winner matrix",
+        ),
+        "grouped_count_float4_candidate" => (
+            "resident_dictionary_groupagg_nullable_float4_count",
+            "nullable bool group key + nullable float4 COUNT input",
+            "three boolean SQL groups: false, true, and NULL",
+            "100% input rows grouped; NULL measures ignored and the NULL-key group is all-NULL",
+            "exactly three grouped rows at release scale".to_owned(),
+            "nullable bool key + nullable float4 measure",
+            "bool key, COUNT(float4)",
+            "exact nullable FLOAT4 resident grouped COUNT warm winner matrix",
+        ),
+        "grouped_count_float8_candidate" => (
+            "resident_dictionary_groupagg_nullable_float8_count",
+            "nullable bool group key + nullable float8 COUNT input",
+            "three boolean SQL groups: false, true, and NULL",
+            "100% input rows grouped; NULL measures ignored and the NULL-key group is all-NULL",
+            "exactly three grouped rows at release scale".to_owned(),
+            "nullable bool key + nullable float8 measure",
+            "bool key, COUNT(float8)",
+            "exact nullable FLOAT8 resident grouped COUNT warm winner matrix",
+        ),
+        "grouped_count_timestamp_candidate" => (
+            "resident_dictionary_groupagg_nullable_timestamp_count",
+            "nullable bool group key + nullable timestamp COUNT input",
+            "three boolean SQL groups: false, true, and NULL",
+            "100% input rows grouped; NULL measures ignored and the NULL-key group is all-NULL",
+            "exactly three grouped rows at release scale".to_owned(),
+            "nullable bool key + nullable timestamp measure",
+            "bool key, COUNT(timestamp)",
+            "exact nullable TIMESTAMP resident grouped COUNT warm winner matrix",
+        ),
+        "grouped_count_timestamptz_candidate" => (
+            "resident_dictionary_groupagg_nullable_timestamptz_count",
+            "nullable bool group key + nullable timestamptz COUNT input",
+            "three boolean SQL groups: false, true, and NULL",
+            "100% input rows grouped; NULL measures ignored and the NULL-key group is all-NULL",
+            "exactly three grouped rows at release scale".to_owned(),
+            "nullable bool key + nullable timestamptz measure",
+            "bool key, COUNT(timestamptz)",
+            "exact nullable TIMESTAMPTZ resident grouped COUNT warm winner matrix",
+        ),
         "timeseries_sensor_rollup" => (
             "resident_dense_groupagg_min_max_avg",
             "int4 sensor_id group key + float8 reading",
@@ -1439,6 +1682,16 @@ fn groupagg_threshold_matrix_entry(
             "int4 product_id + nullable int4 price + int4 quantity",
             "product_id, SUM(price * quantity), COUNT(*)",
             "fused bounded range and exact integer product SUM/COUNT warm winner matrix",
+        ),
+        "aggregate_filter_grouped_agg_int4" => (
+            "resident_dense_groupagg_bounded_aggregate_filter_sum_count",
+            "int4 group key + nullable int4 filtered SUM input",
+            "256 dense product_id groups",
+            "same-column bounded FILTER selects about 60% for SUM; COUNT(*) covers every row",
+            "exactly 256 grouped product rows at release scale".to_owned(),
+            "int4 product_id + nullable int4 price",
+            "product_id, SUM(price) FILTER, COUNT(*)",
+            "exact integer resident grouped bounded aggregate FILTER warm winner matrix",
         ),
         "case_when_expression_grouped_agg" => (
             "resident_dense_groupagg_case_when_expression_sum_count",
@@ -2054,7 +2307,7 @@ fn h3_matrix_profile(name: &str) -> Option<H3MatrixProfile> {
             row_width: "16-byte coordinate pair + 8-byte h3index output",
             output_size: "one count row",
             threshold_basis: "fp64 calibration H3 expression row; native until expression aggregate dispatch exists",
-            decline_reason: "h3_fp64_expression_aggregate_no_dispatch_path",
+            decline_reason: "shape_measure_expression",
         },
         "h3_cell_to_parent" => H3MatrixProfile {
             lane: "h3_cell_to_parent_grouped_count_res7_to_res0",
@@ -2306,40 +2559,19 @@ fn reduce_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThr
         });
     }
 
-    let (data_type, row_width, floor) = match name {
-        "gpu_reduce_sum" => (
-            "float8/float4/int4 mixed",
-            "16 bytes of aggregate inputs",
-            REDUCE_F64_BREAK_EVEN_ROWS,
-        ),
-        "reduce_sum_f32" => ("float4", "4 bytes", REDUCE_F32_BREAK_EVEN_ROWS),
-        "reduce_sum_f64" | "reduce_min_f64" | "reduce_max_f64" => {
-            ("float8", "8 bytes", REDUCE_F64_BREAK_EVEN_ROWS)
-        }
-        "reduce_sum_i64" => ("int8", "8 bytes", REDUCE_I64_BREAK_EVEN_ROWS),
-        "reduce_multi" => (
-            "float8 + count",
-            "8 bytes plus counter",
-            REDUCE_F64_BREAK_EVEN_ROWS,
-        ),
+    let (data_type, row_width) = match name {
+        "gpu_reduce_sum" => ("float8/float4/int4 mixed", "16 bytes of aggregate inputs"),
+        "reduce_sum_f32" => ("float4", "4 bytes"),
+        "reduce_sum_f64" | "reduce_min_f64" | "reduce_max_f64" => ("float8", "8 bytes"),
+        "reduce_sum_i64" => ("int8", "8 bytes"),
+        "reduce_multi" => ("float8 + count", "8 bytes plus counter"),
         _ => return None,
     };
-    let (expectation, threshold_basis) =
-        if rows < floor && matches!(name, "reduce_min_f64" | "reduce_max_f64") {
-            (
-                BenchmarkLaneExpectation::NativeDecline {
-                    reason: "generic_fact_rows_below_device_minimum",
-                },
-                "generic descriptor device-minimum row gate",
-            )
-        } else {
-            let reason = typed_reduce_structural_decline_reason(name)
-                .expect("recognized typed reduce workload has a structural or cost decline");
-            (
-                BenchmarkLaneExpectation::NativeDecline { reason },
-                "generic descriptor preflight or cost gate keeps the workload native",
-            )
-        };
+    let reason = typed_reduce_structural_decline_reason(name)
+        .expect("recognized typed reduce workload has a structural or mode decline");
+    let expectation = BenchmarkLaneExpectation::NativeDecline { reason };
+    let threshold_basis =
+        "generic descriptor preflight or physical-mode gate keeps the workload native";
     Some(BenchmarkThresholdMatrixEntry {
         lane: "typed_reduce",
         workload: static_workload_name(name),
@@ -2369,9 +2601,9 @@ fn typed_reduce_structural_decline_reason(name: &str) -> Option<&'static str> {
         "gpu_reduce_sum" | "reduce_sum_f64" | "reduce_multi" => {
             Some("shape_floating_accumulator_semantics")
         }
-        "reduce_sum_f32" => Some("shape_unsupported_measure_type"),
+        "reduce_sum_f32" => Some("shape_unsupported_aggregate_input"),
         "reduce_sum_i64" => Some("shape_numeric_accumulator_unavailable"),
-        "reduce_min_f64" | "reduce_max_f64" => Some("generic_cost_not_competitive"),
+        "reduce_min_f64" | "reduce_max_f64" => Some("generic_serial_kernel_mode_unqualified"),
         _ => None,
     }
 }
@@ -2380,44 +2612,41 @@ fn hashjoin_threshold_matrix_entry(
     name: &str,
     rows: usize,
 ) -> Option<BenchmarkThresholdMatrixEntry> {
-    let (lane, inner_rows, data_type, cardinality, selectivity, row_width, output_size) = match name
-    {
-        "hash_join" => {
-            let inner = (rows / 100).clamp(100, 100_000);
-            (
-                "hashjoin_count",
-                inner,
-                "int4 equality key",
-                "inner = outer/100, count-only output",
-                "key domain sized to inner table",
-                "12-byte probe row + build payload",
-                "one count row",
-            )
-        }
+    let (lane, data_type, cardinality, selectivity, row_width, output_size) = match name {
+        "hash_join" => (
+            "hashjoin_count",
+            "int4 equality key",
+            "inner = outer/100, count-only output",
+            "key domain sized to inner table",
+            "12-byte probe row + build payload",
+            "one count row",
+        ),
+        "weighted_global_count_int4" => (
+            "weighted_global_count_int4",
+            "int4 equality key",
+            "1M deterministic fact rows x 7-row counted dimension",
+            "duplicate weights {0:2, 1:1, 2:3}; key 3 unmatched; NULL never matches",
+            "12-byte fact row + nullable 4-byte dimension key",
+            "one exact int8 count row",
+        ),
         "gpu_hashjoin_large_build" => (
             "hashjoin_large_build_decline_guard",
-            rows,
             "int4 equality key",
             "build side scales with requested rows",
             "key domain sized to half the build/probe tables",
             "16-byte probe row + 16-byte build row",
             "one count row",
         ),
-        "gpu_hashjoin_filter" => {
-            let inner = (rows / 100).max(100);
-            (
-                "hashjoin_filter_groupagg",
-                inner,
-                "int4 equality key + float8 payload",
-                "dimension table = max(rows/100, 100)",
-                "fact filter amount > 5000 and dimension category < 50",
-                "fact row + dim text payload",
-                "grouped dimension-name rows",
-            )
-        }
+        "gpu_hashjoin_filter" => (
+            "hashjoin_filter_groupagg",
+            "int4 equality key + float8 payload",
+            "dimension table = max(rows/100, 100)",
+            "fact filter amount > 5000 and dimension category < 50",
+            "fact row + dim text payload",
+            "grouped dimension-name rows",
+        ),
         "mixed_join_agg" => (
             "hashjoin_filter_groupagg",
-            1_000,
             "int4 equality key + float8 payload",
             "fixed 1K-row dimension table",
             "all joined fact rows; no fact or dimension filters",
@@ -2426,7 +2655,6 @@ fn hashjoin_threshold_matrix_entry(
         ),
         "mixed_join_agg_int4" => (
             "hashjoin_groupagg_exact_sum_count",
-            1_000,
             "int4 equality key + int4 payload",
             "fixed deterministic 1K-row dimension table",
             "all joined fact rows; no fact or dimension filters",
@@ -2435,7 +2663,6 @@ fn hashjoin_threshold_matrix_entry(
         ),
         "hashjoin_100_1m" => (
             "hashjoin_build_sweep",
-            100,
             "int4 equality key",
             "fixed 100-row build side",
             "high fanout probe over 1M-style outer",
@@ -2444,7 +2671,6 @@ fn hashjoin_threshold_matrix_entry(
         ),
         "hashjoin_1k_1m" => (
             "hashjoin_build_sweep",
-            1_000,
             "int4 equality key",
             "fixed 1K-row build side",
             "high fanout probe over 1M-style outer",
@@ -2453,7 +2679,6 @@ fn hashjoin_threshold_matrix_entry(
         ),
         "hashjoin_10k_1m" => (
             "hashjoin_build_sweep",
-            10_000,
             "int4 equality key",
             "fixed 10K-row build side",
             "probe side dominates build cost",
@@ -2462,10 +2687,9 @@ fn hashjoin_threshold_matrix_entry(
         ),
         "hashjoin_100k_1m" => (
             "hashjoin_build_sweep",
-            100_000,
             "int4 equality key",
             "fixed 100K-row build side",
-            "build side reaches unsafe GPU hash table branch",
+            "build side reaches the inclusive resident counted-dimension maximum",
             "16-byte probe row + 8-byte build row",
             "one count row",
         ),
@@ -2486,23 +2710,23 @@ fn hashjoin_threshold_matrix_entry(
                 dispatch_evidence: GENERIC_NATIVE_DISPATCH_EVIDENCE,
                 correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
                 cache_gate: GENERIC_CACHE_GATE,
-                threshold_basis: "partial private rebuild row cap until shared GPU inner state",
+                threshold_basis: "descriptor remains in the unqualified serial generic mode",
                 expectation: BenchmarkLaneExpectation::NativeDecline {
-                    reason: "hashjoin_parallel_inner_rebuild_too_large",
+                    reason: "generic_serial_kernel_mode_unqualified",
                 },
             });
         }
         _ => return None,
     };
-    let min_build_rows = if matches!(
-        name,
-        "gpu_hashjoin_filter" | "mixed_join_agg" | "mixed_join_agg_int4"
-    ) {
-        100
-    } else {
-        HASHJOIN_MIN_BUILD_ROWS
-    };
-    let expectation = if name == "gpu_hashjoin_filter" {
+    let expectation = if name == "weighted_global_count_int4" && rows != 1_000_000 {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "generic_serial_kernel_mode_unqualified",
+        }
+    } else if name == "weighted_global_count_int4" {
+        BenchmarkLaneExpectation::GpuWinner {
+            min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
+        }
+    } else if name == "gpu_hashjoin_filter" {
         BenchmarkLaneExpectation::NativeDecline {
             reason: "shape_unsupported_predicate",
         }
@@ -2530,6 +2754,34 @@ fn hashjoin_threshold_matrix_entry(
         BenchmarkLaneExpectation::GpuWinner {
             min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
         }
+    } else if name == "gpu_hashjoin_large_build" {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "shape_ambiguous_fact_relation",
+        }
+    } else if matches!(name, "hashjoin_100_1m" | "hashjoin_1k_1m") && rows < 1_000_000 {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "generic_serial_kernel_mode_unqualified",
+        }
+    } else if matches!(name, "hashjoin_100_1m" | "hashjoin_1k_1m") {
+        BenchmarkLaneExpectation::GpuWinner {
+            min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
+        }
+    } else if name == "hashjoin_100k_1m" && rows < 100_000 {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "generic_serial_kernel_mode_unqualified",
+        }
+    } else if name == "hashjoin_100k_1m" && rows == 100_000 {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "shape_ambiguous_fact_relation",
+        }
+    } else if name == "hashjoin_100k_1m" && rows < 10_000_000 {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "generic_cost_not_competitive",
+        }
+    } else if name == "hashjoin_100k_1m" {
+        BenchmarkLaneExpectation::GpuWinner {
+            min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
+        }
     } else if name == "hashjoin_10k_1m" && rows < 100_000 {
         BenchmarkLaneExpectation::NativeDecline {
             reason: "shape_ambiguous_fact_relation",
@@ -2538,17 +2790,9 @@ fn hashjoin_threshold_matrix_entry(
         BenchmarkLaneExpectation::NativeDecline {
             reason: "generic_serial_kernel_mode_unqualified",
         }
-    } else if (min_build_rows..=HASHJOIN_MAX_BUILD_ROWS).contains(&inner_rows) {
+    } else {
         BenchmarkLaneExpectation::GpuWinner {
             min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
-        }
-    } else if inner_rows < min_build_rows {
-        BenchmarkLaneExpectation::NativeDecline {
-            reason: "hashjoin_build_below_break_even",
-        }
-    } else {
-        BenchmarkLaneExpectation::NativeDecline {
-            reason: "hashjoin_build_side_too_large",
         }
     };
     Some(BenchmarkThresholdMatrixEntry {
@@ -2561,7 +2805,12 @@ fn hashjoin_threshold_matrix_entry(
         result_count: output_size.to_owned(),
         index_pruning_shape: "n/a",
         prepared_geometry: "n/a",
-        batch_count: "hash build/probe batches by executor".to_owned(),
+        batch_count: if name == "weighted_global_count_int4" {
+            "one resident counted-dimension artifact reused by the parallel dense-count lifecycle"
+                .to_owned()
+        } else {
+            "hash build/probe batches by executor".to_owned()
+        },
         row_width,
         output_size,
         dispatch_evidence: match expectation {
@@ -2570,7 +2819,13 @@ fn hashjoin_threshold_matrix_entry(
         },
         correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
         cache_gate: GENERIC_CACHE_GATE,
-        threshold_basis: "DeviceLimits hashjoin_min_build_rows/gpu_hash_join_build_max_rows",
+        threshold_basis: if name == "weighted_global_count_int4" {
+            "independently qualified exact 1M-row weighted global COUNT(*) release floor"
+        } else if name == "gpu_hashjoin_large_build" {
+            "count-only equal-size relations have no catalog-proved fact-side orientation"
+        } else {
+            "resident counted-dimension capability, physical-mode, and native-cost admission"
+        },
         expectation,
     })
 }
@@ -2620,7 +2875,7 @@ fn sort_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThres
             "full ORDER BY without LIMIT",
             "~120-byte heap row",
             "full sorted relation",
-            "sort_heap_full_output",
+            "sort_standalone_topk_no_gpu_kernel",
         ),
         "gpu_sort_topk_wide" => (
             "float4 + int4 deterministic tie-break key",
@@ -2641,28 +2896,28 @@ fn sort_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThres
             "full ORDER BY without LIMIT",
             "4-byte projected row",
             "full sorted relation",
-            "sort_heap_full_output",
+            "sort_standalone_topk_no_gpu_kernel",
         ),
         "sort_int8" => (
             "int8 single key",
             "full ORDER BY without LIMIT",
             "8-byte projected row",
             "full sorted relation",
-            "sort_heap_full_output",
+            "sort_standalone_topk_no_gpu_kernel",
         ),
         "sort_float4" => (
             "float4 single key",
             "full ORDER BY without LIMIT",
             "4-byte projected row",
             "full sorted relation",
-            "sort_heap_full_output",
+            "sort_standalone_topk_no_gpu_kernel",
         ),
         "sort_float8" => (
             "float8 single key",
             "full ORDER BY without LIMIT",
             "8-byte projected row",
             "full sorted relation",
-            "sort_heap_full_output",
+            "sort_standalone_topk_no_gpu_kernel",
         ),
         _ => return None,
     };
@@ -2807,10 +3062,8 @@ fn spatial_threshold_matrix_entry(
 ) -> Option<BenchmarkThresholdMatrixEntry> {
     let profile = spatial_matrix_profile(name)?;
     let work_product = (profile.vertices as u64).saturating_mul(rows as u64);
-    let descriptor_capability_decline = (name == "spatial_resident_agg_candidate"
-        && rows != 1_000_000)
-        || (name == "spatial_filter" && rows == 100_000)
-        || phase6_spatial_generic_descriptor_cell(name, rows);
+    let descriptor_capability_decline =
+        name != "spatial_resident_agg_candidate" || rows != 1_000_000;
     let current_planner_decline =
         descriptor_capability_decline.then_some("generic_descriptor_capability");
     let expectation = current_planner_decline.map_or_else(
@@ -2852,24 +3105,6 @@ fn spatial_threshold_matrix_entry(
         },
         expectation,
     })
-}
-
-fn phase6_spatial_generic_descriptor_cell(name: &str, rows: usize) -> bool {
-    match name {
-        "spatial_mega_1kv" | "spatial_sel_10pct" => {
-            matches!(rows, 80_000 | 100_000 | 150_000)
-        }
-        "spatial_filter"
-        | "spatial_selectivity"
-        | "vsweep_low"
-        | "vsweep_mid"
-        | "vsweep_high"
-        | "vsweep_pathological"
-        | "spatial_sel_1pct"
-        | "spatial_sel_50pct"
-        | "spatial_sel_90pct" => rows == 10_000,
-        _ => false,
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -3281,9 +3516,19 @@ fn static_workload_name(name: &str) -> &'static str {
         "gpu_hashjoin_filter" => "gpu_hashjoin_filter",
         "mixed_join_agg" => "mixed_join_agg",
         "mixed_join_agg_int4" => "mixed_join_agg_int4",
+        "weighted_global_count_int4" => "weighted_global_count_int4",
         "grouped_agg" => "grouped_agg",
         "grouped_agg_int4" => "grouped_agg_int4",
         "grouped_count_bool_candidate" => "grouped_count_bool_candidate",
+        "grouped_count_date_candidate" => "grouped_count_date_candidate",
+        "grouped_count_float4_candidate" => "grouped_count_float4_candidate",
+        "grouped_count_float8_candidate" => "grouped_count_float8_candidate",
+        "grouped_count_int2_candidate" => "grouped_count_int2_candidate",
+        "grouped_count_int8_candidate" => "grouped_count_int8_candidate",
+        "grouped_count_timestamp_candidate" => "grouped_count_timestamp_candidate",
+        "grouped_count_timestamptz_candidate" => "grouped_count_timestamptz_candidate",
+        "grouped_int2_sum_avg_candidate" => "grouped_int2_sum_avg_candidate",
+        "grouped_int4_sum_avg_candidate" => "grouped_int4_sum_avg_candidate",
         "grouped_agg_high_card" => "grouped_agg_high_card",
         "gpu_hashagg_med_card" => "gpu_hashagg_med_card",
         "timeseries_sensor_rollup" => "timeseries_sensor_rollup",
@@ -3294,6 +3539,7 @@ fn static_workload_name(name: &str) -> &'static str {
         "and_range_predicate_expression_grouped_agg_int4" => {
             "and_range_predicate_expression_grouped_agg_int4"
         }
+        "aggregate_filter_grouped_agg_int4" => "aggregate_filter_grouped_agg_int4",
         "case_when_expression_grouped_agg" => "case_when_expression_grouped_agg",
         "case_when_range_expression_grouped_agg" => "case_when_range_expression_grouped_agg",
         "case_when_value_predicate_expression_grouped_agg" => {
@@ -3418,7 +3664,18 @@ mod tests {
         matches!(
             (name, rows),
             (
-                "grouped_count_bool_candidate" | "and_range_predicate_expression_grouped_agg_int4",
+                "grouped_count_bool_candidate"
+                    | "grouped_count_date_candidate"
+                    | "grouped_count_float4_candidate"
+                    | "grouped_count_float8_candidate"
+                    | "grouped_count_int2_candidate"
+                    | "grouped_count_int8_candidate"
+                    | "grouped_count_timestamp_candidate"
+                    | "grouped_count_timestamptz_candidate"
+                    | "grouped_int2_sum_avg_candidate"
+                    | "grouped_int4_sum_avg_candidate"
+                    | "aggregate_filter_grouped_agg_int4"
+                    | "and_range_predicate_expression_grouped_agg_int4",
                 GROUPAGG_WINNER_MIN_ROWS
             ) | (
                 "raster_ndvi" | "raster_slope" | "raster_reclass" | "raster_algebra_deep",
@@ -3446,11 +3703,51 @@ mod tests {
                 FINAL_MATRIX_MIN_WARM_SPEEDUP,
             ),
             (
+                "grouped_count_date_candidate",
+                FINAL_MATRIX_MIN_WARM_SPEEDUP,
+            ),
+            (
+                "grouped_count_float4_candidate",
+                FINAL_MATRIX_MIN_WARM_SPEEDUP,
+            ),
+            (
+                "grouped_count_float8_candidate",
+                FINAL_MATRIX_MIN_WARM_SPEEDUP,
+            ),
+            (
+                "grouped_count_timestamp_candidate",
+                FINAL_MATRIX_MIN_WARM_SPEEDUP,
+            ),
+            (
+                "grouped_count_timestamptz_candidate",
+                FINAL_MATRIX_MIN_WARM_SPEEDUP,
+            ),
+            (
+                "grouped_count_int2_candidate",
+                FINAL_MATRIX_MIN_WARM_SPEEDUP,
+            ),
+            (
+                "grouped_count_int8_candidate",
+                FINAL_MATRIX_MIN_WARM_SPEEDUP,
+            ),
+            (
+                "grouped_int2_sum_avg_candidate",
+                FINAL_MATRIX_MIN_WARM_SPEEDUP,
+            ),
+            (
+                "grouped_int4_sum_avg_candidate",
+                FINAL_MATRIX_MIN_WARM_SPEEDUP,
+            ),
+            (
                 "predicate_expression_grouped_agg_int4",
                 FINAL_MATRIX_MIN_WARM_SPEEDUP,
             ),
             (
                 "and_range_predicate_expression_grouped_agg_int4",
+                FINAL_MATRIX_MIN_WARM_SPEEDUP,
+            ),
+            (
+                "aggregate_filter_grouped_agg_int4",
                 FINAL_MATRIX_MIN_WARM_SPEEDUP,
             ),
             ("mixed_join_agg_int4", FINAL_MATRIX_MIN_WARM_SPEEDUP),
@@ -3498,6 +3795,50 @@ mod tests {
     }
 
     #[test]
+    fn native_parity_p0_matrix_contains_only_exact_registered_declines() {
+        let source = include_str!("../../../benchmarks/native-parity-p0.tsv");
+        let mut lines = source.lines();
+        assert_eq!(
+            lines.next(),
+            Some("ordinal\tworkload\trows\tcohort\treason")
+        );
+
+        let mut seen = std::collections::BTreeSet::new();
+        let mut cell_count = 0_usize;
+        for (index, line) in lines.enumerate() {
+            let columns = line.split('\t').collect::<Vec<_>>();
+            assert_eq!(columns.len(), 5, "malformed native-parity row: {line}");
+            let expected_ordinal = format!("{:02}", index + 1);
+            assert_eq!(columns[0], expected_ordinal);
+            assert!(matches!(
+                columns[3],
+                "simple_decline" | "join_decline" | "reduce_decline"
+            ));
+
+            let workload = columns[1];
+            let rows = columns[2]
+                .parse::<usize>()
+                .unwrap_or_else(|error| panic!("invalid row scale in `{line}`: {error}"));
+            assert!(
+                seen.insert((workload, rows)),
+                "duplicate native-parity cell: {workload} @ {rows}"
+            );
+            let registered = find_workload(workload)
+                .unwrap_or_else(|| panic!("unregistered native-parity workload: {workload}"));
+            assert!(
+                registered.row_scales().contains(&rows),
+                "native-parity row scale is not registered: {workload} @ {rows}"
+            );
+            let entry = benchmark_threshold_matrix_entry(workload, rows)
+                .unwrap_or_else(|| panic!("missing native-parity threshold: {workload} @ {rows}"));
+            assert_eq!(entry.expectation.label(), "native_decline");
+            assert_eq!(entry.expectation.decline_reason(), Some(columns[4]));
+            cell_count += 1;
+        }
+        assert_eq!(cell_count, 17, "the P0 gate must retain all 17 sentinels");
+    }
+
+    #[test]
     fn int8_star_threshold_identity_cannot_alias_int4_evidence() {
         let int4 = benchmark_threshold_matrix_entry("ssbm_resident_int4_star", 1_000_000)
             .expect("int4 SSBM threshold");
@@ -3523,6 +3864,7 @@ mod tests {
         for name in [
             "grouped_agg_int4",
             "predicate_expression_grouped_agg_int4",
+            "aggregate_filter_grouped_agg_int4",
             "and_range_predicate_expression_grouped_agg_int4",
             "mixed_join_agg_int4",
         ] {
@@ -3549,6 +3891,22 @@ mod tests {
         assert!(predicate.contains("sum(price * quantity)"));
         assert!(predicate.contains("where active"));
         assert!(!predicate.contains(" filter "));
+
+        let aggregate_filter = find_workload("aggregate_filter_grouped_agg_int4")
+            .expect("aggregate FILTER int4 workload");
+        let aggregate_filter_query = aggregate_filter.query_sql().to_ascii_lowercase();
+        assert!(
+            aggregate_filter_query
+                .contains("sum(price) filter (where price >= 200 and price <= 800)")
+        );
+        assert!(aggregate_filter_query.contains("count(*)"));
+        assert_eq!(
+            workload_metadata("aggregate_filter_grouped_agg_int4")
+                .expect("aggregate FILTER metadata")
+                .evidence
+                .threshold,
+            ThresholdEvidenceEligibility::GpuWinner
+        );
 
         let range = find_workload("and_range_predicate_expression_grouped_agg_int4")
             .expect("AND range predicate int4 workload");
@@ -3693,11 +4051,87 @@ mod tests {
             GROUPAGG_WINNER_MIN_ROWS
         ));
         assert!(supported_default_suite_probe(
+            "grouped_count_date_candidate",
+            GROUPAGG_WINNER_MIN_ROWS
+        ));
+        assert!(supported_default_suite_probe(
+            "grouped_count_float4_candidate",
+            GROUPAGG_WINNER_MIN_ROWS
+        ));
+        assert!(supported_default_suite_probe(
+            "grouped_count_float8_candidate",
+            GROUPAGG_WINNER_MIN_ROWS
+        ));
+        assert!(supported_default_suite_probe(
+            "grouped_count_timestamp_candidate",
+            GROUPAGG_WINNER_MIN_ROWS
+        ));
+        assert!(supported_default_suite_probe(
+            "grouped_count_timestamptz_candidate",
+            GROUPAGG_WINNER_MIN_ROWS
+        ));
+        assert!(supported_default_suite_probe(
+            "grouped_count_int2_candidate",
+            GROUPAGG_WINNER_MIN_ROWS
+        ));
+        assert!(supported_default_suite_probe(
+            "grouped_count_int8_candidate",
+            GROUPAGG_WINNER_MIN_ROWS
+        ));
+        assert!(supported_default_suite_probe(
+            "grouped_int2_sum_avg_candidate",
+            GROUPAGG_WINNER_MIN_ROWS
+        ));
+        assert!(supported_default_suite_probe(
+            "grouped_int4_sum_avg_candidate",
+            GROUPAGG_WINNER_MIN_ROWS
+        ));
+        assert!(supported_default_suite_probe(
+            "aggregate_filter_grouped_agg_int4",
+            GROUPAGG_WINNER_MIN_ROWS
+        ));
+        assert!(supported_default_suite_probe(
             "and_range_predicate_expression_grouped_agg_int4",
             GROUPAGG_WINNER_MIN_ROWS
         ));
         assert!(!supported_default_suite_probe(
             "grouped_count_bool_candidate",
+            GROUPAGG_WINNER_MIN_ROWS - 1
+        ));
+        assert!(!supported_default_suite_probe(
+            "grouped_count_date_candidate",
+            GROUPAGG_WINNER_MIN_ROWS - 1
+        ));
+        assert!(!supported_default_suite_probe(
+            "grouped_count_float4_candidate",
+            GROUPAGG_WINNER_MIN_ROWS - 1
+        ));
+        assert!(!supported_default_suite_probe(
+            "grouped_count_float8_candidate",
+            GROUPAGG_WINNER_MIN_ROWS - 1
+        ));
+        assert!(!supported_default_suite_probe(
+            "grouped_count_timestamp_candidate",
+            GROUPAGG_WINNER_MIN_ROWS - 1
+        ));
+        assert!(!supported_default_suite_probe(
+            "grouped_count_timestamptz_candidate",
+            GROUPAGG_WINNER_MIN_ROWS - 1
+        ));
+        assert!(!supported_default_suite_probe(
+            "grouped_count_int2_candidate",
+            GROUPAGG_WINNER_MIN_ROWS - 1
+        ));
+        assert!(!supported_default_suite_probe(
+            "grouped_count_int8_candidate",
+            GROUPAGG_WINNER_MIN_ROWS - 1
+        ));
+        assert!(!supported_default_suite_probe(
+            "grouped_int2_sum_avg_candidate",
+            GROUPAGG_WINNER_MIN_ROWS - 1
+        ));
+        assert!(!supported_default_suite_probe(
+            "grouped_int4_sum_avg_candidate",
             GROUPAGG_WINNER_MIN_ROWS - 1
         ));
         assert!(supported_default_suite_probe("raster_reclass", 100));
@@ -4102,11 +4536,11 @@ mod tests {
     fn test_threshold_matrix_pins_generic_reduce_preflight_reasons() {
         for (name, reason) in [
             ("gpu_reduce_sum", "shape_floating_accumulator_semantics"),
-            ("reduce_sum_f32", "shape_unsupported_measure_type"),
+            ("reduce_sum_f32", "shape_unsupported_aggregate_input"),
             ("reduce_sum_f64", "shape_floating_accumulator_semantics"),
             ("reduce_sum_i64", "shape_numeric_accumulator_unavailable"),
-            ("reduce_min_f64", "generic_cost_not_competitive"),
-            ("reduce_max_f64", "generic_cost_not_competitive"),
+            ("reduce_min_f64", "generic_serial_kernel_mode_unqualified"),
+            ("reduce_max_f64", "generic_serial_kernel_mode_unqualified"),
             ("reduce_multi", "shape_floating_accumulator_semantics"),
         ] {
             let entry = benchmark_threshold_matrix_entry(name, 100_000)
@@ -4156,22 +4590,22 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} threshold entry"));
             assert_eq!(
                 entry.expectation.decline_reason(),
-                Some("generic_fact_rows_below_device_minimum"),
+                Some("generic_serial_kernel_mode_unqualified"),
                 "{name}"
             );
-            assert!(entry.threshold_basis.contains("device-minimum"), "{name}");
+            assert!(entry.threshold_basis.contains("physical-mode"), "{name}");
         }
     }
 
     #[test]
-    fn test_threshold_matrix_keeps_minmax_cost_decline_at_registered_large_scales() {
+    fn test_threshold_matrix_keeps_minmax_mode_decline_at_registered_large_scales() {
         for name in ["reduce_min_f64", "reduce_max_f64"] {
             for rows in [100_000, 1_000_000, 10_000_000] {
                 let entry = benchmark_threshold_matrix_entry(name, rows)
                     .unwrap_or_else(|| panic!("{name}/{rows} threshold entry"));
                 assert_eq!(
                     entry.expectation.decline_reason(),
-                    Some("generic_cost_not_competitive"),
+                    Some("generic_serial_kernel_mode_unqualified"),
                     "{name}/{rows}"
                 );
             }
@@ -4252,42 +4686,93 @@ mod tests {
     }
 
     #[test]
-    fn test_threshold_matrix_records_nullable_bool_count_winner_gate() {
-        for rows in [GROUPAGG_WINNER_MIN_ROWS, DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS] {
-            let entry = benchmark_threshold_matrix_entry("grouped_count_bool_candidate", rows)
-                .expect("nullable bool COUNT winner cell");
-            assert_eq!(
-                entry.expectation,
-                BenchmarkLaneExpectation::GpuWinner {
-                    min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
-                }
-            );
-            assert_eq!(
-                entry.released_path(),
-                Some(ReleasedPathFamily::GroupedAggregate)
-            );
-            assert!(entry.dispatch_evidence.contains("kernel counter delta > 0"));
-            assert!(
-                entry
-                    .dispatch_evidence
-                    .contains("stock fallback counter = 0")
-            );
-        }
-
-        for (rows, expected_reason) in [
-            (
-                GROUPAGG_WINNER_MIN_ROWS - 1,
-                "generic_fact_rows_below_device_minimum",
-            ),
-            (
-                DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS + 1,
-                "generic_fact_rows_exceed_dense_one_shot_maximum",
-            ),
+    fn test_threshold_matrix_records_nullable_typed_count_winner_gates() {
+        for name in [
+            "grouped_count_bool_candidate",
+            "grouped_count_date_candidate",
+            "grouped_count_float4_candidate",
+            "grouped_count_float8_candidate",
+            "grouped_count_int2_candidate",
+            "grouped_count_int8_candidate",
+            "grouped_count_timestamp_candidate",
+            "grouped_count_timestamptz_candidate",
         ] {
-            let entry = benchmark_threshold_matrix_entry("grouped_count_bool_candidate", rows)
-                .expect("nullable bool COUNT native-decline boundary");
-            assert_eq!(entry.expectation.decline_reason(), Some(expected_reason));
-            assert_eq!(entry.released_path(), None);
+            for rows in [GROUPAGG_WINNER_MIN_ROWS, DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS] {
+                let entry = benchmark_threshold_matrix_entry(name, rows)
+                    .expect("nullable typed COUNT winner cell");
+                assert_eq!(
+                    entry.expectation,
+                    BenchmarkLaneExpectation::GpuWinner {
+                        min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
+                    }
+                );
+                assert_eq!(
+                    entry.released_path(),
+                    Some(ReleasedPathFamily::GroupedAggregate)
+                );
+                assert!(entry.dispatch_evidence.contains("kernel counter delta > 0"));
+                assert!(
+                    entry
+                        .dispatch_evidence
+                        .contains("stock fallback counter = 0")
+                );
+            }
+
+            for (rows, expected_reason) in [
+                (
+                    GROUPAGG_WINNER_MIN_ROWS - 1,
+                    "generic_fact_rows_below_device_minimum",
+                ),
+                (
+                    DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS + 1,
+                    "generic_fact_rows_exceed_dense_one_shot_maximum",
+                ),
+            ] {
+                let entry = benchmark_threshold_matrix_entry(name, rows)
+                    .expect("nullable typed COUNT native-decline boundary");
+                assert_eq!(entry.expectation.decline_reason(), Some(expected_reason));
+                assert_eq!(entry.released_path(), None);
+            }
+        }
+    }
+
+    #[test]
+    fn test_threshold_matrix_records_widened_integer_sum_avg_winner_gates() {
+        for name in [
+            "grouped_int2_sum_avg_candidate",
+            "grouped_int4_sum_avg_candidate",
+        ] {
+            for rows in [GROUPAGG_WINNER_MIN_ROWS, DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS] {
+                let entry = benchmark_threshold_matrix_entry(name, rows)
+                    .expect("widened integer SUM/AVG winner cell");
+                assert_eq!(
+                    entry.expectation,
+                    BenchmarkLaneExpectation::GpuWinner {
+                        min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
+                    }
+                );
+                assert_eq!(
+                    entry.released_path(),
+                    Some(ReleasedPathFamily::GroupedAggregate)
+                );
+                assert!(entry.output_size.contains("NUMERIC AVG"));
+            }
+
+            for (rows, expected_reason) in [
+                (
+                    GROUPAGG_WINNER_MIN_ROWS - 1,
+                    "generic_fact_rows_below_device_minimum",
+                ),
+                (
+                    DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS + 1,
+                    "generic_fact_rows_exceed_dense_one_shot_maximum",
+                ),
+            ] {
+                let entry = benchmark_threshold_matrix_entry(name, rows)
+                    .expect("widened integer SUM/AVG native-decline boundary");
+                assert_eq!(entry.expectation.decline_reason(), Some(expected_reason));
+                assert_eq!(entry.released_path(), None);
+            }
         }
     }
 
@@ -4453,6 +4938,24 @@ mod tests {
 
     #[test]
     fn test_threshold_matrix_marks_hashjoin_build_band() {
+        let weighted = benchmark_threshold_matrix_entry("weighted_global_count_int4", 1_000_000)
+            .expect("weighted global count threshold entry");
+        assert_eq!(weighted.lane, "weighted_global_count_int4");
+        assert_eq!(weighted.expectation.label(), "gpu_winner");
+        assert_eq!(weighted.released_path(), Some(ReleasedPathFamily::StarJoin));
+        assert!(
+            weighted
+                .threshold_basis
+                .contains("weighted global COUNT(*)")
+        );
+        assert_eq!(
+            benchmark_threshold_matrix_entry("weighted_global_count_int4", 999_999)
+                .expect("weighted global count below-floor entry")
+                .expectation
+                .decline_reason(),
+            Some("generic_serial_kernel_mode_unqualified")
+        );
+
         let winner = benchmark_threshold_matrix_entry("hashjoin_10k_1m", 1_000_000)
             .expect("hashjoin_10k_1m threshold entry");
         assert_eq!(winner.expectation.label(), "gpu_winner");
@@ -4495,18 +4998,37 @@ mod tests {
             Some("generic_fact_rows_below_device_minimum")
         );
 
-        let too_small = benchmark_threshold_matrix_entry("hashjoin_1k_1m", 1_000_000)
+        let tiny_build_winner = benchmark_threshold_matrix_entry("hashjoin_1k_1m", 1_000_000)
             .expect("hashjoin_1k_1m threshold entry");
+        assert_eq!(tiny_build_winner.expectation.label(), "gpu_winner");
         assert_eq!(
-            too_small.expectation.decline_reason(),
-            Some("hashjoin_build_below_break_even")
+            benchmark_threshold_matrix_entry("hashjoin_1k_1m", 100_000)
+                .expect("small-probe hashjoin_1k_1m threshold entry")
+                .expectation
+                .decline_reason(),
+            Some("generic_serial_kernel_mode_unqualified")
         );
 
-        let too_large = benchmark_threshold_matrix_entry("hashjoin_100k_1m", 1_000_000)
-            .expect("hashjoin_100k_1m threshold entry");
+        let large_build_cost_decline =
+            benchmark_threshold_matrix_entry("hashjoin_100k_1m", 1_000_000)
+                .expect("hashjoin_100k_1m threshold entry");
         assert_eq!(
-            too_large.expectation.decline_reason(),
-            Some("hashjoin_build_side_too_large")
+            large_build_cost_decline.expectation.decline_reason(),
+            Some("generic_cost_not_competitive")
+        );
+        assert_eq!(
+            benchmark_threshold_matrix_entry("hashjoin_100k_1m", 10_000_000)
+                .expect("large-probe hashjoin_100k_1m threshold entry")
+                .expectation
+                .label(),
+            "gpu_winner"
+        );
+        assert_eq!(
+            benchmark_threshold_matrix_entry("gpu_hashjoin_large_build", 10_000)
+                .expect("symmetric hashjoin threshold entry")
+                .expectation
+                .decline_reason(),
+            Some("shape_ambiguous_fact_relation")
         );
     }
 
@@ -4597,7 +5119,7 @@ mod tests {
             .expect("spatial_filter threshold entry");
         assert_eq!(
             simple.expectation.decline_reason(),
-            Some("spatial_vertices_below_break_even")
+            Some("generic_descriptor_capability")
         );
 
         let small = benchmark_threshold_matrix_entry("vsweep_mid", 10_000)
@@ -4611,21 +5133,21 @@ mod tests {
             .expect("vsweep_mid threshold entry");
         assert_eq!(
             former_crash_band.expectation.decline_reason(),
-            Some("spatial_work_below_break_even")
+            Some("generic_descriptor_capability")
         );
 
         let unregistered = benchmark_threshold_matrix_entry("vsweep_mid", 1_000_000)
             .expect("vsweep_mid threshold entry");
         assert_eq!(
             unregistered.expectation.decline_reason(),
-            Some("spatial_no_registered_gpu_predicate")
+            Some("generic_descriptor_capability")
         );
 
         let high_output = benchmark_threshold_matrix_entry("spatial_sel_90pct", 1_000_000)
             .expect("spatial_sel_90pct threshold entry");
         assert_eq!(
             high_output.expectation.decline_reason(),
-            Some("spatial_high_output_fraction")
+            Some("generic_descriptor_capability")
         );
         assert!(high_output.result_count.contains("900K matching heap rows"));
 
@@ -4636,7 +5158,7 @@ mod tests {
         .expect("spatial selectivity repro threshold entry");
         assert_eq!(
             repro.expectation.decline_reason(),
-            Some("spatial_no_registered_gpu_predicate")
+            Some("generic_descriptor_capability")
         );
         assert_eq!(repro.cardinality, "1024+ polygon vertices");
         assert!(repro.batch_count.contains("16 batches"));

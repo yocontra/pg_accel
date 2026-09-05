@@ -28,9 +28,10 @@ use crate::gpu::{
     ExprDeviceBuffer, GpuError, GpuErrorDomain, GpuOperation, GpuResult, GpuStatusDetail,
     PGACCEL_RESIDENT_RASTER_ABI_VERSION, PgaccelRasterReclassResidentRequest,
     PgaccelResidentRasterBand, PgaccelResidentRasterReclassRule, PgaccelResidentRasterRow,
-    PgaccelResidentRasterValidationScratch, PgaccelResidentRasterView, RasterResidentLaunchOutcome,
-    prepare_raster_reclass_resident, raster_reclass_resident_launch,
-    raster_reclass_resident_launch_result, raster_reclass_resident_validation,
+    PgaccelResidentRasterValidationScratch, PgaccelResidentRasterView,
+    RASTER_NATIVE_ERROR_CAPACITY, RasterResidentLaunchOutcome, prepare_raster_reclass_resident,
+    raster_reclass_resident_launch, raster_reclass_resident_launch_result,
+    raster_reclass_resident_validation,
 };
 
 pub(crate) const RASTER_OUTPUT_MEMORY_CONTEXT_NAME: &str = "pg_accel_raster_output";
@@ -1093,6 +1094,7 @@ pub struct RasterLaunchWorkspace {
     host_validation_scratch: Box<[PgaccelResidentRasterValidationScratch]>,
     expected_rule_count: usize,
     max_chunk_pixels: usize,
+    native_error: [u8; RASTER_NATIVE_ERROR_CAPACITY],
     borrow_outcome: RasterBorrowOutcome,
 }
 
@@ -1125,6 +1127,7 @@ impl RasterLaunchWorkspace {
                 host_validation_scratch: Box::default(),
                 expected_rule_count: spec.reclass.rules.len(),
                 max_chunk_pixels: 1,
+                native_error: [0; RASTER_NATIVE_ERROR_CAPACITY],
                 borrow_outcome: RasterBorrowOutcome::Pending,
             }
             .verify_accounting();
@@ -1176,6 +1179,7 @@ impl RasterLaunchWorkspace {
             host_validation_scratch,
             expected_rule_count: spec.reclass.rules.len(),
             max_chunk_pixels,
+            native_error: [0; RASTER_NATIVE_ERROR_CAPACITY],
             borrow_outcome: RasterBorrowOutcome::Pending,
         }
         .verify_accounting()
@@ -1458,7 +1462,7 @@ impl RasterLaunchWorkspace {
         // SAFETY: every request pointer is owned either by this workspace or
         // by the live resident column borrow, and the process queue was
         // prepared before the borrow was acquired.
-        let outcome = unsafe { raster_reclass_resident_launch(&request) };
+        let outcome = unsafe { raster_reclass_resident_launch(&request, &mut self.native_error) };
         #[cfg(feature = "pg_test")]
         let outcome = if test_raster_kernel_failure_enabled() {
             injected_raster_resident_failure()
@@ -1495,7 +1499,8 @@ impl RasterLaunchWorkspace {
                 ));
             }
         };
-        raster_reclass_resident_launch_result(outcome).map_err(ResidentLoadError::Gpu)?;
+        raster_reclass_resident_launch_result(outcome, &self.native_error)
+            .map_err(ResidentLoadError::Gpu)?;
         let validation_scratch = self.validation_scratch.as_ref().ok_or_else(|| {
             invalid_output("resident raster validation buffer disappeared before readback")
         })?;
@@ -1829,6 +1834,7 @@ mod tests {
                 .into_boxed_slice(),
             expected_rule_count: spec.reclass.rules.len(),
             max_chunk_pixels: 1,
+            native_error: [0; RASTER_NATIVE_ERROR_CAPACITY],
             borrow_outcome: RasterBorrowOutcome::Pending,
         }
     }
@@ -2448,7 +2454,7 @@ mod tests {
             };
             assert_eq!(error.operation, operation);
             assert_eq!(error.status, status);
-            assert_eq!(error.detail, Some(detail));
+            assert_eq!(error.detail.as_deref(), Some(detail));
         }
     }
 

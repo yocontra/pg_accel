@@ -13,9 +13,9 @@
 
 #include <sycl/sycl.hpp>
 
-#include <cstdio>
 #include <stdexcept>
 
+#include "pgaccel_error.h"
 #include "pgaccel_ffi.h"
 
 /// Fork-safe accessor for the process-global in-order queue.
@@ -44,15 +44,4 @@ inline sycl::queue& pgaccel_require_queue() {
   if (q == nullptr)
     throw pgaccel_no_device_error();
   return *q;
-}
-
-/// Honest terminal catch handler for extern "C" kernel entry points: log the
-/// exception to stderr (which lands in the PG log) and return PGACCEL_ERROR.
-/// A swallowed kernel failure must never masquerade as PGACCEL_OK (silent
-/// data corruption) or PGACCEL_ERROR_NO_DEVICE (planner thinks there is no
-/// GPU when there is one that just failed).
-inline pgaccel_status pgaccel_kernel_failure(const char* entry_point, const std::exception* e) {
-  std::fprintf(stderr, "pgaccel: %s: GPU kernel failure: %s\n", entry_point,
-               e != nullptr ? e->what() : "unknown C++ exception");
-  return PGACCEL_ERROR;
 }

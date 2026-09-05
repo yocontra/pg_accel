@@ -14,8 +14,9 @@ pgrx, repository-built PostgreSQL, and the exact AdaptiveCpp commit in
 [`.acpp-version`](.acpp-version) for kernel builds. Setup scripts and CI read
 that file directly; do not substitute the head of `fork-safe-metal`. The
 currently validated GPU development target is Metal on Apple Silicon.
-CUDA/NVIDIA validation is owner-deferred in [TODO.md](TODO.md); do not claim it
-from an unverified build.
+CUDA/NVIDIA validation is owner-deferred in
+[issue #4](https://github.com/yocontra/pg_accel/issues/4); do not claim it from
+an unverified build.
 
 ```bash
 brew install llvm@20 lld@20 libomp boost postgis

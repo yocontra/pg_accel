@@ -2,7 +2,7 @@ use super::{ExpectedResultValue as Value, ResultOracle, Workload};
 
 const AVG_NONFLOAT_DECLINE_ROW_SCALES: &[usize] = &[10_000, 100_000];
 
-/// Integer, NUMERIC, and interval AVG variants that require native accumulators.
+/// AVG shapes outside the exact grouped INT2/INT4 SUM+AVG+COUNT lane.
 pub struct AvgNonfloatDecline;
 
 impl Workload for AvgNonfloatDecline {
@@ -11,8 +11,8 @@ impl Workload for AvgNonfloatDecline {
     }
 
     fn description(&self) -> &'static str {
-        "NULL-sensitive int2/int4/int8/NUMERIC/interval AVG - native planner decline \
-         (`shape_numeric_accumulator_unavailable`) until compatible GPU accumulators exist"
+        "NULL-sensitive global int2/int4/int8/NUMERIC/interval AVG - native planner \
+         decline outside the exact grouped INT2/INT4 SUM+AVG+COUNT release lane"
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {

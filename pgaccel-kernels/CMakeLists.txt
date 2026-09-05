@@ -331,15 +331,14 @@ add_pgaccel_gpu_test(test_kernel_failure_status)
 # gpu-stress-archive recipe and Metal release gate establish and independently
 # verify its empty-cache boundary before launching the fork matrix.
 # test_ooo_overlap is intentionally NOT registered with CTest. It is a
-# representative backend serialization diagnostic built from two independent
+# representative backend concurrency diagnostic built from two independent
 # synthetic compute branches; it does not call or provide coverage for
-# production reduce or resident-count kernels. The diagnostic cannot pass on the
-# pinned AdaptiveCpp Metal backend: every dispatch marks all USM buffers Read|Write
-# (metal_queue.cpp:225-227) on hazard-tracked storage (metal_allocator.cpp:395),
-# so Metal serializes all compute device-wide (observed sub-microsecond gaps
-# between "overlapping" kernels across 6/6 runs). The binary still builds as a
-# manual expected-failure/profile diagnostic for future runtime work on
-# untracked-hazard buffers.
+# production reduce or resident-count kernels. Physical Apple Metal devices may
+# serialize the branches because every dispatch marks all USM buffers Read|Write
+# (metal_queue.cpp:225-227) on hazard-tracked storage (metal_allocator.cpp:395).
+# Apple's paravirtual Metal device has demonstrated real improved overlap. The
+# coverage runner accepts only either that proven success or the exact known
+# no-overlap structural result.
 
 install(TARGETS pgaccel_kernels LIBRARY DESTINATION lib)
 install(FILES include/pgaccel_ffi.h include/pgaccel_expr.h

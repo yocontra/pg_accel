@@ -995,3 +995,85 @@ mod tests {
         assert_eq!(detoasted_copy_free_count(), 0);
     }
 }
+
+#[cfg(test)]
+mod diagnostic_contract_tests {
+    use super::*;
+
+    #[test]
+    fn parse_errors_render_every_corrupt_array_shape_with_context() {
+        let cases = [
+            (ParseError::Null, "ArrayType datum is NULL"),
+            (
+                ParseError::TruncatedHeader,
+                "ArrayType varlena truncated before header",
+            ),
+            (
+                ParseError::NegativeNdim(-1),
+                "ArrayType ndim is negative (-1)",
+            ),
+            (
+                ParseError::Multidim(2),
+                "ArrayType is multidim (ndim=2); 1-D only supported",
+            ),
+            (
+                ParseError::NegativeDimSize(-3),
+                "ArrayType dim size is negative (-3)",
+            ),
+            (
+                ParseError::BadDataOffset {
+                    offset: 17,
+                    total: 16,
+                },
+                "ArrayType dataoffset 17 exceeds varlena size 16",
+            ),
+            (
+                ParseError::DataPastEnd {
+                    data_start: 33,
+                    total: 32,
+                },
+                "ArrayType data start 33 exceeds varlena size 32",
+            ),
+            (
+                ParseError::UnknownAlign(b'x'),
+                "unknown typalign byte 120 (expected c/s/i/d)",
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn typalign_translation_covers_every_postgresql_alignment_class() {
+        let cases = [
+            (pg_sys::TYPALIGN_CHAR, Ok(1)),
+            (pg_sys::TYPALIGN_SHORT, Ok(2)),
+            (pg_sys::TYPALIGN_INT, Ok(4)),
+            (pg_sys::TYPALIGN_DOUBLE, Ok(8)),
+            (b'x', Err(ParseError::UnknownAlign(b'x'))),
+        ];
+
+        for (typalign, expected) in cases {
+            assert_eq!(typalign_bytes(typalign), expected);
+        }
+    }
+
+    #[test]
+    fn borrowed_array_into_iterator_preserves_null_slots_and_payloads() {
+        let payload = [10_u8, 20];
+        let nullmap = [0b0000_0001_u8];
+        let array = PgArray {
+            elem_type: pg_sys::INT2OID,
+            elem_len: 1,
+            elem_align: pg_sys::TYPALIGN_CHAR,
+            nelems: 2,
+            nullmap: Some(&nullmap),
+            payload: &payload,
+        };
+
+        let values = (&array).into_iter().collect::<Vec<_>>();
+        assert_eq!(values, vec![Some(&payload[..1]), None]);
+    }
+}

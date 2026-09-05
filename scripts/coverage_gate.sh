@@ -251,8 +251,9 @@ C++ scope is host-object source coverage for every owned implementation under
 pgaccel-kernels/src and executable inline header under pgaccel-kernels/include.
 The complete registered CTest suite is separate GPU correctness evidence,
 including the fixed 900-second OOM-never invariant: every live family processes
-min(2 * max_alloc, 2 GiB) of logical input (exactly 2 GiB on this M2 candidate)
-and must satisfy the enforced RSS-delta bound.
+min(2 * max_alloc, 2 GiB) of logical input and must satisfy the enforced
+RSS-delta bound. Hardware identity and performance eligibility are recorded
+separately; this functional coverage gate never qualifies release performance.
 Host-object source coverage
 does not claim device kernel-line execution.
 
@@ -485,6 +486,19 @@ rust_coverage() (
         return 1
     fi
 
+    # Every Rust build in this layer must inventory and compile against the
+    # exact PostgreSQL major selected by the gate. In particular, standalone
+    # and cargo-pgrx test binaries need the matching exported-symbol set on
+    # both Mach-O and ELF hosts.
+    local pg_config
+    if ! pg_config="$(pg_accel_pg_config_for_pg "$pg")"; then
+        mark_layer_error rust "$rust_minimum" postgres_config \
+            "could not resolve the exact pg${pg} pg_config" 1
+        return 1
+    fi
+    export PG_CONFIG="$pg_config"
+    export PGRX_PG_CONFIG_PATH="$pg_config"
+
     local coverage_env
     if ! coverage_env="$(CARGO_TARGET_DIR="$build_dir" cargo llvm-cov show-env --sh \
         --include-build-script \
@@ -683,56 +697,6 @@ resolve_cpp_llvm_tools() {
     printf '%s\n%s\n%s\n' "$configured_clang" "$llvm_cov" "$llvm_profdata"
 }
 
-run_ooo_overlap_diagnostic() {
-    local binary="$1"
-    local profile_dir="$2"
-    local output=""
-    local status=0
-    local host_profiles=()
-    local device_profiles=()
-
-    if [ ! -x "$binary" ]; then
-        echo "error: manual OOO overlap diagnostic is unavailable: $binary" >&2
-        return 1
-    fi
-    if output="$(env \
-        LLVM_PROFILE_FILE="$profile_dir/pgaccel-ooo-%p-%m.profraw" \
-        ACPP_METAL_DEVICE_PROFILE_DIR="$profile_dir" \
-        "$binary" 2>&1)"; then
-        status=0
-    else
-        status=$?
-    fi
-    printf '%s\n' "$output"
-    if [ "$status" -ne 1 ]; then
-        echo "error: manual OOO overlap diagnostic exited $status; expected 1" >&2
-        return 1
-    fi
-    if ! grep -Fxq \
-        "test_ooo_overlap: resident/reduce GPU spans did not overlap" <<< "$output"; then
-        echo "error: manual OOO overlap diagnostic did not report the pinned structural failure" >&2
-        return 1
-    fi
-    if find "$profile_dir" -maxdepth 1 -type f -name '*.overflow' -print -quit \
-        | grep -q .; then
-        echo "error: manual OOO overlap diagnostic overflowed a device profile" >&2
-        return 1
-    fi
-    while IFS= read -r -d '' profile; do
-        host_profiles+=("$profile")
-    done < <(find "$profile_dir" -maxdepth 1 -type f \
-        -name 'pgaccel-ooo-*.profraw' -size +0c -print0)
-    while IFS= read -r -d '' profile; do
-        device_profiles+=("$profile")
-    done < <(find "$profile_dir" -maxdepth 1 -type f \
-        -name '*.proftext' -size +0c -print0)
-    if [ "${#host_profiles[@]}" -eq 0 ] || [ "${#device_profiles[@]}" -eq 0 ]; then
-        echo "error: manual OOO overlap diagnostic did not emit host and device coverage" >&2
-        return 1
-    fi
-    echo "manual OOO overlap coverage: PASS (expected no-overlap structural failure)"
-}
-
 cpp_coverage() (
     local output_dir="$artifact_dir/cpp"
     local build_dir="$build_root/cpp-build"
@@ -744,6 +708,14 @@ cpp_coverage() (
     mkdir -p "$output_dir" "$profile_dir" "$per_test_log_dir"
     find "$profile_dir" -type f -delete
     find "$per_test_log_dir" -type f -delete
+
+    if ! scripts/coverage_metal_mode.sh \
+        "$output_dir/metal-execution-mode.json" \
+        > "$output_dir/metal-execution-mode.log" 2>&1; then
+        mark_layer_error cpp "$cpp_minimum" prerequisite \
+            "Metal coverage execution mode validation failed" 1
+        return 1
+    fi
 
     for command in cmake ctest; do
         if ! command -v "$command" >/dev/null 2>&1; then
@@ -833,12 +805,13 @@ cpp_coverage() (
     fi
 
     if run_logged "$output_dir/ooo-overlap-diagnostic.log" \
-        run_ooo_overlap_diagnostic "$build_dir/test_ooo_overlap" "$profile_dir"; then
+        scripts/coverage_ooo_overlap.sh \
+            "$build_dir/test_ooo_overlap" "$profile_dir"; then
         record_stage cpp ooo_overlap_diagnostic 0
     else
         execution_status=1
         record_stage cpp ooo_overlap_diagnostic 1 \
-            "manual OOO overlap diagnostic did not fail in the expected structural mode with coverage"
+            "manual OOO overlap diagnostic produced neither accepted overlap mode with coverage"
     fi
 
     # Do not override per-test timeouts: test_oom_invariant retains its fixed
@@ -1007,6 +980,10 @@ sql_coverage() (
                 record_stage sql extension_init 1 "extension initialization failed"
             fi
             if run_logged "$output_dir/sql-tests.log" env \
+                PG_CONFIG="$pg_config" \
+                PGRX_PG_CONFIG_PATH="$pg_config" \
+                PG_ACCEL_PSQL="$psql_bin" \
+                PATH="$("$pg_config" --bindir):$PATH" \
                 PGOPTIONS="-c pg_accel.kernel_timeout_ms=${sql_coverage_kernel_timeout_ms}" \
                 PG_ACCEL_PG_MAJOR="$pg" \
                 PG_ACCEL_SQL_TEST_REQUIRE_EXTENSION=1 \

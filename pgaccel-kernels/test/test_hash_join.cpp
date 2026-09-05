@@ -3,6 +3,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
@@ -13,6 +14,14 @@
 #include "pgaccel_expr.h"
 #include "pgaccel_ffi.h"
 #include "pgaccel_hash_join.h"
+
+extern "C" bool pgacceltest_hash_join_next_power_of_two(size_t value, size_t* out);
+extern "C" bool pgacceltest_hash_join_capacity(size_t rows, size_t* out);
+extern "C" uint64_t pgacceltest_hash_join_hash_i64(int64_t key);
+extern "C" pgaccel_status pgacceltest_hash_join_build_parallel_i32(const int32_t* keys,
+                                                                   const uint8_t* nulls,
+                                                                   int32_t* heads, int32_t* next,
+                                                                   size_t count, size_t capacity);
 
 namespace {
 
@@ -52,6 +61,27 @@ class DeviceBuffer {
   }
 
   void* get() const { return pointer_; }
+
+ private:
+  void* pointer_ = nullptr;
+};
+
+class SharedBuffer {
+ public:
+  SharedBuffer() = default;
+  SharedBuffer(const SharedBuffer&) = delete;
+  SharedBuffer& operator=(const SharedBuffer&) = delete;
+
+  ~SharedBuffer() { pgaccel_expr_shared_free(pointer_); }
+
+  bool allocate(size_t bytes) {
+    return pgaccel_expr_shared_alloc(bytes, &pointer_) == PGACCEL_OK && pointer_ != nullptr;
+  }
+
+  template <typename T>
+  T* as() {
+    return static_cast<T*>(pointer_);
+  }
 
  private:
   void* pointer_ = nullptr;
@@ -108,6 +138,87 @@ uint64_t test_hash64(uint64_t key) {
   key *= 0xc4ceb9fe1a85ec53ULL;
   key ^= key >> 33;
   return key;
+}
+
+void test_internal_helper_contracts() {
+  size_t value = 0;
+  check(!pgacceltest_hash_join_next_power_of_two(1, nullptr),
+        "power-of-two helper rejects null output");
+  check(pgacceltest_hash_join_next_power_of_two(17, &value) && value == 32,
+        "power-of-two helper rounds upward");
+  check(!pgacceltest_hash_join_next_power_of_two(std::numeric_limits<size_t>::max(), &value),
+        "power-of-two helper rejects overflow");
+
+  check(!pgacceltest_hash_join_capacity(1, nullptr), "capacity helper rejects null output");
+  check(pgacceltest_hash_join_capacity(0, &value) && value == 16,
+        "capacity helper enforces its minimum");
+  check(pgacceltest_hash_join_capacity(9, &value) && value == 32,
+        "capacity helper rounds a doubled row count");
+  check(!pgacceltest_hash_join_capacity(std::numeric_limits<size_t>::max() / 2, &value),
+        "capacity helper rejects overflow");
+
+  check(pgacceltest_hash_join_hash_i64(-1) == test_hash64(static_cast<uint64_t>(int64_t{-1})),
+        "INT64 hash preserves the full two's-complement key");
+}
+
+void test_parallel_build_contracts() {
+  constexpr size_t count = 4;
+  constexpr size_t capacity = 16;
+  constexpr int32_t empty_head = -1;
+  SharedBuffer key_storage;
+  SharedBuffer null_storage;
+  SharedBuffer head_storage;
+  SharedBuffer next_storage;
+  check(key_storage.allocate(count * sizeof(int32_t)), "parallel key shared allocation");
+  check(null_storage.allocate(count * sizeof(uint8_t)), "parallel null shared allocation");
+  check(head_storage.allocate(capacity * sizeof(int32_t)), "parallel head shared allocation");
+  check(next_storage.allocate(count * sizeof(int32_t)), "parallel next shared allocation");
+  int32_t* keys = key_storage.as<int32_t>();
+  uint8_t* nulls = null_storage.as<uint8_t>();
+  int32_t* heads = head_storage.as<int32_t>();
+  int32_t* next = next_storage.as<int32_t>();
+  if (keys == nullptr || nulls == nullptr || heads == nullptr || next == nullptr)
+    return;
+
+  keys[0] = 7;
+  keys[1] = 7;
+  keys[2] = 11;
+  keys[3] = 99;
+  nulls[0] = 0;
+  nulls[1] = 0;
+  nulls[2] = 0;
+  nulls[3] = 1;
+  std::fill_n(heads, capacity, empty_head);
+  std::fill_n(next, count, empty_head);
+  check_status(pgacceltest_hash_join_build_parallel_i32(keys, nulls, heads, next, count, capacity),
+               PGACCEL_OK, "parallel hash build status");
+
+  auto occurrences = [&](int32_t key) {
+    const size_t mask = capacity - 1;
+    int32_t head = empty_head;
+    for (size_t attempt = 0; attempt < capacity; ++attempt) {
+      const int32_t candidate = heads[(test_hash64(static_cast<uint32_t>(key)) + attempt) & mask];
+      if (candidate == empty_head)
+        break;
+      if (candidate < 0 || static_cast<size_t>(candidate) >= count)
+        return count + 1;
+      if (keys[static_cast<size_t>(candidate)] == key) {
+        head = candidate;
+        break;
+      }
+    }
+    size_t found = 0;
+    while (head != empty_head) {
+      if (head < 0 || static_cast<size_t>(head) >= count || found >= count)
+        return count + 1;
+      ++found;
+      head = next[static_cast<size_t>(head)];
+    }
+    return found;
+  };
+  check(occurrences(7) == 2, "parallel hash build links duplicate keys");
+  check(occurrences(11) == 1, "parallel hash build retains a distinct key");
+  check(occurrences(99) == 0 && next[3] == empty_head, "parallel hash build excludes null rows");
 }
 
 std::vector<int32_t> colliding_keys(size_t count, size_t capacity) {
@@ -286,6 +397,9 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "FATAL: pgaccel_init failed with status %d\n", static_cast<int>(init));
     return 1;
   }
+
+  test_internal_helper_contracts();
+  test_parallel_build_contracts();
 
   test_int32_duplicates_and_nulls();
   test_int64_boundaries();

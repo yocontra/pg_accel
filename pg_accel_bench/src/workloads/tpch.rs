@@ -62,7 +62,7 @@ fn tpch_setup_sql(rows: usize) -> Vec<String> {
                     ((i * 7) % 10000 + 1)::int8, \
                     ((i - 1) % 4 + 1)::int4, \
                     ((i % 50) + 1)::numeric(15,2), \
-                    (((i * 7919) % 900000 + 10000)::numeric / 100)::numeric(15,2), \
+                    (((i::int8 * 7919) % 900000 + 10000)::numeric / 100)::numeric(15,2), \
                     (((i * 3) % 11)::numeric / 100)::numeric(15,4), \
                     (((i * 5) % 9)::numeric / 100)::numeric(15,4), \
                     (ARRAY['A','N','R'])[(i % 3) + 1], \
@@ -240,5 +240,11 @@ mod tests {
         }
         assert!(!TpchQ1.query_sql().contains("NUMERIC"));
         assert!(tpch_setup_sql(10_000).join("\n").contains("numeric(15,4)"));
+        assert!(
+            tpch_setup_sql(10_000_000)
+                .join("\n")
+                .contains("i::int8 * 7919"),
+            "the 10M-row price fixture must widen generate_series values before multiplication"
+        );
     }
 }

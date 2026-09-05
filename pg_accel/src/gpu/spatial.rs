@@ -1199,7 +1199,7 @@ mod resident_spatial_tests {
         assert_eq!(error.operation, RESIDENT_SPATIAL_OPERATION);
         assert_eq!(error.status, GpuStatusDetail::InvalidDescriptor);
         assert_eq!(
-            error.detail,
+            error.detail.as_deref(),
             Some("successful resident spatial evaluation returned a nonzero detail code")
         );
     }
@@ -1261,7 +1261,7 @@ mod resident_spatial_tests {
             assert_eq!(error.domain, GpuErrorDomain::Spatial);
             assert_eq!(error.operation, RESIDENT_SPATIAL_OPERATION);
             assert_eq!(error.status, expected_status);
-            assert_eq!(error.detail, Some(expected_message));
+            assert_eq!(error.detail.as_deref(), Some(expected_message));
         }
     }
 
@@ -1348,7 +1348,7 @@ mod resident_spatial_tests {
         assert_eq!(error.domain, GpuErrorDomain::Spatial);
         assert_eq!(error.operation, RESIDENT_SPATIAL_OPERATION);
         assert_eq!(error.status, GpuStatusDetail::CapacityOverflow);
-        assert_eq!(error.detail, Some("spatial capacity exceeded"));
+        assert_eq!(error.detail.as_deref(), Some("spatial capacity exceeded"));
 
         for detail in [
             ResidentSpatialDetail::None,

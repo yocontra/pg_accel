@@ -1,6 +1,6 @@
 //! Hardware-derived dispatch thresholds.
 
-use std::fmt;
+use std::{ffi::OsStr, fmt};
 
 use super::platform::PlatformProfile;
 
@@ -16,6 +16,9 @@ pub(crate) const HISTORICAL_UNSAFE_GROUPED_HASH_INPUT_ROWS: usize = 100_000;
 /// First build-side row count at which the retired row-returning hash-join
 /// lane entered its crash-prone sort/merge branch.
 pub(crate) const HISTORICAL_UNSAFE_ROW_JOIN_BUILD_ROWS: usize = 100_000;
+
+const HOSTED_METAL_COMPATIBILITY_ENV: &str = "PGACCEL_HOSTED_METAL_COMPATIBILITY";
+const HOSTED_METAL_PLANNER_COMPUTE_UNITS: u32 = 32;
 
 // ---------------------------------------------------------------------------
 // Dynamic device limits
@@ -392,6 +395,74 @@ impl fmt::Display for DeviceLimitsValidationError {
 }
 
 impl std::error::Error for DeviceLimitsValidationError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HostedMetalCompatibilityError {
+    InvalidMode(String),
+    ProfileMismatch,
+}
+
+impl fmt::Display for HostedMetalCompatibilityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidMode(value) => write!(
+                f,
+                "{HOSTED_METAL_COMPATIBILITY_ENV} must be 0 or 1, got {value:?}"
+            ),
+            Self::ProfileMismatch => write!(
+                f,
+                "{HOSTED_METAL_COMPATIBILITY_ENV}=1 requires the exact hosted virtual-M1 Metal profile"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for HostedMetalCompatibilityError {}
+
+/// Returns the planner-only compatibility profile for the exact hosted
+/// virtual-M1 runner. The physical device remains unchanged; only the
+/// throughput calibration used to admit compatibility/coverage fixtures is
+/// pinned to the 32-CU reference baseline. This mode is never performance
+/// evidence and rejects every non-exact host instead of broadening normal
+/// production admission.
+fn hosted_metal_planner_profile(
+    profile: &PlatformProfile,
+    mode: Option<&OsStr>,
+    is_macos_arm64: bool,
+) -> Result<Option<PlatformProfile>, HostedMetalCompatibilityError> {
+    let Some(mode) = mode else {
+        return Ok(None);
+    };
+    let Some(mode) = mode.to_str() else {
+        return Err(HostedMetalCompatibilityError::InvalidMode(
+            mode.to_string_lossy().into_owned(),
+        ));
+    };
+    match mode {
+        "0" => return Ok(None),
+        "1" => {}
+        other => {
+            return Err(HostedMetalCompatibilityError::InvalidMode(other.to_owned()));
+        }
+    }
+
+    if !is_macos_arm64
+        || profile.cpu_cores != 3
+        || !profile.has_gpu
+        || profile.compute_units != 1
+        || profile.device_name != "Apple Paravirtual device"
+        || profile.backend_name != "metal"
+        || profile.gpu_max_alloc_bytes == 0
+        || profile.has_native_fp64
+    {
+        return Err(HostedMetalCompatibilityError::ProfileMismatch);
+    }
+
+    let mut calibrated = profile.clone();
+    calibrated.compute_units = HOSTED_METAL_PLANNER_COMPUTE_UNITS;
+    calibrated.estimated_gpu_gflops = f64::from(HOSTED_METAL_PLANNER_COMPUTE_UNITS) * 2.0;
+    Ok(Some(calibrated))
+}
 
 impl DeviceLimits {
     /// Reference baseline: 32 compute units (Apple M2 Max GPU).
@@ -1042,6 +1113,8 @@ mod tests {
             has_gpu: true,
             estimated_gpu_gflops: 2_000.0,
             compute_units,
+            device_name: "test-gpu".to_owned(),
+            backend_name: "metal".to_owned(),
             gpu_max_alloc_bytes,
             has_native_fp64: false,
         }
@@ -1383,6 +1456,71 @@ mod tests {
             })
         ));
     }
+
+    #[test]
+    fn hosted_metal_calibration_is_exact_fail_closed_and_planner_only() {
+        let mut hosted = profile(1, 2 * 1024 * 1024 * 1024);
+        hosted.cpu_cores = 3;
+        hosted.device_name = "Apple Paravirtual device".to_owned();
+        hosted.backend_name = "metal".to_owned();
+
+        assert!(
+            hosted_metal_planner_profile(&hosted, None, true)
+                .expect("absent compatibility mode should be valid")
+                .is_none()
+        );
+        assert!(
+            hosted_metal_planner_profile(&hosted, Some(OsStr::new("0")), true)
+                .expect("disabled compatibility mode should be valid")
+                .is_none()
+        );
+
+        let calibrated = hosted_metal_planner_profile(&hosted, Some(OsStr::new("1")), true)
+            .expect("the exact hosted profile should calibrate")
+            .expect("enabled compatibility mode should return a profile");
+        assert_eq!(hosted.compute_units, 1, "the physical profile is immutable");
+        assert_eq!(calibrated.compute_units, HOSTED_METAL_PLANNER_COMPUTE_UNITS);
+        assert_eq!(calibrated.device_name, hosted.device_name);
+        assert_eq!(calibrated.backend_name, hosted.backend_name);
+        assert_eq!(calibrated.gpu_max_alloc_bytes, hosted.gpu_max_alloc_bytes);
+
+        let limits = DeviceLimits::from_profile(&calibrated);
+        assert_eq!(limits.gpu_hash_agg_min_rows, 250_000);
+        assert_eq!(
+            limits.gpu_grouped_agg_one_shot_max_rows,
+            GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS
+        );
+        let physical_limits = DeviceLimits::from_profile(&hosted);
+        assert_eq!(physical_limits.gpu_grouped_agg_one_shot_max_rows, 64_000);
+        assert!(
+            physical_limits.gpu_grouped_agg_one_shot_max_rows
+                < limits.gpu_grouped_agg_one_shot_max_rows,
+            "planner calibration may not become the physical synchronous-work bound"
+        );
+    }
+
+    #[test]
+    fn hosted_metal_calibration_rejects_malformed_mode_and_profile_drift() {
+        let mut hosted = profile(1, 2 * 1024 * 1024 * 1024);
+        hosted.cpu_cores = 3;
+        hosted.device_name = "Apple Paravirtual device".to_owned();
+        hosted.backend_name = "metal".to_owned();
+
+        assert!(matches!(
+            hosted_metal_planner_profile(&hosted, Some(OsStr::new("yes")), true),
+            Err(HostedMetalCompatibilityError::InvalidMode(value)) if value == "yes"
+        ));
+        assert_eq!(
+            hosted_metal_planner_profile(&hosted, Some(OsStr::new("1")), false),
+            Err(HostedMetalCompatibilityError::ProfileMismatch)
+        );
+
+        hosted.device_name = "Apple M2 Max".to_owned();
+        assert_eq!(
+            hosted_metal_planner_profile(&hosted, Some(OsStr::new("1")), true),
+            Err(HostedMetalCompatibilityError::ProfileMismatch)
+        );
+    }
 }
 
 fn validate_device_limits_for_publication(
@@ -1395,9 +1533,15 @@ fn validate_device_limits_for_publication(
 /// Cached device limits, initialised on first access after GPU init.
 static DEVICE_LIMITS: std::sync::OnceLock<DeviceLimits> = std::sync::OnceLock::new();
 
-/// Source of the cached [`DeviceLimits`] — `HardwareDerived` means
-/// [`DeviceLimits::from_profile`] ran against a detected GPU profile;
-/// `FallbackCpuOnly` means [`DeviceLimits::cpu_only`] was used because no GPU
+/// Physical executor limits cached alongside [`DEVICE_LIMITS`]. The public
+/// limits may use the exact hosted virtual-M1 planner calibration, but a
+/// synthetic compute-unit count must never enlarge synchronous kernel work on
+/// the real device.
+static EXECUTION_DEVICE_LIMITS: std::sync::OnceLock<DeviceLimits> = std::sync::OnceLock::new();
+
+/// Source of the cached [`DeviceLimits`]. `HardwareDerived` is the normal GPU
+/// profile, `HostedCompatibilityCalibrated` is the exact virtual-M1
+/// compatibility/coverage profile, and `FallbackCpuOnly` is used when no GPU
 /// was detected.
 ///
 /// Diagnostic consumers (see `pg_accel_device_limits` SRF) use this to tell
@@ -1407,6 +1551,9 @@ pub enum DeviceLimitsSource {
     /// Derived from a detected [`PlatformProfile`] via
     /// [`DeviceLimits::from_profile`].
     HardwareDerived,
+    /// Planner-only 32-CU reference calibration on the exact hosted virtual-M1
+    /// profile. This source is explicitly ineligible for performance claims.
+    HostedCompatibilityCalibrated,
     /// Hard-coded fallback from [`DeviceLimits::cpu_only`] — used when no GPU
     /// was detected at `device_limits()` init time.
     FallbackCpuOnly,
@@ -1418,6 +1565,7 @@ impl DeviceLimitsSource {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::HardwareDerived => "hardware_derived",
+            Self::HostedCompatibilityCalibrated => "hosted_compatibility_calibrated",
             Self::FallbackCpuOnly => "fallback_cpu_only",
         }
     }
@@ -1437,30 +1585,70 @@ static DEVICE_LIMITS_SOURCE: std::sync::OnceLock<DeviceLimitsSource> = std::sync
 pub fn device_limits() -> &'static DeviceLimits {
     DEVICE_LIMITS.get_or_init(|| {
         #[cfg(test)]
-        let (candidate, source) = (
+        let (candidate, execution_candidate, source) = (
+            DeviceLimits::cpu_only(),
             DeviceLimits::cpu_only(),
             DeviceLimitsSource::FallbackCpuOnly,
         );
         #[cfg(not(test))]
-        let (candidate, source) = {
+        let (candidate, execution_candidate, source) = {
             let profile = PlatformProfile::detect();
-            if profile.has_gpu {
+            let physical_limits = if profile.has_gpu {
+                DeviceLimits::from_profile(&profile)
+            } else {
+                DeviceLimits::cpu_only()
+            };
+            let compatibility_profile = hosted_metal_planner_profile(
+                &profile,
+                std::env::var_os(HOSTED_METAL_COMPATIBILITY_ENV).as_deref(),
+                cfg!(all(target_os = "macos", target_arch = "aarch64")),
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "refusing invalid hosted Metal planner calibration: {error}; detected profile: {profile:?}"
+                )
+            });
+            if let Some(compatibility_profile) = compatibility_profile {
                 (
-                    DeviceLimits::from_profile(&profile),
+                    DeviceLimits::from_profile(&compatibility_profile),
+                    physical_limits,
+                    DeviceLimitsSource::HostedCompatibilityCalibrated,
+                )
+            } else if profile.has_gpu {
+                (
+                    physical_limits.clone(),
+                    physical_limits,
                     DeviceLimitsSource::HardwareDerived,
                 )
             } else {
                 (
                     DeviceLimits::cpu_only(),
+                    physical_limits,
                     DeviceLimitsSource::FallbackCpuOnly,
                 )
             }
         };
+        let execution_limits = validate_device_limits_for_publication(execution_candidate)
+            .unwrap_or_else(|error| panic!("refusing invalid physical executor limits: {error}"));
         let limits = validate_device_limits_for_publication(candidate)
             .unwrap_or_else(|error| panic!("refusing to publish invalid device limits: {error}"));
+        let _ = EXECUTION_DEVICE_LIMITS.set(execution_limits);
         let _ = DEVICE_LIMITS_SOURCE.set(source);
         limits
     })
+}
+
+/// Get limits derived from the physical device for executor chunking and
+/// synchronous-work bounds. This differs from [`device_limits`] only on the
+/// exact hosted compatibility runner, where planner admission is calibrated
+/// to a reference device while execution must remain bounded by the real
+/// one-CU virtual GPU.
+#[must_use]
+pub(crate) fn execution_device_limits() -> &'static DeviceLimits {
+    let _ = device_limits();
+    EXECUTION_DEVICE_LIMITS
+        .get()
+        .expect("physical executor limits initialize with public device limits")
 }
 
 /// Returns the source of the cached device limits, forcing init if it hasn't
@@ -1476,4 +1664,111 @@ pub fn device_limits_source() -> DeviceLimitsSource {
         .get()
         .copied()
         .unwrap_or(DeviceLimitsSource::FallbackCpuOnly)
+}
+
+#[cfg(test)]
+mod diagnostic_contract_tests {
+    use super::*;
+
+    #[test]
+    fn validation_errors_render_stable_actionable_messages() {
+        let cases = [
+            (
+                DeviceLimitsValidationError::ZeroCount {
+                    field: "gpu_min_rows",
+                },
+                "device limit gpu_min_rows must be nonzero",
+            ),
+            (
+                DeviceLimitsValidationError::InvertedRange {
+                    lower_field: "minimum",
+                    lower: 11,
+                    upper_field: "maximum",
+                    upper: 10,
+                },
+                "device limit range is inverted: minimum=11 exceeds maximum=10",
+            ),
+            (
+                DeviceLimitsValidationError::InvalidFraction {
+                    field: "fraction",
+                    value: 1.5,
+                },
+                "device limit fraction must be finite and within [0, 1], got 1.5",
+            ),
+            (
+                DeviceLimitsValidationError::InvalidPositiveFloat {
+                    field: "cost",
+                    value: 0.0,
+                },
+                "device limit cost must be finite and positive, got 0",
+            ),
+            (
+                DeviceLimitsValidationError::InvalidSoftFp64Multiplier { value: 65.0 },
+                "device limit soft_fp64_cost_multiplier must be finite and within [1, 64], got 65",
+            ),
+            (
+                DeviceLimitsValidationError::HistoricalCrashBandExposed {
+                    field: "unsafe_rows",
+                    value: 100_001,
+                    exclusive_upper_bound: 100_000,
+                },
+                "device limit unsafe_rows=100001 exposes the historical crash band at 100000 rows",
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn hosted_compatibility_errors_render_the_control_and_required_profile() {
+        assert_eq!(
+            HostedMetalCompatibilityError::InvalidMode("yes".to_owned()).to_string(),
+            "PGACCEL_HOSTED_METAL_COMPATIBILITY must be 0 or 1, got \"yes\""
+        );
+        assert_eq!(
+            HostedMetalCompatibilityError::ProfileMismatch.to_string(),
+            "PGACCEL_HOSTED_METAL_COMPATIBILITY=1 requires the exact hosted virtual-M1 Metal profile"
+        );
+    }
+
+    #[test]
+    fn device_limit_source_labels_are_complete_and_stable() {
+        let cases = [
+            (DeviceLimitsSource::HardwareDerived, "hardware_derived"),
+            (
+                DeviceLimitsSource::HostedCompatibilityCalibrated,
+                "hosted_compatibility_calibrated",
+            ),
+            (DeviceLimitsSource::FallbackCpuOnly, "fallback_cpu_only"),
+        ];
+
+        for (source, expected) in cases {
+            assert_eq!(source.as_str(), expected);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_hosted_compatibility_mode_is_rejected_lossily_but_safely() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let profile = PlatformProfile {
+            cpu_cores: 3,
+            has_gpu: true,
+            estimated_gpu_gflops: 2.0,
+            compute_units: 1,
+            device_name: "Apple Paravirtual device".to_owned(),
+            backend_name: "metal".to_owned(),
+            gpu_max_alloc_bytes: 1024,
+            has_native_fp64: false,
+        };
+        let mode = OsStr::from_bytes(b"\xff");
+
+        assert!(matches!(
+            hosted_metal_planner_profile(&profile, Some(mode), true),
+            Err(HostedMetalCompatibilityError::InvalidMode(value)) if value == "\u{fffd}"
+        ));
+    }
 }

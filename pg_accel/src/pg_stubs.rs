@@ -1,13 +1,13 @@
-//! PG symbol stubs for macOS test binaries.
+//! PostgreSQL symbol stubs for standalone macOS/Linux test binaries.
 //!
 //! See `build.rs::pg_stub` for the rationale. This file is only compiled
-//! under `cfg(all(test, target_os = "macos"))` and pulls in an
-//! auto-generated source file from `OUT_DIR` containing one
-//! `#[no_mangle] pub static NAME: u8 = 0;` per exported postgres symbol.
+//! under `cfg(test)` on the supported host platforms and pulls in an
+//! auto-generated source file from `OUT_DIR` containing function and data
+//! definitions for exported postgres symbols.
 //!
-//! The stubs satisfy dyld at load time on macOS Sequoia+. They are
-//! never executed at runtime: pgrx tests run inside a real postgres
-//! process where the genuine implementations are provided.
+//! The stubs satisfy standalone test executable linkage/loading. They are not
+//! shipped, and pgrx tests loaded inside a real postgres process resolve the
+//! genuine implementations from that process.
 
 #![allow(non_upper_case_globals, non_snake_case, dead_code)]
 

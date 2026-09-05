@@ -2749,6 +2749,50 @@ class HostComputationAndContractTests(unittest.TestCase):
         finding = finding_for(host_work, "pgaccel_shutdown")
         self.assertIn("invalid_lifecycle_contract", finding.classifications)
 
+    def test_native_error_handoff_lifecycle_contracts_are_exact(self) -> None:
+        valid = audit_fixture(
+            r"""
+            extern "C" void pgaccel_clear_last_error() {
+              tl_last_error[0] = 0;
+            }
+            extern "C" size_t pgaccel_copy_last_error(
+                char* buffer, size_t capacity) {
+              const size_t length = 0;
+              if (buffer == nullptr || capacity == 0) return length;
+              std::memcpy(buffer, tl_last_error, length);
+              buffer[length] = 0;
+              return length;
+            }
+            """
+        )
+        self.assertFalse(valid.findings)
+        self.assertEqual(
+            {entry.entrypoint: entry.classifications for entry in valid.entrypoint_audits},
+            {
+                "pgaccel_clear_last_error": ("lifecycle",),
+                "pgaccel_copy_last_error": ("lifecycle",),
+            },
+        )
+
+        invalid = audit_fixture(
+            r"""
+            extern "C" void pgaccel_clear_last_error() {
+              tl_last_error[1] = 0;
+            }
+            extern "C" size_t pgaccel_copy_last_error(
+                char* buffer, size_t capacity) {
+              const size_t length = 0;
+              if (buffer == nullptr || capacity == 0) return length;
+              for (size_t i = 0; i < length; ++i) buffer[i] = tl_last_error[i];
+              buffer[length] = 0;
+              return length;
+            }
+            """
+        )
+        for entry in invalid.entrypoint_audits:
+            self.assertFalse(entry.ok, entry.detail)
+            self.assertIn("invalid_lifecycle_contract", entry.classifications)
+
     def test_failure_only_contract_rejects_new_host_work(self) -> None:
         valid = audit_fixture(
             r"""
@@ -4249,6 +4293,88 @@ class ResidentV5RegressionTests(unittest.TestCase):
         self.assertIn(
             "device_launch_orchestration",
             result.entrypoint_audits[0].classifications,
+        )
+
+    def test_proven_device_helper_can_orchestrate_streamed_local_chunks(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static void device_chunk(int* device_result, size_t count) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device_result[i] = 1;
+              }).wait_and_throw();
+            }
+
+            static void host_chunk(int* device_result, size_t) { device_result[0] = 7; }
+
+            extern "C" pgaccel_status pgaccel_streamed_device_chunks(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* streamed = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              size_t start = 0;
+              do {
+                size_t chunk = count - start;
+                if (chunk > 64) chunk = 64;
+                device_chunk(streamed + start, chunk);
+                start += chunk;
+              } while (start < count);
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                streamed[i] += 1;
+              }).wait_and_throw();
+              q.memcpy(out, streamed, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_streamed_host_helper(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* streamed = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              size_t start = 0;
+              do {
+                host_chunk(streamed + start, 1);
+                ++start;
+              } while (start < count);
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                streamed[i] += 1;
+              }).wait_and_throw();
+              q.memcpy(out, streamed, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_streamed_hidden_host_write(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* streamed = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              size_t start = 0;
+              do {
+                device_chunk(streamed + start, 1);
+                out[0] = 9;
+                ++start;
+              } while (start < count);
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                streamed[i] += 1;
+              }).wait_and_throw();
+              q.memcpy(out, streamed, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        streamed = entries["pgaccel_streamed_device_chunks"]
+        self.assertTrue(streamed.ok, streamed.detail)
+        self.assertIn("device_launch_orchestration", streamed.classifications)
+        self.assertFalse(entries["pgaccel_streamed_host_helper"].ok)
+        self.assertFalse(entries["pgaccel_streamed_hidden_host_write"].ok)
+        self.assertIn(
+            "host_computation",
+            entries["pgaccel_streamed_hidden_host_write"].classifications,
         )
 
     def test_device_launch_orchestration_mutants_fail_closed(self) -> None:
@@ -6654,11 +6780,11 @@ class AbiInventoryTests(unittest.TestCase):
 
     def test_checked_in_manifest_has_literal_integrity_anchor(self) -> None:
         manifest = audit.load_abi_manifest(audit.DEFAULT_ABI_MANIFEST)
-        self.assertEqual(manifest.count, 121)
-        self.assertEqual(audit.EXPECTED_ABI_MANIFEST_COUNT, 121)
+        self.assertEqual(manifest.count, 123)
+        self.assertEqual(audit.EXPECTED_ABI_MANIFEST_COUNT, 123)
         self.assertEqual(
             manifest.sha256,
-            "2f0f26de09706713002e2b1c44e2f1db5159ae132b1bec860e69b64bd4f244b8",
+            "6a6871c0f01391606ca77714f03324da4de893766a99d1bf036091b41308b667",
         )
         self.assertEqual(manifest.sha256, audit.EXPECTED_ABI_MANIFEST_SHA256)
 
@@ -6787,6 +6913,13 @@ class ReleaseWiringTests(unittest.TestCase):
         )
         self.assertIn("capture-candidate", matrix)
         self.assertIn("--repo-root \"$PWD\"", matrix)
+        benchmark_sweep = matrix[
+            matrix.index('run_logged "benchmark-sweep"') : matrix.index(
+                'if [ "$(uname -s)"', matrix.index('run_logged "benchmark-sweep"')
+            )
+        ]
+        self.assertIn("--cache-mode warm", benchmark_sweep)
+        self.assertNotIn("--cache-mode both", benchmark_sweep)
         self.assertIn("> SHA256SUMS", matrix)
         self.assertIn("shasum -a 256 -c SHA256SUMS", matrix)
         self.assertNotIn("        TODO.md docs README.md", matrix)
@@ -6837,6 +6970,7 @@ class ReleaseWiringTests(unittest.TestCase):
         self.assertNotIn("Run real CPU-cheat audit", ci)
         for workflow in (ci, release, release_plz):
             self.assertIn("libclang-dev", workflow)
+            self.assertIn("libomp-dev", workflow)
         self.assertLess(
             release.index("Build kernels before CPU-cheat release gate"),
             release.index("Run CPU-cheat release gate"),
@@ -6876,15 +7010,15 @@ class ProductionWitnessTests(unittest.TestCase):
         )
 
     def test_complete_real_abi_baseline_and_violation_floor(self) -> None:
-        self.assertEqual(len(self.abi.definitions), 121)
-        self.assertEqual(len({item.name for item in self.abi.definitions}), 121)
-        self.assertEqual(len({item.name for item in self.abi.declarations}), 121)
+        self.assertEqual(len(self.abi.definitions), 123)
+        self.assertEqual(len({item.name for item in self.abi.definitions}), 123)
+        self.assertEqual(len({item.name for item in self.abi.declarations}), 123)
         self.assertFalse(self.abi.findings)
         self.assertEqual(self.abi.definition_hash, self.abi.declaration_hash)
         self.assertEqual(self.abi.source_definition_hash, self.abi.definition_hash)
         self.assertEqual(self.abi.manifest["status"], "verified")
         self.assertEqual(self.abi.compiler["status"], "verified")
-        self.assertEqual(self.abi.compiler["inventory_count"], 121)
+        self.assertEqual(self.abi.compiler["inventory_count"], 123)
         status_names = sorted(
             entry.entrypoint for entry in self.by_name.values() if entry.is_status
         )[:82]

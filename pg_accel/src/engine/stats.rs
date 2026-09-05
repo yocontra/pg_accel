@@ -1114,11 +1114,14 @@ fn pg_accel_planner_rejection_count(reason: String) -> i64 {
 /// Returns the effective [`DeviceLimits`](crate::engine::cost::DeviceLimits)
 /// for this backend as one row per field.
 ///
-/// The `source` column is either `hardware_derived` (values came from
+/// The `source` column is `hardware_derived` (values came from
 /// [`DeviceLimits::from_profile`](crate::engine::cost::DeviceLimits::from_profile)
-/// applied to the detected platform profile) or `fallback_cpu_only` (no GPU
-/// was detected so [`DeviceLimits::cpu_only`](crate::engine::cost::DeviceLimits::cpu_only)
-/// was used). Benchmarks and dispatch tracing should use this function to
+/// applied to the detected platform profile),
+/// `hosted_compatibility_calibrated` (the exact virtual-M1 coverage runner
+/// uses the performance-ineligible reference planner calibration), or
+/// `fallback_cpu_only` (no GPU was detected so
+/// [`DeviceLimits::cpu_only`](crate::engine::cost::DeviceLimits::cpu_only) was
+/// used). Benchmarks and dispatch tracing should use this function to
 /// discover the real thresholds on the current machine — the constants listed
 /// in the `cpu_only()` fallback at `engine/cost/device_limits.rs` are only
 /// active when there is no GPU.
@@ -1928,7 +1931,9 @@ mod tests {
             .expect("source column query should succeed")
             .expect("source column should be non-NULL");
         assert!(
-            source == "hardware_derived" || source == "fallback_cpu_only",
+            source == "hardware_derived"
+                || source == "hosted_compatibility_calibrated"
+                || source == "fallback_cpu_only",
             "unexpected source value: {source}"
         );
 

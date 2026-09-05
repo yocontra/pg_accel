@@ -104,11 +104,32 @@ def _source_lines(repo: Path, relative: str) -> list[str]:
 
 
 def _matching_files(repo: Path, pattern: str) -> list[str]:
+    parts = pattern.split("/")
+    literal_prefix: list[str] = []
+    for part in parts:
+        if part == "**" or any(character in part for character in "*?["):
+            break
+        literal_prefix.append(part)
+
+    search_root = repo.joinpath(*literal_prefix)
+    if search_root.is_file():
+        candidates = [search_root]
+    elif search_root.is_dir():
+        candidates = search_root.rglob("*")
+    else:
+        return []
+
     return sorted(
         str(path.relative_to(repo)).replace("\\", "/")
-        for path in repo.glob(pattern)
+        for path in candidates
         if path.is_file()
+        and _glob_matches(str(path.relative_to(repo)).replace("\\", "/"), pattern)
     )
+
+
+def _glob_matches(path: str, pattern: str) -> bool:
+    """Match normalized repository paths using the registry's stable semantics."""
+    return fnmatch.fnmatchcase(path, pattern)
 
 
 def _validate_registry(repo: Path, registry: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, str]]]:
@@ -231,7 +252,7 @@ def _validate_unsafe_mapping(sites: list[tuple[str, int]], rules: list[dict[str,
     missing = [
         f"{path}:{line}"
         for path, line in sites
-        if not any(fnmatch.fnmatchcase(path, rule["glob"]) for rule in rules)
+        if not any(_glob_matches(path, rule["glob"]) for rule in rules)
     ]
     if missing:
         preview = ", ".join(missing[:20])

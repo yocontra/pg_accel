@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import io
 import os
 import pathlib
 import platform
 import re
 import shutil
 import stat
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -29,6 +32,76 @@ INSTALLER_SPEC.loader.exec_module(install_package)
 
 
 class PackageExtensionTests(unittest.TestCase):
+    def _run_release_verifier_with_members(
+        self, members: tuple[tuple[tarfile.TarInfo, bytes | None], ...]
+    ) -> subprocess.CompletedProcess[str]:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = pathlib.Path(temporary.name)
+        pg_config = root / "pg_config"
+        pg_config.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        pg_config.chmod(0o755)
+        archive = root / "pg_accel-pg18-test.tar.gz"
+        with tarfile.open(archive, "w:gz") as bundle:
+            for info, payload in members:
+                bundle.addfile(info, io.BytesIO(payload) if payload is not None else None)
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        archive.with_name(f"{archive.name}.sha256").write_text(
+            f"{digest}  {archive.name}\n", encoding="utf-8"
+        )
+        return subprocess.run(
+            (str(REPO_ROOT / "scripts/verify_release_package.sh"), str(pg_config), str(archive)),
+            cwd=REPO_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_release_verifier_rejects_archive_traversal_before_extraction(self) -> None:
+        root = tarfile.TarInfo("pg_accel-pg18")
+        root.type = tarfile.DIRTYPE
+        escape = tarfile.TarInfo("../escape")
+        escape.size = 1
+        result = self._run_release_verifier_with_members(((root, None), (escape, b"x")))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsafe release archive", result.stderr)
+
+    def test_release_verifier_rejects_escaping_symlink_before_extraction(self) -> None:
+        root = tarfile.TarInfo("pg_accel-pg18")
+        root.type = tarfile.DIRTYPE
+        link = tarfile.TarInfo("pg_accel-pg18/escape")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "../../outside"
+        result = self._run_release_verifier_with_members(((root, None), (link, None)))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("symlink escapes", result.stderr)
+
+    def test_extension_sql_names_accept_semver_prereleases_without_path_ambiguity(
+        self,
+    ) -> None:
+        valid = (
+            "pg_accel--1.0.0.sql",
+            "pg_accel--1.0.0-rc1.sql",
+            "pg_accel--1.0.0-rc.1+metal.arm64.sql",
+            "pg_accel--0.9.0-beta1--1.0.0-rc1.sql",
+        )
+        invalid = (
+            "pg_accel--1.0.sql",
+            "pg_accel--1.0.0-.sql",
+            "pg_accel--1.0.0--rc1.sql",
+            "pg_accel--1.0.0-rc_1.sql",
+            "pg_accel--1.0.0/rc1.sql",
+            "pg_accel--1.0.0-rc1--1.0.0--final.sql",
+        )
+        for name in valid:
+            with self.subTest(name=name):
+                self.assertIsNotNone(package_extension.EXTENSION_SQL_NAME.fullmatch(name))
+                self.assertIsNotNone(install_package.EXTENSION_SQL_NAME.fullmatch(name))
+        for name in invalid:
+            with self.subTest(name=name):
+                self.assertIsNone(package_extension.EXTENSION_SQL_NAME.fullmatch(name))
+                self.assertIsNone(install_package.EXTENSION_SQL_NAME.fullmatch(name))
+
     def test_discovers_extension_under_arbitrary_pg_prefix(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -231,37 +304,83 @@ class PackageExtensionTests(unittest.TestCase):
         helper = MODULE_PATH.read_text(encoding="utf-8")
         self.assertIn("_remove_generated_path(package_root)", helper)
 
-    def test_linux_release_lane_builds_installs_and_loads_each_package(self) -> None:
+    def test_release_lanes_build_install_and_load_each_package(self) -> None:
         workflow = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
+        mac_job = workflow[
+            workflow.index("  build:") : workflow.index("  linux-package:")
+        ]
         linux_job = workflow[
-            workflow.index("  linux-package:") : workflow.index("  metal-coverage:")
+            workflow.index("  linux-package:") : workflow.index(
+                "  metal-compatibility:"
+            )
         ]
         release_job = workflow[workflow.index("  release:") :]
+        justfile = (REPO_ROOT / "Justfile").read_text(encoding="utf-8")
+        verifier = (REPO_ROOT / "scripts/verify_release_package.sh").read_text(
+            encoding="utf-8"
+        )
 
         for required in (
             "runs-on: ubuntu-latest",
             "pg: [18, 19]",
             "libclang-dev",
+            "libomp-dev",
             "ACPP_BACKEND=generic ./scripts/setup_acpp.sh",
             "just audit-cpu-cheats",
             "python3 scripts/package_extension.py",
-            "sha256sum -c \"$archive_name.sha256\"",
-            "sha256sum -c SHA256SUMS",
+            'just package-smoke "${{ matrix.pg }}"',
+            "target/release/pg_accel-pg${{ matrix.pg }}-linux-*.tar.gz",
+            "target/release/pg_accel-pg${{ matrix.pg }}-*.smoke.txt",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, linux_job)
+        for required in (
+            "os: [macos-26]",
+            "pg: [18, 19]",
+            "python3 scripts/package_extension.py",
+            "Verify extracted macOS package in an isolated PostgreSQL cluster",
+            'just package-smoke "${{ matrix.pg }}"',
+            "target/release/pg_accel-pg${{ matrix.pg }}-*.smoke.txt",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, mac_job)
+        for required in (
+            'package-smoke pg="" archive="":',
+            "scripts/verify_release_package.sh",
+            'package-smoke-matrix:',
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, justfile)
+        for required in (
+            'verify_manifest "$archive_dir" "$outer_manifest"',
+            'verify_manifest "$package_root" SHA256SUMS',
             '"$package_root/install.py"',
             '--destdir "$stage"',
             "dynamic_library_path",
             "extension_control_path",
-            r"\$system:%s",
             "shared_preload_libraries = 'pg_accel'",
             "CREATE EXTENSION pg_accel;",
-            "pg_accel_stats()",
-            "target/release/pg_accel-pg${{ matrix.pg }}-linux-*.tar.gz",
+            "SELECT pg_accel_version();",
+            "SELECT count(*) FROM pg_accel_stats();",
+            "server_log_audit=clean",
         ):
             with self.subTest(required=required):
-                self.assertIn(required, linux_job)
-        self.assertIn("needs: [build, linux-package, metal-coverage]", release_job)
+                self.assertIn(required, verifier)
+        self.assertIn(
+            "needs: [build, linux-package, metal-compatibility]", release_job
+        )
+        self.assertIn("draft: true", release_job)
+        self.assertIn('prerelease: ${{ contains(github.ref_name, \'-\') }}', release_job)
+        self.assertIn(
+            "release-artifacts/pg_accel-pg*/pg_accel-pg*.smoke.txt", release_job
+        )
+        self.assertIn(
+            "Package hosted Metal evidence for durable release assets", release_job
+        )
+        self.assertIn("release-evidence/*.tar.gz", release_job)
+        self.assertIn("release-evidence/*.tar.gz.sha256", release_job)
 
     def test_checksum_manifest_is_sorted_complete_and_fails_when_stale(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

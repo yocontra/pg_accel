@@ -648,6 +648,44 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         // SAFETY: the non-null baserestrictinfo pointer is a planner-owned List.
         && unsafe { pg_sys::list_length(rel_ref.baserestrictinfo) } > 0;
 
+    // Aggregate candidates are classified as one complete scan/filter/join ->
+    // reduce shape by the UPPERREL_GROUP_AGG hook. Re-running the standalone
+    // base-scan observers here cannot add an executable path and used to walk
+    // every aggregate predicate (including catalog-backed H3/PostGIS checks)
+    // before the exact aggregate recognizer repeated that work. Preserve the
+    // established generic resident-only rejection for restricted/sorted/
+    // function inputs, then defer the exact reason and selection decision to
+    // the upper hook.
+    // SAFETY: parse is the non-null planner-owned Query established above.
+    if unsafe { (*parse).hasAggs } {
+        // H3, PostGIS, and standalone-sort observers publish stable,
+        // operator-specific rejection counters. Retain those narrow checks so
+        // deferral cannot replace a precise public reason with the upper
+        // descriptor's more general shape reason.
+        // SAFETY: these are the same planner-owned pointers and cheap shape
+        // facts accepted by the normal observer path below.
+        let specific_decline_recorded = gucs::gpu_enabled()
+            && unsafe {
+                observe_resident_only_rel_declines(root, rel, rte, has_sort, has_restrictions)
+            };
+        if gucs::gpu_enabled()
+            && !specific_decline_recorded
+            && (rte_ref.rtekind == pg_sys::RTEKind::RTE_FUNCTION || has_sort || has_restrictions)
+        {
+            super::record_no_gpu_resident_pipeline_decline(
+                stats::PlannerHookStage::RelPathlist,
+                "rel_pathlist_aggregate_deferred",
+                rel,
+            );
+        } else if !specific_decline_recorded {
+            stats::record_planner_stage_fast_decline(
+                stats::PlannerHookStage::RelPathlist,
+                "rel_pathlist_aggregate_deferred",
+            );
+        }
+        return;
+    }
+
     // A plain base scan with only direct Vars, Consts, or Params in its target
     // list cannot match any resident-v2 observer. Decline before creating a
     // tracing span or performing raster/function catalog lookups. Wrappers and

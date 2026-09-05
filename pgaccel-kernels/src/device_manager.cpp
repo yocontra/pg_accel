@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -22,6 +23,33 @@
 // ---------------------------------------------------------------------------
 
 static thread_local uint64_t tl_gpu_exec_count = 0;
+
+namespace {
+constexpr size_t kLastErrorCapacity = 2048;
+thread_local char tl_last_error[kLastErrorCapacity] = {};
+}  // namespace
+
+extern "C" void pgaccel_clear_last_error(void) {
+  tl_last_error[0] = 0;
+}
+
+extern "C" size_t pgaccel_copy_last_error(char* buffer, size_t capacity) {
+  const size_t length = std::strlen(tl_last_error);
+  if (buffer == nullptr || capacity == 0)
+    return length;
+  const size_t copied = std::min(length, capacity - 1);
+  std::memcpy(buffer, tl_last_error, copied);
+  buffer[copied] = 0;
+  return length;
+}
+
+void pgaccel_set_last_error(const char* entry_point, const std::exception* e) noexcept {
+  const char* safe_entry_point = entry_point != nullptr ? entry_point : "<unknown>";
+  const char* message = e != nullptr ? e->what() : "unknown C++ exception";
+  std::snprintf(tl_last_error, sizeof(tl_last_error),
+                "pgaccel: %s: GPU kernel failure: %s", safe_entry_point, message);
+  tl_last_error[sizeof(tl_last_error) - 1] = 0;
+}
 
 extern "C" uint64_t pgaccel_gpu_exec_count(void) {
   return tl_gpu_exec_count;
@@ -108,43 +136,52 @@ extern "C" void pgacceltest_clear_seeded_runtime_state(void) {
   g_initialized.store(false, std::memory_order_release);
   g_test_fail_after_fork_invalidation.store(false, std::memory_order_release);
 }
+
+extern "C" void pgacceltest_seed_foreign_runtime_state(void) {
+  g_device_info.compute_units = 999;
+  g_caps.compute_units = 999;
+  g_queue = reinterpret_cast<sycl::queue*>(uintptr_t{1});
+  g_ooo_queue = reinterpret_cast<sycl::queue*>(uintptr_t{2});
+  g_init_pid = getpid() == std::numeric_limits<pid_t>::max() ? getpid() - 1 : getpid() + 1;
+  g_initialized.store(true, std::memory_order_release);
+}
 #endif
 
 // ---------------------------------------------------------------------------
 // Backend name detection
 // ---------------------------------------------------------------------------
 
-static std::string detect_backend_name(const sycl::device& dev) {
-  // SAFETY: platform name is always available on a valid SYCL device.
-  std::string platform_name = dev.get_platform().get_info<sycl::info::platform::name>();
-
+static std::string backend_name_from_platform(std::string platform_name) {
   // Lowercase for matching.
-  std::string lower = platform_name;
-  std::transform(lower.begin(), lower.end(), lower.begin(),
+  std::transform(platform_name.begin(), platform_name.end(), platform_name.begin(),
                  [](unsigned char c) { return std::tolower(c); });
 
-  if (lower.find("cuda") != std::string::npos)
+  if (platform_name.find("cuda") != std::string::npos)
     return "cuda";
-  if (lower.find("hip") != std::string::npos)
+  if (platform_name.find("hip") != std::string::npos)
     return "hip";
-  if (lower.find("level-zero") != std::string::npos ||
-      lower.find("level zero") != std::string::npos || lower.find("oneapi") != std::string::npos)
+  if (platform_name.find("level-zero") != std::string::npos ||
+      platform_name.find("level zero") != std::string::npos ||
+      platform_name.find("oneapi") != std::string::npos)
     return "level_zero";
-  if (lower.find("metal") != std::string::npos)
+  if (platform_name.find("metal") != std::string::npos)
     return "metal";
 
   return "unknown";
+}
+
+static std::string detect_backend_name(const sycl::device& dev) {
+  // SAFETY: platform name is always available on a valid SYCL device.
+  return backend_name_from_platform(dev.get_platform().get_info<sycl::info::platform::name>());
 }
 
 // ---------------------------------------------------------------------------
 // Device scoring — higher is better
 // ---------------------------------------------------------------------------
 
-static int score_device(const sycl::device& dev) {
-  if (!dev.is_gpu())
+static int score_backend(bool is_gpu, const std::string& backend) {
+  if (!is_gpu)
     return -1;
-
-  std::string backend = detect_backend_name(dev);
 
   // Discrete GPU backends, ranked by maturity.
   if (backend == "cuda")
@@ -159,11 +196,23 @@ static int score_device(const sycl::device& dev) {
     return 50;
 
   // Generic GPU we don't recognize.
-  if (dev.is_gpu())
-    return 40;
-
-  return -1;
+  return 40;
 }
+
+static int score_device(const sycl::device& dev) {
+  return score_backend(dev.is_gpu(), detect_backend_name(dev));
+}
+
+#if defined(PGACCEL_TEST_HOOKS)
+extern "C" bool pgacceltest_backend_name_matches(const char* platform, const char* expected) {
+  return platform != nullptr && expected != nullptr &&
+         backend_name_from_platform(platform) == expected;
+}
+
+extern "C" int pgacceltest_score_backend(bool is_gpu, const char* backend) {
+  return score_backend(is_gpu, backend == nullptr ? "" : backend);
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Populate caps from SYCL device
@@ -275,12 +324,16 @@ extern "C" pgaccel_status pgaccel_init(void) {
     sigaction(k_fault_signals[i], &sa, &old_handlers[i]);
   }
 
-  bool init_ok = false;
+  // Preserve the distinction between an expected no-GPU host and a real
+  // runtime/queue-construction failure. Callers use NO_DEVICE to decline GPU
+  // work without hiding genuine initialization errors.
+  pgaccel_status init_status = PGACCEL_ERROR;
   try {
     auto devices = sycl::device::get_devices();
 
     if (devices.empty()) {
-      fprintf(stderr, "pgaccel: FATAL: no SYCL devices found\n");
+      fprintf(stderr, "pgaccel: no SYCL devices found; GPU acceleration unavailable\n");
+      init_status = PGACCEL_ERROR_NO_DEVICE;
     } else {
       sycl::device best = devices[0];
       int best_score = score_device(best);
@@ -293,7 +346,8 @@ extern "C" pgaccel_status pgaccel_init(void) {
       }
 
       if (best_score < 0 || !best.is_gpu()) {
-        fprintf(stderr, "pgaccel: FATAL: no SYCL GPU device found\n");
+        fprintf(stderr, "pgaccel: no SYCL GPU device found; GPU acceleration unavailable\n");
+        init_status = PGACCEL_ERROR_NO_DEVICE;
       } else {
         std::string backend = detect_backend_name(best);
         pgaccel_platform_caps caps = make_caps(best, backend);
@@ -356,7 +410,7 @@ extern "C" pgaccel_status pgaccel_init(void) {
         // Silent success: backend init fires per-forked-backend, so
         // logging here produces O(queries) log lines. See Justfile
         // `log-rails` recipe for how PG's own log is rotated.
-        init_ok = true;
+        init_status = PGACCEL_OK;
       }
     }
   } catch (const sycl::exception& e) {
@@ -377,9 +431,8 @@ extern "C" pgaccel_status pgaccel_init(void) {
   }
   sigprocmask(SIG_SETMASK, &old_mask, nullptr);
 
-  if (!init_ok) {
-    return PGACCEL_ERROR;
-  }
+  if (init_status != PGACCEL_OK)
+    return init_status;
 
   g_init_pid = current_pid;
   g_initialized.store(true, std::memory_order_release);

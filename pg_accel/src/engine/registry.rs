@@ -472,7 +472,7 @@ pub fn resolve_oids_again() {
     }
 }
 
-#[cfg(feature = "pg_test")]
+#[cfg(any(test, feature = "pg_test"))]
 mod tests {
     use super::*;
 

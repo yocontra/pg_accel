@@ -27,8 +27,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <stdexcept>
 
 #include "pgaccel_expr.h"
+#include "pgaccel_error.h"
 #include "pgaccel_ffi.h"
 #include "pgaccel_olap.h"
 
@@ -118,32 +120,73 @@ int main() {
     return 1;
   }
 
-  // ── Positive control: the VM entry points succeed on a small batch ──
+  // The PostgreSQL test monitor may omit unprefixed native stderr from the
+  // failing backend's report. Pin the allocation-free TLS handoff that lets
+  // Rust carry the caught exception into the structured PostgreSQL error.
+  {
+    char error_text[256] = {'x'};
+    pgaccel_clear_last_error();
+    ASSERT_TRUE("native error handoff starts empty",
+                pgaccel_copy_last_error(error_text, sizeof(error_text)) == 0 &&
+                    error_text[0] == '\0');
+
+    const std::runtime_error sentinel("native error handoff sentinel");
+    const pgaccel_status st = pgaccel_kernel_failure("test_native_error_handoff", &sentinel);
+    const size_t full_length = pgaccel_copy_last_error(error_text, sizeof(error_text));
+    ASSERT_TRUE("native error handoff preserves hard status", st == PGACCEL_ERROR);
+    ASSERT_TRUE("native error handoff preserves entry point",
+                std::strstr(error_text, "test_native_error_handoff") != nullptr);
+    ASSERT_TRUE("native error handoff preserves exception text",
+                std::strstr(error_text, "native error handoff sentinel") != nullptr);
+    ASSERT_TRUE("native error handoff reports exact full length",
+                full_length == std::strlen(error_text));
+
+    char tiny[8] = {};
+    ASSERT_TRUE("native error handoff truncates with a terminator",
+                pgaccel_copy_last_error(tiny, sizeof(tiny)) == full_length &&
+                    tiny[sizeof(tiny) - 1] == '\0');
+    ASSERT_TRUE("native error handoff supports length-only reads",
+                pgaccel_copy_last_error(nullptr, 0) == full_length);
+
+    ASSERT_TRUE("native error handoff accepts missing exception context",
+                pgaccel_kernel_failure(nullptr, nullptr) == PGACCEL_ERROR);
+    pgaccel_copy_last_error(error_text, sizeof(error_text));
+    ASSERT_TRUE("native error handoff labels a missing entry point",
+                std::strstr(error_text, "<unknown>") != nullptr);
+    ASSERT_TRUE("native error handoff labels a missing exception",
+                std::strstr(error_text, "unknown C++ exception") != nullptr);
+
+    pgaccel_clear_last_error();
+    ASSERT_TRUE("native error handoff clear removes stale detail",
+                pgaccel_copy_last_error(error_text, sizeof(error_text)) == 0 &&
+                    error_text[0] == '\0');
+  }
+
+  // ── Positive control: small-tier GPU entry points succeed ──
+  //
+  // This gate isolates failure containment, so its liveness controls use the
+  // compact expression tier and a reduce kernel.  The expression matrix owns
+  // common/extended opcode coverage; coupling this test to its >900 KiB Metal
+  // pipeline made the virtual-M1 compatibility runner test JIT capacity rather
+  // than failure honesty.
   {
     HugeBatch small(4);
     int8_t results[4] = {99, 99, 99, 99};
-    pgaccel_val constant = {};
-    constant.tag = PGACCEL_VAL_INT32;
-    constant.data.i32 = 2;
-    pgaccel_expr_instruction predicate_insts[3] = {};
+    pgaccel_expr_instruction predicate_insts[2] = {};
     predicate_insts[0].opcode = PGACCEL_EXPR_OP_LOAD_COL;
     predicate_insts[0].arg = 0;
-    predicate_insts[1].opcode = PGACCEL_EXPR_OP_LOAD_CONST;
-    predicate_insts[1].arg = 0;
-    predicate_insts[2].opcode = PGACCEL_EXPR_OP_GT;
+    predicate_insts[1].opcode = PGACCEL_EXPR_OP_IS_NOT_NULL;
     pgaccel_expr_program predicate = {};
     predicate.instructions = predicate_insts;
-    predicate.inst_count = 3;
-    predicate.const_pool = &constant;
-    predicate.const_count = 1;
-    predicate.max_stack = 2;
+    predicate.inst_count = 2;
+    predicate.max_stack = 1;
     predicate.num_cols = 1;
 
     std::memset(results, 99, sizeof(results));
     pgaccel_status st = pgaccel_expr_eval_predicate(&predicate, &small.batch, results);
     ASSERT_TRUE("positive control: bytecode predicate returns OK", st == PGACCEL_OK);
     ASSERT_TRUE("positive control: bytecode predicate copyback correct",
-                results[0] == PGACCEL_EXPR_FALSE && results[1] == PGACCEL_EXPR_FALSE &&
+                results[0] == PGACCEL_EXPR_TRUE && results[1] == PGACCEL_EXPR_TRUE &&
                     results[2] == PGACCEL_EXPR_TRUE && results[3] == PGACCEL_EXPR_TRUE);
 
     pgaccel_expr_instruction project_inst = {};
@@ -167,26 +210,11 @@ int main() {
     ASSERT_TRUE("positive control: bytecode projection uncertainty clear",
                 uncertain[0] == 0 && uncertain[1] == 0 && uncertain[2] == 0 && uncertain[3] == 0);
 
-    double round_values[4] = {-1.5, -0.0, 1.5, 2.4};
-    void* round_columns[1] = {round_values};
-    uint8_t* round_nulls[1] = {nullptr};
-    pgaccel_val_tag round_types[1] = {PGACCEL_VAL_FLOAT64};
-    pgaccel_batch round_batch = {4, 1, round_columns, round_nulls, round_types};
-    pgaccel_expr_instruction round_insts[2] = {};
-    round_insts[0].opcode = PGACCEL_EXPR_OP_LOAD_COL;
-    round_insts[0].arg = 0;
-    round_insts[1].opcode = PGACCEL_EXPR_OP_ROUND_F64;
-    pgaccel_expr_program round_program = {};
-    round_program.instructions = round_insts;
-    round_program.inst_count = 2;
-    round_program.max_stack = 1;
-    round_program.num_cols = 1;
-    st = pgaccel_expr_eval_project(&round_program, &round_batch, projected, uncertain);
-    ASSERT_TRUE("positive control: bytecode round returns OK", st == PGACCEL_OK);
-    ASSERT_TRUE("positive control: bytecode round is half-away-from-zero",
-                projected[0].data.f64 == -2.0 && projected[1].data.f64 == 0.0 &&
-                    std::signbit(projected[1].data.f64) && projected[2].data.f64 == 2.0 &&
-                    projected[3].data.f64 == 2.0);
+    const double reduce_values[4] = {1.0, 2.0, 3.0, 4.0};
+    double reduced = 0.0;
+    st = pgaccel_reduce_sum_f64(reduce_values, 4, &reduced);
+    ASSERT_TRUE("positive control: fp64 reduce returns OK", st == PGACCEL_OK);
+    ASSERT_TRUE("positive control: fp64 reduce copyback correct", reduced == 10.0);
   }
 
   // 2^59 rows: staging needs num_rows * 8B (f64 stage) + num_rows * 1B
@@ -293,9 +321,10 @@ int main() {
                 p == nullptr || st == PGACCEL_OK);
   }
 
-  // H3 bulk entry points allocate every count-sized staging span before
-  // reading the host arrays. The impossible count therefore tests each
-  // allocator's cleanup and C-boundary containment without an input overread.
+  // Non-streaming H3 count entry points allocate every count-sized staging
+  // span before reading the host arrays.  The streaming lat/lng-to-cell entry
+  // validates an impossible caller-visible output span before its first chunk.
+  // Both shapes therefore test C-boundary containment without an input overread.
   {
     const uint64_t cell = UINT64_C(0x8029fffffffffff);
     int32_t i32_output = 0;
@@ -319,17 +348,18 @@ int main() {
     assert_honest_failure("h3_grid_distance with 2^59 rows",
                           pgaccel_h3_grid_distance_bulk(&cell, &cell, kHugeRows, &i32_output));
 
+    const size_t huge_stream_rows = kHugeRows * 4;
     const size_t huge_slab_rows = kHugeRows / 4;
     const double coordinate_f64 = 0.0;
     const float coordinate_f32 = 0.0f;
     pgaccel_agg_state* state = nullptr;
-    assert_honest_failure("h3 fp64 lat/lng with 2^57 rows",
+    assert_honest_failure("h3 fp64 lat/lng with overflowing 2^61-row output span",
                           pgaccel_h3_lat_lng_to_cell_bulk(&coordinate_f64, &coordinate_f64,
-                                                          huge_slab_rows, 0, true, &cell_output,
+                                                          huge_stream_rows, 0, true, &cell_output,
                                                           &byte_output));
-    assert_honest_failure("h3 fp32 lat/lng with 2^57 rows",
+    assert_honest_failure("h3 fp32 lat/lng with overflowing 2^61-row output span",
                           pgaccel_h3_lat_lng_to_cell_bulk(&coordinate_f32, &coordinate_f32,
-                                                          huge_slab_rows, 0, false, &cell_output,
+                                                          huge_stream_rows, 0, false, &cell_output,
                                                           &byte_output));
     assert_honest_failure(
         "h3 lat/lng count with 2^57 rows",
@@ -449,27 +479,20 @@ int main() {
   {
     HugeBatch small(4);
     int8_t results[4] = {99, 99, 99, 99};
-    pgaccel_val constant = {};
-    constant.tag = PGACCEL_VAL_INT32;
-    constant.data.i32 = 2;
-    pgaccel_expr_instruction insts[3] = {};
+    pgaccel_expr_instruction insts[2] = {};
     insts[0].opcode = PGACCEL_EXPR_OP_LOAD_COL;
     insts[0].arg = 0;
-    insts[1].opcode = PGACCEL_EXPR_OP_LOAD_CONST;
-    insts[1].arg = 0;
-    insts[2].opcode = PGACCEL_EXPR_OP_LE;
+    insts[1].opcode = PGACCEL_EXPR_OP_IS_NOT_NULL;
     pgaccel_expr_program program = {};
     program.instructions = insts;
-    program.inst_count = 3;
-    program.const_pool = &constant;
-    program.const_count = 1;
-    program.max_stack = 2;
+    program.inst_count = 2;
+    program.max_stack = 1;
     program.num_cols = 1;
     pgaccel_status st = pgaccel_expr_eval_predicate(&program, &small.batch, results);
     ASSERT_TRUE("post-failure control: bytecode predicate still returns OK", st == PGACCEL_OK);
     ASSERT_TRUE("post-failure control: results correct",
                 results[0] == PGACCEL_EXPR_TRUE && results[1] == PGACCEL_EXPR_TRUE &&
-                    results[2] == PGACCEL_EXPR_FALSE && results[3] == PGACCEL_EXPR_FALSE);
+                    results[2] == PGACCEL_EXPR_TRUE && results[3] == PGACCEL_EXPR_TRUE);
   }
 
   ASSERT_TRUE("pgaccel_shutdown succeeds", pgaccel_shutdown() == PGACCEL_OK);

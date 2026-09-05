@@ -648,6 +648,8 @@ mod admission_tests {
             has_gpu: true,
             estimated_gpu_gflops: 1.0,
             compute_units: 1,
+            device_name: "test-gpu".to_owned(),
+            backend_name: "metal".to_owned(),
             gpu_max_alloc_bytes: 1,
             has_native_fp64: true,
         };
@@ -894,6 +896,8 @@ mod admission_tests {
             has_gpu: false,
             estimated_gpu_gflops: 0.0,
             compute_units: 0,
+            device_name: String::new(),
+            backend_name: String::new(),
             gpu_max_alloc_bytes: 0,
             has_native_fp64: false,
         };
@@ -1153,5 +1157,34 @@ mod fp64_penalty_tests {
         assert!(gpu_native > 0.0);
         assert!(gpu_soft > gpu_native);
         assert!(pg > 0.0);
+    }
+}
+
+#[cfg(test)]
+mod fp64_wrapper_contract_tests {
+    use super::*;
+
+    #[test]
+    fn active_device_fp64_wrappers_match_the_typed_cost_pipeline_exactly() {
+        let rows = 12_345.0;
+        let extract_columns = 3;
+        let gpu_op_cost = 0.0025;
+
+        for uses_fp64 in [false, true] {
+            let input =
+                SelfScanCostInput::fp64_aware(rows, extract_columns, gpu_op_cost, uses_fp64);
+            assert_eq!(input.rows, rows);
+            assert_eq!(input.extract_columns, extract_columns);
+            assert_eq!(
+                input.gpu_op_cost,
+                apply_fp64_penalty(gpu_op_cost, uses_fp64, device_limits())
+            );
+
+            let expected = estimate_self_scan_cost(input).total().get();
+            assert_eq!(
+                self_scan_cost_fp64_aware(rows, extract_columns, gpu_op_cost, uses_fp64,),
+                expected
+            );
+        }
     }
 }

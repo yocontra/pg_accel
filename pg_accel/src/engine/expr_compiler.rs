@@ -631,3 +631,68 @@ mod tests {
         assert_eq!(prog.instructions[end_pc as usize].opcode, opcode::CASE_END);
     }
 }
+
+#[cfg(test)]
+mod complete_opcode_contract_tests {
+    use super::*;
+
+    #[test]
+    fn null_and_unary_builder_operations_preserve_one_stack_value() {
+        let mut builder = ExprProgramBuilder::new(0);
+        builder.emit_load_null();
+        builder.emit_unaryop(opcode::ABS_F64);
+
+        let program = builder.build().expect("one null unary expression");
+        assert_eq!(program.max_stack, 1);
+        assert_eq!(program.instructions.len(), 2);
+        assert_eq!(program.instructions[0].opcode, opcode::LOAD_NULL);
+        assert_eq!(program.instructions[0].arg, 0);
+        assert_eq!(program.instructions[1].opcode, opcode::ABS_F64);
+        assert_eq!(program.instructions[1].arg, 0);
+    }
+
+    #[test]
+    fn arithmetic_opcode_table_is_complete_for_every_supported_scalar_type() {
+        let cases = [
+            ("+", PgaccelValTag::Int32, Some(opcode::ADD_I32)),
+            ("+", PgaccelValTag::Int64, Some(opcode::ADD_I64)),
+            ("+", PgaccelValTag::Float32, Some(opcode::ADD_F32)),
+            ("+", PgaccelValTag::Float64, Some(opcode::ADD_F64)),
+            ("-", PgaccelValTag::Int32, Some(opcode::SUB_I32)),
+            ("-", PgaccelValTag::Int64, Some(opcode::SUB_I64)),
+            ("-", PgaccelValTag::Float32, Some(opcode::SUB_F32)),
+            ("-", PgaccelValTag::Float64, Some(opcode::SUB_F64)),
+            ("*", PgaccelValTag::Int32, Some(opcode::MUL_I32)),
+            ("*", PgaccelValTag::Int64, Some(opcode::MUL_I64)),
+            ("*", PgaccelValTag::Float32, Some(opcode::MUL_F32)),
+            ("*", PgaccelValTag::Float64, Some(opcode::MUL_F64)),
+            ("/", PgaccelValTag::Int32, Some(opcode::DIV_I32)),
+            ("/", PgaccelValTag::Int64, Some(opcode::DIV_I64)),
+            ("/", PgaccelValTag::Float32, Some(opcode::DIV_F32)),
+            ("/", PgaccelValTag::Float64, Some(opcode::DIV_F64)),
+            ("%", PgaccelValTag::Int32, Some(opcode::MOD_I32)),
+            ("%", PgaccelValTag::Int64, Some(opcode::MOD_I64)),
+            ("%", PgaccelValTag::Float32, None),
+            ("^", PgaccelValTag::Int32, None),
+        ];
+
+        for (operator, tag, expected) in cases {
+            assert_eq!(arithmetic_opcode(operator, tag), expected);
+        }
+    }
+
+    #[test]
+    fn absolute_value_aliases_and_unknown_math_function_are_explicit() {
+        for alias in [
+            "dabs",
+            "abs",
+            "float8abs",
+            "float4abs",
+            "int4abs",
+            "int8abs",
+        ] {
+            assert_eq!(math_func_opcode(alias), Some((opcode::ABS_F64, false)));
+        }
+        assert_eq!(math_func_opcode("not_a_math_function"), None);
+    }
+}

@@ -3,8 +3,8 @@
 use crate::engine::cost::{GPU_LAUNCH_OVERHEAD, PgCost, Rows, TypedCostModel, WorkProduct};
 use crate::engine::spec::{
     AggQuerySpec, AggregateKind, AggregateOutput, AggregateSource, BinaryMeasureOp, ColumnRef,
-    FilterSpec, GroupKeySource, JoinMultiplicity, MaskKind, MeasureExpr, SpatialOperand,
-    SpatialPredicateKind, SpatialValueKind,
+    FilterSpec, GroupKeySource, JoinMultiplicity, MaskKind, MeasureExpr, ScalarValue,
+    SpatialOperand, SpatialPredicateKind, SpatialValueKind,
 };
 
 use super::{DescriptorGroupingMode, DescriptorResolution, ResidencyEstimate, ShapeInput};
@@ -70,6 +70,27 @@ const COUNT_OUTPUT: AggregateOutput = AggregateOutput {
     kind: AggregateKind::Count,
 };
 
+fn exact_bounded_int4_measure_filter(measure: &crate::engine::spec::MeasureSpec) -> bool {
+    let MeasureExpr::Column(value) = &measure.expression else {
+        return false;
+    };
+    let FilterSpec::Ranges { input, ranges } = &measure.filter else {
+        return false;
+    };
+    let [range] = ranges.as_slice() else {
+        return false;
+    };
+    let (ScalarValue::I32(lo), ScalarValue::I32(hi)) = (range.lo, range.hi) else {
+        return false;
+    };
+    input == value
+        && value.type_oid == 23
+        && lo != i32::MIN
+        && hi != i32::MAX
+        && lo < hi
+        && measure.outputs.as_slice() == [SUM_OUTPUT]
+}
+
 fn dense_descriptor_structure(spec: &AggQuerySpec, resolution: &DescriptorResolution) -> bool {
     let grouping_is_dense = match resolution {
         DescriptorResolution::Ready => spec.group_keys.is_empty(),
@@ -113,15 +134,34 @@ fn dense_atomic_sum_count_per_row_cost(
                 ..
             }
     ) || spec.measures.len() != 2
-        || spec
-            .measures
-            .iter()
-            .any(|measure| measure.filter != FilterSpec::None)
     {
         return None;
     }
     let value = &spec.measures[0];
     let count = &spec.measures[1];
+    let measure_filtered = exact_bounded_int4_measure_filter(value);
+    if (value.filter != FilterSpec::None && !measure_filtered) || count.filter != FilterSpec::None {
+        return None;
+    }
+    if measure_filtered {
+        let [key] = spec.group_keys.as_slice() else {
+            return None;
+        };
+        let GroupKeySource::FactColumn(group_column) = &key.source else {
+            return None;
+        };
+        let MeasureExpr::Column(value_column) = &value.expression else {
+            return None;
+        };
+        if !spec.star_dims.is_empty()
+            || spec.fact_filter != FilterSpec::None
+            || key.type_oid != 23
+            || group_column.type_oid != 23
+            || group_column == value_column
+        {
+            return None;
+        }
+    }
     if value.outputs.as_slice() != [SUM_OUTPUT]
         || count.expression != MeasureExpr::CountStar
         || count.outputs.as_slice() != [COUNT_OUTPUT]
@@ -131,14 +171,27 @@ fn dense_atomic_sum_count_per_row_cost(
     const INT4OID: u32 = 23;
     match &value.expression {
         MeasureExpr::Column(column) if column.type_oid == INT4OID => {
-            let state_updates = if fact_columns_have_no_null_sidecars {
+            let state_updates = if measure_filtered {
+                // COUNT(*) covers every WHERE-qualified row, while the
+                // filtered SUM needs independent SUM and non-NULL state.
+                3.0
+            } else if fact_columns_have_no_null_sidecars {
                 2.0
             } else {
                 // A nullable SUM lane maintains a third atomic nonnull state.
                 3.0
             };
+            let predicate = if measure_filtered {
+                model.coefficients.gpu_op_cost_filter.get() * 2.0
+            } else {
+                0.0
+            };
             Some(PgCost::new(
-                model.coefficients.gpu_op_cost_reduce.get() * state_updates,
+                model
+                    .coefficients
+                    .gpu_op_cost_reduce
+                    .get()
+                    .mul_add(state_updates, predicate),
             ))
         }
         MeasureExpr::Binary {
@@ -223,6 +276,10 @@ pub enum ShapeCostGate {
         estimated: Rows,
         required: Rows,
     },
+    DenseOneShotRowsExceedDeviceMaximum {
+        fact_rows: Rows,
+        maximum: Rows,
+    },
     H3RowsBelowDeviceMinimum {
         estimated: Rows,
         required: Rows,
@@ -265,10 +322,15 @@ fn mul_cost(count: u64, coefficient: PgCost) -> f64 {
     count as f64 * coefficient.get()
 }
 
-fn expression_uses_fp64(expression: &MeasureExpr) -> bool {
+fn measure_uses_fp64_arithmetic(measure: &crate::engine::spec::MeasureSpec) -> bool {
+    if measure.outputs.as_slice() == [COUNT_OUTPUT]
+        && matches!(measure.expression, MeasureExpr::Column(_))
+    {
+        return false;
+    }
     const FLOAT8OID: u32 = 701;
     let is_fp64 = |column: &ColumnRef| column.type_oid == FLOAT8OID;
-    match expression {
+    match &measure.expression {
         MeasureExpr::CountStar => false,
         MeasureExpr::Column(column) => is_fp64(column),
         MeasureExpr::Binary { lhs, rhs, .. } | MeasureExpr::StatsPair { value: lhs, rhs } => {
@@ -320,8 +382,11 @@ fn h3_transform_chunks(fact_rows: u64, max_chunk_rows: Rows) -> u64 {
 ///
 /// A descriptor at or below the independently proved one-shot boundary uses
 /// one RESET|ACCUMULATE|FINALIZE call. A larger descriptor uses one ACCUMULATE
-/// call per bounded row chunk followed by one FINALIZE call. `None` is a
-/// fail-closed signal for a zero chunk limit or arithmetic overflow.
+/// call per bounded row chunk followed by one FINALIZE call. Bounded chunks
+/// retain the compute-derived synchronous row cap; crossing the one-shot
+/// boundary must not enlarge one native call to the allocation-derived reduce
+/// limit. `None` is a fail-closed signal for a zero bound or arithmetic
+/// overflow.
 pub fn dense_lifecycle_call_count(
     fact_rows: u64,
     one_shot_max_rows: Rows,
@@ -330,7 +395,7 @@ pub fn dense_lifecycle_call_count(
     if fact_rows <= u64::try_from(one_shot_max_rows.get()).ok()? {
         return Some(1);
     }
-    let chunk_rows = u64::try_from(max_chunk_rows.get())
+    let chunk_rows = u64::try_from(max_chunk_rows.get().min(one_shot_max_rows.get()))
         .ok()
         .filter(|rows| *rows > 0)?;
     fact_rows
@@ -442,10 +507,7 @@ pub fn estimate_shape_cost(
         .fold(0_u64, u64::saturating_add);
 
     let fp64_multiplier = if !model.hardware.has_native_fp64
-        && spec
-            .measures
-            .iter()
-            .any(|measure| expression_uses_fp64(&measure.expression))
+        && spec.measures.iter().any(measure_uses_fp64_arithmetic)
     {
         model.coefficients.soft_fp64_cost_multiplier
     } else {

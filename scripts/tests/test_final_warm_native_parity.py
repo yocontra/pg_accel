@@ -76,9 +76,10 @@ def native_row(*, accel: float = 10.0, parallel: float = 10.0) -> dict[str, obje
                         "accel",
                         "disabled_postgresql",
                     ]
-                ),
-                "accel_ms": [accel, accel],
-                "parallel_ms": [parallel, parallel],
+                )
+                * (ANALYZER.EXPECTED_REPETITIONS_PER_ARM // 2),
+                "accel_ms": [accel] * ANALYZER.EXPECTED_REPETITIONS_PER_ARM,
+                "parallel_ms": [parallel] * ANALYZER.EXPECTED_REPETITIONS_PER_ARM,
                 "accel_average_ms": accel,
                 "parallel_average_ms": parallel,
             }
@@ -443,7 +444,7 @@ class AuditBindingTests(unittest.TestCase):
                             "iterations": ANALYZER.EXPECTED_ITERATIONS,
                             "warmup": ANALYZER.EXPECTED_WARMUPS,
                             "native_parity_pairing": True,
-                            "native_parity_repetitions_per_arm": 2,
+                            "native_parity_repetitions_per_arm": ANALYZER.EXPECTED_REPETITIONS_PER_ARM,
                         },
                         "workloads": [row],
                     }

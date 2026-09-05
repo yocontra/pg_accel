@@ -69,11 +69,12 @@ static constexpr size_t REDUCE_N = 100'000;
 static constexpr size_t H3_N = 100'000;
 static constexpr size_t PIP_N = 100'000;
 
-// The stress loop deterministically materializes five Metal code objects:
+// The stress loop deterministically materializes six Metal code objects:
 // two-pass reduce emits an ndrange partial reduction plus a single_task
 // finalizer, fp64 H3 emits projection plus integer H3 assembly, and PIP emits
-// one code object.
-static constexpr size_t EXPECTED_EMPTY_CACHE_IDS = 5;
+// one code object. The streamed public H3 bridge adds one final device
+// normalization pass before its exact ABI copybacks.
+static constexpr size_t EXPECTED_EMPTY_CACHE_IDS = 6;
 
 // ──────────────────────────────────────────────────────────────────────
 // Archive-failure marker patterns. These are emitted by AdaptiveCpp's

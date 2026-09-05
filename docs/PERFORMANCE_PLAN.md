@@ -1,18 +1,18 @@
 # Performance Plan
 
-This document is the performance work program for Resident v2 at commit
-`3a0bcd737f23a28acad55874b17fde9a31bb4f59`, tree
-`2d48d0568629009d2a7aafe0127322d53caca684`. Measurements are local engineering
+This document is the performance work program for Resident v2, updated through
+exact candidate `bfa756f8a21071ef45c54684ab0fadc594520724`, tree
+`e6c5e9afce5a13b222e5c8278d8392b26cc43994`. Measurements are local engineering
 evidence, not publication claims.
 
 ## Current evidence and verdict
 
-The architecture and correctness rebuild is complete enough to optimize from a
-stable base. Production admission is fail-closed, every registered selected
-cell beats PostgreSQL, and the focused repeat removed the apparent relative
-winner regressions. The performance program is not complete because the
-measured rebuild/lifecycle sample is large even under warm-only policy and
-extension-enabled native declines do not meet parity.
+Production admission is fail-closed, every previously registered selected cell
+beats PostgreSQL, lifecycle construction is now reported separately from warm
+artifact hits, and the exact current 17-cell native-decline gate passes. The
+performance program is not complete: the current candidate still needs the
+selected-path acceptance rerun and final release-candidate evidence described in
+`TODO.md`.
 
 ### Sealed artifacts
 
@@ -20,6 +20,7 @@ extension-enabled native declines do not meet parity.
 |---|---|---|---|
 | Complete registered warm matrix | `.codex/scratch/final-warm-benchmark-3a0bcd73-PREPARED-20260811T072357Z` | `5c9f50243bbe0141fa23e8bd0dd5a84a577f95a1646bcc927553fb77c1ced70c` | Acceptance validator passed; regression/native-parity analyzer failed. |
 | Focused 30-pair diagnostics | `.codex/scratch/supplemental-warm-diagnostics-3a0bcd73-PREPARED-20260811T074540Z` | `4a838b7c3dae5f393ef648c2b47d0f47ae88e8b60779dc1b039ea26565b92d58` | Acceptance validator passed; all winner repeats passed; native parity passed 0/10 (failed 10/10). |
+| Exact current 17-cell native parity | `.codex/scratch/native-parity-p0-bfa756f-pg18-20260819-b` | `14382bbec844aff957cb153092ee83b64f8106635696c7789a20068ef8c99c92` | 17/17 descriptive bounds, 17/17 exact non-inferiority tests, and 17/17 parity verdicts passed. |
 
 The complete matrix used PostgreSQL 18.4, release binary
 `65a1303ed43282de520fe189dfbe552813b270ff24fc3db7778965efcca2b6be`
@@ -137,13 +138,35 @@ This evidence sets the priorities below. It does not justify changing planner
 thresholds, lowering the speedup floor, excluding the first sample, or calling
 native overhead noise.
 
+### Exact current native-parity requalification
+
+Candidate `bfa756f` closes the predecessor native-overhead failure without
+changing the frozen thresholds. The profiling-off PG18 artifact contains all 17
+registered decline cells, five warmups and 30 exactly balanced measured pairs
+per cell, four raw executions per arm inside every pair, and comparable
+PostgreSQL-native plan signatures with zero device dispatch. All 17 cells pass
+the median allowance `max(0.25 ms, 2%)`, the 5% p95 allowance, and the exact
+one-sided paired sign-flip non-inferiority test at `alpha=0.05`.
+
+Across the complete artifact, the largest positive median percentage delta was
+1.629%, the largest positive p95 percentage delta was 4.213%, and the largest
+non-inferiority p-value was 0.000147. The expected and installed module SHA-256
+values both equal
+`2c415921f038d772d9d636f861ca62cbb3e2af6cc2087ed983a581f383547693`.
+`native_parity.json` hashes to
+`a395450a097949e23aeb477a0a9d871c0b2d09802a39815c04870494f6d9e9ac`,
+and the terminal manifest verifies without error. The separate `-a` directory
+stopped after six cells under the foreign-CPU guard; it remains partial evidence
+and is not combined with, resumed into, or relabeled as this complete result.
+
 ### Historical context
 
 The sealed `9c53d417` 29-cell artifact remains a useful predecessor for
 cross-commit comparisons. It is not the current matrix, current completion
-claim, or current release gate. The authoritative current envelope is the
-37-cell `3a0bcd7` artifact above; the focused `3a0bcd7` artifact is diagnostic
-evidence, not a replacement for that complete matrix.
+claim, or current release gate. The 37-cell `3a0bcd7` artifact remains the most
+recent complete selected-lane envelope, while the `bfa756f` artifact is the
+authoritative current native-decline gate. Neither artifact inherits evidence
+from the other candidate.
 
 ## Performance invariant
 
@@ -262,8 +285,9 @@ batch, row, and dispatch evidence; native declines remain exactly zero.
 
 ### P4: Make native declines effectively free
 
-The 30-pair diagnostic proves repeatable extension-enabled native overhead.
-Optimize the planner path without weakening recognition or reason fidelity.
+Status: complete for candidate `bfa756f`. The work list below records the path
+used to turn the predecessor's repeatable extension-enabled native overhead into
+the sealed 17/17 parity pass without weakening recognition or reason fidelity.
 
 1. Capture `pg_accel_planner_stage_stats()` deltas for every failing native cell
    and passing controls. Split hook entry, immutable structural recognition,
@@ -288,7 +312,8 @@ unchanged decline reasons.
 
 ### P5: Requalify without gaming the result
 
-Requalification proceeds in this order:
+Native-decline requalification is complete through the exact 17-cell artifact.
+Selected-path and final 37-cell requalification still proceed in this order:
 
 1. Run stage microbenchmarks and exact before/after ABBA blocks on the same host,
    binary, module, database population, and balanced arm schedule.
@@ -337,8 +362,8 @@ available; Metal evidence cannot be relabeled as CUDA evidence.
 - Keep raw samples and arm order. Summaries are derived evidence, not a
   replacement for the raw record.
 
-The next performance milestone is not a larger selected surface. It is a
-sealed artifact that preserves all 20 current winners, explains and reduces
-measured rebuild/lifecycle cost, publishes honest batch/row accounting, and
-makes all 17 native declines statistically and descriptively indistinguishable
-from PostgreSQL.
+The next performance milestone is not a larger selected surface. It is the
+current-candidate selected-path acceptance artifact: preserve all registered
+winners at the 1.15x floor, keep lifecycle construction separate from warm hits,
+publish honest batch/row accounting, and retain the completed 17/17 native
+parity result.

@@ -30,7 +30,7 @@ from typing import Any
 
 EXPECTED_ITERATIONS = 30
 EXPECTED_WARMUPS = 5
-EXPECTED_REPETITIONS_PER_ARM = 2
+EXPECTED_REPETITIONS_PER_ARM = 4
 SELECTED_SPEEDUP_FLOOR = 1.15
 MEDIAN_ABSOLUTE_ALLOWANCE_MS = 0.25
 MEDIAN_RELATIVE_ALLOWANCE = 0.02
@@ -221,14 +221,15 @@ def extract_native_arms(
         accel_first = iteration["accel_first"]
         if capture.get("accel_first") is not accel_first:
             raise AnalysisError(f"{label}: raw crossover block {index} order disagrees")
-        expected_sequence = (
+        motif = (
             ["accel", "disabled_postgresql", "disabled_postgresql", "accel"]
             if accel_first
             else ["disabled_postgresql", "accel", "accel", "disabled_postgresql"]
         )
+        expected_sequence = motif * (EXPECTED_REPETITIONS_PER_ARM // 2)
         if capture.get("sequence") != expected_sequence:
             raise AnalysisError(
-                f"{label}: raw crossover block {index} is not mirrored ABBA/BAAB"
+                f"{label}: raw crossover block {index} is not replicated mirrored ABBA/BAAB"
             )
         raw_accel = capture.get("accel_ms")
         raw_disabled = capture.get("parallel_ms")
@@ -239,7 +240,8 @@ def extract_native_arms(
             or len(raw_disabled) != EXPECTED_REPETITIONS_PER_ARM
         ):
             raise AnalysisError(
-                f"{label}: raw crossover block {index} does not retain two executions per arm"
+                f"{label}: raw crossover block {index} does not retain "
+                f"{EXPECTED_REPETITIONS_PER_ARM} executions per arm"
             )
         raw_accel = [
             _positive_number(value, f"{label}: raw accel[{index}]")
@@ -810,7 +812,8 @@ def _load_report_row(path: Path, label: str) -> dict[str, Any]:
         != EXPECTED_REPETITIONS_PER_ARM
     ):
         raise AnalysisError(
-            f"{label}: methodology does not declare two raw executions per arm/pair"
+            f"{label}: methodology does not declare "
+            f"{EXPECTED_REPETITIONS_PER_ARM} raw executions per arm/pair"
         )
     if methodology.get("iterations") != EXPECTED_ITERATIONS:
         raise AnalysisError(

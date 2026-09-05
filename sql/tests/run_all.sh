@@ -13,13 +13,13 @@ set -euo pipefail
 
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$TESTS_DIR/../.." && pwd)"
+# shellcheck source=/dev/null
+source "$REPO_ROOT/scripts/pg_versions.sh"
 
 # Parse connection params
 if [ $# -ge 1 ]; then
     CONNSTR="$1"
 else
-    # shellcheck source=/dev/null
-    source "$REPO_ROOT/scripts/pg_versions.sh"
     PG_MAJOR="${PG_ACCEL_PG_MAJOR:-$(pg_accel_default_pg_major)}"
     DB_HOST="${DB_HOST:-localhost}"
     DB_PORT="${DB_PORT:-$(pg_accel_pgrx_port_for_pg "$PG_MAJOR")}"
@@ -32,6 +32,48 @@ else
         CONNSTR="$CONNSTR password=$DB_PASSWORD"
     fi
 fi
+
+resolve_command() {
+    local requested="$1"
+    if [ -x "$requested" ]; then
+        printf '%s\n' "$requested"
+        return 0
+    fi
+    command -v "$requested" 2>/dev/null || return 1
+}
+
+resolve_psql_bin() {
+    local candidate="" pg_config="" pg_major=""
+    if [ -n "${PG_ACCEL_PSQL:-}" ]; then
+        candidate="$(resolve_command "$PG_ACCEL_PSQL" || true)"
+        if [ -z "$candidate" ]; then
+            echo "ERROR: PG_ACCEL_PSQL is not executable: $PG_ACCEL_PSQL" >&2
+            return 127
+        fi
+    elif [ -n "${PG_CONFIG:-}" ]; then
+        pg_config="$(resolve_command "$PG_CONFIG" || true)"
+        if [ -z "$pg_config" ]; then
+            echo "ERROR: PG_CONFIG is not executable: $PG_CONFIG" >&2
+            return 127
+        fi
+        candidate="$("$pg_config" --bindir 2>/dev/null)/psql" || return 127
+    elif [ -n "${PG_ACCEL_PG_MAJOR:-}" ]; then
+        pg_major="${PG_ACCEL_PG_MAJOR#pg}"
+        pg_accel_require_pgrx_support "$pg_major" || return 127
+        pg_accel_require_pgrx_pg_config "$pg_major" || return 127
+        pg_config="$(pg_accel_pg_config_for_pg "$pg_major")" || return 127
+        candidate="$("$pg_config" --bindir 2>/dev/null)/psql" || return 127
+    else
+        candidate="$(command -v psql 2>/dev/null || true)"
+    fi
+    if [ -z "$candidate" ] || [ ! -x "$candidate" ]; then
+        echo "ERROR: PostgreSQL client is unavailable: ${candidate:-psql}" >&2
+        return 127
+    fi
+    printf '%s\n' "$candidate"
+}
+
+PSQL_BIN="$(resolve_psql_bin)" || exit $?
 
 FAILURES=0
 PASSES=0
@@ -104,7 +146,7 @@ capture_expected_session_profile() {
 
     local output status expected
     set +e
-    output="$(psql "$CONNSTR" -X -v ON_ERROR_STOP=1 -At -F $'\t' \
+    output="$("$PSQL_BIN" "$CONNSTR" -X -v ON_ERROR_STOP=1 -At -F $'\t' \
         -c "SELECT name, setting, COALESCE(unit, ''), source FROM pg_settings WHERE name = 'pg_accel.kernel_timeout_ms'" \
         2>&1)"
     status=$?
@@ -129,7 +171,7 @@ echo ""
 # Check if pg_accel extension is installed. Local developer runs may skip when
 # the extension is not installed; CI and release gates must fail loudly.
 set +e
-extension_check_output="$(psql "$CONNSTR" -v ON_ERROR_STOP=1 -tAc "SELECT 1 FROM pg_extension WHERE extname = 'pg_accel'" 2>&1)"
+extension_check_output="$("$PSQL_BIN" "$CONNSTR" -v ON_ERROR_STOP=1 -tAc "SELECT 1 FROM pg_extension WHERE extname = 'pg_accel'" 2>&1)"
 extension_check_status=$?
 set -e
 if [ "$extension_check_status" -ne 0 ]; then
@@ -166,7 +208,7 @@ for test_file in "$TESTS_DIR"/[0-9]*.sql; do
     # retain the complete psql output and exit status for the SQL coverage
     # inventory instead of reducing evidence to a terminal-only pass count.
     set +e
-    output=$(psql "$CONNSTR" \
+    output=$("$PSQL_BIN" "$CONNSTR" \
         -v ON_ERROR_STOP=1 \
         -f "$test_file" 2>&1)
     psql_status=$?

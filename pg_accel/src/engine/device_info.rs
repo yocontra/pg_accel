@@ -64,7 +64,7 @@ fn pg_accel_device_info() -> TableIterator<
     ))
 }
 
-#[cfg(feature = "pg_test")]
+#[cfg(any(test, feature = "pg_test"))]
 mod tests {
     use super::*;
 

@@ -1304,7 +1304,6 @@ extern "C" pgaccel_status pgaccel_reduce_multi_masked_f32(const float* data,
       if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
       return st;
-      return st;
     }
   } catch (const pgaccel_no_device_error&) {
     return PGACCEL_ERROR_NO_DEVICE;
@@ -1353,7 +1352,6 @@ extern "C" pgaccel_status pgaccel_reduce_multi_masked_f64(const double* data,
       if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
       return st;
-      return st;
     }
   } catch (const pgaccel_no_device_error&) {
     return PGACCEL_ERROR_NO_DEVICE;
@@ -1395,7 +1393,6 @@ pgaccel_reduce_multi_masked_i64(const int64_t* data, const uint8_t* value_nulls,
           *q, data, value_nulls, selection, count, out_sum, out_min, out_max, out_count);
       if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
-      return st;
       return st;
     }
   } catch (const pgaccel_no_device_error&) {

@@ -864,6 +864,13 @@ unsafe extern "C" {
     /// Reset the GPU execution counter to zero.
     pub fn pgaccel_reset_gpu_exec_count();
 
+    /// Clear the current thread's fixed-capacity native kernel-error buffer.
+    pub(super) fn pgaccel_clear_last_error();
+
+    /// Copy the current thread's native kernel-error buffer, returning its
+    /// full length before any caller-buffer truncation.
+    pub(super) fn pgaccel_copy_last_error(buffer: *mut std::ffi::c_char, capacity: usize) -> usize;
+
     /// Free a pointer returned by `pgaccel_expr_device_alloc_copy`.
     pub fn pgaccel_expr_device_free(ptr: *mut std::ffi::c_void);
 

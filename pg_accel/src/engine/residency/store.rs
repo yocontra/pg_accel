@@ -4406,9 +4406,44 @@ pub(super) mod tests {
         ExprDeviceBuffer::copy_from_slice(values).expect("test device buffer")
     }
 
+    /// Probe the same resident-memory allocation path these tests exercise.
+    /// A no-device result is an expected prerequisite miss on generic Linux
+    /// CI; every other failure remains a test failure rather than a skip.
+    fn resident_device_test_available() -> bool {
+        let source = 0_u8;
+        let mut allocation = std::ptr::null_mut();
+        // SAFETY: `source` is live for one byte and `allocation` is a valid
+        // out-pointer. A successful allocation is freed before returning.
+        let status = unsafe {
+            crate::gpu::bridge::pgaccel_expr_device_alloc_copy(
+                std::ptr::from_ref(&source).cast(),
+                std::mem::size_of_val(&source),
+                &raw mut allocation,
+            )
+        };
+        match status {
+            crate::gpu::PgaccelStatus::Ok => {
+                assert!(
+                    !allocation.is_null(),
+                    "successful device probe returned NULL"
+                );
+                // SAFETY: the successful call above returned this live
+                // allocation, and this is its only free.
+                unsafe { crate::gpu::bridge::pgaccel_expr_device_free(allocation) };
+                true
+            }
+            crate::gpu::PgaccelStatus::ErrorNoDevice => false,
+            other => panic!("resident device prerequisite probe failed with {other:?}"),
+        }
+    }
+
     #[test]
     fn resident_column_variants_report_exact_views_lengths_and_accounting() {
         let _guard = reserved_lifecycle_test_guard();
+        if !resident_device_test_available() {
+            eprintln!("skipping resident-column device-buffer test: no GPU device");
+            return;
+        }
         let mut point = vec![0_u8, 0, 0, 0, 0, 0x10, 0xe6, 0];
         point.extend_from_slice(&1_u32.to_le_bytes());
         point.extend_from_slice(&1_u32.to_le_bytes());
@@ -7115,6 +7150,10 @@ pub(super) mod tests {
     #[test]
     fn staged_geometry_snapshot_uses_supplied_borrow_and_captured_dependency() {
         let _guard = reserved_lifecycle_test_guard();
+        if !resident_device_test_available() {
+            eprintln!("skipping staged-geometry device-buffer test: no GPU device");
+            return;
+        }
         let owner = pg_sys::Oid::from(1_162_u32);
         let column = ResidentColumnRef {
             relid: owner,

@@ -55,8 +55,8 @@
     }
   ],
   "execution_commands": [
-    "cargo test -p pg_accel --lib historical_crash",
-    "cargo pgrx test --package pg_accel pg{major}",
+    "PG_CONFIG=<exact-pg-config> PGRX_PG_CONFIG_PATH=<exact-pg-config> cargo test -p pg_accel --locked --lib --no-default-features --features pg{major} historical_crash",
+    "just test-unit {major}",
     "ctest --test-dir pgaccel-kernels/build --output-on-failure -R 'test_(grouped_agg_hash|oom_invariant)'",
     "just metal-stress {major}"
   ]

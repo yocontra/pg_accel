@@ -99,11 +99,13 @@ OUTPUT_ASSIGNMENTS = frozenset(
 )
 
 DEFAULT_ABI_MANIFEST = pathlib.Path(__file__).with_name("cpu_cheat_abi_manifest.txt")
-EXPECTED_ABI_MANIFEST_COUNT = 121
+EXPECTED_ABI_MANIFEST_COUNT = 123
 EXPECTED_ABI_MANIFEST_SHA256 = (
-    "2f0f26de09706713002e2b1c44e2f1db5159ae132b1bec860e69b64bd4f244b8"
+    "6a6871c0f01391606ca77714f03324da4de893766a99d1bf036091b41308b667"
 )
-INTERNAL_NON_ABI_HEADERS = frozenset({"alloc_helper.h", "pgaccel_queue.h"})
+INTERNAL_NON_ABI_HEADERS = frozenset(
+    {"alloc_helper.h", "pgaccel_error.h", "pgaccel_queue.h"}
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -317,6 +319,23 @@ LIFECYCLE_CONTRACTS: Mapping[str, LifecycleContract] = MappingProxyType(
                 ("counter", "=", "0", ";"),
                 ("tl_gpu_exec_count", "=", "0", ";"),
             ),
+        ),
+        "pgaccel_clear_last_error": LifecycleContract(
+            "native kernel-error buffer reset",
+            (("tl_last_error", "[", "0", "]", "=", "0", ";"),),
+            "void ()",
+            exact_body_alternatives=(
+                ("tl_last_error", "[", "0", "]", "=", "0", ";"),
+            ),
+        ),
+        "pgaccel_copy_last_error": LifecycleContract(
+            "native kernel-error metadata copy",
+            (("std", "::", "memcpy", "("),),
+            "size_t (char *, size_t)",
+            noop_guard_conditions=(
+                ("buffer", "==", "nullptr", "||", "capacity", "==", "0"),
+            ),
+            output_policy="metadata",
         ),
         "pgaccel_grouped_agg_transition_launch_count": LifecycleContract(
             "grouped-aggregate transition-launch counter accessor",
@@ -4669,7 +4688,13 @@ def _device_orchestration_do_loops(
             allowed_call_indices.add(method_index)
             allowed_call_indices.add(call[1] + 2)
 
-        if not launch_calls:
+        helper_launch_calls = {
+            indexed.index
+            for indexed in indexed_calls
+            if body_start < indexed.index < body_end
+            and indexed.index in proven_helper_calls
+        }
+        if not launch_calls and not helper_launch_calls:
             continue
 
         unsafe = False

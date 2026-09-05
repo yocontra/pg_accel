@@ -3008,7 +3008,7 @@ mod tests {
             let error = validate_descriptor_shell(desc).expect_err("descriptor must be rejected");
             assert_eq!(error.domain, GpuErrorDomain::Descriptor);
             assert_eq!(error.status, GpuStatusDetail::InvalidDescriptor);
-            assert_eq!(error.detail, Some(expected));
+            assert_eq!(error.detail.as_deref(), Some(expected));
         };
 
         let mut desc = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
@@ -3068,7 +3068,7 @@ mod tests {
         let allocation = allocation_error("test allocation");
         assert_eq!(allocation.domain, GpuErrorDomain::Memory);
         assert_eq!(allocation.status, GpuStatusDetail::OutOfMemory);
-        assert_eq!(allocation.detail, Some("test allocation"));
+        assert_eq!(allocation.detail.as_deref(), Some("test allocation"));
 
         let plan = plan(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
         assert_eq!(plan.row_count(), 0);

@@ -21,6 +21,12 @@ pub(crate) use artifact::estimate_descriptor_artifact_bytes_upper_bound;
 pub(crate) use descriptor::planned_descriptor_kernel_mode;
 pub use execute::AggExecState;
 
+pub(crate) fn is_weighted_global_count_descriptor(
+    spec: &crate::engine::spec::AggQuerySpec,
+) -> bool {
+    descriptor::weighted_global_count_inputs(spec)
+}
+
 #[cfg(feature = "pg_test")]
 pub(crate) use descriptor::{configure_dense_dispatch_test, dense_dispatch_test_completed_calls};
 

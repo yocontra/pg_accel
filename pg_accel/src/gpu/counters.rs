@@ -164,3 +164,76 @@ pub fn record_unknown_status() {
 pub fn unknown_status_count() -> u64 {
     UNKNOWN_STATUS.load(Ordering::Relaxed)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DOMAINS: [GpuFailureDomain; GPU_FAILURE_DOMAIN_COUNT] = [
+        GpuFailureDomain::Runtime,
+        GpuFailureDomain::Spatial,
+        GpuFailureDomain::H3,
+        GpuFailureDomain::Raster,
+        GpuFailureDomain::Sort,
+        GpuFailureDomain::Reduce,
+        GpuFailureDomain::Expr,
+        GpuFailureDomain::HashAgg,
+        GpuFailureDomain::HashJoin,
+        GpuFailureDomain::Window,
+        GpuFailureDomain::NestedLoop,
+        GpuFailureDomain::Memory,
+        GpuFailureDomain::GroupedAgg,
+    ];
+
+    #[test]
+    fn failure_domain_discriminants_and_labels_form_one_stable_dense_table() {
+        let labels = [
+            "runtime",
+            "spatial",
+            "h3",
+            "raster",
+            "sort",
+            "reduce",
+            "expr",
+            "hash_agg",
+            "hash_join",
+            "window",
+            "nested_loop",
+            "memory",
+            "grouped_agg",
+        ];
+
+        for (index, (domain, label)) in DOMAINS.into_iter().zip(labels).enumerate() {
+            assert_eq!(domain as usize, index);
+            assert_eq!(domain.as_str(), label);
+        }
+    }
+
+    #[test]
+    fn total_is_at_least_a_same_snapshot_sum_of_every_domain() {
+        let observed_sum: u64 = DOMAINS.into_iter().map(kernel_failure_count).sum();
+
+        // Counters only increase. Reading the aggregate after the individual
+        // snapshot therefore remains race-safe when the test suite is parallel.
+        assert!(kernel_failure_total() >= observed_sum);
+    }
+
+    #[test]
+    fn classifier_covers_memory_and_runtime_fallback_boundaries() {
+        for symbol in [
+            "pgaccel_alloc",
+            "pgaccel_alloc_shared",
+            "pgaccel_free",
+            "pgaccel_pool_trim",
+            "pgaccel_prefetch",
+        ] {
+            assert_eq!(GpuFailureDomain::classify(symbol), GpuFailureDomain::Memory);
+        }
+        for symbol in ["pgaccel_init", "pgaccel_shutdown", "not_pgaccel"] {
+            assert_eq!(
+                GpuFailureDomain::classify(symbol),
+                GpuFailureDomain::Runtime
+            );
+        }
+    }
+}
