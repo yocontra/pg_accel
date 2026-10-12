@@ -1204,6 +1204,7 @@ install-pg-accel pg="":
     #!/usr/bin/env bash
     set -euo pipefail
     source scripts/pg_versions.sh
+    pg_accel_prepare_server_file_limit
     requested="{{pg}}"
     if [ -z "$requested" ]; then
         pg="$(pg_accel_default_pg_major)"
@@ -1290,6 +1291,7 @@ install-pg-accel pg="":
         exit 1
     fi
     echo "install-provenance:"
+    echo "  open_files_soft=$(ulimit -Sn)"
     echo "  pg=$pg"
     echo "  pg_config=$pg_config"
     echo "  pg_version=$("$pg_config" --version)"

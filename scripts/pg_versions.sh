@@ -18,6 +18,23 @@ PG_ACCEL_ACPP_PREFIX="${PG_ACCEL_ACPP_PREFIX:-$PG_ACCEL_REPO_ROOT/.pgaccel/acpp/
 
 source "$PG_ACCEL_REPO_ROOT/scripts/pg_source.sh"
 
+# The development server inherits this shell's soft descriptor limit. Metal
+# pipelines and PostgreSQL relation files share that limit; macOS's default
+# 256 can fail long-lived SQL matrices even when clients raise their own limit.
+# Never lower a larger limit or change the hard limit. Fail before stopping or
+# installing a server if the required soft limit cannot be established.
+pg_accel_prepare_server_file_limit() {
+    local current_limit
+    current_limit="$(ulimit -Sn)"
+    if [ "$current_limit" = unlimited ] || [ "$current_limit" -ge 4096 ]; then
+        return 0
+    fi
+    if ! ulimit -Sn 4096; then
+        echo "error: pg_accel development server requires at least 4096 open files; raise the shell hard limit before installation" >&2
+        return 1
+    fi
+}
+
 pg_accel_supported_pg_majors() {
     printf '%s\n' $PG_ACCEL_SUPPORTED_PG_MAJORS
 }
