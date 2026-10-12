@@ -1,0 +1,79 @@
+Available recipes:
+    audit                                            # pg_accel runtime safety boundaries.
+    audit-cpu-cheats                                 # closed. Exact source-validated lifecycle/fail-only contracts remain auditable.
+    audit-cpu-cheats-test                            # Assertions expect the current production audit to be nonzero, so this stays green.
+    bench iterations="10" warmup="5" pg=""           # the postmaster GUC mismatch should be tolerated.
+    bench-dev iterations="10" warmup="5" pg=""       # running postmaster is worse than no table at all (see main.rs --skip-guc-verify).
+    bench-rigorous iterations="30" warmup="5" pg=""  # raw wall-clock timing (no EXPLAIN ANALYZE overhead).
+    check pg=""                                      # Type check one PG major. Defaults to the active supported PostgreSQL major.
+    check-matrix                                     # Type check every supported PostgreSQL major.
+    ci                                               # Run full CI locally (pre-commit checks + all supported PG tests)
+    clean-logs pg=""                                 # Hard-truncate all pgrx PG + pg_accel logs (no size check).
+    clear-jit                                        # time for permission).
+    coverage pg=""                                   # complete registered GPU CTest suite, so it requires a qualified Metal runner.
+    coverage-audit
+    crash-band-contracts pg=""                       # structural declines, redesigned million-row descriptor, and OOM invariant.
+    cuda-stress pg=""                                # Run the NVIDIA CUDA release stress gate with durable artifacts.
+    default                                          # Default: list commands
+    deny                                             # Run cargo-deny checks (licenses + advisories)
+    doc-parity                                       # CI gate.
+    extension-smoke pg=""                            # Install into the pgrx-managed cluster and prove a fresh CREATE EXTENSION path.
+    extension-smoke-matrix                           # Install into each pgrx-managed cluster and prove fresh CREATE EXTENSION paths.
+    fmt                                              # Format code
+    fmt-check                                        # Check formatting
+    fuzz-contracts pg=""                             # Rust-library, PostgreSQL-list, and native descriptor/packed-input boundary.
+    gpu-build                                        # Build GPU kernel library (AdaptiveCpp/SYCL -> CUDA/ROCm/L0/Metal/CPU)
+    gpu-stress-archive workers="8" iters="20"        # Run the Metal archive fork-safety stress test with quiet console output.
+    gpu-test                                         # (no clear-jit), with a per-test timeout via GPU_TEST_TIMEOUT_S.
+    gpu-test-cold name timeout_s="300"               # Run one GPU kernel test cold with quiet console and raw log preservation.
+    gpu-test-cold-all                                # Run the full standalone GPU test suite cold.
+    install-pg-accel pg=""                           # restart the cluster so shared_preload_libraries maps the same binary.
+    lint pg=""                                       # Run clippy lints. Defaults to the active supported PostgreSQL major.
+    log-rails pg=""                                  # logging under `log_statement` / heavy fprintf.
+    metal-benchmark-ship-gate pg="" artifacts_dir="" # purge the host page cache. It supplements the mandatory warm ratchet above.
+    metal-stress pg=""                               # Run the M-series Metal release stress gate with durable artifacts.
+    metal-stress-artifact-test                       # Validate the Metal stress parser and shell contract without a GPU device.
+    metal-warm-benchmark-ship-gate pg="" artifacts_dir="" # the PG installation and optional deterministic CI artifact path.
+    native-parity-p0 artifacts_dir connection="postgresql://localhost:28818/postgres" pg="18" # identity is retained and sealed.
+    otel-tui pg=""                                   # Live OTel span viewer TUI (reads OTLP JSON file)
+    package pg=""                                    # Build installable pgrx package
+    package-extension-test                           # Validate relocatable package layout, loader metadata, and archive preservation.
+    package-matrix                                   # Build installable pgrx packages for every supported PG major.
+    package-smoke pg="" archive=""                   # closed when the target directory contains zero or multiple candidates.
+    package-smoke-matrix                             # Verify already-built release archives for every supported PostgreSQL major.
+    pg-build pg=""                                   # Alias for building one source PostgreSQL major/version.
+    pg-config pg=""                                  # Print the repo-local pg_config path for a PostgreSQL major/version.
+    pg-smoke pg=""                                   # Boot a temporary source-built PostgreSQL cluster and run SELECT version().
+    pg-version-audit                                 # Validate that default PG-version plumbing is centralized.
+    plan-shape-tests pg=""                           # so we point it at the resolved pgrx port explicitly.
+    pre-commit                                       # Pre-commit checks: fmt, lint, type-check matrix, deny, audits, doc-parity
+    release-checklist-audit                          # RELEASE_CHECKLIST_EVIDENCE_PATH to audit a completed external/tag-PR ledger.
+    release-checklist-audit-test                     # Test the checker itself; the incomplete release checklist must still fail.
+    release-verify pg=""                             # Run the release verification matrix with durable artifacts.
+    resident-ledger-test pg=""                       # installed non-pg_test extension and therefore its PgLwLock implementation.
+    safety-contract-audit                            # corpus without compiling Rust or starting PostgreSQL/a GPU device.
+    setup                                            # Install repo-local PostgreSQL, test extensions, and Rust tooling (run once on a fresh clone).
+    setup-gpu                                        # Build a repo-local AdaptiveCpp toolchain. Use ACPP_BACKEND=cuda, metal, or generic.
+    setup-gpu-acpp                                   # Build and install AdaptiveCpp from source into .pgaccel/acpp/<backend>.
+    setup-gpu-metal                                  # Build a repo-local AdaptiveCpp Metal toolchain on macOS.
+    setup-gpu-metal-headers                          # Download Apple metal-cpp headers
+    setup-hooks                                      # from .pre-commit-config.yaml. Idempotent — safe to re-run.
+    setup-pg-extensions pg=""                        # Install h3, postgis, and postgis_raster into repo-local PostgreSQL.
+    setup-pg-source pg=""                            # Build repo-local PostgreSQL from official source tarballs.
+    setup-pgrx pg=""                                 # Initialize pgrx for source-built PostgreSQL majors.
+    setup-pgrx-matrix                                # Explicit alias for initializing the configured PG version matrix.
+    setup-system-deps                                # Print system dependency hints for source PostgreSQL + AdaptiveCpp builds.
+    setup-tools                                      # Install Rust-side tools used by pg_accel.
+    sql-test pg=""                                   # Run SQL integration tests against the pgrx-managed PostgreSQL cluster.
+    system-workload-gate pg="" artifacts_dir=""      # system-level speedup headline or claim certified third-party benchmark status.
+    test                                             # Run all tests: pgrx unit-test matrix
+    test-matrix                                      # Run pgrx unit tests against every supported PG major.
+    test-standalone pg=""                            # script generates test-only stubs from this exact selected pg_config.
+    test-unit pg=""                                  # Run pgrx unit tests against one PG major. Defaults to the repo target PG major.
+    traces pg=""                                     # Live trace viewer (tail tracing-subscriber JSONL)
+    traces-last n="20" pg=""                         # View last N trace entries
+    update-cpu-cheat-abi-manifest                    # constants; review the manifest diff and hash before changing those constants.
+    upstream-pg-tests pg="" artifacts_dir=""         # every temporary-server session. The evidence directory must not exist.
+    upstream-pg-tests-audit                          # without building PostgreSQL or starting a server.
+    upstream-pg-tests-matrix artifacts_root=""       # Run the upstream compatibility gate for every supported PostgreSQL major.
+    weighted-count-benchmark-ship-gate pg="" artifacts_dir="" # warm-speedup floor without changing the sealed nineteen-cell Metal contract.

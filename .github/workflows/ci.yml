@@ -630,6 +630,9 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 \
             python3 -m unittest discover -s scripts/tests -p 'test_cpu_cheat_audit.py' -v \
             2>&1 | tee "$LINUX_NO_GPU_ARTIFACT_DIR/cpu-cheat-analyzer-tests.log"
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 -m unittest discover -s scripts/tests -p 'test_workspace*.py' -v \
+            2>&1 | tee "$LINUX_NO_GPU_ARTIFACT_DIR/workspace-effect-tests.log"
 
       - name: Prove the hosted runtime exposes no GPU device
         if: steps.pg-support.outputs.skip != 'true'

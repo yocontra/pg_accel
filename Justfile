@@ -977,6 +977,7 @@ release-checklist-audit-test:
 # Prove the analyzer against synthetic evasions and the real ABI/witness baseline.
 # Assertions expect the current production audit to be nonzero, so this stays green.
 audit-cpu-cheats-test:
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_workspace*.py' -v
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_cpu_cheat_audit.py' -v
 
 # Audit every extern-C pgaccel_* definition and its public header declaration.

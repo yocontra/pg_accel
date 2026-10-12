@@ -1,0 +1,102 @@
+[
+  {
+    "source": "/Users/contra/Projects/pg_accel/pgaccel-kernels/src/grouped_agg.cpp",
+    "caller": "bind_params",
+    "base_parameter": 2,
+    "metadata_parameters": [
+      1
+    ],
+    "extended_metadata_parameters": [
+      0,
+      1
+    ],
+    "source_sha256": "9676e061e7b9cb1a96ab9a771cf4c346e1ea1c5b6c078b366af0d12917aad08a",
+    "address_facts_ok": true,
+    "address_call_count": 38,
+    "control_facts_ok": false,
+    "control_decline": "unproved control expression BinaryOperator at expanded offset 5831746",
+    "extended_control_facts_ok": false,
+    "extended_control_decline": "unproved control expression BinaryOperator at expanded offset 5835396",
+    "extended_failure_source": "layout.dense_numeric && slot < dense_integer_value_count(desc)) {\n      params->numeric_buckets[slot] =\n          arena_ptr<AtomicU64Words>(scratch, layout.numeric_buckets[slot]);\n"
+  },
+  {
+    "source": "/Users/contra/Projects/pg_accel/pgaccel-kernels/src/grouped_agg.cpp",
+    "caller": "bind_publish_params",
+    "base_parameter": 2,
+    "metadata_parameters": [
+      1
+    ],
+    "extended_metadata_parameters": [
+      0,
+      1
+    ],
+    "source_sha256": "9676e061e7b9cb1a96ab9a771cf4c346e1ea1c5b6c078b366af0d12917aad08a",
+    "address_facts_ok": true,
+    "address_call_count": 1,
+    "control_facts_ok": false,
+    "control_decline": "unproved control expression BinaryOperator at expanded offset 5838619",
+    "extended_control_facts_ok": false,
+    "extended_control_decline": "metadata root has an unproved mutation/escape CallExpr at expanded offset 5838679",
+    "extended_failure_source": "materialized_key_type(desc, desc.keys[key]);\n    params->source_offsets.key_values[key] = layout.staged_key_values[key];\n    params->source_offsets.key_nulls[key] = layout.staged_k"
+  },
+  {
+    "source": "/Users/contra/Projects/pg_accel/pgaccel-kernels/src/grouped_agg.cpp",
+    "caller": "launch_grouped_agg_device",
+    "base_parameter": 3,
+    "metadata_parameters": [
+      4
+    ],
+    "extended_metadata_parameters": [
+      1,
+      4
+    ],
+    "source_sha256": "9676e061e7b9cb1a96ab9a771cf4c346e1ea1c5b6c078b366af0d12917aad08a",
+    "address_facts_ok": true,
+    "address_call_count": 1,
+    "control_facts_ok": false,
+    "control_decline": "unproved control expression BinaryOperator at expanded offset 5888359",
+    "extended_control_facts_ok": false,
+    "extended_control_decline": "unproved control expression UnaryOperator at expanded offset 5888701",
+    "extended_failure_source": "!pgaccel_scalar::validate_program(view.words, view.word_count, &proof))\n      return PGACCEL_ERROR;\n    program.uses_predicate_mask = proof.uses_predicate_mask;\n    std::memcpy(pro"
+  },
+  {
+    "source": "/Users/contra/Projects/pg_accel/pgaccel-kernels/src/join_rows.cpp",
+    "caller": "execute",
+    "base_parameter": 3,
+    "metadata_parameters": [
+      1
+    ],
+    "extended_metadata_parameters": [
+      0,
+      1
+    ],
+    "source_sha256": "e414bf0453a179a3be7d326c36a29ab0d9df5e3368aed219828e5a81b4360fe2",
+    "address_facts_ok": true,
+    "address_call_count": 11,
+    "control_facts_ok": false,
+    "control_decline": "unproved control expression BinaryOperator at expanded offset 5591625",
+    "extended_control_facts_ok": false,
+    "extended_control_decline": "unproved lambda capture initialization",
+    "extended_failure_source": ""
+  },
+  {
+    "source": "/Users/contra/Projects/pg_accel/pgaccel-kernels/src/join_rows.cpp",
+    "caller": "execute_controlled",
+    "base_parameter": 4,
+    "metadata_parameters": [
+      2
+    ],
+    "extended_metadata_parameters": [
+      0,
+      2
+    ],
+    "source_sha256": "e414bf0453a179a3be7d326c36a29ab0d9df5e3368aed219828e5a81b4360fe2",
+    "address_facts_ok": true,
+    "address_call_count": 14,
+    "control_facts_ok": false,
+    "control_decline": "unproved control expression UnaryOperator at expanded offset 5599348",
+    "extended_control_facts_ok": false,
+    "extended_control_decline": "unproved control expression UnaryOperator at expanded offset 5599348",
+    "extended_failure_source": "!run.poll())\n    return PGACCEL_TIMEOUT;\n  if (request.outer_rows == 0) {\n    *result = run.produced;\n    return PGACCEL_OK;\n  }\n  auto* device_request = at<pgaccel_join_rows_reque"
+  }
+]

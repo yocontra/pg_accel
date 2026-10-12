@@ -1,0 +1,46 @@
+--- a/Justfile
++++ b/Justfile
+@@ -977,6 +977,7 @@
+ # Prove the analyzer against synthetic evasions and the real ABI/witness baseline.
+ # Assertions expect the current production audit to be nonzero, so this stays green.
+ audit-cpu-cheats-test:
++    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_workspace*.py' -v
+     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_cpu_cheat_audit.py' -v
+ 
+ # Audit every extern-C pgaccel_* definition and its public header declaration.
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -624,6 +624,9 @@
+           PYTHONDONTWRITEBYTECODE=1 \
+             python3 -m unittest discover -s scripts/tests -p 'test_cpu_cheat_audit.py' -v \
+             2>&1 | tee "$LINUX_NO_GPU_ARTIFACT_DIR/cpu-cheat-analyzer-tests.log"
++          PYTHONDONTWRITEBYTECODE=1 \
++            python3 -m unittest discover -s scripts/tests -p 'test_workspace*.py' -v \
++            2>&1 | tee "$LINUX_NO_GPU_ARTIFACT_DIR/workspace-effect-tests.log"
+ 
+       - name: Prove the hosted runtime exposes no GPU device
+         if: steps.pg-support.outputs.skip != 'true'
+--- a/TODO.md
++++ b/TODO.md
+@@ -5,6 +5,21 @@
+ is local evidence, not a substitute for hosted CI, independent hardware, or a
+ published release artifact.
+ 
++## Workspace Proof Tooling
++
++- [x] Add standalone compiler-resolved workspace address and explicit-control
++  facts, with stable-base, initializer/update, metadata-use and dependency-ID
++  checks. The separate control result rejects unsupported predicates, escapes
++  and flow atomically; address-only behavior remains unchanged. The extracted
++  five-file package passes 52 compiler-backed tests independently of pending
++  engine changes; 56 focused tests pass in the accumulated tree, including four
++  adjacent output-escape regressions. Current-source inspection counts 65
++  address calls, but all five callers still decline the stronger qualification.
++  Ordinary host effects, external aliases, bounds, device execution and exact
++  build binding remain separate obligations. No SQL admission, release approval
++  or waiver of the seven grouped/join execution findings is introduced.
++  Evidence: `benchmarks/evidence/workspace-control-proof-20261012/README.md`.
++
+ ## Current Implementation Baseline
+ 
+ - [x] The latest frozen implementation candidate is

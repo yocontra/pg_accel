@@ -5,6 +5,21 @@ implementation history belongs in Git and `CHANGELOG.md`. A checked item below
 is local evidence, not a substitute for hosted CI, independent hardware, or a
 published release artifact.
 
+## Workspace Proof Tooling
+
+- [x] Add standalone compiler-resolved workspace address and explicit-control
+  facts, with stable-base, initializer/update, metadata-use and dependency-ID
+  checks. The separate control result rejects unsupported predicates, escapes
+  and flow atomically; address-only behavior remains unchanged. The extracted
+  five-file package passes 52 compiler-backed tests independently of pending
+  engine changes; 56 focused tests pass in the accumulated tree, including four
+  adjacent output-escape regressions. Current-source inspection counts 65
+  address calls, but all five callers still decline the stronger qualification.
+  Ordinary host effects, external aliases, bounds, device execution and exact
+  build binding remain separate obligations. No SQL admission, release approval
+  or waiver of the seven grouped/join execution findings is introduced.
+  Evidence: `benchmarks/evidence/workspace-control-proof-20261012/README.md`.
+
 ## Current Implementation Baseline
 
 - [x] The latest frozen implementation candidate is
