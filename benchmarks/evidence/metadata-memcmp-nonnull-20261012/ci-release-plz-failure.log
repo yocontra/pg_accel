@@ -1,0 +1,26 @@
+288-Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4871376Z ======================================================================
+289-Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4872449Z FAIL: test_both_real_queries_have_bounded_typed_metadata_effects (test_metadata_effects.ProductionMetadataEffectsTests.test_both_real_queries_have_bounded_typed_metadata_effects) (name='pgaccel_join_rows_workspace_bytes')
+290-Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4873722Z ----------------------------------------------------------------------
+291-Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4874108Z Traceback (most recent call last):
+292-Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4874819Z   File "/home/runner/work/pg_accel/pg_accel/scripts/tests/test_metadata_effects.py", line 339, in test_both_real_queries_have_bounded_typed_metadata_effects
+293-Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4875558Z     self.assertTrue(result.ok, result.detail)
+294:Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4876072Z AssertionError: False is not true : unproven callable attribute/linkage (NonNullAttr, line ?)
+295-Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4876478Z 
+296-Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4876606Z ======================================================================
+297-Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4877659Z FAIL: test_both_real_queries_have_bounded_typed_metadata_effects (test_metadata_effects.ProductionMetadataEffectsTests.test_both_real_queries_have_bounded_typed_metadata_effects) (name='pgaccel_join_rows_controlled_workspace_bytes')
+298-Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4878749Z ----------------------------------------------------------------------
+299-Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4879338Z Traceback (most recent call last):
+300-Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4880031Z   File "/home/runner/work/pg_accel/pg_accel/scripts/tests/test_metadata_effects.py", line 339, in test_both_real_queries_have_bounded_typed_metadata_effects
+301-Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4880738Z     self.assertTrue(result.ok, result.detail)
+302:Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4881235Z AssertionError: False is not true : unproven callable attribute/linkage (NonNullAttr, line ?)
+303-Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4881623Z 
+304-Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4881760Z ======================================================================
+305-Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4882628Z FAIL: test_memcmp_requires_exact_metadata_objects_and_trusted_linkage (test_metadata_effects.TypedMetadataEffectsTests.test_memcmp_requires_exact_metadata_objects_and_trusted_linkage)
+306-Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4883841Z ----------------------------------------------------------------------
+307-Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4884217Z Traceback (most recent call last):
+308-Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4884921Z   File "/home/runner/work/pg_accel/pg_accel/scripts/tests/test_metadata_effects.py", line 129, in test_memcmp_requires_exact_metadata_objects_and_trusted_linkage
+309-Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4885663Z     self.assertTrue(result.ok, result.detail)
+310:Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4886160Z AssertionError: False is not true : unproven callable attribute/linkage (NonNullAttr, line ?)
+311-Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4886540Z 
+312-Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4886698Z ----------------------------------------------------------------------
+313-Release PLZ	Run real CPU-cheat release gate	2026-10-12T23:20:38.4887055Z Ran 20 tests in 2.869s

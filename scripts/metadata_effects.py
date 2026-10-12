@@ -172,6 +172,19 @@ class Verifier:
                     collect(child, namespace, c_linkage)
 
         collect(ast.tree)
+        # sizeof's result type is compiler evidence for this target's size_t;
+        # a source typedef with that name is not an ABI authority.
+        self.size_types = {
+            spelling(item)
+            for item in self.nodes.values()
+            if item.get("kind") == "UnaryExprOrTypeTraitExpr"
+            and item.get("name") == "sizeof"
+        }
+        self.function_groups: dict[str, list[Node]] = {}
+        for item in tuple(self.nodes.values()):
+            if item.get("kind") == "FunctionDecl":
+                root = self.function_root(item)
+                self.function_groups.setdefault(root, []).append(item)
         for name, identities in short_records.items():
             if len(identities) == 1 and name not in self.aliases:
                 self.aliases[name] = next(iter(identities))
@@ -207,6 +220,75 @@ class Verifier:
             if not previous or previous not in self.nodes:
                 break
             node = self.nodes[previous]
+
+    def function_root(self, node: Node) -> str:
+        seen: set[str] = set()
+        while node.get("previousDecl"):
+            identity = node.get("id", "")
+            previous = node["previousDecl"]
+            if identity in seen or previous not in self.nodes:
+                self.fail(node, "incomplete callable redeclaration chain")
+            seen.add(identity)
+            node = self.nodes[previous]
+        return node["id"]
+
+    def builtin_memcmp(self, node: Node) -> None:
+        """Validate the complete external builtin contract, not general helpers.
+
+        libc's source-spelled nonnull is a precondition, not a new effect. It is
+        accepted only here; the exact-object/extent proof must still follow.
+        Scan later declarations too: their attributes or bodies can change the
+        symbol even when the CallExpr refers to an earlier declaration.
+        """
+        declarations = self.function_groups.get(self.function_root(node), ())
+        if not declarations or not any(
+            item["id"] in self.c_linkage for item in declarations
+        ):
+            self.fail(node, "memcmp is not the exact external C builtin")
+        if not any(
+            child.get("kind") == "BuiltinAttr" and child.get("implicit") is True
+            for item in declarations
+            for child in item.get("inner", ())
+        ):
+            self.fail(node, "memcmp lacks compiler builtin identity")
+        for item in declarations:
+            children = item.get("inner", ())
+            parameters = [p for p in children if p.get("kind") == "ParmVarDecl"]
+            if (
+                item.get("name") != "memcmp"
+                or item.get("mangledName") not in {"memcmp", "_memcmp"}
+                or item.get("variadic")
+                or spelling(item).split("(", 1)[0].strip() != "int"
+                or len(parameters) != 3
+                or [spelling(p) for p in parameters[:2]] != ["const void *"] * 2
+                or len(self.size_types) != 1
+                or spelling(parameters[2]) not in self.size_types
+                or item["id"] in self.definitions
+                or any(
+                    item.get(flag)
+                    for flag in (
+                        "isDeleted",
+                        "explicitlyDeleted",
+                        "isDefaulted",
+                        "explicitlyDefaulted",
+                    )
+                )
+            ):
+                self.fail(item, "memcmp differs from the external builtin ABI")
+            for child in children:
+                kind = child.get("kind", "")
+                if kind not in {
+                    "ParmVarDecl",
+                    "BuiltinAttr",
+                    "NoThrowAttr",
+                    "PureAttr",
+                    "ConstAttr",
+                    "NonNullAttr",
+                }:
+                    self.fail(child, "unproven memcmp declaration child")
+            for parameter in parameters:
+                if parameter.get("inner"):
+                    self.fail(parameter, "unproven memcmp parameter annotation/default")
 
     def type(self, value: str) -> str:
         if "volatile" in value:
@@ -562,7 +644,11 @@ class Verifier:
             if not isinstance(callee, Value) or callee.kind != "function":
                 self.fail(node, "indirect/callback call")
             target = self.nodes.get(callee.declaration or "", {})
-            self.callable(target)
+            is_memcmp = target.get("name") == "memcmp"
+            if is_memcmp:
+                self.builtin_memcmp(target)
+            else:
+                self.callable(target)
             arguments = [self.expr(child, env) for child in children[1:]]
             if kind == "CXXOperatorCallExpr":
                 if (
@@ -576,9 +662,7 @@ class Verifier:
             definition = self.definitions.get(callee.declaration or "")
             if definition is not None:
                 return self.call(definition, arguments)
-            if target.get("name") == "memcmp" and any(
-                item.get("kind") == "BuiltinAttr" for item in target.get("inner", ())
-            ):
+            if is_memcmp:
                 self.memcmp(node, arguments, children[3] if len(children) == 4 else {})
                 return Value()
             self.fail(node, f"unknown call {target.get('name', '?')}")

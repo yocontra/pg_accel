@@ -1,0 +1,16 @@
+test_changed_library_or_source_invalidates_binding (scripts.tests.test_metadata_link.MetadataLinkTests.test_changed_library_or_source_invalidates_binding) ... ok
+test_changed_map_owner_is_not_just_a_name_match (scripts.tests.test_metadata_link.MetadataLinkTests.test_changed_map_owner_is_not_just_a_name_match) ... ok
+test_forged_object_receipt_cannot_replace_rebuilt_object (scripts.tests.test_metadata_link.MetadataLinkTests.test_forged_object_receipt_cannot_replace_rebuilt_object) ... ok
+test_real_link_map_rebuild_and_symbol_ownership (scripts.tests.test_metadata_link.MetadataLinkTests.test_real_link_map_rebuild_and_symbol_ownership) ... ok
+test_receipt_cannot_choose_an_executable_or_release_build_root (scripts.tests.test_metadata_link.MetadataLinkTests.test_receipt_cannot_choose_an_executable_or_release_build_root) ... ok
+test_receipt_proof_booleans_are_not_authority (scripts.tests.test_metadata_link.MetadataLinkTests.test_receipt_proof_booleans_are_not_authority) ... ok
+test_wrong_source_and_stale_link_are_rejected (scripts.tests.test_metadata_link.MetadataLinkTests.test_wrong_source_and_stale_link_are_rejected) ... ok
+test_overlay_preserves_hard_findings_and_inventory_errors (scripts.tests.test_metadata_link.MetadataMapAndIsolationTests.test_overlay_preserves_hard_findings_and_inventory_errors) ... ok
+test_real_source_view_tag_is_not_a_preprocessor_failure (scripts.tests.test_metadata_link.MetadataMapAndIsolationTests.test_real_source_view_tag_is_not_a_preprocessor_failure) ... ok
+test_report_overlay_never_supplies_borrowable_device_evidence (scripts.tests.test_metadata_link.MetadataMapAndIsolationTests.test_report_overlay_never_supplies_borrowable_device_evidence) ... ok
+test_supported_map_dialects_and_rejected_ownership (scripts.tests.test_metadata_link.MetadataMapAndIsolationTests.test_supported_map_dialects_and_rejected_ownership) ... ok
+
+----------------------------------------------------------------------
+Ran 11 tests in 6.099s
+
+OK

@@ -43,6 +43,151 @@ def prove(source: str):
 
 
 class TypedMetadataEffectsTests(unittest.TestCase):
+    def test_memcmp_explicit_and_macro_nonnull_preserve_bounded_contract(self):
+        declaration = 'extern "C" int memcmp(const void*, const void*, __SIZE_TYPE__) '
+        body = (
+            "Request zero{}; if (memcmp(req, &zero, sizeof(zero))) "
+            "return PGACCEL_INVALID_ARGUMENT; *out = req->rows; return PGACCEL_OK;"
+        )
+        for helpers in (
+            declaration + "__attribute__((pure, nonnull(1,2)));",
+            "#define LIBC_NONNULL __attribute__((nonnull(1,2)))\n"
+            + declaration
+            + "LIBC_NONNULL;",
+            declaration + "__attribute__((nonnull));\n" + declaration + ";",
+        ):
+            with self.subTest(helpers=helpers):
+                result = prove(fixture(body, helpers))
+                self.assertTrue(result.ok, result.detail)
+
+    def test_memcmp_nonnull_does_not_relax_general_helpers(self):
+        helpers = (
+            "uint64_t helper(const Request* r) __attribute__((nonnull));\n"
+            "uint64_t helper(const Request* r) { return r->rows; }"
+        )
+        result = prove(fixture("*out = helper(req); return PGACCEL_OK;", helpers))
+        self.assertFalse(result.ok, result)
+        self.assertIn("unproven callable attribute", result.detail)
+
+    def test_memcmp_function_try_bodies_are_not_external_declarations(self):
+        declaration = 'extern "C" int memcmp(const void*, const void*, __SIZE_TYPE__);'
+        implementation = (
+            'extern "C" int memcmp(const void* a, const void*, __SIZE_TYPE__) '
+            "try { return static_cast<const Request*>(a)->values[0]; } "
+            "catch (...) { return 0; }"
+        )
+        body = (
+            "Request zero{}; if (memcmp(req, &zero, sizeof(zero))) "
+            "return PGACCEL_INVALID_ARGUMENT; *out = req->rows; return PGACCEL_OK;"
+        )
+        for later in (False, True):
+            source = (
+                fixture(body, declaration) + implementation
+                if later
+                else fixture(body, declaration + implementation)
+            )
+            with self.subTest(later=later):
+                # Compiler rejection raises instead of satisfying this check.
+                result = prove(source)
+                self.assertFalse(result.ok, result)
+
+    def test_memcmp_rejects_earlier_and_later_attributes_and_definitions(self):
+        declaration = 'extern "C" int memcmp(const void*, const void*, __SIZE_TYPE__)'
+        body = (
+            "Request zero{}; if (memcmp(req, &zero, sizeof(zero))) "
+            "return PGACCEL_INVALID_ARGUMENT; *out = req->rows; return PGACCEL_OK;"
+        )
+        for attribute in ('annotate("unknown effect")', "weak", 'visibility("hidden")'):
+            for later in (False, True):
+                attributed = declaration + f" __attribute__(({attribute}));\n"
+                source = (
+                    fixture(body, declaration + ";\n") + attributed
+                    if later
+                    else fixture(body, attributed + declaration + ";\n")
+                )
+                with self.subTest(attribute=attribute, later=later):
+                    # prove() must return a rejection; compiler exceptions fail
+                    # this test instead of masquerading as verifier coverage.
+                    result = prove(source)
+                    self.assertFalse(result.ok, result)
+                    self.assertIn("memcmp", result.detail)
+        for implementation in (
+            'extern "C" int memcmp(const void*, const void*, __SIZE_TYPE__) { return 0; }',
+            'extern "C" int memcmp(const void* a, const void*, __SIZE_TYPE__) '
+            "{ return static_cast<const Request*>(a)->values[0]; }",
+        ):
+            for later in (False, True):
+                source = (
+                    fixture(body, declaration + ";\n") + implementation
+                    if later
+                    else fixture(body, implementation)
+                )
+                with self.subTest(implementation=implementation, later=later):
+                    result = prove(source)
+                    self.assertFalse(result.ok, result)
+                    self.assertIn("external builtin ABI", result.detail)
+
+    def test_memcmp_rejects_lookalikes_wrong_abi_and_renaming(self):
+        for declaration, call in (
+            ("int memcmp(const void*, const void*, __SIZE_TYPE__);", "memcmp"),
+            (
+                "namespace other { int memcmp(const void*, const void*, __SIZE_TYPE__); }",
+                "other::memcmp",
+            ),
+            (
+                'extern "C" long memcmp(const void*, const void*, __SIZE_TYPE__);',
+                "memcmp",
+            ),
+            ('extern "C" int memcmp(void*, void*, __SIZE_TYPE__);', "memcmp"),
+            (
+                'extern "C" int memcmp(const void*, const void*, unsigned int);',
+                "memcmp",
+            ),
+            (
+                'extern "C" int memcmp(const void*, const void*, __SIZE_TYPE__, ...);',
+                "memcmp",
+            ),
+            (
+                'extern "C" int memcmp(const void*, const void*, __SIZE_TYPE__) asm("untrusted_compare");',
+                "memcmp",
+            ),
+        ):
+            with self.subTest(declaration=declaration):
+                result = prove(
+                    fixture(
+                        f"Request zero{{}}; if ({call}(&zero, &zero, sizeof(zero))) "
+                        "return PGACCEL_INVALID_ARGUMENT; *out = req->rows; return PGACCEL_OK;",
+                        declaration,
+                    )
+                )
+                self.assertFalse(result.ok, result)
+
+    def test_memcmp_nonnull_keeps_exact_object_and_extent_requirements(self):
+        helpers = (
+            'extern "C" int memcmp(const void*, const void*, __SIZE_TYPE__) '
+            "__attribute__((nonnull(1,2)));"
+        )
+        for operands in (
+            "nullptr, &zero, sizeof(zero)",
+            "req, nullptr, sizeof(zero)",
+            "req->values, &zero, sizeof(zero)",
+            "req->nested, &zero, sizeof(zero)",
+            "out, &zero, sizeof(zero)",
+            "req, &zero, sizeof(zero) + 1",
+            "req, &zero, req->rows",
+            "req, &zero, 0",
+            "req, &zero, sizeof(uint64_t)",
+        ):
+            with self.subTest(operands=operands):
+                result = prove(
+                    fixture(
+                        f"Request zero{{}}; if (memcmp({operands})) "
+                        "return PGACCEL_INVALID_ARGUMENT; *out = req->rows; return PGACCEL_OK;",
+                        helpers,
+                    )
+                )
+                self.assertFalse(result.ok, result)
+
     def test_source_pragmas_cannot_suppress_hidden_vla_bound_errors(self):
         for directive in (
             '#pragma clang diagnostic ignored "-Wvla"',

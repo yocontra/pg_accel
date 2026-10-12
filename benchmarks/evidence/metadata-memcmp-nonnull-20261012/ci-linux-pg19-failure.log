@@ -1,0 +1,10 @@
+1127-2026-10-12T23:09:49.3578698Z   [  1%] Building CXX object CMakeFiles/test_raster_lookup.dir/test/test_raster_lookup.cpp.o
+1128-2026-10-12T23:09:49.3579874Z   [  2%] Generating CMakeFiles/pgaccel_metadata.dir/Release/join_rows_layout.cpp.o
+1129-2026-10-12T23:09:49.3580634Z   [  2%] Linking CXX executable test_raster_lookup
+1130-2026-10-12T23:09:49.3581152Z   [  2%] Built target test_raster_lookup
+1131-2026-10-12T23:09:49.3581483Z 
+1132-2026-10-12T23:09:49.3581631Z   --- stderr
+1133:2026-10-12T23:09:49.3582385Z   metadata build failed: pgaccel_join_rows_workspace_bytes: unproven callable attribute/linkage (NonNullAttr, line ?)
+1134-2026-10-12T23:09:49.3583945Z   gmake[2]: *** [CMakeFiles/pgaccel_metadata.dir/build.make:78: CMakeFiles/pgaccel_metadata.dir/Release/join_rows_layout.cpp.o] Error 1
+1135-2026-10-12T23:09:49.3585213Z   gmake[1]: *** [CMakeFiles/Makefile2:235: CMakeFiles/pgaccel_metadata.dir/all] Error 2
+1136-2026-10-12T23:09:49.3586331Z   gmake[1]: *** Waiting for unfinished jobs....

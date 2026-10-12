@@ -20,6 +20,16 @@ published release artifact.
   or waiver of the seven grouped/join execution findings is introduced.
   Evidence: `benchmarks/evidence/workspace-control-proof-20261012/README.md`.
 
+- [x] Handle libc's explicit `nonnull` annotation only for the exact external
+  builtin `memcmp` metadata contract, retaining strict general callable,
+  object-origin and extent checks. Full redeclaration validation rejects later
+  attributes and implementations, including function-try bodies. Integrated
+  local suites pass 26 effects, 15 build-binding and 11 link-binding tests;
+  old failures and compiler-valid regressions are preserved. Actual Linux CI
+  validation remains pending. The seven device/address proof gaps remain open;
+  no full production-audit rerun or release approval is claimed. Evidence:
+  `benchmarks/evidence/metadata-memcmp-nonnull-20261012/README.md`.
+
 ## Active OLAP And Geo Expansion
 
 The September implementation plan expands the objective beyond the historical

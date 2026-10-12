@@ -1,0 +1,26 @@
+test_memcmp_function_try_bodies_are_not_external_declarations (scripts.tests.test_metadata_effects.TypedMetadataEffectsTests.test_memcmp_function_try_bodies_are_not_external_declarations) ... 
+  test_memcmp_function_try_bodies_are_not_external_declarations (scripts.tests.test_metadata_effects.TypedMetadataEffectsTests.test_memcmp_function_try_bodies_are_not_external_declarations) (later=False) ... FAIL
+  test_memcmp_function_try_bodies_are_not_external_declarations (scripts.tests.test_metadata_effects.TypedMetadataEffectsTests.test_memcmp_function_try_bodies_are_not_external_declarations) (later=True) ... FAIL
+
+======================================================================
+FAIL: test_memcmp_function_try_bodies_are_not_external_declarations (scripts.tests.test_metadata_effects.TypedMetadataEffectsTests.test_memcmp_function_try_bodies_are_not_external_declarations) (later=False)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/pgaccel-memcmp-nonnull.gwl5Vu/scripts/tests/test_metadata_effects.py", line 91, in test_memcmp_function_try_bodies_are_not_external_declarations
+    self.assertFalse(result.ok, result)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+AssertionError: True is not false : Result(ok=True, detail='bounded typed metadata effects', functions=('pgaccel_metadata',), loop_bounds=())
+
+======================================================================
+FAIL: test_memcmp_function_try_bodies_are_not_external_declarations (scripts.tests.test_metadata_effects.TypedMetadataEffectsTests.test_memcmp_function_try_bodies_are_not_external_declarations) (later=True)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/pgaccel-memcmp-nonnull.gwl5Vu/scripts/tests/test_metadata_effects.py", line 91, in test_memcmp_function_try_bodies_are_not_external_declarations
+    self.assertFalse(result.ok, result)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+AssertionError: True is not false : Result(ok=True, detail='bounded typed metadata effects', functions=('pgaccel_metadata',), loop_bounds=())
+
+----------------------------------------------------------------------
+Ran 1 test in 0.117s
+
+FAILED (failures=2)

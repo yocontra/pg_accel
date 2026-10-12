@@ -1,0 +1,36 @@
+test_memcmp_explicit_and_macro_nonnull_preserve_bounded_contract (scripts.tests.test_metadata_effects.TypedMetadataEffectsTests.test_memcmp_explicit_and_macro_nonnull_preserve_bounded_contract) ... 
+  test_memcmp_explicit_and_macro_nonnull_preserve_bounded_contract (scripts.tests.test_metadata_effects.TypedMetadataEffectsTests.test_memcmp_explicit_and_macro_nonnull_preserve_bounded_contract) (helpers='extern "C" int memcmp(const void*, const void*, __SIZE_TYPE__) __attribute__((pure, nonnull(1,2)));') ... FAIL
+  test_memcmp_explicit_and_macro_nonnull_preserve_bounded_contract (scripts.tests.test_metadata_effects.TypedMetadataEffectsTests.test_memcmp_explicit_and_macro_nonnull_preserve_bounded_contract) (helpers='#define LIBC_NONNULL __attribute__((nonnull(1,2)))\nextern "C" int memcmp(const void*, const void*, __SIZE_TYPE__) LIBC_NONNULL;') ... FAIL
+  test_memcmp_explicit_and_macro_nonnull_preserve_bounded_contract (scripts.tests.test_metadata_effects.TypedMetadataEffectsTests.test_memcmp_explicit_and_macro_nonnull_preserve_bounded_contract) (helpers='extern "C" int memcmp(const void*, const void*, __SIZE_TYPE__) __attribute__((nonnull));\nextern "C" int memcmp(const void*, const void*, __SIZE_TYPE__) ;') ... FAIL
+
+======================================================================
+FAIL: test_memcmp_explicit_and_macro_nonnull_preserve_bounded_contract (scripts.tests.test_metadata_effects.TypedMetadataEffectsTests.test_memcmp_explicit_and_macro_nonnull_preserve_bounded_contract) (helpers='extern "C" int memcmp(const void*, const void*, __SIZE_TYPE__) __attribute__((pure, nonnull(1,2)));')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/pgaccel-memcmp-nonnull.gwl5Vu/scripts/tests/test_metadata_effects.py", line 62, in test_memcmp_explicit_and_macro_nonnull_preserve_bounded_contract
+    self.assertTrue(result.ok, result.detail)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true : unproven callable attribute/linkage (NonNullAttr, line ?)
+
+======================================================================
+FAIL: test_memcmp_explicit_and_macro_nonnull_preserve_bounded_contract (scripts.tests.test_metadata_effects.TypedMetadataEffectsTests.test_memcmp_explicit_and_macro_nonnull_preserve_bounded_contract) (helpers='#define LIBC_NONNULL __attribute__((nonnull(1,2)))\nextern "C" int memcmp(const void*, const void*, __SIZE_TYPE__) LIBC_NONNULL;')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/pgaccel-memcmp-nonnull.gwl5Vu/scripts/tests/test_metadata_effects.py", line 62, in test_memcmp_explicit_and_macro_nonnull_preserve_bounded_contract
+    self.assertTrue(result.ok, result.detail)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true : unproven callable attribute/linkage (NonNullAttr, line ?)
+
+======================================================================
+FAIL: test_memcmp_explicit_and_macro_nonnull_preserve_bounded_contract (scripts.tests.test_metadata_effects.TypedMetadataEffectsTests.test_memcmp_explicit_and_macro_nonnull_preserve_bounded_contract) (helpers='extern "C" int memcmp(const void*, const void*, __SIZE_TYPE__) __attribute__((nonnull));\nextern "C" int memcmp(const void*, const void*, __SIZE_TYPE__) ;')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/pgaccel-memcmp-nonnull.gwl5Vu/scripts/tests/test_metadata_effects.py", line 62, in test_memcmp_explicit_and_macro_nonnull_preserve_bounded_contract
+    self.assertTrue(result.ok, result.detail)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true : unproven callable attribute/linkage (NonNullAttr, line 371)
+
+----------------------------------------------------------------------
+Ran 1 test in 0.176s
+
+FAILED (failures=3)
