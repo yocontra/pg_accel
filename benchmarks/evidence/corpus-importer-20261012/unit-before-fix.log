@@ -1,0 +1,99 @@
+test_airport_asset_preserves_pinned_complete_geometry (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_airport_asset_preserves_pinned_complete_geometry) ... ok
+test_download_never_replaces_concurrently_created_destination (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_download_never_replaces_concurrently_created_destination) ... FAIL
+test_existing_verified_download_needs_no_network (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_existing_verified_download_needs_no_network) ... ok
+test_fetch_rejects_oversize_and_never_publishes_partial (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_fetch_rejects_oversize_and_never_publishes_partial) ... ok
+test_import_hashes_copy_bytes_and_rolls_back_replaced_source (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_import_hashes_copy_bytes_and_rolls_back_replaced_source) ... 
+  test_import_hashes_copy_bytes_and_rolls_back_replaced_source (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_import_hashes_copy_bytes_and_rolls_back_replaced_source) (changed=True, restore_after_copy=False) ... FAIL
+  test_import_hashes_copy_bytes_and_rolls_back_replaced_source (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_import_hashes_copy_bytes_and_rolls_back_replaced_source) (changed=True, restore_after_copy=True) ... FAIL
+test_live_import_preserves_rows_generated_columns_and_immutability (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_live_import_preserves_rows_generated_columns_and_immutability) ... skipped 'opt-in live importer test'
+test_modified_source_is_rejected (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_modified_source_is_rejected) ... ok
+test_pinned_source_keeps_null_and_zero_coordinates (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_pinned_source_keeps_null_and_zero_coordinates) ... ok
+test_projection_keeps_order_duplicates_outliers_nulls_and_decimal_text (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_projection_keeps_order_duplicates_outliers_nulls_and_decimal_text) ... ok
+test_projection_never_replaces_concurrently_created_destination (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_projection_never_replaces_concurrently_created_destination) ... FAIL
+test_projection_rejects_malformed_csv_quotes_before_publication (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_projection_rejects_malformed_csv_quotes_before_publication) ... 
+  test_projection_rejects_malformed_csv_quotes_before_publication (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_projection_rejects_malformed_csv_quotes_before_publication) (last_field='"40.7') ... FAIL
+  test_projection_rejects_malformed_csv_quotes_before_publication (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_projection_rejects_malformed_csv_quotes_before_publication) (last_field='"40.7"trailing\n') ... FAIL
+test_projection_rejects_wrong_hash_header_and_count (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_projection_rejects_wrong_hash_header_and_count) ... ok
+test_truncated_bzip_is_never_published (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_truncated_bzip_is_never_published) ... ok
+test_unpinned_manifest_fails_before_network (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_unpinned_manifest_fails_before_network) ... ok
+test_verify_rejects_malformed_csv_quotes_even_with_matching_pin (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_verify_rejects_malformed_csv_quotes_even_with_matching_pin) ... 
+  test_verify_rejects_malformed_csv_quotes_even_with_matching_pin (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_verify_rejects_malformed_csv_quotes_even_with_matching_pin) (last_field='"40.7') ... FAIL
+  test_verify_rejects_malformed_csv_quotes_even_with_matching_pin (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_verify_rejects_malformed_csv_quotes_even_with_matching_pin) (last_field='"40.7"trailing\n') ... FAIL
+test_wrong_header_row_count_and_size_fail_closed (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_wrong_header_row_count_and_size_fail_closed) ... ok
+
+======================================================================
+FAIL: test_download_never_replaces_concurrently_created_destination (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_download_never_replaces_concurrently_created_destination)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_nyc_taxi_corpus.py", line 83, in test_download_never_replaces_concurrently_created_destination
+    with self.assertRaises(FileExistsError):
+         ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+AssertionError: FileExistsError not raised
+
+======================================================================
+FAIL: test_import_hashes_copy_bytes_and_rolls_back_replaced_source (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_import_hashes_copy_bytes_and_rolls_back_replaced_source) (changed=True, restore_after_copy=False)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_nyc_taxi_corpus.py", line 234, in test_import_hashes_copy_bytes_and_rolls_back_replaced_source
+    with self.assertRaisesRegex(ValueError, "COPY.*SHA-256 mismatch"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_import_hashes_copy_bytes_and_rolls_back_replaced_source (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_import_hashes_copy_bytes_and_rolls_back_replaced_source) (changed=True, restore_after_copy=True)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_nyc_taxi_corpus.py", line 234, in test_import_hashes_copy_bytes_and_rolls_back_replaced_source
+    with self.assertRaisesRegex(ValueError, "COPY.*SHA-256 mismatch"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_projection_never_replaces_concurrently_created_destination (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_projection_never_replaces_concurrently_created_destination)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_nyc_taxi_corpus.py", line 167, in test_projection_never_replaces_concurrently_created_destination
+    with self.assertRaises(FileExistsError):
+         ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+AssertionError: FileExistsError not raised
+
+======================================================================
+FAIL: test_projection_rejects_malformed_csv_quotes_before_publication (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_projection_rejects_malformed_csv_quotes_before_publication) (last_field='"40.7')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_nyc_taxi_corpus.py", line 179, in test_projection_rejects_malformed_csv_quotes_before_publication
+    with self.assertRaises(csv.Error):
+         ~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+AssertionError: Error not raised
+
+======================================================================
+FAIL: test_projection_rejects_malformed_csv_quotes_before_publication (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_projection_rejects_malformed_csv_quotes_before_publication) (last_field='"40.7"trailing\n')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_nyc_taxi_corpus.py", line 179, in test_projection_rejects_malformed_csv_quotes_before_publication
+    with self.assertRaises(csv.Error):
+         ~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+AssertionError: Error not raised
+
+======================================================================
+FAIL: test_verify_rejects_malformed_csv_quotes_even_with_matching_pin (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_verify_rejects_malformed_csv_quotes_even_with_matching_pin) (last_field='"40.7')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_nyc_taxi_corpus.py", line 93, in test_verify_rejects_malformed_csv_quotes_even_with_matching_pin
+    with self.assertRaises(csv.Error):
+         ~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+AssertionError: Error not raised
+
+======================================================================
+FAIL: test_verify_rejects_malformed_csv_quotes_even_with_matching_pin (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_verify_rejects_malformed_csv_quotes_even_with_matching_pin) (last_field='"40.7"trailing\n')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_nyc_taxi_corpus.py", line 93, in test_verify_rejects_malformed_csv_quotes_even_with_matching_pin
+    with self.assertRaises(csv.Error):
+         ~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+AssertionError: Error not raised
+
+----------------------------------------------------------------------
+Ran 16 tests in 0.018s
+
+FAILED (failures=8, skipped=1)

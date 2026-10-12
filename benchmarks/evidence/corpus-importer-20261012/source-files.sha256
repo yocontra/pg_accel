@@ -1,0 +1,4 @@
+78e1be0833adef92c8ee6833759e84093f70ae5d9c502e9c25f4b50f0e70992d  scripts/nyc_taxi_corpus.py
+4596b9461ba7f46b7e43e77c7e41b7e8dc69d4c39c139b3ee99c15d055072a0e  scripts/tests/test_nyc_taxi_corpus.py
+eb974348fc40aa0947d82678b14282067e5fc0c92672598ef1dcc921efe7a993  benchmarks/corpora/nyc-yellow-2015-01/manifest.json
+ffd952fa10b500f57c94787d3c9bbd0229db86b61f25b88d83e9ef63459d3350  benchmarks/corpora/nyc-yellow-2015-01/jfk-airport.ewkt

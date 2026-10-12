@@ -1,0 +1,23 @@
+test_airport_asset_preserves_pinned_complete_geometry (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_airport_asset_preserves_pinned_complete_geometry) ... ok
+test_download_never_replaces_concurrently_created_destination (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_download_never_replaces_concurrently_created_destination) ... ok
+test_existing_verified_download_needs_no_network (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_existing_verified_download_needs_no_network) ... ok
+test_fetch_rejects_oversize_and_never_publishes_partial (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_fetch_rejects_oversize_and_never_publishes_partial) ... ok
+test_import_hashes_copy_bytes_and_rolls_back_replaced_source (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_import_hashes_copy_bytes_and_rolls_back_replaced_source) ... ok
+test_interleaved_download_cannot_write_another_producers_partial (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_interleaved_download_cannot_write_another_producers_partial) ... ok
+test_interleaved_projection_cannot_write_verified_partial (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_interleaved_projection_cannot_write_verified_partial) ... ok
+test_live_import_preserves_rows_generated_columns_and_immutability (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_live_import_preserves_rows_generated_columns_and_immutability) ... skipped 'opt-in live importer test'
+test_modified_source_is_rejected (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_modified_source_is_rejected) ... ok
+test_pinned_source_keeps_null_and_zero_coordinates (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_pinned_source_keeps_null_and_zero_coordinates) ... ok
+test_projection_keeps_order_duplicates_outliers_nulls_and_decimal_text (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_projection_keeps_order_duplicates_outliers_nulls_and_decimal_text) ... ok
+test_projection_never_replaces_concurrently_created_destination (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_projection_never_replaces_concurrently_created_destination) ... ok
+test_projection_rejects_malformed_csv_quotes_before_publication (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_projection_rejects_malformed_csv_quotes_before_publication) ... ok
+test_projection_rejects_wrong_hash_header_and_count (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_projection_rejects_wrong_hash_header_and_count) ... ok
+test_truncated_bzip_is_never_published (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_truncated_bzip_is_never_published) ... ok
+test_unpinned_manifest_fails_before_network (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_unpinned_manifest_fails_before_network) ... ok
+test_verify_rejects_malformed_csv_quotes_even_with_matching_pin (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_verify_rejects_malformed_csv_quotes_even_with_matching_pin) ... ok
+test_wrong_header_row_count_and_size_fail_closed (scripts.tests.test_nyc_taxi_corpus.NycCorpusTests.test_wrong_header_row_count_and_size_fail_closed) ... ok
+
+----------------------------------------------------------------------
+Ran 18 tests in 0.023s
+
+OK (skipped=1)
