@@ -1,0 +1,314 @@
+PGACCEL_TEST_START name=test_fork_warmed
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+=== Fork Policy Test (PG postmaster→backend flow) ===
+Parent PID: 38614
+
+Parent: calling pgaccel_prefork_warmup()...
+Parent: pre-fork policy ready, forking...
+
+
+=== Fork cycle 1/8 ===
+Child PID: 38615 (parent was 38614)
+Child: pgaccel_init OK — device=Apple M2 Max backend=metal
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+=== Fork Policy Test (PG postmaster→backend flow) ===
+Parent PID: 38614
+
+Parent: calling pgaccel_prefork_warmup()...
+Parent: pre-fork policy ready, forking...
+
+
+=== Fork cycle 1/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 2/8 ===
+Child PID: 38620 (parent was 38614)
+Child: pgaccel_init OK — device=Apple M2 Max backend=metal
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+=== Fork Policy Test (PG postmaster→backend flow) ===
+Parent PID: 38614
+
+Parent: calling pgaccel_prefork_warmup()...
+Parent: pre-fork policy ready, forking...
+
+
+=== Fork cycle 1/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 2/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 3/8 ===
+Child PID: 38621 (parent was 38614)
+Child: pgaccel_init OK — device=Apple M2 Max backend=metal
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+=== Fork Policy Test (PG postmaster→backend flow) ===
+Parent PID: 38614
+
+Parent: calling pgaccel_prefork_warmup()...
+Parent: pre-fork policy ready, forking...
+
+
+=== Fork cycle 1/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 2/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 3/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 4/8 ===
+Child PID: 38622 (parent was 38614)
+Child: pgaccel_init OK — device=Apple M2 Max backend=metal
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+=== Fork Policy Test (PG postmaster→backend flow) ===
+Parent PID: 38614
+
+Parent: calling pgaccel_prefork_warmup()...
+Parent: pre-fork policy ready, forking...
+
+
+=== Fork cycle 1/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 2/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 3/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 4/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 5/8 ===
+Child PID: 38623 (parent was 38614)
+Child: pgaccel_init OK — device=Apple M2 Max backend=metal
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+=== Fork Policy Test (PG postmaster→backend flow) ===
+Parent PID: 38614
+
+Parent: calling pgaccel_prefork_warmup()...
+Parent: pre-fork policy ready, forking...
+
+
+=== Fork cycle 1/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 2/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 3/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 4/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 5/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 6/8 ===
+Child PID: 38634 (parent was 38614)
+Child: pgaccel_init OK — device=Apple M2 Max backend=metal
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+=== Fork Policy Test (PG postmaster→backend flow) ===
+Parent PID: 38614
+
+Parent: calling pgaccel_prefork_warmup()...
+Parent: pre-fork policy ready, forking...
+
+
+=== Fork cycle 1/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 2/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 3/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 4/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 5/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 6/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 7/8 ===
+Child PID: 38636 (parent was 38614)
+Child: pgaccel_init OK — device=Apple M2 Max backend=metal
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+=== Fork Policy Test (PG postmaster→backend flow) ===
+Parent PID: 38614
+
+Parent: calling pgaccel_prefork_warmup()...
+Parent: pre-fork policy ready, forking...
+
+
+=== Fork cycle 1/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 2/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 3/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 4/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 5/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 6/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 7/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 8/8 ===
+Child PID: 38639 (parent was 38614)
+Child: pgaccel_init OK — device=Apple M2 Max backend=metal
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+=== Fork Policy Test (PG postmaster→backend flow) ===
+Parent PID: 38614
+
+Parent: calling pgaccel_prefork_warmup()...
+Parent: pre-fork policy ready, forking...
+
+
+=== Fork cycle 1/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 2/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 3/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 4/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 5/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 6/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 7/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 8/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Warm-parent failed child reinitialization ===
+pgaccel: fork detected (parent=38614, child=38646) — attempting fresh GPU init
+pgaccel: FATAL: injected failure after fork-state invalidation
+
+PASS: all 8 pre-fork policy GPU cycles completed.
+PGACCEL_TEST_RESULT name=test_fork_warmed exit_code=0 result=PASS raw_lines=312 body_sha256=80d00b288468c2e313682170818b448dc670f4b2b3d996b72fc88dd092fcd281 binding_sha256=9fbcc893dc41ae50e08ad406c129d834f1a00415a686b4ae53a0ba2851e9d433

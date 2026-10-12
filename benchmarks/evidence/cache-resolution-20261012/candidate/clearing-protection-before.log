@@ -1,0 +1,46 @@
+test_clear_protects_effective_tokenized_runtime_base (scripts.tests.test_acpp_cache.CachePathTests.test_clear_protects_effective_tokenized_runtime_base) ... 
+  test_clear_protects_effective_tokenized_runtime_base (scripts.tests.test_acpp_cache.CachePathTests.test_clear_protects_effective_tokenized_runtime_base) (variable='ACPP_APPDB_DIR') ... FAIL
+  test_clear_protects_effective_tokenized_runtime_base (scripts.tests.test_acpp_cache.CachePathTests.test_clear_protects_effective_tokenized_runtime_base) (variable='HIPSYCL_APPDB_DIR') ... FAIL
+test_clear_protects_home_directory_through_alias_identity (scripts.tests.test_acpp_cache.CachePathTests.test_clear_protects_home_directory_through_alias_identity) ... FAIL
+test_clear_rejects_implicit_relative_base_in_distinct_client_cwd (scripts.tests.test_acpp_cache.CachePathTests.test_clear_rejects_implicit_relative_base_in_distinct_client_cwd) ... FAIL
+
+======================================================================
+FAIL: test_clear_protects_effective_tokenized_runtime_base (scripts.tests.test_acpp_cache.CachePathTests.test_clear_protects_effective_tokenized_runtime_base) (variable='ACPP_APPDB_DIR')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/pgaccel-cache-resolution.PtRG1h/scripts/tests/test_acpp_cache.py", line 97, in test_clear_protects_effective_tokenized_runtime_base
+    with self.assertRaisesRegex(acpp_cache.CachePathError, "base"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: CachePathError not raised
+
+======================================================================
+FAIL: test_clear_protects_effective_tokenized_runtime_base (scripts.tests.test_acpp_cache.CachePathTests.test_clear_protects_effective_tokenized_runtime_base) (variable='HIPSYCL_APPDB_DIR')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/pgaccel-cache-resolution.PtRG1h/scripts/tests/test_acpp_cache.py", line 97, in test_clear_protects_effective_tokenized_runtime_base
+    with self.assertRaisesRegex(acpp_cache.CachePathError, "base"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: CachePathError not raised
+
+======================================================================
+FAIL: test_clear_protects_home_directory_through_alias_identity (scripts.tests.test_acpp_cache.CachePathTests.test_clear_protects_home_directory_through_alias_identity)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/pgaccel-cache-resolution.PtRG1h/scripts/tests/test_acpp_cache.py", line 112, in test_clear_protects_home_directory_through_alias_identity
+    with self.assertRaisesRegex(acpp_cache.CachePathError, "home"):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: CachePathError not raised
+
+======================================================================
+FAIL: test_clear_rejects_implicit_relative_base_in_distinct_client_cwd (scripts.tests.test_acpp_cache.CachePathTests.test_clear_rejects_implicit_relative_base_in_distinct_client_cwd)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/pgaccel-cache-resolution.PtRG1h/scripts/tests/test_acpp_cache.py", line 140, in test_clear_rejects_implicit_relative_base_in_distinct_client_cwd
+    self.assertNotEqual(result.returncode, 0)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 0 == 0
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.047s
+
+FAILED (failures=4)

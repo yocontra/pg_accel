@@ -1,0 +1,65 @@
+PGACCEL_TEST_START name=test_fp64_mul_probe
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/9006912424214334792.8662441930426779175.metalar.49324.17370796658623709695.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/4522639862724633842.16838675006504571002.metalar.49324.16746243155226646545.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/4522639862724633842.15953365034819882766.metalar.49324.514716994068819133.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/16573259895399976642.8662441930426779175.metalar.49324.18012430358648813361.tmp (kernels_added=1 skipped=0)
+
+=== Probe A: v * v (same SSA) ===
+  v*v                          got=1 (0x3ff0000000000000)  expected=1 (0x3ff0000000000000)  xor=0x0000000000000000  OK
+  v*v                          got=0.25 (0x3fd0000000000000)  expected=0.25 (0x3fd0000000000000)  xor=0x0000000000000000  OK
+  v*v                          got=4 (0x4010000000000000)  expected=4 (0x4010000000000000)  xor=0x0000000000000000  OK
+  v*v                          got=9 (0x4022000000000000)  expected=9 (0x4022000000000000)  xor=0x0000000000000000  OK
+  v*v                          got=10000 (0x40c3880000000000)  expected=10000 (0x40c3880000000000)  xor=0x0000000000000000  OK
+  v*v                          got=2.25 (0x4002000000000000)  expected=2.25 (0x4002000000000000)  xor=0x0000000000000000  OK
+  v*v                          got=1e-300 (0x01a56e1fc2f8f359)  expected=1e-300 (0x01a56e1fc2f8f359)  xor=0x0000000000000000  OK
+  v*v                          got=16 (0x4030000000000000)  expected=16 (0x4030000000000000)  xor=0x0000000000000000  OK
+
+=== Probe B: v * w (separate loads of same addr) ===
+  v*w                          got=1 (0x3ff0000000000000)  expected=1 (0x3ff0000000000000)  xor=0x0000000000000000  OK
+  v*w                          got=0.25 (0x3fd0000000000000)  expected=0.25 (0x3fd0000000000000)  xor=0x0000000000000000  OK
+  v*w                          got=4 (0x4010000000000000)  expected=4 (0x4010000000000000)  xor=0x0000000000000000  OK
+  v*w                          got=9 (0x4022000000000000)  expected=9 (0x4022000000000000)  xor=0x0000000000000000  OK
+  v*w                          got=10000 (0x40c3880000000000)  expected=10000 (0x40c3880000000000)  xor=0x0000000000000000  OK
+  v*w                          got=2.25 (0x4002000000000000)  expected=2.25 (0x4002000000000000)  xor=0x0000000000000000  OK
+  v*w                          got=1e-300 (0x01a56e1fc2f8f359)  expected=1e-300 (0x01a56e1fc2f8f359)  xor=0x0000000000000000  OK
+  v*w                          got=16 (0x4030000000000000)  expected=16 (0x4030000000000000)  xor=0x0000000000000000  OK
+
+=== Probe C: v * 2.0 (immediate const operand) ===
+  v*2.0                        got=2 (0x4000000000000000)  expected=2 (0x4000000000000000)  xor=0x0000000000000000  OK
+  v*2.0                        got=1 (0x3ff0000000000000)  expected=1 (0x3ff0000000000000)  xor=0x0000000000000000  OK
+  v*2.0                        got=4 (0x4010000000000000)  expected=4 (0x4010000000000000)  xor=0x0000000000000000  OK
+  v*2.0                        got=6 (0x4018000000000000)  expected=6 (0x4018000000000000)  xor=0x0000000000000000  OK
+  v*2.0                        got=-200 (0xc069000000000000)  expected=-200 (0xc069000000000000)  xor=0x0000000000000000  OK
+  v*2.0                        got=3 (0x4008000000000000)  expected=3 (0x4008000000000000)  xor=0x0000000000000000  OK
+  v*2.0                        got=2e-150 (0x20da2fe76a3f9475)  expected=2e-150 (0x20da2fe76a3f9475)  xor=0x0000000000000000  OK
+  v*2.0                        got=8 (0x4020000000000000)  expected=8 (0x4020000000000000)  xor=0x0000000000000000  OK
+
+=== Probe D: v + v (pure add, control) ===
+  v+v                          got=2 (0x4000000000000000)  expected=2 (0x4000000000000000)  xor=0x0000000000000000  OK
+  v+v                          got=1 (0x3ff0000000000000)  expected=1 (0x3ff0000000000000)  xor=0x0000000000000000  OK
+  v+v                          got=4 (0x4010000000000000)  expected=4 (0x4010000000000000)  xor=0x0000000000000000  OK
+  v+v                          got=6 (0x4018000000000000)  expected=6 (0x4018000000000000)  xor=0x0000000000000000  OK
+  v+v                          got=-200 (0xc069000000000000)  expected=-200 (0xc069000000000000)  xor=0x0000000000000000  OK
+  v+v                          got=3 (0x4008000000000000)  expected=3 (0x4008000000000000)  xor=0x0000000000000000  OK
+  v+v                          got=2e-150 (0x20da2fe76a3f9475)  expected=2e-150 (0x20da2fe76a3f9475)  xor=0x0000000000000000  OK
+  v+v                          got=8 (0x4020000000000000)  expected=8 (0x4020000000000000)  xor=0x0000000000000000  OK
+
+=== Ratio summary (got/expected) ===
+  in=1  v*v_ratio=1  v*w_ratio=1  v*2.0_ratio=1
+  in=0.5  v*v_ratio=1  v*w_ratio=1  v*2.0_ratio=1
+  in=2  v*v_ratio=1  v*w_ratio=1  v*2.0_ratio=1
+  in=3  v*v_ratio=1  v*w_ratio=1  v*2.0_ratio=1
+  in=-100  v*v_ratio=1  v*w_ratio=1  v*2.0_ratio=1
+  in=1.5  v*v_ratio=1  v*w_ratio=1  v*2.0_ratio=1
+  in=1e-150  v*v_ratio=1  v*w_ratio=1  v*2.0_ratio=1
+  in=4  v*v_ratio=1  v*w_ratio=1  v*2.0_ratio=1
+PGACCEL_TEST_RESULT name=test_fp64_mul_probe exit_code=0 result=PASS raw_lines=63 body_sha256=f920d20dfcf0aece237a5d5ba75c57248ceece41c9ae5a25e85850f502e5a5e0 binding_sha256=dbeb3a35c7679c76fe7ce98419d803f787847c9dce78fd853e2be484494b6e25

@@ -370,6 +370,10 @@ target_link_libraries(test_kernel_failure_status PRIVATE pgaccel_kernels_shared)
 add_executable(test_host_api_contract test/test_host_api_contract.cpp)
 target_link_libraries(test_host_api_contract PRIVATE pgaccel_kernels_shared)
 
+# Read-only path/count contracts run without pgaccel_init or a GPU.
+add_executable(test_archive_cache_path test/test_archive_cache_path.cpp)
+target_link_libraries(test_archive_cache_path PRIVATE pgaccel_kernels_shared AdaptiveCpp::acpp-common)
+
 enable_testing()
 find_package(Python3 COMPONENTS Interpreter QUIET)
 set(PGACCEL_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
@@ -398,6 +402,8 @@ endfunction()
 
 add_pgaccel_gpu_test(test_host_api_contract)
 set_tests_properties(test_host_api_contract PROPERTIES LABELS host)
+add_pgaccel_gpu_test(test_archive_cache_path)
+set_tests_properties(test_archive_cache_path PROPERTIES LABELS host)
 add_pgaccel_gpu_test(test_join_rows_layout)
 set_tests_properties(test_join_rows_layout PROPERTIES LABELS host)
 add_pgaccel_gpu_test(test_raster_lookup)

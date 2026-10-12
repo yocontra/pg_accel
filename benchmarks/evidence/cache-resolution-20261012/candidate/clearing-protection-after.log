@@ -1,0 +1,19 @@
+test_clear_preserves_decoys_and_never_traverses_symlinks (scripts.tests.test_acpp_cache.CachePathTests.test_clear_preserves_decoys_and_never_traverses_symlinks) ... ok
+test_clear_protects_effective_tokenized_runtime_base (scripts.tests.test_acpp_cache.CachePathTests.test_clear_protects_effective_tokenized_runtime_base) ... ok
+test_clear_protects_home_directory_through_alias_identity (scripts.tests.test_acpp_cache.CachePathTests.test_clear_protects_home_directory_through_alias_identity) ... ok
+test_clear_refuses_unsafe_targets_before_mutation (scripts.tests.test_acpp_cache.CachePathTests.test_clear_refuses_unsafe_targets_before_mutation) ... ok
+test_clear_rejects_implicit_relative_base_in_distinct_client_cwd (scripts.tests.test_acpp_cache.CachePathTests.test_clear_rejects_implicit_relative_base_in_distinct_client_cwd) ... ok
+test_cli_explicit_path_and_recipe_environment_propagation (scripts.tests.test_acpp_cache.CachePathTests.test_cli_explicit_path_and_recipe_environment_propagation) ... ok
+test_diagnostic_cache_section_uses_shared_resolver (scripts.tests.test_acpp_cache.CachePathTests.test_diagnostic_cache_section_uses_shared_resolver) ... ok
+test_explicit_target_reaches_all_nested_cold_recipes (scripts.tests.test_acpp_cache.CachePathTests.test_explicit_target_reaches_all_nested_cold_recipes) ... ok
+test_explicit_tool_target_precedence_and_invalid_values (scripts.tests.test_acpp_cache.CachePathTests.test_explicit_tool_target_precedence_and_invalid_values) ... ok
+test_native_fresh_process_parity (scripts.tests.test_acpp_cache.CachePathTests.test_native_fresh_process_parity) ... ok
+test_passwd_and_cwd_fallback (scripts.tests.test_acpp_cache.CachePathTests.test_passwd_and_cwd_fallback) ... ok
+test_resolution_never_creates_files (scripts.tests.test_acpp_cache.CachePathTests.test_resolution_never_creates_files) ... ok
+test_runtime_environment_precedence_and_token_rules (scripts.tests.test_acpp_cache.CachePathTests.test_runtime_environment_precedence_and_token_rules) ... ok
+test_target_swap_after_preflight_cannot_delete_replacement (scripts.tests.test_acpp_cache.CachePathTests.test_target_swap_after_preflight_cannot_delete_replacement) ... ok
+
+----------------------------------------------------------------------
+Ran 14 tests in 1.210s
+
+OK

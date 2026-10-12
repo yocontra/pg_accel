@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "kind": "metadata-link-binding",
+  "working_directory": "/Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/build",
+  "library": "/Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/build/libpgaccel_kernels_shared.dylib",
+  "library_sha256": "1003547ca0517131fc39ee9dff1b720289a33eb7bd12126e229472b5fb6db252",
+  "linker_map": "/Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/build/libpgaccel_kernels_shared.dylib.map",
+  "map_sha256": "3f9da49e485ed3c6b644c4c971801fcdad274fec9abae36c326243bfcf14fdf3",
+  "object": "/Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/build/CMakeFiles/pgaccel_metadata.dir/Release/join_rows_layout.cpp.o",
+  "object_sha256": "a40bd621185f95de594499e53f13838e92fc81026f3c036a280c46849e325531",
+  "receipt_sha256": "739bd5a453ce8eaf51178d8fc9a9691b1423e7c0e2920017f611665de4f37021",
+  "link_driver_sha256": "bd3d6c5ade817e3e00bf82191c6cb614b70d13f41e73ce7f36b8a0e5c0ae19cb",
+  "exports": {
+    "pgaccel_join_rows_controlled_workspace_bytes": 2537352,
+    "pgaccel_join_rows_workspace_bytes": 2534268
+  }
+}

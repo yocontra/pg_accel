@@ -11,10 +11,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "metal_stress_artifacts.py"
+sys.path.insert(0, str(SCRIPT.parent))
 SPEC = importlib.util.spec_from_file_location("metal_stress_artifacts", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 artifacts = importlib.util.module_from_spec(SPEC)
@@ -155,6 +157,23 @@ def valid_archive_log(
 
 
 class CacheMeasurementTests(unittest.TestCase):
+    def test_cache_resolution_uses_shared_runtime_base_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            actual = root / "override/apps/global/jit-cache"
+            actual.mkdir(parents=True)
+            (actual / "a.metalar").write_bytes(b"real")
+            old = root / "override/global/jit-cache"
+            old.mkdir(parents=True)
+            (old / "decoy.metalar").write_bytes(b"wrong")
+            with patch.dict("os.environ", {"ACPP_APPDB_DIR": str(root / "override")}, clear=True), patch("acpp_cache.sys.platform", "darwin"):
+                self.assertEqual(artifacts.resolve_cache_dir(), actual)
+                measured = artifacts.measure_cache(artifacts.resolve_cache_dir(), "fixture")
+                self.assertEqual(measured["measurements"]["metalar"]["total_bytes"], 4)
+            with patch.dict("os.environ", {"PGACCEL_ACPP_CACHE_DIR": ""}, clear=True):
+                with self.assertRaises(artifacts.ArtifactContractError):
+                    artifacts.resolve_cache_dir()
+
     def test_snapshot_records_archive_jit_other_counts_and_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             cache = Path(temporary) / "jit-cache"

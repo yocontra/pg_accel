@@ -1,0 +1,21 @@
+PGACCEL_TEST_START name=test_spatial_dispatch
+spatial_dispatch tests
+  empty_inputs                                       OK
+  legacy_cross_product_declines                      OK
+  pairwise_recheck_boundaries                        OK
+  malformed_pairwise_rings_decline_before_dispatch   OK
+  pairwise_contract_and_geometry_boundaries          OK
+  points_vs_polygon                                  OK
+  all_bbox_miss                                      OK
+  point_vs_point                                     OK
+  line_vs_line                                       OK
+  pairwise_reverse_polygon_and_line_boundaries       OK
+  unknown_geom_type                                  OK
+  total_partitioning                                 OK
+  point_in_polygon_bulk_simple_100k_selectivity_sweep OK
+  point_in_polygon_bulk_coop_1024v_100k              OK
+  point_in_polygon_ring_and_hole_boundaries          OK
+  unsupported_pairs_are_uncertain                    OK
+
+16 passed, 0 failed
+PGACCEL_TEST_RESULT name=test_spatial_dispatch exit_code=0 result=PASS raw_lines=19 body_sha256=4b8270b09478e4276986f91b896bbec3dbd8812f97e7f8c308f6d5dd567e332b binding_sha256=404c7b52097f5246a91d7f52674cf07e70915cd7d4bbe4b7fbd9e81e6c203825

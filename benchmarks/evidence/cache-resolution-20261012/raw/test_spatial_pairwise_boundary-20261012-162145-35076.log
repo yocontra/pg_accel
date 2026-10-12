@@ -1,0 +1,15 @@
+PGACCEL_TEST_START name=test_spatial_pairwise_boundary
+PASS rows=0
+PASS rows=1
+PASS rows=255
+PASS rows=256
+PASS rows=65535
+PASS rows=65536
+PASS rows=65537
+PASS rows=79999
+PASS rows=80000
+PASS rows=99999
+PASS rows=100000
+PASS rows=150000
+PASS rows=150001
+PGACCEL_TEST_RESULT name=test_spatial_pairwise_boundary exit_code=0 result=PASS raw_lines=13 body_sha256=3cc73a41371bd8d0752af2b95066182054313be20ecc8ee8009d5c2fc659c73f binding_sha256=c0372bab1811932704d8a63e6eaa30d4146cd6c692e2d8612ce3e2581510c24f

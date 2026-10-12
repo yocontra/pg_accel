@@ -27,6 +27,7 @@ class EnvironmentRestore {
   EnvironmentRestore() {
     save("ACPP_APPDB_DIR");
     save("HOME");
+    save("XDG_DATA_HOME");
   }
 
   EnvironmentRestore(const EnvironmentRestore&) = delete;
@@ -255,15 +256,18 @@ void test_host_runtime_contracts() {
   std::filesystem::remove_all(root, error);
   error.clear();
 
-  const std::filesystem::path appdb = root / "apps";
-  const std::filesystem::path cache = appdb / "global" / "jit-cache";
+  const std::filesystem::path appdb = root / "base";
   require(setenv("ACPP_APPDB_DIR", appdb.c_str(), 1) == 0,
           "archive override environment is writable");
   unsetenv("HOME");
 
   require(pgaccel_archive_jit_cache_dir(buffer, sizeof(buffer)) == PGACCEL_OK,
           "archive path honors ACPP_APPDB_DIR");
-  require(std::filesystem::path(buffer) == cache, "archive override path is exact");
+  const std::filesystem::path cache{buffer};
+  require(cache.parent_path().parent_path() == appdb / "apps", "archive override apps layer is exact");
+#ifdef __APPLE__
+  require(cache == appdb / "apps" / "global" / "jit-cache", "Metal global cache path is exact");
+#endif
   char tiny[2] = {'x', 'x'};
   require(pgaccel_archive_jit_cache_dir(tiny, sizeof(tiny)) == PGACCEL_ERROR && tiny[0] == '\0',
           "archive path rejects truncation and clears output");
@@ -290,15 +294,12 @@ void test_host_runtime_contracts() {
           "archive snapshot classifies paired, orphan, and JIT files");
 
   require(setenv("ACPP_APPDB_DIR", "", 1) == 0, "empty archive override is writable");
-  unsetenv("HOME");
-  snapshot.metallib_files = 99;
-  require(pgaccel_archive_stats_snapshot(&snapshot) == PGACCEL_ERROR &&
-              snapshot.metallib_files == 0,
-          "archive snapshot rejects an unresolved cache root and clears output");
-  buffer[0] = 'x';
-  require(pgaccel_archive_jit_cache_dir(buffer, sizeof(buffer)) == PGACCEL_ERROR &&
-              buffer[0] == '\0',
-          "archive path rejects an unresolved cache root and clears output");
+  const auto fallback = root / "xdg";
+  require(setenv("XDG_DATA_HOME", fallback.c_str(), 1) == 0, "XDG fallback is writable");
+  require(pgaccel_archive_jit_cache_dir(buffer, sizeof(buffer)) == PGACCEL_OK &&
+              std::filesystem::path(buffer).parent_path().parent_path() == fallback / "acpp" / "apps",
+          "empty override uses runtime XDG fallback");
+  require(!std::filesystem::exists(fallback), "fallback resolution does not initialize storage");
 
   std::filesystem::remove_all(root, error);
   require(!error, "archive fixture cleanup succeeds");

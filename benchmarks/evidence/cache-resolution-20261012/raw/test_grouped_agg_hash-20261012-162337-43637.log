@@ -1,0 +1,90 @@
+PGACCEL_TEST_START name=test_grouped_agg_hash
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+--- hash COUNT(column) metadata contracts (no device initialization) ---
+--- hash FILTER metadata contracts (protected row storage) ---
+--- Boolean/NULL SQL mask exhaustive byte pairs and exact output spans ---
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/15645957498266366212.7680845920647621527.metalar.43638.15725224365094626585.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/12742463291825261128.3927193039924703950.metalar.43638.12400291145504616356.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/4939212832255122260.12926595982601698438.metalar.43638.13094454320207201368.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/2574708908066720270.7745327627911445479.metalar.43638.4791258914782954990.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/7819755321666386692.8197571623496365072.metalar.43638.1514951649329093322.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/14690400167917884164.2363311082623587089.metalar.43638.10150353567181869057.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/14171431133706346120.8197571623496365072.metalar.43638.9282680673086492030.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/9605769421955569320.7745327627911445479.metalar.43638.9436062025511297657.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/8425344857425537224.8197571623496365072.metalar.43638.4738763744012913676.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/17128233800462945510.8197571623496365072.metalar.43638.6157538518615508987.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/14690400167917884164.1875108273136232971.metalar.43638.13638665177750972284.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/14690400167917884164.8571605966862131823.metalar.43638.14882824151208841145.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/14690400167917884164.12880123478475754453.metalar.43638.9579664553918400934.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/14690400167917884164.2557712728330269115.metalar.43638.4956746941906234358.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/13810581291822887598.8197571623496365072.metalar.43638.14866514521459623842.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/14690400167917884164.9951919299720129677.metalar.43638.10838471173141403711.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/16555657627412307434.8197571623496365072.metalar.43638.15197627517520205974.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/3577875019036991826.3827486203047508494.metalar.43638.5741788255909212943.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/14690400167917884164.16353365056051816361.metalar.43638.17306454643886413246.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/485210627829320754.8197571623496365072.metalar.43638.6155030362996905596.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/14690400167917884164.9497407897885860251.metalar.43638.12936253468514152302.tmp (kernels_added=1 skipped=0)
+--- hash COUNT(column) exact NULL groups, types, merge sort, and failures ---
+--- hash FILTER preserves zero-count groups, NULLs, failures and retries ---
+--- hash WHERE states, independent FILTER, empty input and failure barriers ---
+--- hash INT32 extrema: subsets, sort alignment, NULLs and failure barriers ---
+--- hash duplicates/nulls/high-bits/collisions/warm workspace ---
+--- hash empty/all-null/capacity boundaries ---
+--- hash fixed-seed differential ---
+--- hash million-row hot groups ---
+--- parallel hash compaction/sort, non-power-of-two cardinalities ---
+parallel case: groups=16383 nullable=0
+parallel case: groups=16383 nullable=1
+parallel case: groups=16385 nullable=0
+parallel case: groups=16385 nullable=1
+parallel case: groups=32771 nullable=0
+parallel case: groups=32771 nullable=1
+parallel case: groups=1048583 nullable=0
+parallel case: groups=1048583 nullable=1
+--- hash qualification ceiling: 16Mi distinct groups including NULL ---
+--- fused H3 parent hash exactness/validation ---
+--- hash hard failure and unsupported shapes ---
+test_grouped_agg_hash: 10309427 passed, 0 failed
+PGACCEL_TEST_RESULT name=test_grouped_agg_hash exit_code=0 result=PASS raw_lines=88 body_sha256=d3161435ea8dfe2d162c23d33ea504e7703da9c10ca4c8fd28b2c48419fa536a binding_sha256=3d3bc534618fd4d170318607d02f51a5e237da24a220d9d23739fb6688d83036

@@ -1,0 +1,80 @@
+PGACCEL_TEST_START name=test_correctness
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+=== pgaccel Phase 8 correctness tests ===
+
+
+== Spatial Predicates ==
+--- point_in_ring: point exactly on edge ---
+--- point_in_ring: point exactly on vertex ---
+--- point_in_ring: degenerate ring (2 points) ---
+--- point_in_ring: all identical vertices ---
+--- point_in_ring: large ring (1000 vertices circle) ---
+--- point_in_ring: bulk with 0 points ---
+--- point_in_ring: bulk with 1 point ---
+--- point_in_ring: concave L-shaped polygon ---
+--- point_in_ring: fp32 near edge ---
+--- sphere_distance: identical points (distance=0) ---
+--- sphere_distance: antipodal points ---
+--- sphere_distance: near-antipodal points ---
+--- sphere_distance: points at poles ---
+--- sphere_distance: bulk with 0 pairs ---
+--- sphere_distance: fp32 very close points ---
+--- sphere_distance: batch with mixed definite/uncertain ---
+--- segment_intersects: collinear segments ---
+--- segment_intersects: touching at endpoint ---
+--- segment_intersects: parallel non-overlapping ---
+--- segment_intersects: perpendicular crossing ---
+--- segment_intersects: bulk with 0 segments ---
+--- segment_intersects: T-junction ---
+--- segment_intersects: L-shaped endpoint ---
+--- segment_intersects: nearly parallel ---
+
+== Spatial Dispatch ==
+--- dispatch: 0 geometries in A ---
+--- dispatch: 0 geometries in B ---
+--- dispatch: point vs point (equal within epsilon) ---
+--- dispatch: point vs point (not equal) ---
+--- dispatch: linestring vs linestring crossing ---
+--- dispatch: linestring vs linestring parallel ---
+--- dispatch: polygon with hole, point in hole ---
+--- dispatch: polygon with hole, point in shell ---
+--- dispatch: unknown geometry type ---
+--- dispatch: geometry with NULL bbox ---
+
+== H3 ==
+--- h3: get_resolution 0 through 15 ---
+--- h3: cell_to_parent same resolution ---
+--- h3: cell_to_parent resolution 0 ---
+--- h3: grid_distance same cell ---
+--- h3: grid_distance adjacent cells ---
+--- h3: grid_distance different resolutions ---
+--- h3: cell_to_parent higher resolution ---
+--- h3: lat_lng_to_cell at poles ---
+--- h3: lat_lng_to_cell at antimeridian ---
+--- h3: lat_lng_to_cell at origin ---
+--- h3: lat_lng_to_cell bulk with 0 elements ---
+--- h3: lat_lng_to_cell fp32 at low resolution ---
+--- h3: lat_lng_to_cell fp32 at high resolution ---
+--- h3: get_resolution on invalid cell ---
+
+== Bbox ==
+--- bbox: identical boxes ---
+--- bbox: touching at edge ---
+--- bbox: touching at corner ---
+--- bbox: zero-area box (point) ---
+--- bbox: 0 elements in A ---
+--- bbox: 0 elements in B ---
+--- bbox: large batch (100x100) ---
+--- bbox: fully separated boxes ---
+--- bbox: one box inside another ---
+
+== fp64 round-trip ==
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/13550929976417525968.3630016113370476072.metalar.38059.14763440794116640832.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/15920992504126014958.16579445338544003125.metalar.38059.9384815215420629366.tmp (kernels_added=1 skipped=0)
+
+=== Results: 247/247 passed ===
+PGACCEL_TEST_RESULT name=test_correctness exit_code=0 result=PASS raw_lines=78 body_sha256=5206feb44f5dc0fb33fb294de227c757808eb79a1938c6ef288d695f64156470 binding_sha256=87f5218a8df21f038f41fa6aadddb6b5803a61f5cdc7df6fb4e10e44fd466c1d

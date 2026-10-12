@@ -1,0 +1,19 @@
+2026-10-12T23:19:46Z START configure
+2026-10-12T23:19:52Z END configure exit=0
+2026-10-12T23:19:52Z START build
+2026-10-12T23:21:27Z END build exit=0
+2026-10-12T23:21:27Z START ctest-manifest
+2026-10-12T23:21:27Z END ctest-manifest exit=0
+2026-10-12T23:21:27Z START ctest
+2026-10-12T23:27:04Z END ctest exit=0
+2026-10-12T23:27:04Z START python
+2026-10-12T23:27:07Z END python exit=0
+2026-10-12T23:27:07Z START shell
+2026-10-12T23:27:07Z END shell exit=0
+2026-10-12T23:27:07Z START just
+2026-10-12T23:27:07Z END just exit=0
+2026-10-12T23:27:07Z START actionlint
+2026-10-12T23:27:07Z END actionlint exit=0
+2026-10-12T23:27:07Z START cpu-audit
+2026-10-12T23:36:14Z END cpu-audit exit=1
+SUMMARY ctest=0 python=0 shell=0 just=0 actionlint=0 audit=1 source_identity=0

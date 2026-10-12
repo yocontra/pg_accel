@@ -1,0 +1,31 @@
+PGACCEL_TEST_START name=test_fork_cold
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+=== Cold Fork GPU Test ===
+Parent PID: 38648
+Parent does NOT call pgaccel_init() — no Metal state to inherit.
+
+Parent: forking WITHOUT any GPU initialization...
+
+Child PID: 38649 (parent was 38648)
+Child: calling pgaccel_init() — first-ever GPU init in this process tree branch...
+Child: pgaccel_init OK!
+Child: device=Apple M2 Max backend=metal compute_units=38 fp64=0
+Child: cold resident shared-USM round trip OK
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+=== Cold Fork GPU Test ===
+Parent PID: 38648
+Parent does NOT call pgaccel_init() — no Metal state to inherit.
+
+Parent: forking WITHOUT any GPU initialization...
+
+=== Final Result ===
+PASS: Cold Metal init after fork WORKS.
+→ Direct Metal dispatch in forked backends confirmed.
+PGACCEL_TEST_RESULT name=test_fork_cold exit_code=0 result=PASS raw_lines=29 body_sha256=f4dba431084f1b973638d44b04b165aa7a139a4632ee032c85ac0fc6fd7225dd binding_sha256=3fe2ace11056304bf0a30e6e14f11b7fa94f30b0b20ff37cf6e08e4b810c068d

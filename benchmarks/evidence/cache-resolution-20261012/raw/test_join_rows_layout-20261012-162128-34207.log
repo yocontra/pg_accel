@@ -1,0 +1,3 @@
+PGACCEL_TEST_START name=test_join_rows_layout
+join layout: 40389 passed, 0 failed (no GPU initialization)
+PGACCEL_TEST_RESULT name=test_join_rows_layout exit_code=0 result=PASS raw_lines=1 body_sha256=e0846c36966b821225e73bc46c00f95104b2edc28650acefd195f9cd26824cfa binding_sha256=ab0740e0243f95daee1501b7c8311723d7babdc4edaf52a83dd889c91609146f

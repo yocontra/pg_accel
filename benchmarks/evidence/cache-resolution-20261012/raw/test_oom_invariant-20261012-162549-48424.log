@@ -1,0 +1,43 @@
+PGACCEL_TEST_START name=test_oom_invariant
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+Device: Apple M2 Max backend=metal has_native_fp64=0 max_alloc_bytes=41747087360
+PGACCEL_DEVICE_PROOF device="Apple M2 Max" backend="metal" compute_units=38 max_alloc_bytes=41747087360 real_device=1
+
+Plan:
+  N (doubles) = 2 * max_alloc / sizeof(double) = 10436771840
+  N_capped    = 268435456 (2.15 GB per-family input)
+  RSS ceiling = 3 * max_alloc = 125.24 GB
+
+-- reduce_f64 @ N=268435456 (2.00 GB raw input) --
+   status=0 (OK=1) got=268435456 expected=268435456 correct=1  dispatches=1 rss_before=2.19GB peak=4.34GB delta=2.15GB ceiling=125.24GB under=1
+
+-- expr_vm_f64 @ values=268435456 (2.00 GB logical raw input, 8 cols x 33554432 rows) --
+   status=0 (OK=1) values_ok=1 processed_values=268435456 logical_bytes=2147483648 rss_before=4.38GB peak=4.38GB delta=0.00GB ceiling=125.24GB dispatches=64 under=1
+
+-- grouped_agg_i32_mul @ rows=67108864 (2.00 GB logical input, 32 B/row: 3 int32 keys + 3 int32 dimension keys + 2 int32 MUL inputs, 65536 groups) --
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/14690400167917884164.9881740886483571005.metalar.48425.9655810756984096024.tmp (kernels_added=1 skipped=0)
+   status=0 detail=0 status_ok=1 correct=1 processed_rows=67108864 lifecycle_calls=69 logical_bytes=2147483648 rss_before=4.38GB peak=4.41GB delta=0.03GB ceiling=125.24GB dispatches=69 under=1
+
+-- spatial_f64 (PIP) @ N=134217728 points (2.00 GB raw input) --
+   status=0 (OK=1) all_inside=1  rss_before=4.55GB peak=6.51GB delta=1.97GB ceiling=125.24GB dispatches=1 under=1
+
+-- h3_f64 @ N=134217728 (2.00 GB raw lat+lng input) --
+   status=0 (OK=1) all_same_valid=1  rss_before=7.79GB peak=8.87GB delta=1.08GB ceiling=125.24GB dispatches=129 under=1
+
+=== OOM-never invariant summary ===
+  reduce_f64     PASS  peak_rss=4.34GB ceiling=125.24GB status_ok=1 correct=1 under_ceiling=1 note=""
+PGACCEL_OOM_FAMILY family=reduce_f64 result=PASS dispatches=1 peak_rss_bytes=4344102912 rss_baseline_bytes=2194456576 rss_delta_bytes=2149646336 rss_limit_bytes=125241262080
+  expr_vm_f64    PASS  peak_rss=4.38GB ceiling=125.24GB status_ok=1 correct=1 under_ceiling=1 note=""
+PGACCEL_OOM_FAMILY family=expr_vm_f64 result=PASS dispatches=64 peak_rss_bytes=4378476544 rss_baseline_bytes=4377673728 rss_delta_bytes=802816 rss_limit_bytes=125241262080
+  grouped_agg_i32_mul PASS  peak_rss=4.41GB ceiling=125.24GB status_ok=1 correct=1 under_ceiling=1 note=""
+PGACCEL_OOM_FAMILY family=grouped_agg_i32_mul result=PASS dispatches=69 peak_rss_bytes=4411162624 rss_baseline_bytes=4378476544 rss_delta_bytes=32686080 rss_limit_bytes=125241262080
+  spatial_f64    PASS  peak_rss=6.51GB ceiling=125.24GB status_ok=1 correct=1 under_ceiling=1 note=""
+PGACCEL_OOM_FAMILY family=spatial_f64 result=PASS dispatches=1 peak_rss_bytes=6513360896 rss_baseline_bytes=4545363968 rss_delta_bytes=1967996928 rss_limit_bytes=125241262080
+  h3_f64         PASS  peak_rss=8.87GB ceiling=125.24GB status_ok=1 correct=1 under_ceiling=1 note=""
+PGACCEL_OOM_FAMILY family=h3_f64 result=PASS dispatches=129 peak_rss_bytes=8869789696 rss_baseline_bytes=7788183552 rss_delta_bytes=1081606144 rss_limit_bytes=125241262080
+PGACCEL_OOM_INVARIANT result=PASS families=5 max_alloc_bytes=41747087360 input_doubles=268435456 rss_limit_bytes=125241262080
+
+PASS — all live kernel families honor OOM-never invariant.
+PGACCEL_TEST_RESULT name=test_oom_invariant exit_code=0 result=PASS raw_lines=41 body_sha256=a8afb1d4fe300edc249840a7185918c3a0be4e5ee858e27b02a45dc4b7a10cce binding_sha256=dfdd0177b8514025cad4ce1a419fae850eb929636ec35bc38eda1d1c6b8e531b

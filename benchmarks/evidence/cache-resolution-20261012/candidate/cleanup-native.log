@@ -1,0 +1,3 @@
+archive path host checks: PASS
+00000001000071a4 T _pgaccel_archive_jit_cache_dir
+0000000100006354 T _pgaccel_archive_stats_snapshot

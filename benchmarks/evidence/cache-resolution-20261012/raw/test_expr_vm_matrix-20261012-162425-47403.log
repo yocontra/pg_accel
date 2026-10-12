@@ -1,0 +1,28 @@
+PGACCEL_TEST_START name=test_expr_vm_matrix
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+test_expr_vm_matrix no-device: 5 check(s)
+test_expr_vm_matrix no-device: 0 failure(s)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/9450157488126810516.16438609993866474665.metalar.47404.2706535175155110449.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/4989390578195973678.16438609993866474665.metalar.47404.1317567415746883647.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/11684871488776710216.15512229678258746914.metalar.47404.5468563944107416614.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/6019400534160191300.5254335597871926935.metalar.47404.7983982165077089337.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/11684871488776710216.4984755661368253500.metalar.47404.1829560687320879771.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/11684871488776710216.2261015541468216542.metalar.47404.17489866421433505994.tmp (kernels_added=1 skipped=0)
+test_expr_vm_matrix: 231 check(s)
+test_expr_vm_matrix: 0 failure(s)
+PGACCEL_TEST_RESULT name=test_expr_vm_matrix exit_code=0 result=PASS raw_lines=26 body_sha256=a5a25c32330299959faa4fdb9686f4c80992b30330b4018ec741cc8b6f3c3e66 binding_sha256=3c25f1221160c51b066e95df76686f914b01b94df0bbd55686fa09705e26ae51

@@ -1,0 +1,5 @@
+pgaccel-kernels/CMakeLists.txt: OK
+Justfile: OK
+.github/workflows/ci.yml: OK
+.acpp-version: OK
+Cargo.toml: OK

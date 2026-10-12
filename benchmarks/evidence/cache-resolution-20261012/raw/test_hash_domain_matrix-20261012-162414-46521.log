@@ -1,0 +1,11 @@
+PGACCEL_TEST_START name=test_hash_domain_matrix
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+=== pgaccel hash domain matrix ===
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/15647454366847382928.17515858964206451973.metalar.46522.8974542011892546586.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/4939582667055833024.2412196289837571745.metalar.46522.6934129415034127946.tmp (kernels_added=1 skipped=0)
+failures=0
+PGACCEL_TEST_RESULT name=test_hash_domain_matrix exit_code=0 result=PASS raw_lines=9 body_sha256=a1d2d2b19f29e84c733557765eecfc6f1a506163537f0261a46ca38e4385fe58 binding_sha256=5cf0d6beab6d2a76f6fd3977973dbe1b3181db2817ffdb39dd8ca67d0541fcbc

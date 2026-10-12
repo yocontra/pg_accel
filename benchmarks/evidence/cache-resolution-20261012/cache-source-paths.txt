@@ -1,0 +1,15 @@
+Justfile
+pgaccel-kernels/CMakeLists.txt
+pgaccel-kernels/src/archive_stats.cpp
+pgaccel-kernels/src/archive_cache_path.hpp
+pgaccel-kernels/test/test_archive_cache_path.cpp
+pgaccel-kernels/test/test_fork.cpp
+pgaccel-kernels/test/test_fork_cold.cpp
+pgaccel-kernels/test/test_hash_domain_matrix.cpp
+scripts/acpp_cache.py
+scripts/tests/test_acpp_cache.py
+scripts/metal_stress_artifacts.py
+scripts/tests/test_metal_stress_artifacts.py
+scripts/capture_metal_ci_diagnostics.sh
+docs/cache-layout.md
+.github/workflows/ci.yml

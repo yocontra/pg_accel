@@ -1,0 +1,87 @@
+PGACCEL_TEST_START name=test_sycl_basic
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: test_sycl_basic: GPU kernel failure: synthetic kernel failure
+pgaccel: test_sycl_basic: GPU kernel failure: unknown C++ exception
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: pgaccel_grouped_agg_workspace_free: runtime init failed with status -5; allocation leaked
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/6739187580822535820.15289709123761673676.metalar.38683.13987539396060603642.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/15191544922452604636.13094519779968452899.metalar.38683.16981721934913024882.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/13485180490891169168.15953365034819882766.metalar.38683.17027480136269256093.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/13060844252914593326.3066453158995232387.metalar.38683.586439210287543722.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/runtime-base/apps/global/jit-cache/7013164701252873078.2250632123430863711.metalar.38683.17820734539672156997.tmp (kernels_added=1 skipped=0)
+Test 1 (single_task write): 42 (expected 42)
+Test 2 (parallel_for write): 1 2 3 4 5 6 7 8 (expected 1 2 3 4 5 6 7 8)
+Test 3 (read+write shared): 20 20 20 20 20 20 20 20 (expected 20 20 20 20 20 20 20 20)
+Test 5 (nd_range tree reduce): 8 (expected 8)
+Test 6 (sycl::reduction): 8 (expected 8)
+PGACCEL_TEST_RESULT name=test_sycl_basic exit_code=0 result=PASS raw_lines=85 body_sha256=d07fd9edcd1b8bd3802f95eb6cc33c13030e65f4138a72a249a6894539b0a4b0 binding_sha256=e3a49549e7bff8d9a482acb64de4d9da9448630b5057c0b7ef63a7456120ea00

@@ -1,0 +1,466 @@
+cmake_minimum_required(VERSION 3.21)
+project(pgaccel_kernels LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+option(PGACCEL_ENABLE_COVERAGE
+    "Instrument pg_accel-owned C++/SYCL sources with Clang source coverage"
+    OFF)
+
+if(PGACCEL_ENABLE_COVERAGE)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR
+            "PGACCEL_ENABLE_COVERAGE requires Clang; got ${CMAKE_CXX_COMPILER_ID}")
+    endif()
+    add_compile_options(
+        $<$<COMPILE_LANGUAGE:CXX>:-fprofile-instr-generate>
+        $<$<COMPILE_LANGUAGE:CXX>:-fcoverage-mapping>)
+    add_link_options(-fprofile-instr-generate)
+    message(STATUS
+        "pgaccel-kernels: Clang source coverage instrumentation enabled")
+endif()
+
+# Default to Release for optimized GPU kernels (-O3).
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
+# AdaptiveCpp installs to .pgaccel/acpp/current by default (see:
+# ACPP_BACKEND=cuda just setup-gpu or just setup-gpu-metal). Use
+# -DAdaptiveCpp_DIR=... for system toolchains, or use: just gpu-build.
+find_package(AdaptiveCpp REQUIRED)
+
+set(KERNEL_SOURCES
+    src/device_manager.cpp
+    src/archive_stats.cpp
+    src/bbox_ops.cpp
+    src/bbox_ops_f64.cpp
+    src/reduce.cpp
+    src/spatial_predicates.cpp
+    src/spatial_dispatch.cpp
+    src/h3_ops.cpp
+    src/raster_ops.cpp
+    src/expr_eval.cpp
+    src/expr_memory.cpp
+    src/hash_join.cpp
+    src/join_rows.cpp
+    src/join_rows_layout.cpp
+    src/resident_count.cpp
+    src/grouped_agg.cpp
+    src/grouped_agg_workspace.cpp
+)
+
+# Metadata is proved and compiled from one frozen Clang source/header snapshot.
+# It has no SYCL implementation or fallback. Keep it in the source inventory
+# above, but never send it through AdaptiveCpp's source-rewriting launcher.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    set(PGACCEL_METADATA_CXX "${CMAKE_CXX_COMPILER}")
+else()
+    find_program(PGACCEL_METADATA_CXX NAMES clang++ REQUIRED)
+endif()
+set(metadata_driver "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/metadata_build.py")
+set(metadata_verifier "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/metadata_effects.py")
+set(metadata_source "${CMAKE_CURRENT_SOURCE_DIR}/src/join_rows_layout.cpp")
+set(metadata_object_dir "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/pgaccel_metadata.dir/$<CONFIG>")
+set(metadata_object "${metadata_object_dir}/join_rows_layout.cpp.o")
+set(metadata_flags --flag=-fPIC --flag=-ffast-math
+    "--flag=-I${CMAKE_CURRENT_SOURCE_DIR}/include")
+separate_arguments(metadata_common_flags NATIVE_COMMAND "${CMAKE_CXX_FLAGS}")
+foreach(flag IN LISTS metadata_common_flags)
+    list(APPEND metadata_flags "--flag=${flag}")
+endforeach()
+foreach(config Debug Release RelWithDebInfo MinSizeRel)
+    string(TOUPPER "${config}" upper_config)
+    separate_arguments(config_flags NATIVE_COMMAND "${CMAKE_CXX_FLAGS_${upper_config}}")
+    foreach(flag IN LISTS config_flags)
+        list(APPEND metadata_flags "$<$<CONFIG:${config}>:--flag=${flag}>")
+    endforeach()
+endforeach()
+if(CMAKE_OSX_SYSROOT)
+    list(APPEND metadata_flags --flag=-isysroot "--flag=${CMAKE_OSX_SYSROOT}")
+endif()
+if(CMAKE_OSX_DEPLOYMENT_TARGET)
+    list(APPEND metadata_flags "--flag=-mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET}")
+endif()
+foreach(arch IN LISTS CMAKE_OSX_ARCHITECTURES)
+    list(APPEND metadata_flags --flag=-arch "--flag=${arch}")
+endforeach()
+if(CMAKE_CXX_COMPILER_TARGET)
+    list(APPEND metadata_flags --flag=-target "--flag=${CMAKE_CXX_COMPILER_TARGET}")
+endif()
+if(CMAKE_SYSROOT)
+    list(APPEND metadata_flags "--flag=--sysroot=${CMAKE_SYSROOT}")
+endif()
+if(PGACCEL_ENABLE_COVERAGE)
+    list(APPEND metadata_flags --flag=-fprofile-instr-generate --flag=-fcoverage-mapping)
+endif()
+add_custom_command(OUTPUT "${metadata_object}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${metadata_object_dir}"
+    COMMAND ${CMAKE_COMMAND} -E env PYTHONDONTWRITEBYTECODE=1
+        ${Python3_EXECUTABLE} "${metadata_driver}"
+        --compiler "${PGACCEL_METADATA_CXX}" --source "${metadata_source}"
+        --output "${metadata_object}" --depfile "${metadata_object}.d"
+        ${metadata_flags}
+    DEPENDS "${metadata_source}" "${metadata_driver}" "${metadata_verifier}"
+    DEPFILE "${metadata_object}.d"
+    BYPRODUCTS "${metadata_object}.metadata.json"
+    COMMAND_EXPAND_LISTS VERBATIM)
+add_custom_target(pgaccel_metadata
+    COMMAND ${CMAKE_COMMAND} -E env PYTHONDONTWRITEBYTECODE=1
+        ${Python3_EXECUTABLE} "${metadata_driver}"
+        --verify "${metadata_object}.metadata.json"
+        --compiler "${PGACCEL_METADATA_CXX}" --source "${metadata_source}"
+        --output "${metadata_object}" ${metadata_flags}
+    DEPENDS "${metadata_object}"
+    COMMAND_EXPAND_LISTS VERBATIM)
+set_source_files_properties("${metadata_object}" PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
+list(REMOVE_ITEM KERNEL_SOURCES src/join_rows_layout.cpp)
+
+# Static library for embedding into the Rust extension.
+add_library(pgaccel_kernels STATIC ${KERNEL_SOURCES} "${metadata_object}")
+add_dependencies(pgaccel_kernels pgaccel_metadata)
+
+target_include_directories(pgaccel_kernels PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+# Shared library for standalone test executables.
+add_library(pgaccel_kernels_shared SHARED ${KERNEL_SOURCES} "${metadata_object}")
+add_dependencies(pgaccel_kernels_shared pgaccel_metadata)
+
+# Linker ownership is part of release metadata approval, not merely a list of
+# exported names. Bind the map and linked bytes after this exact link succeeds.
+set(metadata_link_driver "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/metadata_link.py")
+if(APPLE)
+    target_link_options(pgaccel_kernels_shared PRIVATE
+        "LINKER:-map,$<TARGET_FILE:pgaccel_kernels_shared>.map")
+else()
+    target_link_options(pgaccel_kernels_shared PRIVATE
+        "LINKER:-Map,$<TARGET_FILE:pgaccel_kernels_shared>.map")
+endif()
+set_property(TARGET pgaccel_kernels_shared APPEND PROPERTY LINK_DEPENDS "${metadata_link_driver}")
+add_custom_command(TARGET pgaccel_kernels_shared POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E env PYTHONDONTWRITEBYTECODE=1
+        ${Python3_EXECUTABLE} "${metadata_link_driver}"
+        --library "$<TARGET_FILE:pgaccel_kernels_shared>"
+        --map "$<TARGET_FILE:pgaccel_kernels_shared>.map"
+        --object "${metadata_object}"
+        --output "$<TARGET_FILE:pgaccel_kernels_shared>.metadata-binding.json"
+    VERBATIM)
+
+target_include_directories(pgaccel_kernels_shared PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+# The standalone shared-library tests get deterministic failure-injection
+# hooks. The production static library has no hook state or hot-path checks.
+target_compile_definitions(pgaccel_kernels_shared PRIVATE PGACCEL_TEST_HOOKS)
+
+add_sycl_to_target(TARGET pgaccel_kernels)
+add_sycl_to_target(TARGET pgaccel_kernels_shared)
+# AdaptiveCpp's CMake helper applies RULE_LAUNCH_LINK to every SYCL target.
+# For a static library that "link" step is just ar/ranlib; routing it through
+# syclcc-launcher can make the launcher hand archive flags to clang++.
+set_target_properties(pgaccel_kernels PROPERTIES RULE_LAUNCH_LINK "")
+message(STATUS "pgaccel_kernels: SYCL (AdaptiveCpp) is the only supported backend; build fails without AdaptiveCpp")
+
+# -ffast-math enables vectorizer-friendly float math (reciprocal throughput,
+# FMA contraction, reassociation) across all kernels. IEEE 754-2008 NaN +
+# signed-zero semantics for fmin/fmax are preserved by the AdaptiveCpp
+# Metal libkernel (src/libkernel/sscp/metal/math.cpp) and the emitter's
+# inline NaN sequence (Emitter.cpp, __acpp_sscp_fmin/fmax_f32 branch), so
+# fast-math here does not silently drop those contracts.
+target_compile_options(pgaccel_kernels        PRIVATE -ffast-math)
+target_compile_options(pgaccel_kernels_shared PRIVATE -ffast-math)
+
+# Files that rely on IEEE NaN/Inf semantics opt out of -ffast-math:
+#   raster_ops         — resident metadata and NODATA validation use isfinite
+#   spatial_predicates — isfinite gates NaN/Inf → UNCERTAIN
+#   spatial_dispatch   — resident fp64 validation and uncertainty gates depend
+#                         on finite intermediates and signed-zero semantics.
+#   bbox_ops_f64       — raw IEEE-754 ordering preserves conservative NaN/Inf
+#                         behavior without invoking Metal fp64 lowering.
+#   reduce             — the fused multi-reduce NaN-propagation contract
+#                         (pgaccel_ffi.h "NaN handling matches PG's
+#                         SUM/MIN/MAX semantics") is void under
+#                         -ffinite-math-only; MIN/MAX identities are ±inf.
+#   expr_eval          — PostgreSQL-compatible comparisons detect NaN with
+#                         x != x, which -ffinite-math-only may fold to false.
+#   grouped_agg        — floating predicates and MIN/MAX use explicit NaN
+#                         detection and PostgreSQL NaN ordering.
+set_source_files_properties(
+    src/raster_ops.cpp
+    src/spatial_predicates.cpp
+    src/spatial_dispatch.cpp
+    src/bbox_ops_f64.cpp
+    src/reduce.cpp
+    src/expr_eval.cpp
+    src/grouped_agg.cpp
+    PROPERTIES COMPILE_FLAGS "-fno-fast-math -fhonor-nans -fhonor-infinities")
+
+# Standalone test binary
+add_executable(test_device test/test_device.cpp)
+target_link_libraries(test_device PRIVATE pgaccel_kernels_shared)
+target_compile_definitions(test_device PRIVATE PGACCEL_TEST_HOOKS)
+add_sycl_to_target(TARGET test_device)
+
+add_executable(test_bbox test/test_bbox.cpp)
+target_link_libraries(test_bbox PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_spatial test/test_spatial.cpp)
+target_link_libraries(test_spatial PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_spatial_dispatch test/test_spatial_dispatch.cpp)
+target_link_libraries(test_spatial_dispatch PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_spatial_pairwise_boundary test/test_spatial_pairwise_boundary.cpp)
+target_link_libraries(test_spatial_pairwise_boundary PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_spatial_resident test/test_spatial_resident.cpp)
+target_link_libraries(test_spatial_resident PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_h3 test/test_h3.cpp)
+target_link_libraries(test_h3 PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_reduce_matrix test/test_reduce_matrix.cpp)
+target_link_libraries(test_reduce_matrix PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_hash_agg_keys test/test_hash_agg_keys.cpp)
+target_link_libraries(test_hash_agg_keys PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_hash_join test/test_hash_join.cpp)
+target_link_libraries(test_hash_join PRIVATE pgaccel_kernels_shared)
+add_executable(test_join_rows test/test_join_rows.cpp)
+target_link_libraries(test_join_rows PRIVATE pgaccel_kernels_shared)
+
+# The exact public workspace queries, without SYCL or either kernel library.
+# Linking this target also guards against hidden runtime dependencies.
+add_executable(test_join_rows_layout test/test_join_rows_layout.cpp "${metadata_object}")
+add_dependencies(test_join_rows_layout pgaccel_metadata)
+target_include_directories(test_join_rows_layout PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+add_executable(test_hash_domain_matrix test/test_hash_domain_matrix.cpp)
+target_link_libraries(test_hash_domain_matrix PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_hashagg_spatial_matrix test/test_hashagg_spatial_matrix.cpp)
+target_link_libraries(test_hashagg_spatial_matrix PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_hash_agg_partial test/test_hash_agg_partial.cpp)
+target_link_libraries(test_hash_agg_partial PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_expr_memory test/test_expr_memory.cpp)
+target_link_libraries(test_expr_memory PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_expr_vm_matrix test/test_expr_vm_matrix.cpp)
+target_link_libraries(test_expr_vm_matrix PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_raster_resident test/test_raster_resident.cpp)
+target_link_libraries(test_raster_resident PRIVATE pgaccel_kernels_shared)
+add_executable(test_raster_lookup test/test_raster_lookup.cpp)
+target_include_directories(test_raster_lookup PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+add_executable(test_correctness test/test_correctness.cpp)
+target_link_libraries(test_correctness PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_fork test/test_fork.cpp)
+target_link_libraries(test_fork PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_fork_cold test/test_fork_cold.cpp)
+target_link_libraries(test_fork_cold PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_fork_warmed test/test_fork_warmed.cpp)
+target_link_libraries(test_fork_warmed PRIVATE pgaccel_kernels_shared)
+target_compile_definitions(test_fork_warmed PRIVATE PGACCEL_TEST_HOOKS)
+if(PGACCEL_ENABLE_COVERAGE)
+    # The successful injected-fork child normally uses _exit(), which correctly
+    # avoids inherited process teardown but also suppresses LLVM's atexit profile
+    # flush. Coverage filenames contain %p, so a normal return is safe and gives
+    # the child a distinct raw profile without changing production behavior.
+    target_compile_definitions(test_fork_warmed PRIVATE PGACCEL_COVERAGE_CHILD_FLUSH)
+endif()
+
+add_executable(test_fork_archive_stress test/test_fork_archive_stress.cpp)
+target_link_libraries(test_fork_archive_stress PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_fork_cold_barrier test/test_fork_cold_barrier.cpp)
+target_link_libraries(test_fork_cold_barrier PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_reduce_minimal test/test_reduce_minimal.cpp)
+target_link_libraries(test_reduce_minimal PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_grouped_agg test/test_grouped_agg.cpp)
+target_link_libraries(test_grouped_agg PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_grouped_agg_hash test/test_grouped_agg_hash.cpp)
+target_link_libraries(test_grouped_agg_hash PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_grouped_agg_workspace test/test_grouped_agg_workspace.cpp)
+target_link_libraries(test_grouped_agg_workspace PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_reduce_stats test/test_reduce_stats.cpp)
+target_link_libraries(test_reduce_stats PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_reduce_bool_bit test/test_reduce_bool_bit.cpp)
+target_link_libraries(test_reduce_bool_bit PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_exec_gpu test/test_exec_gpu.cpp)
+target_link_libraries(test_exec_gpu PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_ooo_overlap
+    test/test_ooo_overlap.cpp
+    test/ooo_overlap_support.cpp)
+target_link_libraries(test_ooo_overlap PRIVATE pgaccel_kernels_shared)
+add_sycl_to_target(TARGET test_ooo_overlap)
+
+add_executable(test_spatial_bench test/test_spatial_bench.cpp)
+target_link_libraries(test_spatial_bench PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_sycl_basic test/test_sycl_basic.cpp)
+target_link_libraries(test_sycl_basic PRIVATE pgaccel_kernels_shared)
+add_sycl_to_target(TARGET test_sycl_basic)
+
+add_executable(test_scalar test/test_scalar.cpp)
+target_link_libraries(test_scalar PRIVATE pgaccel_kernels_shared)
+target_compile_definitions(test_scalar PRIVATE
+    PGACCEL_SCALAR_CASES="${CMAKE_CURRENT_SOURCE_DIR}/test/scalar_cases.txt")
+add_sycl_to_target(TARGET test_scalar)
+
+add_executable(test_fp64_mul_probe test/test_fp64_mul_probe.cpp)
+target_link_libraries(test_fp64_mul_probe PRIVATE pgaccel_kernels_shared)
+add_sycl_to_target(TARGET test_fp64_mul_probe)
+
+function(add_fp64_transcendental_probe target_name op_id)
+    add_executable(${target_name} test/test_fp64_transcendental_probe.cpp)
+    target_link_libraries(${target_name} PRIVATE pgaccel_kernels_shared)
+    target_compile_definitions(${target_name}
+        PRIVATE
+            PGACCEL_FP64_PROBE_OP=${op_id}
+            PGACCEL_FP64_PROBE_LABEL="${target_name}")
+    add_sycl_to_target(TARGET ${target_name})
+endfunction()
+
+add_fp64_transcendental_probe(test_fp64_probe_add 0)
+add_fp64_transcendental_probe(test_fp64_probe_mul 1)
+add_fp64_transcendental_probe(test_fp64_probe_sqrt 2)
+add_fp64_transcendental_probe(test_fp64_probe_sin 3)
+add_fp64_transcendental_probe(test_fp64_probe_cos 4)
+add_fp64_transcendental_probe(test_fp64_probe_asin 5)
+add_fp64_transcendental_probe(test_fp64_probe_atan2 6)
+add_fp64_transcendental_probe(test_fp64_probe_haversine 7)
+
+# OOM-never invariant test (W5 fp64-unlock plan §5). Exercises reduce_f64,
+# expr_vm_f64, grouped_agg_i32_mul, spatial_f64, and h3_f64 with a logical input
+# of up to 2 GiB per family and asserts correctness, real device dispatch, and
+# peak RSS growth < 3 × caps.max_alloc_bytes.
+add_executable(test_oom_invariant test/test_oom_invariant.cpp)
+target_link_libraries(test_oom_invariant PRIVATE pgaccel_kernels_shared)
+
+# Induced-failure honesty gate: a dispatch whose staging cannot succeed
+# must return PGACCEL_OOM / PGACCEL_ERROR — never PGACCEL_OK over unwritten
+# output, never SIGABRT through the C ABI, never a fake NO_DEVICE. This is
+# regression coverage for synchronous queue errors crossing the extern-C ABI.
+add_executable(test_kernel_failure_status test/test_kernel_failure_status.cpp)
+target_link_libraries(test_kernel_failure_status PRIVATE pgaccel_kernels_shared)
+
+# Host-only public API contracts. This target intentionally never initializes a
+# SYCL device, so its empty-input and descriptor-validation checks remain
+# runnable on coverage workers without a GPU backend.
+add_executable(test_host_api_contract test/test_host_api_contract.cpp)
+target_link_libraries(test_host_api_contract PRIVATE pgaccel_kernels_shared)
+
+# Read-only path/count contracts run without pgaccel_init or a GPU.
+add_executable(test_archive_cache_path test/test_archive_cache_path.cpp)
+target_link_libraries(test_archive_cache_path PRIVATE pgaccel_kernels_shared AdaptiveCpp::acpp-common)
+
+enable_testing()
+find_package(Python3 COMPONENTS Interpreter QUIET)
+set(PGACCEL_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
+set(PGACCEL_GPU_TEST_FILTER "${PGACCEL_REPO_ROOT}/scripts/filter_gpu_output.py")
+set(PGACCEL_GPU_TEST_LOG_DIR "${PGACCEL_REPO_ROOT}/.pgaccel/logs"
+    CACHE PATH "Directory for raw GPU CTest logs")
+
+# Optional TIMEOUT <seconds> sets an explicit CTest TIMEOUT property, which
+# overrides the suite-wide `ctest --timeout` budget for that one test.
+function(add_pgaccel_gpu_test test_target)
+    cmake_parse_arguments(PGACCEL_TEST "" "TIMEOUT" "" ${ARGN})
+    if(Python3_Interpreter_FOUND AND EXISTS "${PGACCEL_GPU_TEST_FILTER}")
+        add_test(
+            NAME ${test_target}
+            COMMAND ${Python3_EXECUTABLE} "${PGACCEL_GPU_TEST_FILTER}"
+                --label ${test_target}
+                --log-dir "${PGACCEL_GPU_TEST_LOG_DIR}"
+                -- "$<TARGET_FILE:${test_target}>")
+    else()
+        add_test(NAME ${test_target} COMMAND ${test_target})
+    endif()
+    if(PGACCEL_TEST_TIMEOUT)
+        set_tests_properties(${test_target} PROPERTIES TIMEOUT ${PGACCEL_TEST_TIMEOUT})
+    endif()
+endfunction()
+
+add_pgaccel_gpu_test(test_host_api_contract)
+set_tests_properties(test_host_api_contract PROPERTIES LABELS host)
+add_pgaccel_gpu_test(test_archive_cache_path)
+set_tests_properties(test_archive_cache_path PROPERTIES LABELS host)
+add_pgaccel_gpu_test(test_join_rows_layout)
+set_tests_properties(test_join_rows_layout PROPERTIES LABELS host)
+add_pgaccel_gpu_test(test_raster_lookup)
+set_tests_properties(test_raster_lookup PROPERTIES LABELS host)
+
+add_pgaccel_gpu_test(test_device)
+add_pgaccel_gpu_test(test_bbox)
+add_pgaccel_gpu_test(test_spatial)
+add_pgaccel_gpu_test(test_spatial_dispatch)
+add_pgaccel_gpu_test(test_spatial_pairwise_boundary TIMEOUT 1800)
+add_pgaccel_gpu_test(test_spatial_resident TIMEOUT 1800)
+add_pgaccel_gpu_test(test_h3)
+add_pgaccel_gpu_test(test_raster_resident TIMEOUT 600)
+add_pgaccel_gpu_test(test_correctness)
+add_pgaccel_gpu_test(test_exec_gpu)
+add_pgaccel_gpu_test(test_fork)
+add_pgaccel_gpu_test(test_fork_warmed)
+add_pgaccel_gpu_test(test_fork_cold)
+add_pgaccel_gpu_test(test_fork_cold_barrier TIMEOUT 1200)
+add_pgaccel_gpu_test(test_sycl_basic)
+add_pgaccel_gpu_test(test_scalar)
+add_pgaccel_gpu_test(test_reduce_stats)
+add_pgaccel_gpu_test(test_reduce_bool_bit)
+add_pgaccel_gpu_test(test_grouped_agg)
+add_pgaccel_gpu_test(test_grouped_agg_hash)
+add_pgaccel_gpu_test(test_grouped_agg_workspace)
+add_pgaccel_gpu_test(test_hash_agg_partial)
+add_pgaccel_gpu_test(test_hash_agg_keys)
+add_pgaccel_gpu_test(test_hash_join)
+add_pgaccel_gpu_test(test_join_rows)
+add_pgaccel_gpu_test(test_hash_domain_matrix)
+add_pgaccel_gpu_test(test_hashagg_spatial_matrix)
+add_pgaccel_gpu_test(test_reduce_matrix)
+add_pgaccel_gpu_test(test_expr_memory)
+add_pgaccel_gpu_test(test_expr_vm_matrix)
+# Each live family processes min(2 * max_alloc, 2 GiB) of logical input. Artifact
+# oom-invariant-basic-tier-20260729T043721Z processed 2 GiB per family and
+# observed 73.29s elapsed on Apple M2 Max; the CTest gate keeps its fixed 900s
+# timeout.
+add_pgaccel_gpu_test(test_oom_invariant TIMEOUT 900)
+add_pgaccel_gpu_test(test_fp64_mul_probe)
+add_pgaccel_gpu_test(test_kernel_failure_status)
+# test_fork_archive_stress stays outside the warm-cache CTest suite. The
+# gpu-stress-archive recipe and Metal release gate establish and independently
+# verify its empty-cache boundary before launching the fork matrix.
+# test_ooo_overlap is intentionally NOT registered with CTest. It is a
+# representative backend concurrency diagnostic built from two independent
+# synthetic compute branches; it does not call or provide coverage for
+# production reduce or resident-count kernels. Physical Apple Metal devices may
+# serialize the branches because every dispatch marks all USM buffers Read|Write
+# (metal_queue.cpp:225-227) on hazard-tracked storage (metal_allocator.cpp:395).
+# Apple's paravirtual Metal device has demonstrated real improved overlap. The
+# coverage runner accepts only either that proven success or the exact known
+# no-overlap structural result.
+
+install(TARGETS pgaccel_kernels LIBRARY DESTINATION lib)
+install(FILES include/pgaccel_ffi.h include/pgaccel_expr.h
+              include/pgaccel_hash_join.h include/pgaccel_join_rows.h include/pgaccel_olap.h
+              include/pgaccel_resident_count.h
+        DESTINATION include)

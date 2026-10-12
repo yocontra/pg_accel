@@ -14,6 +14,8 @@ import sys
 from pathlib import Path
 from typing import Any, TextIO
 
+from acpp_cache import CachePathError, resolve_cache_dir as resolve_acpp_cache_dir
+
 
 SCHEMA_VERSION = 1
 LOG_EXCERPT_BYTES = 64 * 1024
@@ -516,23 +518,14 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def resolve_cache_dir(explicit: str | None = None) -> Path:
-    if explicit:
-        return Path(explicit).expanduser().resolve()
-    appdb = os.environ.get("ACPP_APPDB_DIR")
-    if appdb:
-        return (Path(appdb).expanduser() / "global" / "jit-cache").resolve()
-    home = os.environ.get("HOME")
-    if not home:
-        raise ArtifactContractError(
-            "cannot resolve AdaptiveCpp cache: HOME and ACPP_APPDB_DIR are unset"
-        )
-    return (
-        Path(home).expanduser() / ".acpp" / "apps" / "global" / "jit-cache"
-    ).resolve()
+    try:
+        return resolve_acpp_cache_dir(explicit).resolve()
+    except (CachePathError, OSError) as error:
+        raise ArtifactContractError(str(error)) from error
 
 
 def measure_cache(cache_dir: Path, point: str) -> dict[str, Any]:
-    cache_dir = cache_dir.expanduser().resolve()
+    cache_dir = cache_dir.resolve()
     counts = {scope: {"file_count": 0, "total_bytes": 0} for scope in CACHE_SCOPES}
     directory_exists = cache_dir.exists()
     if directory_exists and not cache_dir.is_dir():
@@ -768,7 +761,7 @@ def parse_archive_log(path: Path) -> dict[str, Any]:
         raise ArtifactContractError(
             "archive stress could not resolve its JIT cache directory"
         )
-    cache_dir = str(Path(raw_cache_dir).expanduser().resolve())
+    cache_dir = str(Path(raw_cache_dir).resolve())
 
     records: list[dict[str, int]] = []
     for line in text.splitlines():

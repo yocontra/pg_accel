@@ -1,0 +1,4 @@
+FAIL: override contains apps layer
+FAIL: pinned Darwin global cache
+FAIL: counts actual cache, not old-layout decoy
+archive path host checks: FAIL

@@ -7,7 +7,6 @@
 
 #include <cerrno>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -15,40 +14,16 @@
 #include <unordered_set>
 
 #include "pgaccel_ffi.h"
-#include "pgaccel_queue.h"
+#include "pgaccel_error.h"
+#include "archive_cache_path.hpp"
 
 namespace {
 
-/// Resolve the AdaptiveCpp JIT cache directory. Mirrors the path that
-/// `hipsycl::common::filesystem::persistent_storage::get_jit_cache_dir()`
-/// returns at runtime: `$HOME/.acpp/apps/global/jit-cache`. The runtime
-/// will accept `ACPP_APPDB_DIR` to relocate this in CI environments;
-/// honour it here so the snapshot matches the actual cache path the
-/// AdaptiveCpp backend writes to.
-///
-/// Returns the empty string if HOME is unset and ACPP_APPDB_DIR is not
-/// set — callers must treat that as a snapshot failure rather than
-/// silently zeroing counters.
+/// Resolve the current process's pinned runtime path without initializing its
+/// persistent storage. Metal uses apps/global; Linux uses an executable/hash
+/// subdirectory. Tool-only explicit path overrides do not affect the runtime.
 std::string resolve_jit_cache_dir() {
-  if (const char* override_dir = std::getenv("ACPP_APPDB_DIR")) {
-    if (override_dir[0] != '\0') {
-      // ACPP_APPDB_DIR points at `<dir>/apps`. Append /global/jit-cache.
-      std::filesystem::path p{override_dir};
-      p /= "global";
-      p /= "jit-cache";
-      return p.string();
-    }
-  }
-  const char* home = std::getenv("HOME");
-  if (!home || home[0] == '\0') {
-    return {};
-  }
-  std::filesystem::path p{home};
-  p /= ".acpp";
-  p /= "apps";
-  p /= "global";
-  p /= "jit-cache";
-  return p.string();
+  return pgaccel::archive_cache::resolve();
 }
 
 }  // namespace
@@ -66,6 +41,12 @@ extern "C" pgaccel_status pgaccel_archive_stats_snapshot(pgaccel_archive_snapsho
 
   std::error_code ec;
   if (!std::filesystem::is_directory(cache_dir, ec) || ec) {
+    if (ec && ec != std::errc::no_such_file_or_directory)
+      return PGACCEL_ERROR;
+    ec.clear();
+    const bool exists = std::filesystem::exists(cache_dir, ec);
+    if (ec || exists)
+      return PGACCEL_ERROR;
     // Cache directory does not exist yet (e.g. first-ever run before any
     // dispatch happened). All counters legitimately stay zero, but the
     // status is OK so callers can distinguish "cache empty" from
@@ -100,6 +81,7 @@ extern "C" pgaccel_status pgaccel_archive_stats_snapshot(pgaccel_archive_snapsho
     // Directory walk ran into an I/O error after we already started —
     // surface it to the caller rather than silently truncating the
     // snapshot.
+    std::memset(out, 0, sizeof(*out));
     return PGACCEL_ERROR;
   }
 
@@ -110,11 +92,13 @@ extern "C" pgaccel_status pgaccel_archive_stats_snapshot(pgaccel_archive_snapsho
   }
 
   return PGACCEL_OK;
-} catch (const pgaccel_no_device_error&) {
-  return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
+  if (out)
+    std::memset(out, 0, sizeof(*out));
   return pgaccel_kernel_failure("pgaccel_archive_stats_snapshot", &e);
 } catch (...) {
+  if (out)
+    std::memset(out, 0, sizeof(*out));
   return pgaccel_kernel_failure("pgaccel_archive_stats_snapshot", nullptr);
 }
 
@@ -122,21 +106,18 @@ extern "C" pgaccel_status pgaccel_archive_jit_cache_dir(char* buf, size_t buf_le
   if (!buf || buf_len == 0) {
     return PGACCEL_ERROR;
   }
+  buf[0] = '\0';
   const std::string cache_dir = resolve_jit_cache_dir();
   if (cache_dir.empty()) {
-    buf[0] = '\0';
     return PGACCEL_ERROR;
   }
   if (cache_dir.size() + 1 > buf_len) {
     // Truncating would mislead the caller about which path was actually
     // scanned. Refuse instead of producing a partial path.
-    buf[0] = '\0';
     return PGACCEL_ERROR;
   }
   std::memcpy(buf, cache_dir.c_str(), cache_dir.size() + 1);
   return PGACCEL_OK;
-} catch (const pgaccel_no_device_error&) {
-  return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
   return pgaccel_kernel_failure("pgaccel_archive_jit_cache_dir", &e);
 } catch (...) {

@@ -27,11 +27,12 @@
 #include "pgaccel_resident_count.h"
 
 static size_t count_metalar_files() {
-  const char* home = std::getenv("HOME");
-  if (!home)
-    return 0;
-  std::filesystem::path cache =
-      std::filesystem::path{home} / ".acpp" / "apps" / "global" / "jit-cache";
+  char cache_path[16384]{};
+  if (pgaccel_archive_jit_cache_dir(cache_path, sizeof(cache_path)) != PGACCEL_OK) {
+    std::fprintf(stderr, "FAIL: cannot resolve AdaptiveCpp archive cache\n");
+    std::exit(1);
+  }
+  const std::filesystem::path cache{cache_path};
   std::error_code ec;
   if (!std::filesystem::is_directory(cache, ec) || ec)
     return 0;

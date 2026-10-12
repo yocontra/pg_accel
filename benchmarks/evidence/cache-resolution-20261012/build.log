@@ -1,0 +1,187 @@
+[  1%] Generating CMakeFiles/pgaccel_metadata.dir/Release/join_rows_layout.cpp.o
+[  2%] Building CXX object CMakeFiles/test_raster_lookup.dir/test/test_raster_lookup.cpp.o
+[  2%] Built target pgaccel_metadata
+[  2%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/bbox_ops.cpp.o
+[  3%] Building CXX object CMakeFiles/test_join_rows_layout.dir/test/test_join_rows_layout.cpp.o
+[  4%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/device_manager.cpp.o
+[  5%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/reduce.cpp.o
+[  6%] Building CXX object CMakeFiles/pgaccel_kernels.dir/src/device_manager.cpp.o
+[  6%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/archive_stats.cpp.o
+[  7%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/bbox_ops_f64.cpp.o
+[  8%] Linking CXX executable test_raster_lookup
+[  8%] Built target test_raster_lookup
+[  9%] Building CXX object CMakeFiles/pgaccel_kernels.dir/src/archive_stats.cpp.o
+[ 10%] Linking CXX executable test_join_rows_layout
+[ 10%] Built target test_join_rows_layout
+[ 11%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/spatial_predicates.cpp.o
+[ 11%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/spatial_dispatch.cpp.o
+[ 12%] Building CXX object CMakeFiles/pgaccel_kernels.dir/src/bbox_ops.cpp.o
+[ 13%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/h3_ops.cpp.o
+[ 13%] Building CXX object CMakeFiles/pgaccel_kernels.dir/src/bbox_ops_f64.cpp.o
+[ 14%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/raster_ops.cpp.o
+[ 15%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/expr_eval.cpp.o
+[ 16%] Building CXX object CMakeFiles/pgaccel_kernels.dir/src/reduce.cpp.o
+[ 17%] Building CXX object CMakeFiles/pgaccel_kernels.dir/src/spatial_predicates.cpp.o
+[ 18%] Building CXX object CMakeFiles/pgaccel_kernels.dir/src/spatial_dispatch.cpp.o
+[ 18%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/expr_memory.cpp.o
+[ 19%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/hash_join.cpp.o
+[ 20%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/join_rows.cpp.o
+[ 21%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/resident_count.cpp.o
+[ 21%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/grouped_agg.cpp.o
+[ 21%] Building CXX object CMakeFiles/pgaccel_kernels.dir/src/h3_ops.cpp.o
+[ 22%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/grouped_agg_workspace.cpp.o
+[ 23%] Building CXX object CMakeFiles/pgaccel_kernels.dir/src/raster_ops.cpp.o
+[ 24%] Building CXX object CMakeFiles/pgaccel_kernels.dir/src/expr_eval.cpp.o
+[ 25%] Building CXX object CMakeFiles/pgaccel_kernels.dir/src/expr_memory.cpp.o
+[ 25%] Building CXX object CMakeFiles/pgaccel_kernels.dir/src/hash_join.cpp.o
+[ 26%] Building CXX object CMakeFiles/pgaccel_kernels.dir/src/join_rows.cpp.o
+[ 27%] Building CXX object CMakeFiles/pgaccel_kernels.dir/src/resident_count.cpp.o
+[ 28%] Building CXX object CMakeFiles/pgaccel_kernels.dir/src/grouped_agg.cpp.o
+[ 28%] Building CXX object CMakeFiles/pgaccel_kernels.dir/src/grouped_agg_workspace.cpp.o
+[ 29%] Linking CXX shared library libpgaccel_kernels_shared.dylib
+ld: warning: object file (/Users/contra/Projects/pg_accel/.codex/scratch/cache-resolution-live-20261012/build/CMakeFiles/pgaccel_metadata.dir/Release/join_rows_layout.cpp.o) was built for newer 'macOS' version (27.0) than being linked (18.0)
+[ 29%] Built target pgaccel_kernels_shared
+[ 30%] Building CXX object CMakeFiles/test_h3.dir/test/test_h3.cpp.o
+[ 30%] Building CXX object CMakeFiles/test_spatial_dispatch.dir/test/test_spatial_dispatch.cpp.o
+[ 31%] Building CXX object CMakeFiles/test_bbox.dir/test/test_bbox.cpp.o
+[ 32%] Building CXX object CMakeFiles/test_spatial_resident.dir/test/test_spatial_resident.cpp.o
+[ 32%] Building CXX object CMakeFiles/test_device.dir/test/test_device.cpp.o
+[ 32%] Building CXX object CMakeFiles/test_spatial.dir/test/test_spatial.cpp.o
+[ 33%] Building CXX object CMakeFiles/test_spatial_pairwise_boundary.dir/test/test_spatial_pairwise_boundary.cpp.o
+[ 34%] Linking CXX executable test_bbox
+[ 35%] Linking CXX executable test_spatial_pairwise_boundary
+[ 35%] Built target test_bbox
+[ 35%] Built target test_spatial_pairwise_boundary
+[ 35%] Building CXX object CMakeFiles/test_reduce_matrix.dir/test/test_reduce_matrix.cpp.o
+[ 36%] Building CXX object CMakeFiles/test_hash_agg_keys.dir/test/test_hash_agg_keys.cpp.o
+[ 37%] Linking CXX executable test_spatial_dispatch
+[ 37%] Built target test_spatial_dispatch
+[ 38%] Building CXX object CMakeFiles/test_hash_join.dir/test/test_hash_join.cpp.o
+[ 39%] Linking CXX executable test_spatial
+[ 39%] Built target test_spatial
+[ 40%] Building CXX object CMakeFiles/test_join_rows.dir/test/test_join_rows.cpp.o
+[ 40%] Linking CXX executable test_hash_agg_keys
+[ 40%] Built target test_hash_agg_keys
+[ 41%] Building CXX object CMakeFiles/test_hash_domain_matrix.dir/test/test_hash_domain_matrix.cpp.o
+[ 42%] Linking CXX executable test_reduce_matrix
+[ 43%] Linking CXX executable test_hash_join
+[ 43%] Built target test_reduce_matrix
+[ 43%] Built target test_hash_join
+[ 44%] Building CXX object CMakeFiles/test_hashagg_spatial_matrix.dir/test/test_hashagg_spatial_matrix.cpp.o
+[ 45%] Building CXX object CMakeFiles/test_hash_agg_partial.dir/test/test_hash_agg_partial.cpp.o
+[ 46%] Linking CXX executable test_h3
+[ 46%] Built target test_h3
+[ 47%] Building CXX object CMakeFiles/test_expr_memory.dir/test/test_expr_memory.cpp.o
+[ 47%] Linking CXX executable test_hash_domain_matrix
+[ 48%] Linking CXX executable test_hash_agg_partial
+[ 48%] Built target test_hash_domain_matrix
+[ 48%] Built target test_hash_agg_partial
+[ 48%] Linking CXX executable test_join_rows
+[ 48%] Building CXX object CMakeFiles/test_expr_vm_matrix.dir/test/test_expr_vm_matrix.cpp.o
+[ 48%] Building CXX object CMakeFiles/test_raster_resident.dir/test/test_raster_resident.cpp.o
+[ 49%] Linking CXX executable test_spatial_resident
+[ 49%] Built target test_join_rows
+[ 50%] Linking CXX executable test_expr_memory
+[ 50%] Building CXX object CMakeFiles/test_correctness.dir/test/test_correctness.cpp.o
+[ 50%] Built target test_spatial_resident
+[ 50%] Built target test_expr_memory
+[ 51%] Building CXX object CMakeFiles/test_fork.dir/test/test_fork.cpp.o
+[ 52%] Linking CXX executable test_device
+[ 53%] Building CXX object CMakeFiles/test_fork_cold.dir/test/test_fork_cold.cpp.o
+[ 53%] Linking CXX executable test_hashagg_spatial_matrix
+[ 53%] Built target test_hashagg_spatial_matrix
+[ 54%] Building CXX object CMakeFiles/test_fork_warmed.dir/test/test_fork_warmed.cpp.o
+[ 54%] Built target test_device
+[ 54%] Building CXX object CMakeFiles/test_fork_archive_stress.dir/test/test_fork_archive_stress.cpp.o
+[ 55%] Linking CXX executable test_fork_warmed
+[ 55%] Built target test_fork_warmed
+[ 55%] Building CXX object CMakeFiles/test_fork_cold_barrier.dir/test/test_fork_cold_barrier.cpp.o
+[ 56%] Linking CXX executable test_fork
+[ 57%] Linking CXX executable test_correctness
+[ 58%] Linking CXX executable test_fork_cold
+[ 58%] Built target test_fork
+[ 58%] Built target test_correctness
+[ 58%] Built target test_fork_cold
+[ 59%] Building CXX object CMakeFiles/test_reduce_minimal.dir/test/test_reduce_minimal.cpp.o
+[ 61%] Building CXX object CMakeFiles/test_grouped_agg.dir/test/test_grouped_agg.cpp.o
+[ 61%] Building CXX object CMakeFiles/test_grouped_agg_hash.dir/test/test_grouped_agg_hash.cpp.o
+[ 62%] Linking CXX executable test_reduce_minimal
+[ 62%] Built target test_reduce_minimal
+[ 63%] Building CXX object CMakeFiles/test_grouped_agg_workspace.dir/test/test_grouped_agg_workspace.cpp.o
+[ 63%] Linking CXX executable test_grouped_agg_workspace
+[ 64%] Linking CXX executable test_expr_vm_matrix
+[ 64%] Built target test_grouped_agg_workspace
+[ 65%] Linking CXX executable test_raster_resident
+[ 65%] Built target test_expr_vm_matrix
+[ 65%] Building CXX object CMakeFiles/test_reduce_stats.dir/test/test_reduce_stats.cpp.o
+[ 66%] Linking CXX executable test_fork_cold_barrier
+[ 67%] Building CXX object CMakeFiles/test_reduce_bool_bit.dir/test/test_reduce_bool_bit.cpp.o
+[ 67%] Built target test_raster_resident
+[ 67%] Built target test_fork_cold_barrier
+[ 67%] Building CXX object CMakeFiles/test_exec_gpu.dir/test/test_exec_gpu.cpp.o
+[ 68%] Linking CXX executable test_fork_archive_stress
+[ 69%] Building CXX object CMakeFiles/test_ooo_overlap.dir/test/test_ooo_overlap.cpp.o
+[ 69%] Built target test_fork_archive_stress
+[ 69%] Building CXX object CMakeFiles/test_ooo_overlap.dir/test/ooo_overlap_support.cpp.o
+[ 70%] Linking CXX executable test_exec_gpu
+[ 71%] Linking CXX executable test_reduce_stats
+[ 71%] Built target test_exec_gpu
+[ 71%] Built target test_reduce_stats
+[ 72%] Building CXX object CMakeFiles/test_spatial_bench.dir/test/test_spatial_bench.cpp.o
+[ 73%] Linking CXX executable test_reduce_bool_bit
+[ 74%] Building CXX object CMakeFiles/test_sycl_basic.dir/test/test_sycl_basic.cpp.o
+[ 75%] Building CXX object CMakeFiles/test_scalar.dir/test/test_scalar.cpp.o
+[ 76%] Linking CXX static library libpgaccel_kernels.a
+[ 76%] Built target test_reduce_bool_bit
+[ 76%] Building CXX object CMakeFiles/test_fp64_mul_probe.dir/test/test_fp64_mul_probe.cpp.o
+[ 77%] Linking CXX executable test_spatial_bench
+[ 77%] Built target test_spatial_bench
+[ 78%] Building CXX object CMakeFiles/test_fp64_probe_add.dir/test/test_fp64_transcendental_probe.cpp.o
+[ 78%] Built target pgaccel_kernels
+[ 79%] Building CXX object CMakeFiles/test_fp64_probe_mul.dir/test/test_fp64_transcendental_probe.cpp.o
+[ 80%] Linking CXX executable test_grouped_agg_hash
+[ 80%] Built target test_grouped_agg_hash
+[ 81%] Building CXX object CMakeFiles/test_fp64_probe_sqrt.dir/test/test_fp64_transcendental_probe.cpp.o
+[ 82%] Linking CXX executable test_ooo_overlap
+[ 82%] Built target test_ooo_overlap
+[ 83%] Linking CXX executable test_fp64_probe_add
+[ 84%] Linking CXX executable test_fp64_mul_probe
+[ 85%] Building CXX object CMakeFiles/test_fp64_probe_sin.dir/test/test_fp64_transcendental_probe.cpp.o
+[ 85%] Built target test_fp64_probe_add
+[ 85%] Built target test_fp64_mul_probe
+[ 85%] Building CXX object CMakeFiles/test_fp64_probe_cos.dir/test/test_fp64_transcendental_probe.cpp.o
+[ 85%] Building CXX object CMakeFiles/test_fp64_probe_asin.dir/test/test_fp64_transcendental_probe.cpp.o
+[ 86%] Linking CXX executable test_scalar
+[ 86%] Built target test_scalar
+[ 87%] Building CXX object CMakeFiles/test_fp64_probe_atan2.dir/test/test_fp64_transcendental_probe.cpp.o
+[ 88%] Linking CXX executable test_sycl_basic
+[ 89%] Linking CXX executable test_fp64_probe_mul
+[ 89%] Built target test_sycl_basic
+[ 90%] Building CXX object CMakeFiles/test_fp64_probe_haversine.dir/test/test_fp64_transcendental_probe.cpp.o
+[ 90%] Built target test_fp64_probe_mul
+[ 91%] Building CXX object CMakeFiles/test_oom_invariant.dir/test/test_oom_invariant.cpp.o
+[ 92%] Linking CXX executable test_fp64_probe_sqrt
+[ 92%] Built target test_fp64_probe_sqrt
+[ 93%] Building CXX object CMakeFiles/test_kernel_failure_status.dir/test/test_kernel_failure_status.cpp.o
+[ 94%] Linking CXX executable test_oom_invariant
+[ 94%] Linking CXX executable test_kernel_failure_status
+[ 94%] Built target test_oom_invariant
+[ 94%] Built target test_kernel_failure_status
+[ 95%] Building CXX object CMakeFiles/test_host_api_contract.dir/test/test_host_api_contract.cpp.o
+[ 95%] Building CXX object CMakeFiles/test_archive_cache_path.dir/test/test_archive_cache_path.cpp.o
+[ 95%] Linking CXX executable test_grouped_agg
+[ 95%] Built target test_grouped_agg
+[ 96%] Linking CXX executable test_host_api_contract
+[ 96%] Built target test_host_api_contract
+[ 96%] Linking CXX executable test_fp64_probe_sin
+[ 97%] Linking CXX executable test_fp64_probe_cos
+[ 97%] Built target test_fp64_probe_sin
+[ 97%] Built target test_fp64_probe_cos
+[ 98%] Linking CXX executable test_fp64_probe_asin
+[ 99%] Linking CXX executable test_archive_cache_path
+[ 99%] Built target test_archive_cache_path
+[ 99%] Built target test_fp64_probe_asin
+[100%] Linking CXX executable test_fp64_probe_atan2
+[100%] Built target test_fp64_probe_atan2
+[100%] Linking CXX executable test_fp64_probe_haversine
+[100%] Built target test_fp64_probe_haversine

@@ -802,40 +802,13 @@ clean-logs pg="":
 # rebuilds. Does NOT touch the kernel cache index files; AdaptiveCpp
 # rebuilds those on demand.
 #
-# Use this instead of `rm -rf ~/.acpp/apps/global/jit-cache/*` so the
-# command is auto-allowed by the harness (the bare rm prompts each
-# time for permission).
+# Clear only a validated cache's regular files during an exclusive quiet
+# window. See docs/cache-layout.md for explicit targets and safety checks.
 clear-jit:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ -n "${ACPP_APPDB_DIR:-}" ]; then
-        cache_dir="${ACPP_APPDB_DIR}/global/jit-cache"
-    else
-        cache_dir="$HOME/.acpp/apps/global/jit-cache"
-    fi
-    if [ -d "$cache_dir" ]; then
-        mkdir -p .pgaccel/logs
-        log=".pgaccel/logs/clear-jit-$(date +%Y%m%d-%H%M%S).log"
-        total=0
-        deleted=0
-        failed=0
-        while IFS= read -r -d '' entry; do
-            total=$((total + 1))
-            if rm -rf "$entry" >>"$log" 2>&1; then
-                deleted=$((deleted + 1))
-            else
-                failed=$((failed + 1))
-            fi
-        done < <(find "$cache_dir" -mindepth 1 -maxdepth 1 -print0)
-        if [ "$failed" -gt 0 ]; then
-            echo "clear-jit: deleted $deleted/$total entries; failed $failed (raw log: $log)" >&2
-            exit 1
-        fi
-        rm -f "$log"
-        echo "cleared $cache_dir ($deleted entries)"
-    else
-        echo "no JIT cache at $cache_dir (nothing to clear)"
-    fi
+    # PGACCEL_ACPP_CACHE_DIR propagates unchanged through nested cold/stress recipes.
+    python3 scripts/acpp_cache.py clear
 
 # === GPU Kernels ===
 
@@ -935,6 +908,7 @@ gpu-stress-archive workers="8" iters="20":
 
 # Validate the Metal stress parser and shell contract without a GPU device.
 metal-stress-artifact-test:
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_acpp_cache.py -v
     bash -n scripts/metal_stress_gate.sh
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_metal_stress_artifacts.py -v
     python3 scripts/metal_stress_artifacts.py workflow-audit --kind ci --path .github/workflows/ci.yml

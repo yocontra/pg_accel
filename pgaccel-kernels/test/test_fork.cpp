@@ -326,11 +326,12 @@ static int run_pip_simple_fork_regression(const char* label) {
 // archive-build helper actually ran for each fp64 kernel family
 // dispatched from the forked child.
 static size_t count_metalar_files() {
-  const char* home = std::getenv("HOME");
-  if (!home)
-    return 0;
-  std::filesystem::path cache =
-      std::filesystem::path{home} / ".acpp" / "apps" / "global" / "jit-cache";
+  char cache_path[16384]{};
+  if (pgaccel_archive_jit_cache_dir(cache_path, sizeof(cache_path)) != PGACCEL_OK) {
+    std::fprintf(stderr, "FAIL: cannot resolve AdaptiveCpp archive cache\n");
+    std::exit(1);
+  }
+  const std::filesystem::path cache{cache_path};
   std::error_code ec;
   if (!std::filesystem::is_directory(cache, ec) || ec)
     return 0;
@@ -424,27 +425,9 @@ int main() {
     // must exist in the AdaptiveCpp JIT cache. If this fires, either the
     // archive-builder helper failed silently (check acpp-metal-archive-build
     // stderr) or the pipeline-state path is still using direct compile.
-    const char* home = std::getenv("HOME");
-    if (home) {
-      std::filesystem::path cache =
-          std::filesystem::path{home} / ".acpp" / "apps" / "global" / "jit-cache";
-      std::error_code ec;
-      bool found_metalar = false;
-      if (std::filesystem::is_directory(cache, ec) && !ec) {
-        for (auto& e : std::filesystem::directory_iterator(cache, ec)) {
-          if (e.path().extension() == ".metalar") {
-            found_metalar = true;
-            break;
-          }
-        }
-      }
-      if (!found_metalar) {
-        fprintf(stderr,
-                "Child: FAIL — no .metalar files in %s; archive path not "
-                "exercised, fork-safety is not actually enforced\n",
-                cache.c_str());
-        _exit(5);
-      }
+    if (count_metalar_files() == 0) {
+      fprintf(stderr, "Child: FAIL — no .metalar files in resolved cache; archive path not exercised\n");
+      _exit(5);
     }
 
     printf("\nChild: PASS — GPU works after fork.\n");

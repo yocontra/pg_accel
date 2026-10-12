@@ -45,8 +45,11 @@ if [ -f "$acpp_provenance" ]; then
     cp "$acpp_provenance" "$diagnostic_dir/" || true
 fi
 
-cache_dir="${ACPP_APPDB_DIR:-$HOME/.acpp/apps/global/jit-cache}"
-if [ -d "$cache_dir" ]; then
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if ! cache_dir="$(python3 "$script_dir/acpp_cache.py" resolve 2>"$diagnostic_dir/jit-cache-resolution-error.txt")"; then
+    printf 'cache resolution unavailable; not an empty-cache observation\n' \
+        > "$diagnostic_dir/jit-cache.missing.txt"
+elif [ -d "$cache_dir" ]; then
     find "$cache_dir" -maxdepth 1 -type f -exec wc -c {} + 2>/dev/null |
         LC_ALL=C sort -n > "$diagnostic_dir/jit-cache-files.txt" || true
 else

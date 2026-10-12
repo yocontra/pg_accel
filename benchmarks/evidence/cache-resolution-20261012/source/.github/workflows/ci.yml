@@ -1,0 +1,798 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      cuda_smoke:
+        description: Run the optional self-hosted CUDA smoke job.
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # ACPP_REQUIRED_SHA is loaded per-job from the repo-root .acpp-version file
+  # (single source of truth shared with scripts/setup_acpp.sh) via a
+  # "Load pinned AdaptiveCpp SHA" step; do not hardcode it here.
+  SOFT_FP64_REQUIRED_TAG: v2.0.1
+
+jobs:
+  mac-arm64:
+    name: macOS arm64 PG ${{ matrix.pg }}
+    runs-on: macos-26
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [18, 19]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Load pinned AdaptiveCpp SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ACPP_REQUIRED_SHA=$(cat .acpp-version)" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rust_version="$(awk '/^rust / { print $2 }' .tool-versions)"
+          rustup toolchain install "$rust_version" --profile minimal --component clippy,rustfmt
+          rustup default "$rust_version"
+
+      - name: Validate pgrx support for PostgreSQL ${{ matrix.pg }}
+        id: pg-support
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/pg_versions.sh
+          pg_accel_require_pgrx_support "${{ matrix.pg }}"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Cargo artifacts
+        if: steps.pg-support.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+            ~/.cargo/bin
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: cargo-install-v2-macos-${{ runner.arch }}-pg${{ matrix.pg }}-${{ hashFiles('Cargo.lock', '.tool-versions') }}
+          restore-keys: |
+            cargo-install-v2-macos-${{ runner.arch }}-pg${{ matrix.pg }}-
+            cargo-install-v2-macos-${{ runner.arch }}-
+
+      - name: Cache pgrx cluster
+        if: steps.pg-support.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pgrx
+            .pgaccel/postgres
+          key: pgrx-macos-${{ runner.arch }}-pg${{ matrix.pg }}-${{ hashFiles('Cargo.lock', 'pg_accel/pg_accel.control') }}
+          restore-keys: |
+            pgrx-macos-${{ runner.arch }}-pg${{ matrix.pg }}-
+            pgrx-macos-${{ runner.arch }}-
+
+      - name: Cache AdaptiveCpp install
+        if: steps.pg-support.outputs.skip != 'true'
+        id: cache-acpp
+        uses: actions/cache@v4
+        with:
+          path: |
+            .pgaccel/acpp
+            .pgaccel/src/AdaptiveCpp
+            .pgaccel/src/soft-fp64
+          key: acpp-macos-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}-${{ env.SOFT_FP64_REQUIRED_TAG }}-${{ hashFiles('.acpp-version', 'patches/adaptivecpp/*.patch', 'scripts/setup_acpp.sh') }}
+
+      - name: Install macOS build dependencies
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew update
+          brew install just llvm@20 lld@20 boost libomp postgis
+
+      - name: Install cargo tools
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/pg_versions.sh
+          cargo install cargo-pgrx --version "$PG_ACCEL_PGRX_VERSION" --locked
+          cargo install cargo-deny --locked
+          cargo install cargo-audit --locked
+
+      - name: Build pinned AdaptiveCpp Metal toolchain
+        if: steps.pg-support.outputs.skip != 'true' && steps.cache-acpp.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          just setup-gpu-metal-headers
+          ACPP_BACKEND=metal \
+            LLVM_PREFIX="$(brew --prefix llvm@20)" \
+            ACPP_LLD_PATH="$(brew --prefix lld@20)/bin/ld64.lld" \
+            just setup-gpu-acpp
+
+      - name: Initialize pgrx PostgreSQL ${{ matrix.pg }}
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          just setup-pg-source ${{ matrix.pg }}
+          just setup-pg-extensions ${{ matrix.pg }}
+          just setup-pgrx ${{ matrix.pg }}
+
+      - name: Run PostgreSQL ${{ matrix.pg }} Rust gate
+        id: rust-gate
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        env:
+          PGACCEL_HOSTED_METAL_COMPATIBILITY: "1"
+        run: |
+          set -euo pipefail
+          just fmt-check
+          just lint ${{ matrix.pg }}
+          just check ${{ matrix.pg }}
+          just test-unit ${{ matrix.pg }}
+
+      - name: Audit safety and deterministic fuzz contracts
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
+        shell: bash
+        run: |
+          set -euo pipefail
+          just safety-contract-audit
+
+      - name: Run benchmark harness release-gate tests
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p pg_accel_bench --locked
+
+      - name: Run live extension smoke
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          just extension-smoke ${{ matrix.pg }}
+
+      - name: Run SQL integration tests
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        env:
+          PG_ACCEL_SQL_TEST_REQUIRE_EXTENSION: "1"
+          PGACCEL_HOSTED_METAL_COMPATIBILITY: "1"
+          # The virtual M1 is a correctness-only compatibility runner. Its
+          # first Metal JIT can exceed the physical-hardware 5s diagnostic
+          # threshold, so pin and verify a compatibility-only warning profile.
+          # This does not alter statement_timeout or suppress SQL errors.
+          PGOPTIONS: "-c pg_accel.kernel_timeout_ms=60000"
+          PG_ACCEL_SQL_TEST_EXPECT_KERNEL_TIMEOUT_MS: "60000"
+        run: |
+          set -euo pipefail
+          just sql-test ${{ matrix.pg }}
+
+      - name: Run pristine and pg_accel-loaded PostgreSQL upstream suites
+        id: upstream-pg
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          just upstream-pg-tests \
+            "${{ matrix.pg }}" \
+            "artifacts/upstream-postgresql-pg${{ matrix.pg }}"
+
+      - name: Verify extension catalog lifecycle
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          just extension-catalog-test "${{ matrix.pg }}" \
+            2>&1 | tee "artifacts/extension-catalog-pg${{ matrix.pg }}.log"
+
+      - name: Upload extension catalog lifecycle evidence
+        if: always() && steps.pg-support.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: extension-catalog-pg${{ matrix.pg }}-macos-arm64
+          path: artifacts/extension-catalog-pg${{ matrix.pg }}.log
+          if-no-files-found: warn
+
+      - name: Upload PostgreSQL upstream-suite evidence
+        if: always() && steps.upstream-pg.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-postgresql-pg${{ matrix.pg }}-macos-arm64
+          path: artifacts/upstream-postgresql-pg${{ matrix.pg }}
+          if-no-files-found: error
+
+      - name: Run plan-shape + parallel-stress integration tests
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
+        shell: bash
+        env:
+          # The virtual M1 has no overlap between the physical one-CU
+          # grouped-aggregate admission floor and one-shot safety ceiling.
+          # Calibrate planning to the reference profile while the executor
+          # continues to derive synchronous-work bounds from the real device.
+          PGACCEL_HOSTED_METAL_COMPATIBILITY: "1"
+        run: |
+          set -euo pipefail
+          just plan-shape-tests ${{ matrix.pg }}
+
+      - name: Generate package schema artifact
+        if: steps.pg-support.outputs.skip != 'true' && success()
+        id: schema
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          package_version="$(
+            cargo metadata --locked --no-deps --format-version 1 |
+              python3 -c 'import json, sys; versions = [p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "pg_accel"]; len(versions) == 1 or sys.exit("expected exactly one pg_accel package"); print(versions[0])'
+          )"
+          schema_path="artifacts/pg_accel--${package_version}-pg${{ matrix.pg }}.sql"
+          echo "path=$schema_path" >> "$GITHUB_OUTPUT"
+          cargo pgrx schema -p pg_accel pg${{ matrix.pg }} --no-default-features --features pg${{ matrix.pg }} -o "$schema_path"
+          test -s "$schema_path"
+
+      - name: Upload schema artifact
+        if: always() && steps.schema.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-schema-pg${{ matrix.pg }}-macos-arm64
+          path: ${{ steps.schema.outputs.path }}
+          if-no-files-found: error
+
+      - name: Capture macOS Metal diagnostics
+        if: always() && steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          scripts/capture_metal_ci_diagnostics.sh \
+            "${{ matrix.pg }}" \
+            "artifacts/macos-metal-diagnostics-pg${{ matrix.pg }}" \
+            "rust=${{ steps.rust-gate.outcome }} upstream=${{ steps.upstream-pg.outcome }}"
+
+      - name: Upload macOS Metal diagnostics
+        if: always() && steps.pg-support.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-macos-metal-diagnostics-pg${{ matrix.pg }}
+          path: artifacts/macos-metal-diagnostics-pg${{ matrix.pg }}
+          if-no-files-found: error
+
+  metal-compatibility:
+    name: Hosted Metal compatibility and coverage (PG 18)
+    runs-on: macos-26
+    timeout-minutes: 360
+    env:
+      SOFT_FP64_REQUIRED_TAG: v2.0.1
+      PUBLIC_INSTALL_ARTIFACT_DIR: artifacts/public-install-pg18-hosted-apple-silicon
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Load pinned AdaptiveCpp SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ACPP_REQUIRED_SHA=$(cat .acpp-version)" >> "$GITHUB_ENV"
+
+      - name: Install Rust and coverage tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/pg_versions.sh
+          rust_version="$(awk '/^rust / { print $2 }' .tool-versions)"
+          rustup toolchain install "$rust_version" --profile minimal --component clippy,rustfmt,llvm-tools-preview
+          rustup default "$rust_version"
+          cargo install cargo-pgrx --version "$PG_ACCEL_PGRX_VERSION" --locked
+          cargo install cargo-llvm-cov --locked
+
+      - name: Install hosted Metal dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew update
+          brew install just cmake llvm@20 lld@20 boost libomp postgis
+
+      - name: Cache hosted Metal toolchain
+        id: cache-acpp-metal-compatibility
+        uses: actions/cache@v4
+        with:
+          path: |
+            .pgaccel/acpp
+            .pgaccel/src/AdaptiveCpp
+            .pgaccel/src/soft-fp64
+          key: acpp-hosted-metal-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}-${{ env.SOFT_FP64_REQUIRED_TAG }}-${{ hashFiles('.acpp-version', 'patches/adaptivecpp/*.patch', 'scripts/setup_acpp.sh') }}
+
+      - name: Build pinned AdaptiveCpp Metal toolchain
+        if: steps.cache-acpp-metal-compatibility.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          just setup-gpu-metal-headers
+          ACPP_BACKEND=metal \
+            LLVM_PREFIX="$(brew --prefix llvm@20)" \
+            ACPP_LLD_PATH="$(brew --prefix lld@20)/bin/ld64.lld" \
+            just setup-gpu-acpp
+
+      - name: Initialize PostgreSQL 18
+        shell: bash
+        run: |
+          set -euo pipefail
+          just setup-pg-source 18
+          just setup-pg-extensions 18
+          just setup-pgrx 18
+
+      - name: Capture hosted runner and exact-candidate provenance
+        shell: bash
+        env:
+          EXPECTED_CANDIDATE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          artifact_dir="artifacts/hosted-metal-runner-pg18"
+          mkdir -p "$artifact_dir"
+          python3 scripts/metal_stress_artifacts.py capture-candidate \
+            --repo-root "$PWD" \
+            --expected-commit "$EXPECTED_CANDIDATE_SHA" \
+            --output "$artifact_dir/candidate-provenance.json"
+          {
+            uname -a
+            sysctl -n machdep.cpu.brand_string
+            sysctl -n hw.logicalcpu
+            .pgaccel/acpp/current/bin/acpp-info
+          } > "$artifact_dir/runner-metadata.txt"
+
+      - name: Verify public source build, install, and CREATE EXTENSION
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$PUBLIC_INSTALL_ARTIFACT_DIR"
+          just extension-smoke 18 2>&1 | \
+            tee "$PUBLIC_INSTALL_ARTIFACT_DIR/source-build-create-extension.log"
+
+      - name: Build and verify the public release package
+        shell: bash
+        run: |
+          set -euo pipefail
+          pg_config="$(scripts/pg_source.sh pg-config 18)"
+          python3 scripts/package_extension.py \
+            --pg 18 \
+            --pg-config "$pg_config" \
+            --acpp-prefix "$PWD/.pgaccel/acpp/current" 2>&1 | \
+            tee "$PUBLIC_INSTALL_ARTIFACT_DIR/package-build.log"
+          just package-smoke 18 2>&1 | \
+            tee "$PUBLIC_INSTALL_ARTIFACT_DIR/package-install-create-extension.log"
+          for pattern in \
+            'pg_accel-pg18-*.tar.gz' \
+            'pg_accel-pg18-*.tar.gz.sha256' \
+            'pg_accel-pg18-*.smoke.txt'; do
+            count="$(find target/release -maxdepth 1 -type f \
+              -name "$pattern" -print | wc -l | tr -d ' ')"
+            if [ "$count" -ne 1 ]; then
+              echo "error: expected one public package artifact for $pattern; found $count" >&2
+              exit 1
+            fi
+          done
+          find target/release -maxdepth 1 -type f \
+            \( -name 'pg_accel-pg18-*.tar.gz' \
+              -o -name 'pg_accel-pg18-*.tar.gz.sha256' \
+              -o -name 'pg_accel-pg18-*.smoke.txt' \) \
+            -exec cp {} "$PUBLIC_INSTALL_ARTIFACT_DIR/" \;
+          cp artifacts/hosted-metal-runner-pg18/candidate-provenance.json \
+            "$PUBLIC_INSTALL_ARTIFACT_DIR/"
+          cp artifacts/hosted-metal-runner-pg18/runner-metadata.txt \
+            "$PUBLIC_INSTALL_ARTIFACT_DIR/"
+
+      - name: Seal public Apple Silicon install evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="$RUNNER_TEMP/public-install-pg18.SHA256SUMS"
+          (
+            cd "$PUBLIC_INSTALL_ARTIFACT_DIR"
+            find . -type f ! -name SHA256SUMS -print | LC_ALL=C sort | while IFS= read -r path; do
+              shasum -a 256 "$path"
+            done > "$manifest"
+            mv "$manifest" SHA256SUMS
+            shasum -a 256 -c SHA256SUMS
+          )
+
+      - name: Run three-layer hosted Metal compatibility gate
+        id: hosted-coverage
+        shell: bash
+        env:
+          COVERAGE_ARTIFACT_DIR: artifacts/coverage-pg18-hosted-metal
+          COVERAGE_MIN_RUST_LINES: 90
+          COVERAGE_MIN_CPP_LINES: 90
+          COVERAGE_MIN_SQL_ASSERTIONS: 90
+          PGACCEL_HOSTED_METAL_COMPATIBILITY: "1"
+        run: |
+          set -euo pipefail
+          CPP_COVERAGE_LLVM_PREFIX="$(brew --prefix llvm@20)" just coverage 18
+
+      - name: Capture hosted Metal diagnostics
+        if: always()
+        shell: bash
+        run: |
+          scripts/capture_metal_ci_diagnostics.sh \
+            18 artifacts/hosted-metal-diagnostics-pg18 \
+            "coverage=${{ steps.hosted-coverage.outcome }}"
+
+      - name: Seal hosted runner provenance
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="artifacts/hosted-metal-runner-pg18"
+          manifest="$RUNNER_TEMP/hosted-metal-runner-pg18.SHA256SUMS"
+          test -d "$artifact_dir"
+          (
+            cd "$artifact_dir"
+            find . -type f ! -name SHA256SUMS -print | LC_ALL=C sort | while IFS= read -r path; do
+              shasum -a 256 "$path"
+            done > "$manifest"
+            mv "$manifest" SHA256SUMS
+            shasum -a 256 -c SHA256SUMS
+          )
+
+      - name: Upload hosted Metal coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-three-layer-coverage-pg18-hosted-metal
+          path: artifacts/coverage-pg18-hosted-metal
+          if-no-files-found: error
+
+      - name: Upload hosted Metal runner provenance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-hosted-metal-runner-pg18
+          path: artifacts/hosted-metal-runner-pg18
+          if-no-files-found: error
+
+      - name: Upload public Apple Silicon install evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-public-install-pg18-hosted-apple-silicon
+          path: artifacts/public-install-pg18-hosted-apple-silicon
+          if-no-files-found: error
+
+      - name: Upload hosted Metal diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-hosted-metal-diagnostics-pg18
+          path: artifacts/hosted-metal-diagnostics-pg18
+          if-no-files-found: error
+
+  linux-x86:
+    name: Linux x86_64 PG ${{ matrix.pg }} check/test
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      LINUX_NO_GPU_ARTIFACT_DIR: artifacts/linux-no-gpu-pg${{ matrix.pg }}
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [18, 19]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Capture exact-candidate provenance
+        shell: bash
+        env:
+          EXPECTED_CANDIDATE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$LINUX_NO_GPU_ARTIFACT_DIR"
+          python3 scripts/metal_stress_artifacts.py capture-candidate \
+            --repo-root "$PWD" \
+            --expected-commit "$EXPECTED_CANDIDATE_SHA" \
+            --output "$LINUX_NO_GPU_ARTIFACT_DIR/candidate-provenance.json"
+
+      - name: Test release checklist audit
+        if: matrix.pg == 18
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 -m unittest scripts/tests/test_release_checklist_audit.py -v \
+            2>&1 | tee "$LINUX_NO_GPU_ARTIFACT_DIR/release-checklist-audit-tests.log"
+
+      - name: Load pinned AdaptiveCpp SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ACPP_REQUIRED_SHA=$(cat .acpp-version)" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rust_version="$(awk '/^rust / { print $2 }' .tool-versions)"
+          rustup toolchain install "$rust_version" --profile minimal --component clippy,rustfmt
+          rustup default "$rust_version"
+
+      - name: Validate pgrx support for PostgreSQL ${{ matrix.pg }}
+        id: pg-support
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/pg_versions.sh
+          pg_accel_require_pgrx_support "${{ matrix.pg }}"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Cargo artifacts
+        if: steps.pg-support.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: cargo-linux-${{ runner.arch }}-pg${{ matrix.pg }}-${{ hashFiles('Cargo.lock', '.tool-versions') }}
+          restore-keys: |
+            cargo-linux-${{ runner.arch }}-pg${{ matrix.pg }}-
+            cargo-linux-${{ runner.arch }}-
+
+      - name: Cache AdaptiveCpp generic install
+        if: steps.pg-support.outputs.skip != 'true'
+        id: cache-acpp-linux
+        uses: actions/cache@v4
+        with:
+          path: |
+            .pgaccel/acpp
+            .pgaccel/src/AdaptiveCpp
+            .pgaccel/src/soft-fp64
+          key: acpp-linux-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}-${{ env.SOFT_FP64_REQUIRED_TAG }}-${{ hashFiles('.acpp-version', 'patches/adaptivecpp/*.patch', 'scripts/setup_acpp.sh') }}
+
+      - name: Cache source PostgreSQL
+        if: steps.pg-support.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pgrx
+            .pgaccel/postgres
+          key: source-pg-linux-${{ runner.arch }}-pg${{ matrix.pg }}-${{ hashFiles('scripts/pg_source.sh') }}
+
+      - name: Install system dependencies
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            ca-certificates \
+            bison \
+            clang \
+            cmake \
+            curl \
+            flex \
+            git \
+            libclang-dev \
+            libomp-dev \
+            libreadline-dev \
+            libssl-dev \
+            lld \
+            llvm-dev \
+            ninja-build \
+            pkg-config \
+            zlib1g-dev
+
+      - name: Install cargo-pgrx and initialize PostgreSQL ${{ matrix.pg }}
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/pg_versions.sh
+          cargo install just --locked
+          cargo install cargo-pgrx --version "$PG_ACCEL_PGRX_VERSION" --locked
+          scripts/pg_source.sh build ${{ matrix.pg }}
+          cargo pgrx init --pg${{ matrix.pg }} "$(scripts/pg_source.sh pg-config ${{ matrix.pg }})"
+
+      - name: Build pinned AdaptiveCpp generic toolchain
+        if: steps.pg-support.outputs.skip != 'true' && steps.cache-acpp-linux.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ACPP_BACKEND=generic ./scripts/setup_acpp.sh
+
+      - uses: actions/setup-python@v5
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
+        with:
+          python-version: '3.11'
+
+      - name: Run CPU-cheat analyzer and ABI integrity gate
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_release_profile.py -v
+          # Host filesystem tests; native parity explicitly skips without its probe.
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_acpp_cache.py -v
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 -m unittest discover -s scripts/tests -p 'test_cpu_cheat_audit.py' -v \
+            2>&1 | tee "$LINUX_NO_GPU_ARTIFACT_DIR/cpu-cheat-analyzer-tests.log"
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 -m unittest discover -s scripts/tests -p 'test_output_container_escape.py' -v \
+            2>&1 | tee "$LINUX_NO_GPU_ARTIFACT_DIR/output-container-escape-tests.log"
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 -m unittest discover -s scripts/tests -p 'test_workspace*.py' -v \
+            2>&1 | tee "$LINUX_NO_GPU_ARTIFACT_DIR/workspace-effect-tests.log"
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 -m unittest discover -s scripts/tests -p 'test_metadata_effects.py' -v \
+            2>&1 | tee "$LINUX_NO_GPU_ARTIFACT_DIR/metadata-effect-tests.log"
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 -m unittest discover -s scripts/tests -p 'test_metadata_build.py' -v \
+            2>&1 | tee "$LINUX_NO_GPU_ARTIFACT_DIR/metadata-build-tests.log"
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 -m unittest discover -s scripts/tests -p 'test_metadata_link.py' -v \
+            2>&1 | tee "$LINUX_NO_GPU_ARTIFACT_DIR/metadata-link-tests.log"
+
+      - name: Prove the hosted runtime exposes no GPU device
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            uname -a
+            lscpu
+            # Hosted VMs may expose virtual DRM nodes (for example, Hyper-V
+            # card devices) without exposing a compute GPU. Preserve those
+            # nodes as evidence; gate on the runtime inventory below.
+            find /dev -maxdepth 2 \
+              \( -name 'nvidia*' -o -name 'dri' -o -name 'renderD*' \
+                 -o -name 'card*' -o -name 'kfd' -o -name 'dxg' \
+                 -o -name 'mali*' \) -print
+          } > "$LINUX_NO_GPU_ARTIFACT_DIR/runner-metadata.txt"
+
+          runtime_inventory="$LINUX_NO_GPU_ARTIFACT_DIR/runtime-device-inventory.txt"
+          ./.pgaccel/acpp/current/bin/acpp-info > "$runtime_inventory" 2>&1
+          if ! grep -Eq '^[[:space:]]*Is GPU:[[:space:]]*[01][[:space:]]*$' \
+              "$runtime_inventory"; then
+            echo "error: Linux no-GPU gate could not parse the AdaptiveCpp device inventory" >&2
+            exit 1
+          fi
+          if grep -Eq '^[[:space:]]*Is GPU:[[:space:]]*1[[:space:]]*$' \
+              "$runtime_inventory"; then
+            echo "error: Linux no-GPU gate found a GPU exposed by AdaptiveCpp" >&2
+            exit 1
+          fi
+
+          nvidia_probe="$LINUX_NO_GPU_ARTIFACT_DIR/nvidia-smi.txt"
+          if command -v nvidia-smi > /dev/null 2>&1; then
+            if ! nvidia-smi -L > "$nvidia_probe" 2>&1; then
+              printf 'nvidia-smi is installed but no NVIDIA GPU is reachable\n' \
+                >> "$nvidia_probe"
+            else
+              echo "error: Linux no-GPU gate unexpectedly reached an NVIDIA GPU" >&2
+              exit 1
+            fi
+          else
+            printf 'nvidia-smi is not installed\n' > "$nvidia_probe"
+          fi
+
+      - name: Check without GPU devices
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          just check ${{ matrix.pg }} 2>&1 | \
+            tee "$LINUX_NO_GPU_ARTIFACT_DIR/check.log"
+
+      - name: Run standalone Rust tests without GPU devices
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          just test-standalone ${{ matrix.pg }} 2>&1 | \
+            tee "$LINUX_NO_GPU_ARTIFACT_DIR/test-standalone.log"
+
+      - name: Audit safety and deterministic fuzz contracts
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
+        shell: bash
+        run: |
+          set -euo pipefail
+          just safety-contract-audit 2>&1 | \
+            tee "$LINUX_NO_GPU_ARTIFACT_DIR/safety-contract-audit.log"
+
+      - name: Run benchmark harness release-gate tests
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p pg_accel_bench --locked 2>&1 | \
+            tee "$LINUX_NO_GPU_ARTIFACT_DIR/benchmark-harness-tests.log"
+
+      - name: Seal Linux no-GPU evidence
+        if: steps.pg-support.outputs.skip != 'true' && success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="$RUNNER_TEMP/linux-no-gpu-pg${{ matrix.pg }}.SHA256SUMS"
+          (
+            cd "$LINUX_NO_GPU_ARTIFACT_DIR"
+            find . -type f ! -name SHA256SUMS -print | LC_ALL=C sort | while IFS= read -r path; do
+              sha256sum "$path"
+            done > "$manifest"
+            mv "$manifest" SHA256SUMS
+            sha256sum -c SHA256SUMS
+          )
+
+      - name: Upload Linux no-GPU evidence
+        if: always() && steps.pg-support.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-linux-no-gpu-pg${{ matrix.pg }}-${{ runner.arch }}
+          path: ${{ env.LINUX_NO_GPU_ARTIFACT_DIR }}
+          if-no-files-found: error
+
+  cuda-smoke:
+    name: CUDA smoke
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.cuda_smoke) || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'cuda-smoke')) }}
+    runs-on:
+      - self-hosted
+      - cuda
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Verify CUDA AdaptiveCpp runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v nvidia-smi
+          command -v acpp
+          nvidia-smi
+          acpp --acpp-version
+
+      - name: Build kernels and run minimal smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -B pgaccel-kernels/build -S pgaccel-kernels \
+            -DCMAKE_PREFIX_PATH="$HOME/local" \
+            -DACPP_TARGETS=cuda
+          cmake --build pgaccel-kernels/build --parallel
+          ./pgaccel-kernels/build/test_device
+          ./pgaccel-kernels/build/test_sycl_basic

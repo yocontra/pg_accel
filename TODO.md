@@ -27,14 +27,18 @@ The September implementation plan expands the objective beyond the historical
 completion of this expansion. Retain this file and planning docs until the
 complete objective is implemented and verified.
 
-- [ ] Correct pinned AdaptiveCpp cache-path handling. On macOS, explicit
-  `ACPP_APPDB_DIR` stores artifacts under `apps/global/jit-cache`; current
-  `archive_stats`, `Justfile` clear-jit, `metal_stress_artifacts` and CI
-  diagnostics assume other locations. Add path-layout regressions covering
-  archive statistics, targeted clearing, diagnostics, fork and hash-domain
-  fixtures. Preserve Linux per-executable, default, legacy and configuration
-  semantics; the recursive `resident_concurrency` fingerprint is intentional
-  and must not be narrowed. This remains separate from workspace-proof tooling.
+- [x] Correct pinned AdaptiveCpp cache-path handling. Native observation,
+  targeted clearing, artifact capture and diagnostics now use the actual
+  `apps/<application>/jit-cache` layout with runtime default/legacy/token rules.
+  Clearing protects home/base aliases and rejects ambiguous relative targets;
+  owned fixture regressions preserve old failures. Fresh local Metal validation
+  passes all 37 native CTests plus 14 cache and 22 artifact tests, including
+  native/Python parity; CI also invokes the host filesystem regressions.
+  Linux per-executable behavior has macOS host algorithm coverage, not live
+  Linux qualification. The recursive `resident_concurrency` fingerprint is
+  unchanged. Seven grouped/join release-proof findings remain open; no new SQL,
+  performance or cold-latency qualification is claimed. Evidence:
+  `benchmarks/evidence/cache-resolution-20261012/README.md`.
 
 - [ ] Generalize exact aggregation: multiple keys/measures, numeric/dictionary
   inputs, arithmetic/Boolean/IN/CASE/date expressions, FILTER, and parallel
