@@ -2,6 +2,10 @@
 members = ["pg_accel", "pg_accel_bench"]
 resolver = "2"
 
+[profile.release]
+# Rust 1.96 post-link stripping can misalign Mach-O dylibs: rust-lang/rust#157750.
+strip = "none"
+
 [workspace.package]
 version = "1.0.0-rc1"
 edition = "2024"

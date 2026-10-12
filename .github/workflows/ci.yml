@@ -616,11 +616,17 @@ jobs:
           set -euo pipefail
           ACPP_BACKEND=generic ./scripts/setup_acpp.sh
 
+      - uses: actions/setup-python@v5
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
+        with:
+          python-version: '3.11'
+
       - name: Run CPU-cheat analyzer and ABI integrity gate
         if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
         shell: bash
         run: |
           set -euo pipefail
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_release_profile.py -v
           PYTHONDONTWRITEBYTECODE=1 \
             python3 -m unittest discover -s scripts/tests -p 'test_cpu_cheat_audit.py' -v \
             2>&1 | tee "$LINUX_NO_GPU_ARTIFACT_DIR/cpu-cheat-analyzer-tests.log"
