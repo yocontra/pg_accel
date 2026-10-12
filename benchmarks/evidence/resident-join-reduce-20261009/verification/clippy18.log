@@ -1,0 +1,13 @@
+    Checking pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error: usage of wildcard import for enum variants
+   --> pg_accel/src/tests/join_rows.rs:656:82
+    |
+656 |         use crate::engine::spec::scalar::{ScalarInstruction as I, ScalarProgram, ScalarType::*};
+    |                                                                                  ^^^^^^^^^^^^^ help: try: `ScalarType::{Int4, Bool, Date}`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#enum_glob_use
+    = note: `-D clippy::enum-glob-use` implied by `-D clippy::pedantic`
+    = help: to override `-D clippy::pedantic` add `#[allow(clippy::enum_glob_use)]`
+
+error: could not compile `pg_accel` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

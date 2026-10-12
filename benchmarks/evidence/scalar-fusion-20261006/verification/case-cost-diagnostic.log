@@ -1,0 +1,212 @@
+BEGIN
+SELECT 250000
+COMMIT
+ANALYZE
+SET
+SET
+SET
+SET
+SET
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel join: observed 1 viable MergePath candidate(s); no GPU merge-join kernel exists
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel join: observed 1 viable row-returning HashPath candidate(s); no selected GPU row-output hash-join executor exists
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel join: observed 1 viable MergePath candidate(s); no GPU merge-join kernel exists
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel join: observed 1 viable row-returning HashPath candidate(s); no selected GPU row-output hash-join executor exists
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel join: observed 1 viable MergePath candidate(s); no GPU merge-join kernel exists
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel join: observed 1 viable row-returning HashPath candidate(s); no selected GPU row-output hash-join executor exists
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel join: observed 1 viable MergePath candidate(s); no GPU merge-join kernel exists
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel join: observed 1 viable row-returning HashPath candidate(s); no selected GPU row-output hash-join executor exists
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel join: observed 1 viable MergePath candidate(s); no GPU merge-join kernel exists
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel join: observed 1 viable row-returning HashPath candidate(s); no selected GPU row-output hash-join executor exists
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: join_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: rel_pathlist_no_resident_pipeline: declined because pg_accel requires a proven GPU-resident pipeline
+DEBUG:  pg_accel: admitted aggregate candidate gpu_total=5505.96 admission_native=Some(23844.4) live_native=Some(4567.822857142856) aggregate=5250 fact_scan=250 output=0.96 load=0
+SET
+ pg_accel_pin 
+--------------
+       250000
+(1 row)
+
+DEBUG:  pg_accel: admitted aggregate candidate gpu_total=3255.96 admission_native=Some(17594.4) live_native=Some(3674.9728571428577) aggregate=3000 fact_scan=250 output=0.96 load=0
+                                                        QUERY PLAN                                                        
+--------------------------------------------------------------------------------------------------------------------------
+ Finalize GroupAggregate  (cost=4559.50..4567.82 rows=32 width=68)
+   Group Key: region
+   ->  Gather Merge  (cost=4559.50..4563.50 rows=224 width=68)
+         Workers Planned: 7
+         ->  Sort  (cost=4559.38..4559.46 rows=32 width=68)
+               Sort Key: region
+               ->  Partial HashAggregate  (cost=4558.26..4558.58 rows=32 width=68)
+                     Group Key: region
+                     ->  Parallel Seq Scan on _pgaccel_case_cost_probe_20261006  (cost=0.00..1701.14 rows=35714 width=12)
+(9 rows)
+
+ pg_accel_last_planner_rejection_reason 
+----------------------------------------
+ no_gpu_resident_pipeline
+(1 row)
+
+                                                                                                                                                                                                                                                                                                                                                       QUERY PLAN                                                                                                                                                                                                                                                                                                                                                        
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuAccelAgg)  (cost=5.00..3255.96 rows=32 width=68)
+   Strategy: GpuAgg
+   Plan Selected: true
+   Batch Size: 65536
+   Expected Threads: 1
+   GPU Resident Pipeline: true
+   GPU Resident Proof Version: 2
+   GPU Resident Operator Class: resident_groupagg
+   GPU Physical Kernel Mode: parallel_dense_integer
+   GPU Descriptor Strategy: descriptor_grouped_aggregate
+   GPU Descriptor Specialization: dense_scalar_programs_plain
+   GPU Descriptor Specialization Cache: miss
+   GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+   GPU Descriptor Group Keys: k0:fact(2414688.1:type=23) type=23 collation=0 encoding=hash
+   GPU Descriptor Aggregates: m0:bytecode(inputs=2, words=27, result_type=23) -> value.sum; value.avg; value.count; value.min; value.max; m1:count_star -> value.count
+   GPU Descriptor Filter: fact=none; measures=[m0=none; m1=none]; dimensions=[none]
+   GPU Descriptor Star Dimensions: none
+   GPU Descriptor Output: slot0:group[k0] source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot2:aggregate[m0].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot3:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false; slot4:aggregate[m0].value.min source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot5:aggregate[m0].value.max source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot6:aggregate[m1].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+   GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+   GPU Descriptor Artifact: not initialized
+   GPU Descriptor Generations: not inspected
+   GPU Descriptor Bytes: not inspected
+   GPU Resident Stage Mask: 16395
+   GPU Resident Device Columns: 3
+   GPU Resident Boundary: none: no CPU boundary
+(25 rows)
+
+ pg_accel_last_planner_rejection_reason 
+----------------------------------------
+ no_gpu_resident_pipeline
+(1 row)
+
+DROP TABLE

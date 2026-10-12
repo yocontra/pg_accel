@@ -13,6 +13,11 @@ use std::fmt;
 pub const RESIDENT_GEOMETRY_POINT: u32 = 1;
 pub const RESIDENT_GEOMETRY_LINESTRING: u32 = 2;
 pub const RESIDENT_GEOMETRY_POLYGON: u32 = 3;
+pub const RESIDENT_GEOMETRY_MULTIPOLYGON: u32 = 6;
+/// MULTIPOLYGON ring offsets mark each component's shell with this bit.
+/// Low 63 bits remain absolute coordinate-pair offsets; Polygon offsets are
+/// untagged. Coordinate byte-span validation excludes offsets this large.
+pub const RESIDENT_GEOMETRY_RING_COMPONENT_START: u64 = 1 << 63;
 /// The row's bbox lane is finite, ordered, and covers every coordinate.
 /// A clear bit denotes an empty geometry and requires a zero bbox payload.
 pub const RESIDENT_GEOMETRY_BBOX_VALID: u32 = 1 << 0;
@@ -295,6 +300,8 @@ pub struct ResidentGeometryRow {
 /// or scalar indexes. A non-NULL row is empty exactly when its coordinate span
 /// is empty and `RESIDENT_GEOMETRY_BBOX_VALID` is clear; its bbox is then
 /// canonical positive zero.
+/// MULTIPOLYGON ring offsets additionally tag component shells with
+/// `RESIDENT_GEOMETRY_RING_COMPONENT_START`; mask it before indexing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResidentGeometryData {
     pub coordinates: Vec<f64>,
@@ -353,7 +360,10 @@ impl ResidentGeometryData {
             }
             if !matches!(
                 row.geom_type,
-                RESIDENT_GEOMETRY_POINT | RESIDENT_GEOMETRY_LINESTRING | RESIDENT_GEOMETRY_POLYGON
+                RESIDENT_GEOMETRY_POINT
+                    | RESIDENT_GEOMETRY_LINESTRING
+                    | RESIDENT_GEOMETRY_POLYGON
+                    | RESIDENT_GEOMETRY_MULTIPOLYGON
             ) || row.flags & !RESIDENT_GEOMETRY_ALL_FLAGS != 0
                 || !(0..=999_999).contains(&row.srid)
             {
@@ -371,7 +381,12 @@ impl ResidentGeometryData {
             let bbox_valid = row.flags & RESIDENT_GEOMETRY_BBOX_VALID != 0;
             if first_ring != next_ring
                 || ring_end > self.ring_offsets.len()
-                || (bbox_valid && row.geom_type == RESIDENT_GEOMETRY_POLYGON) != (ring_count > 0)
+                || (bbox_valid
+                    && matches!(
+                        row.geom_type,
+                        RESIDENT_GEOMETRY_POLYGON | RESIDENT_GEOMETRY_MULTIPOLYGON
+                    ))
+                    != (ring_count > 0)
             {
                 return Err(DomainContractError::Invalid(
                     "geometry row ring range is invalid",
@@ -420,23 +435,32 @@ impl ResidentGeometryData {
                         "resident linestring contains fewer than two coordinates",
                     ));
                 }
-                RESIDENT_GEOMETRY_POLYGON => {
+                RESIDENT_GEOMETRY_POLYGON | RESIDENT_GEOMETRY_MULTIPOLYGON => {
                     let ring_offsets = &self.ring_offsets[first_ring..ring_end];
-                    if ring_offsets.first().copied() != u64::try_from(coordinate_start).ok()
-                        || ring_offsets.windows(2).any(|pair| pair[0] >= pair[1])
+                    let mask = !RESIDENT_GEOMETRY_RING_COMPONENT_START;
+                    let multi = row.geom_type == RESIDENT_GEOMETRY_MULTIPOLYGON;
+                    if ring_offsets.first().map(|offset| offset & mask)
+                        != u64::try_from(coordinate_start).ok()
+                        || ring_offsets
+                            .first()
+                            .is_some_and(|offset| (*offset & !mask != 0) != multi)
+                        || (!multi && ring_offsets.iter().any(|offset| offset & !mask != 0))
+                        || ring_offsets
+                            .windows(2)
+                            .any(|pair| (pair[0] & mask) >= (pair[1] & mask))
                     {
                         return Err(DomainContractError::Invalid(
                             "geometry polygon ring starts are not canonical",
                         ));
                     }
                     for (ring_index, start) in ring_offsets.iter().enumerate() {
-                        let start = usize::try_from(*start).map_err(|_| {
+                        let start = usize::try_from(*start & mask).map_err(|_| {
                             DomainContractError::Invalid("geometry ring offset overflows usize")
                         })?;
                         let end = ring_offsets.get(ring_index + 1).copied().map_or(
                             Ok(coordinate_end),
                             |end| {
-                                usize::try_from(end).map_err(|_| {
+                                usize::try_from(end & mask).map_err(|_| {
                                     DomainContractError::Invalid(
                                         "geometry ring offset overflows usize",
                                     )

@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "timing_skew_threshold_fraction": 0.1,
+  "evaluated_no_dispatch_rows": 1,
+  "clean_rows": 1,
+  "warning_rows": 0,
+  "timing_skew_rows": 0,
+  "plan_mismatch_rows": 0,
+  "selected_custom_scan_not_dispatched_rows": 0,
+  "missing_plan_evidence_rows": 0,
+  "ignored_dispatching_rows": 1,
+  "rows": [
+    {
+      "workload": "global_scalar_program",
+      "rows": 1000000,
+      "speedup_median_vs_parallel": 0.9931686689637823,
+      "timing_skew_fraction": 0.006878319111037978,
+      "timing_skew": false,
+      "plan_mismatch": false,
+      "missing_plan_evidence": false,
+      "accel_plan_signature": "finalize aggregate",
+      "baseline_plan_signature": "finalize aggregate",
+      "status": "comparable_native",
+      "action": "no GPU credit; use only as native-decline/stability evidence"
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+SQL semantic assertion coverage: PASS
+assertions: 416/416 (100.00%)
+files completed: 89/89
+threshold: 90.00%

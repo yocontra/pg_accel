@@ -1,0 +1,1089 @@
+source: /Users/contra/.pgrx/19.log
+tail_bytes: 65536
+---
+	                RAISE EXCEPTION '117 missing normal NUMERIC dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _numeric_expected,_numeric_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 13:54:52.997 MST [36741] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 13:54:52.997 MST [36741] CONTEXT:  SQL statement "CREATE TEMP TABLE _numeric_actual AS SELECT g,h,k,sum(v) FILTER (WHERE id>500003) s,count(w) c FROM _numeric_agg WHERE NOT (g=1 OR g=3) GROUP BY g,h,k"
+	PL/pgSQL function inline_code_block line 55 at EXECUTE
+2026-09-29 13:54:52.997 MST [36741] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_numeric_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY['',' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL'] LOOP
+	        FOREACH outputs IN ARRAY CASE WHEN restriction='' THEN ARRAY[
+	            'sum(v) s',
+	            'avg(v) a',
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(v) s,avg(w) a,count(w) c,count(*) n',
+	            'sum(v) FILTER (WHERE id<=500003) s,avg(w) FILTER (WHERE id>500003) a,count(w) FILTER (WHERE id>500003) c,count(*) n',
+	            'count(*) n,sum(v) FILTER (WHERE g IN (0,2)) s,avg(v) FILTER (WHERE g IN (0,2)) a,sum(v) FILTER (WHERE id BETWEEN 250000 AND 750003) t',
+	            'sum(v) FILTER (WHERE id<0) s,avg(v) FILTER (WHERE id<0) a,count(v) FILTER (WHERE id<0) c',
+	            'count(v) c',
+	            'count(*) n,count(v) c,count(w) d',
+	            'sum(v) s,count(w) c',
+	            'count(v) FILTER (WHERE g IN (0,2)) c,count(w) FILTER (WHERE id>500003) d,count(*) n',
+	            'count(v) FILTER (WHERE id<0) c',
+	            'sum(v) s,sum(qty) q,avg(qty) a,count(qty) c,count(*) n',
+	            'sum(id) i,avg(v) a,count(qty) c,count(*) n',
+	            'sum(v) FILTER (WHERE g=1) s,sum(qty) FILTER (WHERE id>500003) q,avg(qty) FILTER (WHERE id>500003) a,count(*) FILTER (WHERE g IN (0,2)) c',
+	            'count(v) c,sum(id) FILTER (WHERE id<0) s,avg(qty) FILTER (WHERE id<0) a'
+	        ] ELSE ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) FILTER (WHERE id>500003) c',
+	            'sum(v) FILTER (WHERE id>500003) s,count(w) c'
+	        ] END LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _numeric_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            IF position('WHERE id<=500003' IN outputs)>0 THEN
+	                -- The HAVING count is hidden from the SQL target list but
+	                -- shares the filtered SUM state. Retain native order/limit.
+	                query := query || ' HAVING count(v) FILTER (WHERE id<=500003)>1000' ||
+	                    ' ORDER BY sum(v) FILTER (WHERE id<=500003) DESC NULLS LAST' ||
+	                    CASE WHEN keys='' THEN '' ELSE ','||keys END || ' LIMIT 3';
+	            END IF;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _numeric_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _numeric_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _numeric_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _numeric_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_expected nr)) THEN
+	                RAISE EXCEPTION '117 exact NUMERIC SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: parallel_dense_numeric' IN plan)=0) THEN
+	                RAISE EXCEPTION '117 missing normal NUMERIC dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _numeric_expected,_numeric_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 13:54:52.998 MST [36741] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 13:54:52.998 MST [36741] CONTEXT:  SQL statement "CREATE TEMP TABLE _numeric_actual AS SELECT g,h,k,sum(v) FILTER (WHERE id>500003) s,count(w) c FROM _numeric_agg WHERE NOT (g=1 OR g=3) GROUP BY g,h,k"
+	PL/pgSQL function inline_code_block line 55 at EXECUTE
+2026-09-29 13:54:52.998 MST [36741] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_numeric_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY['',' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL'] LOOP
+	        FOREACH outputs IN ARRAY CASE WHEN restriction='' THEN ARRAY[
+	            'sum(v) s',
+	            'avg(v) a',
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(v) s,avg(w) a,count(w) c,count(*) n',
+	            'sum(v) FILTER (WHERE id<=500003) s,avg(w) FILTER (WHERE id>500003) a,count(w) FILTER (WHERE id>500003) c,count(*) n',
+	            'count(*) n,sum(v) FILTER (WHERE g IN (0,2)) s,avg(v) FILTER (WHERE g IN (0,2)) a,sum(v) FILTER (WHERE id BETWEEN 250000 AND 750003) t',
+	            'sum(v) FILTER (WHERE id<0) s,avg(v) FILTER (WHERE id<0) a,count(v) FILTER (WHERE id<0) c',
+	            'count(v) c',
+	            'count(*) n,count(v) c,count(w) d',
+	            'sum(v) s,count(w) c',
+	            'count(v) FILTER (WHERE g IN (0,2)) c,count(w) FILTER (WHERE id>500003) d,count(*) n',
+	            'count(v) FILTER (WHERE id<0) c',
+	            'sum(v) s,sum(qty) q,avg(qty) a,count(qty) c,count(*) n',
+	            'sum(id) i,avg(v) a,count(qty) c,count(*) n',
+	            'sum(v) FILTER (WHERE g=1) s,sum(qty) FILTER (WHERE id>500003) q,avg(qty) FILTER (WHERE id>500003) a,count(*) FILTER (WHERE g IN (0,2)) c',
+	            'count(v) c,sum(id) FILTER (WHERE id<0) s,avg(qty) FILTER (WHERE id<0) a'
+	        ] ELSE ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) FILTER (WHERE id>500003) c',
+	            'sum(v) FILTER (WHERE id>500003) s,count(w) c'
+	        ] END LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _numeric_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            IF position('WHERE id<=500003' IN outputs)>0 THEN
+	                -- The HAVING count is hidden from the SQL target list but
+	                -- shares the filtered SUM state. Retain native order/limit.
+	                query := query || ' HAVING count(v) FILTER (WHERE id<=500003)>1000' ||
+	                    ' ORDER BY sum(v) FILTER (WHERE id<=500003) DESC NULLS LAST' ||
+	                    CASE WHEN keys='' THEN '' ELSE ','||keys END || ' LIMIT 3';
+	            END IF;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _numeric_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _numeric_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _numeric_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _numeric_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_expected nr)) THEN
+	                RAISE EXCEPTION '117 exact NUMERIC SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: parallel_dense_numeric' IN plan)=0) THEN
+	                RAISE EXCEPTION '117 missing normal NUMERIC dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _numeric_expected,_numeric_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 13:54:53.075 MST [36741] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 13:54:53.075 MST [36741] CONTEXT:  SQL statement "CREATE TEMP TABLE _numeric_actual AS SELECT g,h,k,count(*) n,sum(v) s,avg(v) a,count(v) c FROM _numeric_agg WHERE g<0 GROUP BY g,h,k"
+	PL/pgSQL function inline_code_block line 55 at EXECUTE
+2026-09-29 13:54:53.075 MST [36741] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_numeric_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY['',' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL'] LOOP
+	        FOREACH outputs IN ARRAY CASE WHEN restriction='' THEN ARRAY[
+	            'sum(v) s',
+	            'avg(v) a',
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(v) s,avg(w) a,count(w) c,count(*) n',
+	            'sum(v) FILTER (WHERE id<=500003) s,avg(w) FILTER (WHERE id>500003) a,count(w) FILTER (WHERE id>500003) c,count(*) n',
+	            'count(*) n,sum(v) FILTER (WHERE g IN (0,2)) s,avg(v) FILTER (WHERE g IN (0,2)) a,sum(v) FILTER (WHERE id BETWEEN 250000 AND 750003) t',
+	            'sum(v) FILTER (WHERE id<0) s,avg(v) FILTER (WHERE id<0) a,count(v) FILTER (WHERE id<0) c',
+	            'count(v) c',
+	            'count(*) n,count(v) c,count(w) d',
+	            'sum(v) s,count(w) c',
+	            'count(v) FILTER (WHERE g IN (0,2)) c,count(w) FILTER (WHERE id>500003) d,count(*) n',
+	            'count(v) FILTER (WHERE id<0) c',
+	            'sum(v) s,sum(qty) q,avg(qty) a,count(qty) c,count(*) n',
+	            'sum(id) i,avg(v) a,count(qty) c,count(*) n',
+	            'sum(v) FILTER (WHERE g=1) s,sum(qty) FILTER (WHERE id>500003) q,avg(qty) FILTER (WHERE id>500003) a,count(*) FILTER (WHERE g IN (0,2)) c',
+	            'count(v) c,sum(id) FILTER (WHERE id<0) s,avg(qty) FILTER (WHERE id<0) a'
+	        ] ELSE ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) FILTER (WHERE id>500003) c',
+	            'sum(v) FILTER (WHERE id>500003) s,count(w) c'
+	        ] END LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _numeric_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            IF position('WHERE id<=500003' IN outputs)>0 THEN
+	                -- The HAVING count is hidden from the SQL target list but
+	                -- shares the filtered SUM state. Retain native order/limit.
+	                query := query || ' HAVING count(v) FILTER (WHERE id<=500003)>1000' ||
+	                    ' ORDER BY sum(v) FILTER (WHERE id<=500003) DESC NULLS LAST' ||
+	                    CASE WHEN keys='' THEN '' ELSE ','||keys END || ' LIMIT 3';
+	            END IF;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _numeric_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _numeric_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _numeric_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _numeric_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_expected nr)) THEN
+	                RAISE EXCEPTION '117 exact NUMERIC SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: parallel_dense_numeric' IN plan)=0) THEN
+	                RAISE EXCEPTION '117 missing normal NUMERIC dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _numeric_expected,_numeric_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 13:54:53.381 MST [36741] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 13:54:53.381 MST [36741] CONTEXT:  SQL statement "CREATE TEMP TABLE _numeric_actual AS SELECT g,h,k,count(*) n,sum(v) s,avg(v) a,count(v) c FROM _numeric_agg WHERE b GROUP BY g,h,k"
+	PL/pgSQL function inline_code_block line 55 at EXECUTE
+2026-09-29 13:54:53.381 MST [36741] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_numeric_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY['',' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL'] LOOP
+	        FOREACH outputs IN ARRAY CASE WHEN restriction='' THEN ARRAY[
+	            'sum(v) s',
+	            'avg(v) a',
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(v) s,avg(w) a,count(w) c,count(*) n',
+	            'sum(v) FILTER (WHERE id<=500003) s,avg(w) FILTER (WHERE id>500003) a,count(w) FILTER (WHERE id>500003) c,count(*) n',
+	            'count(*) n,sum(v) FILTER (WHERE g IN (0,2)) s,avg(v) FILTER (WHERE g IN (0,2)) a,sum(v) FILTER (WHERE id BETWEEN 250000 AND 750003) t',
+	            'sum(v) FILTER (WHERE id<0) s,avg(v) FILTER (WHERE id<0) a,count(v) FILTER (WHERE id<0) c',
+	            'count(v) c',
+	            'count(*) n,count(v) c,count(w) d',
+	            'sum(v) s,count(w) c',
+	            'count(v) FILTER (WHERE g IN (0,2)) c,count(w) FILTER (WHERE id>500003) d,count(*) n',
+	            'count(v) FILTER (WHERE id<0) c',
+	            'sum(v) s,sum(qty) q,avg(qty) a,count(qty) c,count(*) n',
+	            'sum(id) i,avg(v) a,count(qty) c,count(*) n',
+	            'sum(v) FILTER (WHERE g=1) s,sum(qty) FILTER (WHERE id>500003) q,avg(qty) FILTER (WHERE id>500003) a,count(*) FILTER (WHERE g IN (0,2)) c',
+	            'count(v) c,sum(id) FILTER (WHERE id<0) s,avg(qty) FILTER (WHERE id<0) a'
+	        ] ELSE ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) FILTER (WHERE id>500003) c',
+	            'sum(v) FILTER (WHERE id>500003) s,count(w) c'
+	        ] END LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _numeric_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            IF position('WHERE id<=500003' IN outputs)>0 THEN
+	                -- The HAVING count is hidden from the SQL target list but
+	                -- shares the filtered SUM state. Retain native order/limit.
+	                query := query || ' HAVING count(v) FILTER (WHERE id<=500003)>1000' ||
+	                    ' ORDER BY sum(v) FILTER (WHERE id<=500003) DESC NULLS LAST' ||
+	                    CASE WHEN keys='' THEN '' ELSE ','||keys END || ' LIMIT 3';
+	            END IF;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _numeric_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _numeric_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _numeric_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _numeric_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_expected nr)) THEN
+	                RAISE EXCEPTION '117 exact NUMERIC SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: parallel_dense_numeric' IN plan)=0) THEN
+	                RAISE EXCEPTION '117 missing normal NUMERIC dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _numeric_expected,_numeric_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 13:54:53.552 MST [36741] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 13:54:53.552 MST [36741] CONTEXT:  SQL statement "CREATE TEMP TABLE _numeric_actual AS SELECT g,h,k,sum(qty) q,avg(v) a,count(*) FILTER (WHERE id>500003) c FROM _numeric_agg WHERE b GROUP BY g,h,k"
+	PL/pgSQL function inline_code_block line 55 at EXECUTE
+2026-09-29 13:54:53.552 MST [36741] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_numeric_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY['',' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL'] LOOP
+	        FOREACH outputs IN ARRAY CASE WHEN restriction='' THEN ARRAY[
+	            'sum(v) s',
+	            'avg(v) a',
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(v) s,avg(w) a,count(w) c,count(*) n',
+	            'sum(v) FILTER (WHERE id<=500003) s,avg(w) FILTER (WHERE id>500003) a,count(w) FILTER (WHERE id>500003) c,count(*) n',
+	            'count(*) n,sum(v) FILTER (WHERE g IN (0,2)) s,avg(v) FILTER (WHERE g IN (0,2)) a,sum(v) FILTER (WHERE id BETWEEN 250000 AND 750003) t',
+	            'sum(v) FILTER (WHERE id<0) s,avg(v) FILTER (WHERE id<0) a,count(v) FILTER (WHERE id<0) c',
+	            'count(v) c',
+	            'count(*) n,count(v) c,count(w) d',
+	            'sum(v) s,count(w) c',
+	            'count(v) FILTER (WHERE g IN (0,2)) c,count(w) FILTER (WHERE id>500003) d,count(*) n',
+	            'count(v) FILTER (WHERE id<0) c',
+	            'sum(v) s,sum(qty) q,avg(qty) a,count(qty) c,count(*) n',
+	            'sum(id) i,avg(v) a,count(qty) c,count(*) n',
+	            'sum(v) FILTER (WHERE g=1) s,sum(qty) FILTER (WHERE id>500003) q,avg(qty) FILTER (WHERE id>500003) a,count(*) FILTER (WHERE g IN (0,2)) c',
+	            'count(v) c,sum(id) FILTER (WHERE id<0) s,avg(qty) FILTER (WHERE id<0) a'
+	        ] ELSE ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) FILTER (WHERE id>500003) c',
+	            'sum(v) FILTER (WHERE id>500003) s,count(w) c'
+	        ] END LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _numeric_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            IF position('WHERE id<=500003' IN outputs)>0 THEN
+	                -- The HAVING count is hidden from the SQL target list but
+	                -- shares the filtered SUM state. Retain native order/limit.
+	                query := query || ' HAVING count(v) FILTER (WHERE id<=500003)>1000' ||
+	                    ' ORDER BY sum(v) FILTER (WHERE id<=500003) DESC NULLS LAST' ||
+	                    CASE WHEN keys='' THEN '' ELSE ','||keys END || ' LIMIT 3';
+	            END IF;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _numeric_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _numeric_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _numeric_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _numeric_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_expected nr)) THEN
+	                RAISE EXCEPTION '117 exact NUMERIC SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: parallel_dense_numeric' IN plan)=0) THEN
+	                RAISE EXCEPTION '117 missing normal NUMERIC dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _numeric_expected,_numeric_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 13:54:53.553 MST [36741] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 13:54:53.553 MST [36741] CONTEXT:  SQL statement "CREATE TEMP TABLE _numeric_actual AS SELECT g,h,k,sum(qty) q,avg(v) a,count(*) FILTER (WHERE id>500003) c FROM _numeric_agg WHERE b GROUP BY g,h,k"
+	PL/pgSQL function inline_code_block line 55 at EXECUTE
+2026-09-29 13:54:53.553 MST [36741] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_numeric_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY['',' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL'] LOOP
+	        FOREACH outputs IN ARRAY CASE WHEN restriction='' THEN ARRAY[
+	            'sum(v) s',
+	            'avg(v) a',
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(v) s,avg(w) a,count(w) c,count(*) n',
+	            'sum(v) FILTER (WHERE id<=500003) s,avg(w) FILTER (WHERE id>500003) a,count(w) FILTER (WHERE id>500003) c,count(*) n',
+	            'count(*) n,sum(v) FILTER (WHERE g IN (0,2)) s,avg(v) FILTER (WHERE g IN (0,2)) a,sum(v) FILTER (WHERE id BETWEEN 250000 AND 750003) t',
+	            'sum(v) FILTER (WHERE id<0) s,avg(v) FILTER (WHERE id<0) a,count(v) FILTER (WHERE id<0) c',
+	            'count(v) c',
+	            'count(*) n,count(v) c,count(w) d',
+	            'sum(v) s,count(w) c',
+	            'count(v) FILTER (WHERE g IN (0,2)) c,count(w) FILTER (WHERE id>500003) d,count(*) n',
+	            'count(v) FILTER (WHERE id<0) c',
+	            'sum(v) s,sum(qty) q,avg(qty) a,count(qty) c,count(*) n',
+	            'sum(id) i,avg(v) a,count(qty) c,count(*) n',
+	            'sum(v) FILTER (WHERE g=1) s,sum(qty) FILTER (WHERE id>500003) q,avg(qty) FILTER (WHERE id>500003) a,count(*) FILTER (WHERE g IN (0,2)) c',
+	            'count(v) c,sum(id) FILTER (WHERE id<0) s,avg(qty) FILTER (WHERE id<0) a'
+	        ] ELSE ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) FILTER (WHERE id>500003) c',
+	            'sum(v) FILTER (WHERE id>500003) s,count(w) c'
+	        ] END LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _numeric_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            IF position('WHERE id<=500003' IN outputs)>0 THEN
+	                -- The HAVING count is hidden from the SQL target list but
+	                -- shares the filtered SUM state. Retain native order/limit.
+	                query := query || ' HAVING count(v) FILTER (WHERE id<=500003)>1000' ||
+	                    ' ORDER BY sum(v) FILTER (WHERE id<=500003) DESC NULLS LAST' ||
+	                    CASE WHEN keys='' THEN '' ELSE ','||keys END || ' LIMIT 3';
+	            END IF;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _numeric_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _numeric_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _numeric_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _numeric_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_expected nr)) THEN
+	                RAISE EXCEPTION '117 exact NUMERIC SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: parallel_dense_numeric' IN plan)=0) THEN
+	                RAISE EXCEPTION '117 missing normal NUMERIC dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _numeric_expected,_numeric_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 13:54:53.715 MST [36741] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 13:54:53.715 MST [36741] CONTEXT:  SQL statement "CREATE TEMP TABLE _numeric_actual AS SELECT g,h,k,sum(v) FILTER (WHERE id>500003) s,count(w) c FROM _numeric_agg WHERE b GROUP BY g,h,k"
+	PL/pgSQL function inline_code_block line 55 at EXECUTE
+2026-09-29 13:54:53.715 MST [36741] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_numeric_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY['',' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL'] LOOP
+	        FOREACH outputs IN ARRAY CASE WHEN restriction='' THEN ARRAY[
+	            'sum(v) s',
+	            'avg(v) a',
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(v) s,avg(w) a,count(w) c,count(*) n',
+	            'sum(v) FILTER (WHERE id<=500003) s,avg(w) FILTER (WHERE id>500003) a,count(w) FILTER (WHERE id>500003) c,count(*) n',
+	            'count(*) n,sum(v) FILTER (WHERE g IN (0,2)) s,avg(v) FILTER (WHERE g IN (0,2)) a,sum(v) FILTER (WHERE id BETWEEN 250000 AND 750003) t',
+	            'sum(v) FILTER (WHERE id<0) s,avg(v) FILTER (WHERE id<0) a,count(v) FILTER (WHERE id<0) c',
+	            'count(v) c',
+	            'count(*) n,count(v) c,count(w) d',
+	            'sum(v) s,count(w) c',
+	            'count(v) FILTER (WHERE g IN (0,2)) c,count(w) FILTER (WHERE id>500003) d,count(*) n',
+	            'count(v) FILTER (WHERE id<0) c',
+	            'sum(v) s,sum(qty) q,avg(qty) a,count(qty) c,count(*) n',
+	            'sum(id) i,avg(v) a,count(qty) c,count(*) n',
+	            'sum(v) FILTER (WHERE g=1) s,sum(qty) FILTER (WHERE id>500003) q,avg(qty) FILTER (WHERE id>500003) a,count(*) FILTER (WHERE g IN (0,2)) c',
+	            'count(v) c,sum(id) FILTER (WHERE id<0) s,avg(qty) FILTER (WHERE id<0) a'
+	        ] ELSE ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) FILTER (WHERE id>500003) c',
+	            'sum(v) FILTER (WHERE id>500003) s,count(w) c'
+	        ] END LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _numeric_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            IF position('WHERE id<=500003' IN outputs)>0 THEN
+	                -- The HAVING count is hidden from the SQL target list but
+	                -- shares the filtered SUM state. Retain native order/limit.
+	                query := query || ' HAVING count(v) FILTER (WHERE id<=500003)>1000' ||
+	                    ' ORDER BY sum(v) FILTER (WHERE id<=500003) DESC NULLS LAST' ||
+	                    CASE WHEN keys='' THEN '' ELSE ','||keys END || ' LIMIT 3';
+	            END IF;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _numeric_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _numeric_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _numeric_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _numeric_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_expected nr)) THEN
+	                RAISE EXCEPTION '117 exact NUMERIC SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: parallel_dense_numeric' IN plan)=0) THEN
+	                RAISE EXCEPTION '117 missing normal NUMERIC dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _numeric_expected,_numeric_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 13:54:53.717 MST [36741] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 13:54:53.717 MST [36741] CONTEXT:  SQL statement "CREATE TEMP TABLE _numeric_actual AS SELECT g,h,k,sum(v) FILTER (WHERE id>500003) s,count(w) c FROM _numeric_agg WHERE b GROUP BY g,h,k"
+	PL/pgSQL function inline_code_block line 55 at EXECUTE
+2026-09-29 13:54:53.717 MST [36741] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_numeric_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY['',' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL'] LOOP
+	        FOREACH outputs IN ARRAY CASE WHEN restriction='' THEN ARRAY[
+	            'sum(v) s',
+	            'avg(v) a',
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(v) s,avg(w) a,count(w) c,count(*) n',
+	            'sum(v) FILTER (WHERE id<=500003) s,avg(w) FILTER (WHERE id>500003) a,count(w) FILTER (WHERE id>500003) c,count(*) n',
+	            'count(*) n,sum(v) FILTER (WHERE g IN (0,2)) s,avg(v) FILTER (WHERE g IN (0,2)) a,sum(v) FILTER (WHERE id BETWEEN 250000 AND 750003) t',
+	            'sum(v) FILTER (WHERE id<0) s,avg(v) FILTER (WHERE id<0) a,count(v) FILTER (WHERE id<0) c',
+	            'count(v) c',
+	            'count(*) n,count(v) c,count(w) d',
+	            'sum(v) s,count(w) c',
+	            'count(v) FILTER (WHERE g IN (0,2)) c,count(w) FILTER (WHERE id>500003) d,count(*) n',
+	            'count(v) FILTER (WHERE id<0) c',
+	            'sum(v) s,sum(qty) q,avg(qty) a,count(qty) c,count(*) n',
+	            'sum(id) i,avg(v) a,count(qty) c,count(*) n',
+	            'sum(v) FILTER (WHERE g=1) s,sum(qty) FILTER (WHERE id>500003) q,avg(qty) FILTER (WHERE id>500003) a,count(*) FILTER (WHERE g IN (0,2)) c',
+	            'count(v) c,sum(id) FILTER (WHERE id<0) s,avg(qty) FILTER (WHERE id<0) a'
+	        ] ELSE ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) FILTER (WHERE id>500003) c',
+	            'sum(v) FILTER (WHERE id>500003) s,count(w) c'
+	        ] END LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _numeric_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            IF position('WHERE id<=500003' IN outputs)>0 THEN
+	                -- The HAVING count is hidden from the SQL target list but
+	                -- shares the filtered SUM state. Retain native order/limit.
+	                query := query || ' HAVING count(v) FILTER (WHERE id<=500003)>1000' ||
+	                    ' ORDER BY sum(v) FILTER (WHERE id<=500003) DESC NULLS LAST' ||
+	                    CASE WHEN keys='' THEN '' ELSE ','||keys END || ' LIMIT 3';
+	            END IF;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _numeric_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _numeric_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _numeric_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _numeric_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_expected nr)) THEN
+	                RAISE EXCEPTION '117 exact NUMERIC SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: parallel_dense_numeric' IN plan)=0) THEN
+	                RAISE EXCEPTION '117 missing normal NUMERIC dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _numeric_expected,_numeric_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 13:54:53.944 MST [36741] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 13:54:53.944 MST [36741] CONTEXT:  SQL statement "CREATE TEMP TABLE _numeric_actual AS SELECT g,h,k,count(*) n,sum(v) s,avg(v) a,count(v) c FROM _numeric_agg WHERE g IS NOT NULL GROUP BY g,h,k"
+	PL/pgSQL function inline_code_block line 55 at EXECUTE
+2026-09-29 13:54:53.944 MST [36741] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_numeric_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY['',' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL'] LOOP
+	        FOREACH outputs IN ARRAY CASE WHEN restriction='' THEN ARRAY[
+	            'sum(v) s',
+	            'avg(v) a',
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(v) s,avg(w) a,count(w) c,count(*) n',
+	            'sum(v) FILTER (WHERE id<=500003) s,avg(w) FILTER (WHERE id>500003) a,count(w) FILTER (WHERE id>500003) c,count(*) n',
+	            'count(*) n,sum(v) FILTER (WHERE g IN (0,2)) s,avg(v) FILTER (WHERE g IN (0,2)) a,sum(v) FILTER (WHERE id BETWEEN 250000 AND 750003) t',
+	            'sum(v) FILTER (WHERE id<0) s,avg(v) FILTER (WHERE id<0) a,count(v) FILTER (WHERE id<0) c',
+	            'count(v) c',
+	            'count(*) n,count(v) c,count(w) d',
+	            'sum(v) s,count(w) c',
+	            'count(v) FILTER (WHERE g IN (0,2)) c,count(w) FILTER (WHERE id>500003) d,count(*) n',
+	            'count(v) FILTER (WHERE id<0) c',
+	            'sum(v) s,sum(qty) q,avg(qty) a,count(qty) c,count(*) n',
+	            'sum(id) i,avg(v) a,count(qty) c,count(*) n',
+	            'sum(v) FILTER (WHERE g=1) s,sum(qty) FILTER (WHERE id>500003) q,avg(qty) FILTER (WHERE id>500003) a,count(*) FILTER (WHERE g IN (0,2)) c',
+	            'count(v) c,sum(id) FILTER (WHERE id<0) s,avg(qty) FILTER (WHERE id<0) a'
+	        ] ELSE ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) FILTER (WHERE id>500003) c',
+	            'sum(v) FILTER (WHERE id>500003) s,count(w) c'
+	        ] END LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _numeric_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            IF position('WHERE id<=500003' IN outputs)>0 THEN
+	                -- The HAVING count is hidden from the SQL target list but
+	                -- shares the filtered SUM state. Retain native order/limit.
+	                query := query || ' HAVING count(v) FILTER (WHERE id<=500003)>1000' ||
+	                    ' ORDER BY sum(v) FILTER (WHERE id<=500003) DESC NULLS LAST' ||
+	                    CASE WHEN keys='' THEN '' ELSE ','||keys END || ' LIMIT 3';
+	            END IF;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _numeric_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _numeric_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _numeric_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _numeric_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_expected nr)) THEN
+	                RAISE EXCEPTION '117 exact NUMERIC SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: parallel_dense_numeric' IN plan)=0) THEN
+	                RAISE EXCEPTION '117 missing normal NUMERIC dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _numeric_expected,_numeric_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 13:54:53.945 MST [36741] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 13:54:53.945 MST [36741] CONTEXT:  SQL statement "CREATE TEMP TABLE _numeric_actual AS SELECT g,h,k,count(*) n,sum(v) s,avg(v) a,count(v) c FROM _numeric_agg WHERE g IS NOT NULL GROUP BY g,h,k"
+	PL/pgSQL function inline_code_block line 55 at EXECUTE
+2026-09-29 13:54:53.945 MST [36741] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_numeric_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY['',' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL'] LOOP
+	        FOREACH outputs IN ARRAY CASE WHEN restriction='' THEN ARRAY[
+	            'sum(v) s',
+	            'avg(v) a',
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(v) s,avg(w) a,count(w) c,count(*) n',
+	            'sum(v) FILTER (WHERE id<=500003) s,avg(w) FILTER (WHERE id>500003) a,count(w) FILTER (WHERE id>500003) c,count(*) n',
+	            'count(*) n,sum(v) FILTER (WHERE g IN (0,2)) s,avg(v) FILTER (WHERE g IN (0,2)) a,sum(v) FILTER (WHERE id BETWEEN 250000 AND 750003) t',
+	            'sum(v) FILTER (WHERE id<0) s,avg(v) FILTER (WHERE id<0) a,count(v) FILTER (WHERE id<0) c',
+	            'count(v) c',
+	            'count(*) n,count(v) c,count(w) d',
+	            'sum(v) s,count(w) c',
+	            'count(v) FILTER (WHERE g IN (0,2)) c,count(w) FILTER (WHERE id>500003) d,count(*) n',
+	            'count(v) FILTER (WHERE id<0) c',
+	            'sum(v) s,sum(qty) q,avg(qty) a,count(qty) c,count(*) n',
+	            'sum(id) i,avg(v) a,count(qty) c,count(*) n',
+	            'sum(v) FILTER (WHERE g=1) s,sum(qty) FILTER (WHERE id>500003) q,avg(qty) FILTER (WHERE id>500003) a,count(*) FILTER (WHERE g IN (0,2)) c',
+	            'count(v) c,sum(id) FILTER (WHERE id<0) s,avg(qty) FILTER (WHERE id<0) a'
+	        ] ELSE ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) FILTER (WHERE id>500003) c',
+	            'sum(v) FILTER (WHERE id>500003) s,count(w) c'
+	        ] END LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _numeric_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            IF position('WHERE id<=500003' IN outputs)>0 THEN
+	                -- The HAVING count is hidden from the SQL target list but
+	                -- shares the filtered SUM state. Retain native order/limit.
+	                query := query || ' HAVING count(v) FILTER (WHERE id<=500003)>1000' ||
+	                    ' ORDER BY sum(v) FILTER (WHERE id<=500003) DESC NULLS LAST' ||
+	                    CASE WHEN keys='' THEN '' ELSE ','||keys END || ' LIMIT 3';
+	            END IF;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _numeric_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _numeric_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _numeric_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _numeric_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_expected nr)) THEN
+	                RAISE EXCEPTION '117 exact NUMERIC SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: parallel_dense_numeric' IN plan)=0) THEN
+	                RAISE EXCEPTION '117 missing normal NUMERIC dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _numeric_expected,_numeric_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 13:54:54.188 MST [36741] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 13:54:54.188 MST [36741] CONTEXT:  SQL statement "CREATE TEMP TABLE _numeric_actual AS SELECT g,h,k,sum(qty) q,avg(v) a,count(*) FILTER (WHERE id>500003) c FROM _numeric_agg WHERE g IS NOT NULL GROUP BY g,h,k"
+	PL/pgSQL function inline_code_block line 55 at EXECUTE
+2026-09-29 13:54:54.188 MST [36741] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_numeric_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY['',' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL'] LOOP
+	        FOREACH outputs IN ARRAY CASE WHEN restriction='' THEN ARRAY[
+	            'sum(v) s',
+	            'avg(v) a',
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(v) s,avg(w) a,count(w) c,count(*) n',
+	            'sum(v) FILTER (WHERE id<=500003) s,avg(w) FILTER (WHERE id>500003) a,count(w) FILTER (WHERE id>500003) c,count(*) n',
+	            'count(*) n,sum(v) FILTER (WHERE g IN (0,2)) s,avg(v) FILTER (WHERE g IN (0,2)) a,sum(v) FILTER (WHERE id BETWEEN 250000 AND 750003) t',
+	            'sum(v) FILTER (WHERE id<0) s,avg(v) FILTER (WHERE id<0) a,count(v) FILTER (WHERE id<0) c',
+	            'count(v) c',
+	            'count(*) n,count(v) c,count(w) d',
+	            'sum(v) s,count(w) c',
+	            'count(v) FILTER (WHERE g IN (0,2)) c,count(w) FILTER (WHERE id>500003) d,count(*) n',
+	            'count(v) FILTER (WHERE id<0) c',
+	            'sum(v) s,sum(qty) q,avg(qty) a,count(qty) c,count(*) n',
+	            'sum(id) i,avg(v) a,count(qty) c,count(*) n',
+	            'sum(v) FILTER (WHERE g=1) s,sum(qty) FILTER (WHERE id>500003) q,avg(qty) FILTER (WHERE id>500003) a,count(*) FILTER (WHERE g IN (0,2)) c',
+	            'count(v) c,sum(id) FILTER (WHERE id<0) s,avg(qty) FILTER (WHERE id<0) a'
+	        ] ELSE ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) FILTER (WHERE id>500003) c',
+	            'sum(v) FILTER (WHERE id>500003) s,count(w) c'
+	        ] END LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _numeric_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            IF position('WHERE id<=500003' IN outputs)>0 THEN
+	                -- The HAVING count is hidden from the SQL target list but
+	                -- shares the filtered SUM state. Retain native order/limit.
+	                query := query || ' HAVING count(v) FILTER (WHERE id<=500003)>1000' ||
+	                    ' ORDER BY sum(v) FILTER (WHERE id<=500003) DESC NULLS LAST' ||
+	                    CASE WHEN keys='' THEN '' ELSE ','||keys END || ' LIMIT 3';
+	            END IF;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _numeric_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _numeric_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _numeric_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _numeric_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_expected nr)) THEN
+	                RAISE EXCEPTION '117 exact NUMERIC SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: parallel_dense_numeric' IN plan)=0) THEN
+	                RAISE EXCEPTION '117 missing normal NUMERIC dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _numeric_expected,_numeric_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 13:54:54.189 MST [36741] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 13:54:54.189 MST [36741] CONTEXT:  SQL statement "CREATE TEMP TABLE _numeric_actual AS SELECT g,h,k,sum(qty) q,avg(v) a,count(*) FILTER (WHERE id>500003) c FROM _numeric_agg WHERE g IS NOT NULL GROUP BY g,h,k"
+	PL/pgSQL function inline_code_block line 55 at EXECUTE
+2026-09-29 13:54:54.189 MST [36741] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_numeric_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY['',' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL'] LOOP
+	        FOREACH outputs IN ARRAY CASE WHEN restriction='' THEN ARRAY[
+	            'sum(v) s',
+	            'avg(v) a',
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(v) s,avg(w) a,count(w) c,count(*) n',
+	            'sum(v) FILTER (WHERE id<=500003) s,avg(w) FILTER (WHERE id>500003) a,count(w) FILTER (WHERE id>500003) c,count(*) n',
+	            'count(*) n,sum(v) FILTER (WHERE g IN (0,2)) s,avg(v) FILTER (WHERE g IN (0,2)) a,sum(v) FILTER (WHERE id BETWEEN 250000 AND 750003) t',
+	            'sum(v) FILTER (WHERE id<0) s,avg(v) FILTER (WHERE id<0) a,count(v) FILTER (WHERE id<0) c',
+	            'count(v) c',
+	            'count(*) n,count(v) c,count(w) d',
+	            'sum(v) s,count(w) c',
+	            'count(v) FILTER (WHERE g IN (0,2)) c,count(w) FILTER (WHERE id>500003) d,count(*) n',
+	            'count(v) FILTER (WHERE id<0) c',
+	            'sum(v) s,sum(qty) q,avg(qty) a,count(qty) c,count(*) n',
+	            'sum(id) i,avg(v) a,count(qty) c,count(*) n',
+	            'sum(v) FILTER (WHERE g=1) s,sum(qty) FILTER (WHERE id>500003) q,avg(qty) FILTER (WHERE id>500003) a,count(*) FILTER (WHERE g IN (0,2)) c',
+	            'count(v) c,sum(id) FILTER (WHERE id<0) s,avg(qty) FILTER (WHERE id<0) a'
+	        ] ELSE ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) FILTER (WHERE id>500003) c',
+	            'sum(v) FILTER (WHERE id>500003) s,count(w) c'
+	        ] END LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _numeric_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            IF position('WHERE id<=500003' IN outputs)>0 THEN
+	                -- The HAVING count is hidden from the SQL target list but
+	                -- shares the filtered SUM state. Retain native order/limit.
+	                query := query || ' HAVING count(v) FILTER (WHERE id<=500003)>1000' ||
+	                    ' ORDER BY sum(v) FILTER (WHERE id<=500003) DESC NULLS LAST' ||
+	                    CASE WHEN keys='' THEN '' ELSE ','||keys END || ' LIMIT 3';
+	            END IF;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _numeric_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _numeric_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _numeric_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _numeric_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_expected nr)) THEN
+	                RAISE EXCEPTION '117 exact NUMERIC SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: parallel_dense_numeric' IN plan)=0) THEN
+	                RAISE EXCEPTION '117 missing normal NUMERIC dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _numeric_expected,_numeric_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 13:54:54.411 MST [36741] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 13:54:54.411 MST [36741] CONTEXT:  SQL statement "CREATE TEMP TABLE _numeric_actual AS SELECT g,h,k,sum(v) FILTER (WHERE id>500003) s,count(w) c FROM _numeric_agg WHERE g IS NOT NULL GROUP BY g,h,k"
+	PL/pgSQL function inline_code_block line 55 at EXECUTE
+2026-09-29 13:54:54.411 MST [36741] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_numeric_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY['',' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL'] LOOP
+	        FOREACH outputs IN ARRAY CASE WHEN restriction='' THEN ARRAY[
+	            'sum(v) s',
+	            'avg(v) a',
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(v) s,avg(w) a,count(w) c,count(*) n',
+	            'sum(v) FILTER (WHERE id<=500003) s,avg(w) FILTER (WHERE id>500003) a,count(w) FILTER (WHERE id>500003) c,count(*) n',
+	            'count(*) n,sum(v) FILTER (WHERE g IN (0,2)) s,avg(v) FILTER (WHERE g IN (0,2)) a,sum(v) FILTER (WHERE id BETWEEN 250000 AND 750003) t',
+	            'sum(v) FILTER (WHERE id<0) s,avg(v) FILTER (WHERE id<0) a,count(v) FILTER (WHERE id<0) c',
+	            'count(v) c',
+	            'count(*) n,count(v) c,count(w) d',
+	            'sum(v) s,count(w) c',
+	            'count(v) FILTER (WHERE g IN (0,2)) c,count(w) FILTER (WHERE id>500003) d,count(*) n',
+	            'count(v) FILTER (WHERE id<0) c',
+	            'sum(v) s,sum(qty) q,avg(qty) a,count(qty) c,count(*) n',
+	            'sum(id) i,avg(v) a,count(qty) c,count(*) n',
+	            'sum(v) FILTER (WHERE g=1) s,sum(qty) FILTER (WHERE id>500003) q,avg(qty) FILTER (WHERE id>500003) a,count(*) FILTER (WHERE g IN (0,2)) c',
+	            'count(v) c,sum(id) FILTER (WHERE id<0) s,avg(qty) FILTER (WHERE id<0) a'
+	        ] ELSE ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) FILTER (WHERE id>500003) c',
+	            'sum(v) FILTER (WHERE id>500003) s,count(w) c'
+	        ] END LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _numeric_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            IF position('WHERE id<=500003' IN outputs)>0 THEN
+	                -- The HAVING count is hidden from the SQL target list but
+	                -- shares the filtered SUM state. Retain native order/limit.
+	                query := query || ' HAVING count(v) FILTER (WHERE id<=500003)>1000' ||
+	                    ' ORDER BY sum(v) FILTER (WHERE id<=500003) DESC NULLS LAST' ||
+	                    CASE WHEN keys='' THEN '' ELSE ','||keys END || ' LIMIT 3';
+	            END IF;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _numeric_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _numeric_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _numeric_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _numeric_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_expected nr)) THEN
+	                RAISE EXCEPTION '117 exact NUMERIC SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: parallel_dense_numeric' IN plan)=0) THEN
+	                RAISE EXCEPTION '117 missing normal NUMERIC dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _numeric_expected,_numeric_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 13:54:54.412 MST [36741] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 13:54:54.412 MST [36741] CONTEXT:  SQL statement "CREATE TEMP TABLE _numeric_actual AS SELECT g,h,k,sum(v) FILTER (WHERE id>500003) s,count(w) c FROM _numeric_agg WHERE g IS NOT NULL GROUP BY g,h,k"
+	PL/pgSQL function inline_code_block line 55 at EXECUTE
+2026-09-29 13:54:54.412 MST [36741] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_numeric_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY['',' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL'] LOOP
+	        FOREACH outputs IN ARRAY CASE WHEN restriction='' THEN ARRAY[
+	            'sum(v) s',
+	            'avg(v) a',
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(v) s,avg(w) a,count(w) c,count(*) n',
+	            'sum(v) FILTER (WHERE id<=500003) s,avg(w) FILTER (WHERE id>500003) a,count(w) FILTER (WHERE id>500003) c,count(*) n',
+	            'count(*) n,sum(v) FILTER (WHERE g IN (0,2)) s,avg(v) FILTER (WHERE g IN (0,2)) a,sum(v) FILTER (WHERE id BETWEEN 250000 AND 750003) t',
+	            'sum(v) FILTER (WHERE id<0) s,avg(v) FILTER (WHERE id<0) a,count(v) FILTER (WHERE id<0) c',
+	            'count(v) c',
+	            'count(*) n,count(v) c,count(w) d',
+	            'sum(v) s,count(w) c',
+	            'count(v) FILTER (WHERE g IN (0,2)) c,count(w) FILTER (WHERE id>500003) d,count(*) n',
+	            'count(v) FILTER (WHERE id<0) c',
+	            'sum(v) s,sum(qty) q,avg(qty) a,count(qty) c,count(*) n',
+	            'sum(id) i,avg(v) a,count(qty) c,count(*) n',
+	            'sum(v) FILTER (WHERE g=1) s,sum(qty) FILTER (WHERE id>500003) q,avg(qty) FILTER (WHERE id>500003) a,count(*) FILTER (WHERE g IN (0,2)) c',
+	            'count(v) c,sum(id) FILTER (WHERE id<0) s,avg(qty) FILTER (WHERE id<0) a'
+	        ] ELSE ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) FILTER (WHERE id>500003) c',
+	            'sum(v) FILTER (WHERE id>500003) s,count(w) c'
+	        ] END LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _numeric_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            IF position('WHERE id<=500003' IN outputs)>0 THEN
+	                -- The HAVING count is hidden from the SQL target list but
+	                -- shares the filtered SUM state. Retain native order/limit.
+	                query := query || ' HAVING count(v) FILTER (WHERE id<=500003)>1000' ||
+	                    ' ORDER BY sum(v) FILTER (WHERE id<=500003) DESC NULLS LAST' ||
+	                    CASE WHEN keys='' THEN '' ELSE ','||keys END || ' LIMIT 3';
+	            END IF;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _numeric_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _numeric_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _numeric_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _numeric_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _numeric_expected nr)) THEN
+	                RAISE EXCEPTION '117 exact NUMERIC SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: parallel_dense_numeric' IN plan)=0) THEN
+	                RAISE EXCEPTION '117 missing normal NUMERIC dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _numeric_expected,_numeric_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 13:58:42.609 MST [34935] LOG:  checkpoint starting: time

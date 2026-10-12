@@ -1,0 +1,100 @@
+[ 13%] Built target pgaccel_kernels_shared
+[ 14%] Linking CXX executable test_bbox
+[ 14%] Linking CXX executable test_spatial
+[ 14%] Linking CXX executable test_device
+[ 14%] Built target test_bbox
+[ 15%] Built target test_spatial
+[ 16%] Building CXX object CMakeFiles/pgaccel_kernels.dir/src/grouped_agg.cpp.o
+[ 17%] Linking CXX executable test_spatial_dispatch
+[ 18%] Linking CXX executable test_spatial_pairwise_boundary
+[ 19%] Built target test_spatial_dispatch
+[ 19%] Built target test_spatial_pairwise_boundary
+[ 20%] Building CXX object CMakeFiles/pgaccel_kernels.dir/src/grouped_agg_workspace.cpp.o
+[ 21%] Linking CXX executable test_spatial_resident
+[ 22%] Built target test_spatial_resident
+[ 23%] Linking CXX executable test_h3
+[ 24%] Built target test_h3
+[ 25%] Linking CXX executable test_reduce_matrix
+[ 26%] Built target test_device
+[ 27%] Built target test_reduce_matrix
+[ 28%] Linking CXX executable test_hash_agg_keys
+[ 29%] Linking CXX executable test_hash_join
+[ 29%] Built target test_hash_agg_keys
+[ 30%] Built target test_hash_join
+[ 30%] Linking CXX executable test_hash_domain_matrix
+[ 31%] Building CXX object CMakeFiles/test_hashagg_spatial_matrix.dir/test/test_hashagg_spatial_matrix.cpp.o
+[ 32%] Built target test_hash_domain_matrix
+[ 33%] Linking CXX executable test_hash_agg_partial
+[ 34%] Built target test_hash_agg_partial
+[ 35%] Linking CXX executable test_expr_memory
+[ 36%] Built target test_expr_memory
+[ 37%] Linking CXX executable test_expr_vm_matrix
+[ 37%] Built target test_expr_vm_matrix
+[ 38%] Linking CXX executable test_raster_resident
+[ 39%] Built target test_raster_resident
+[ 40%] Linking CXX executable test_correctness
+[ 41%] Built target test_correctness
+[ 42%] Linking CXX executable test_fork
+[ 43%] Built target test_fork
+[ 44%] Linking CXX executable test_fork_cold
+[ 44%] Built target test_fork_cold
+[ 44%] Linking CXX executable test_fork_warmed
+[ 45%] Built target test_fork_warmed
+[ 46%] Linking CXX executable test_fork_archive_stress
+[ 47%] Built target test_fork_archive_stress
+[ 48%] Linking CXX executable test_hashagg_spatial_matrix
+[ 49%] Linking CXX executable test_fork_cold_barrier
+[ 49%] Built target test_hashagg_spatial_matrix
+[ 49%] Linking CXX executable test_reduce_minimal
+[ 50%] Built target test_fork_cold_barrier
+[ 53%] Built target test_grouped_agg
+[ 53%] Built target test_reduce_minimal
+[ 54%] Building CXX object CMakeFiles/test_grouped_agg_workspace.dir/test/test_grouped_agg_workspace.cpp.o
+[ 54%] Building CXX object CMakeFiles/test_grouped_agg_hash.dir/test/test_grouped_agg_hash.cpp.o
+[ 55%] Linking CXX executable test_grouped_agg_workspace
+[ 55%] Built target test_grouped_agg_workspace
+[ 56%] Linking CXX executable test_reduce_stats
+[ 57%] Built target test_reduce_stats
+[ 58%] Linking CXX executable test_reduce_bool_bit
+[ 58%] Built target test_reduce_bool_bit
+[ 59%] Linking CXX executable test_exec_gpu
+[ 60%] Built target test_exec_gpu
+[ 61%] Linking CXX executable test_ooo_overlap
+[ 62%] Built target test_ooo_overlap
+[ 63%] Linking CXX executable test_spatial_bench
+[ 64%] Built target test_spatial_bench
+[ 65%] Building CXX object CMakeFiles/test_sycl_basic.dir/test/test_sycl_basic.cpp.o
+[ 66%] Linking CXX executable test_grouped_agg_hash
+[ 66%] Built target test_grouped_agg_hash
+[ 68%] Built target test_scalar
+[ 69%] Linking CXX executable test_fp64_mul_probe
+[ 70%] Linking CXX executable test_fp64_probe_add
+[ 71%] Built target test_fp64_mul_probe
+[ 72%] Built target test_fp64_probe_add
+[ 73%] Linking CXX executable test_fp64_probe_mul
+[ 74%] Linking CXX executable test_fp64_probe_sqrt
+[ 75%] Built target test_fp64_probe_mul
+[ 76%] Built target test_fp64_probe_sqrt
+[ 76%] Linking CXX executable test_fp64_probe_sin
+[ 77%] Linking CXX executable test_fp64_probe_cos
+[ 78%] Built target test_fp64_probe_sin
+[ 79%] Built target test_fp64_probe_cos
+[ 80%] Linking CXX executable test_fp64_probe_asin
+[ 81%] Linking CXX executable test_fp64_probe_atan2
+[ 81%] Built target test_fp64_probe_asin
+[ 82%] Built target test_fp64_probe_atan2
+[ 83%] Linking CXX executable test_fp64_probe_haversine
+[ 84%] Building CXX object CMakeFiles/test_oom_invariant.dir/test/test_oom_invariant.cpp.o
+[ 84%] Built target test_fp64_probe_haversine
+[ 85%] Building CXX object CMakeFiles/test_kernel_failure_status.dir/test/test_kernel_failure_status.cpp.o
+[ 86%] Linking CXX executable test_kernel_failure_status
+[ 86%] Built target test_kernel_failure_status
+[ 86%] Building CXX object CMakeFiles/test_host_api_contract.dir/test/test_host_api_contract.cpp.o
+[ 87%] Linking CXX executable test_host_api_contract
+[ 87%] Built target test_host_api_contract
+[ 88%] Linking CXX executable test_oom_invariant
+[ 88%] Built target test_oom_invariant
+[ 89%] Linking CXX executable test_sycl_basic
+[ 89%] Built target test_sycl_basic
+[ 90%] Linking CXX static library libpgaccel_kernels.a
+[100%] Built target pgaccel_kernels

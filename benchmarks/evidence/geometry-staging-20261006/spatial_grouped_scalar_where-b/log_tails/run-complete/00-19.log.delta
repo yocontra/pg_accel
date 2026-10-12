@@ -1,0 +1,8 @@
+source: /Users/contra/.pgrx/19.log
+run_start_offset_bytes: 2559103
+delta_start_offset_bytes: 2559103
+capture_end_offset_bytes: 2559431
+delta_max_bytes: 262144
+truncated_to_last_delta_bytes: false
+---
+2026-10-06 04:28:24.555 MST [69260] LOG:  checkpoint complete: time: wrote 474 buffers (2.9%), wrote 4 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=48.170 s, sync=0.004 s, total=48.175 s; sync files=52, longest=0.001 s, average=0.001 s; distance=7388 kB, estimate=7388 kB; lsn=1/42C6AD50, redo lsn=1/42C6ACB8

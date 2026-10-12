@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "workload": "grouped_date_span",
+  "rows": 2000000,
+  "status": "pass",
+  "order_sensitive": false,
+  "accel_rows": 33,
+  "baseline_rows": 33,
+  "accel_minus_baseline_count": 0,
+  "baseline_minus_accel_count": 0,
+  "sample_limit": 20,
+  "accel_minus_baseline_samples": [],
+  "baseline_minus_accel_samples": [],
+  "accel_query_sql": "SELECT region,sum(ship_date-order_date) total,avg(ship_date-order_date) mean,count(ship_date-order_date) present,min(ship_date-order_date) lo,max(ship_date-order_date) hi,count(*) n FROM bench_scalar_sales GROUP BY region",
+  "baseline_query_sql": "SELECT region,sum(ship_date-order_date) total,avg(ship_date-order_date) mean,count(ship_date-order_date) present,min(ship_date-order_date) lo,max(ship_date-order_date) hi,count(*) n FROM bench_scalar_sales GROUP BY region",
+  "error": null
+}

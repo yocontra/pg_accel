@@ -1,0 +1,34 @@
+=== 126_computed_integer_aggregates ===
+SET
+SET
+SELECT 1000017
+ANALYZE
+DO
+PGACCEL_ASSERT_OK:126_computed_integer_aggregates.assert_001
+SET
+PREPARE
+DO
+PGACCEL_ASSERT_OK:126_computed_integer_aggregates.assert_002
+DEALLOCATE
+RESET
+INSERT 0 1000017
+ANALYZE
+DO
+PGACCEL_ASSERT_OK:126_computed_integer_aggregates.assert_003
+DO
+PGACCEL_ASSERT_OK:126_computed_integer_aggregates.assert_004
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ f
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:126_computed_integer_aggregates

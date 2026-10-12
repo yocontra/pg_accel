@@ -413,6 +413,20 @@ upstream-pg-tests pg="" artifacts_dir="":
     just install-pg-accel "$pg"
     scripts/upstream_pg_tests.sh "$pg" "$artifact_dir"
 
+# Exercise CREATE/DROP/rollback with the production preloaded module in an
+# owned temporary database, without touching extension objects in postgres.
+extension-catalog-test pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    pg="{{pg}}"
+    if [ -z "$pg" ]; then pg="$(pg_accel_default_pg_major)"; fi
+    pg="${pg#pg}"
+    pg_accel_require_pgrx_support "$pg"
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+    PG_CONFIG="$pg_config" PG_ACCEL_PG_MAJOR="$pg" \
+        bash scripts/extension_catalog_integration.sh
+
 # Run the upstream compatibility gate for every supported PostgreSQL major.
 upstream-pg-tests-matrix artifacts_root="":
     #!/usr/bin/env bash
@@ -977,8 +991,12 @@ release-checklist-audit-test:
 # Prove the analyzer against synthetic evasions and the real ABI/witness baseline.
 # Assertions expect the current production audit to be nonzero, so this stays green.
 audit-cpu-cheats-test:
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_output_container_escape.py' -v
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_workspace*.py' -v
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_cpu_cheat_audit.py' -v
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_metadata_effects.py' -v
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_metadata_build.py' -v
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_metadata_link.py' -v
 
 # Audit every extern-C pgaccel_* definition and its public header declaration.
 # Every successful compute path must be dominated by output-producing SYCL work;
@@ -1009,6 +1027,7 @@ audit-cpu-cheats: audit-cpu-cheats-test
         --abi-manifest scripts/cpu_cheat_abi_manifest.txt \
         --objects "$objects" \
         --build-marker "$build_marker" \
+        --metadata-binding "$objects.metadata-binding.json" \
         --headers pgaccel-kernels/include/*.h -- \
         pgaccel-kernels/src/*.cpp
 

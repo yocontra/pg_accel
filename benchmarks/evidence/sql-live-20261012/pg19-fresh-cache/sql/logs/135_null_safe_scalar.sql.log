@@ -1,0 +1,48 @@
+=== 135_null_safe_scalar ===
+SET
+SET
+SELECT 1000017
+ANALYZE
+SELECT 1
+CREATE TABLE
+INSERT 0 3
+INSERT 0 3
+INSERT 0 6
+psql:/Users/contra/Projects/pg_accel/sql/tests/135_null_safe_scalar.sql:73: NOTICE:  135 NULL-safe WHERE selected 48 of 48 shapes
+DO
+PGACCEL_ASSERT_OK:135_null_safe_scalar.assert_001
+psql:/Users/contra/Projects/pg_accel/sql/tests/135_null_safe_scalar.sql:110: NOTICE:  135 NULL-safe FILTER/CASE/count selected 24 of 24 shapes
+DO
+PGACCEL_ASSERT_OK:135_null_safe_scalar.assert_002
+SET
+PREPARE
+DO
+DEALLOCATE
+RESET
+PGACCEL_ASSERT_OK:135_null_safe_scalar.assert_003
+INSERT 0 1000017
+ANALYZE
+ pg_accel_refresh 
+------------------
+          1000017
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:135_null_safe_scalar.assert_004
+DO
+PGACCEL_ASSERT_OK:135_null_safe_scalar.assert_005
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ t
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:135_null_safe_scalar

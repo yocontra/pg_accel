@@ -9,8 +9,13 @@ mod domain;
 mod geometry;
 mod ledger;
 mod loader;
+mod nulls;
+mod numeric;
 mod proof;
 mod store;
+
+pub(crate) use ledger::ExecutionMemoryCharge;
+pub(crate) use store::with_resident_dispatch_inputs;
 
 #[cfg(test)]
 pub(crate) use store::tests::{begin_test_allocation_count, finish_test_allocation_count};
@@ -25,30 +30,39 @@ pub use geometry::{ResidentGeometryColumn, ResidentGeometryColumnView};
 pub(crate) use geometry::{
     materialize_resident_geometry_constant, validate_resident_geometry_value,
 };
+pub use numeric::{
+    NumericDigitBounds, ResidentNumericColumn, ResidentNumericColumnView, ResidentNumericData,
+    ResidentNumericRow,
+};
 pub use proof::*;
 pub use store::{
     ArtifactEnsureOutcome, ArtifactEnsureReport, ArtifactProbeOutcome, DerivedArtifact,
     DerivedArtifactIdentity, EphemeralArtifactBuildReport, EphemeralDerivedArtifact,
     PreparedDerived, ResidentBudgetSnapshot, ResidentColumn, ResidentColumnRef, ResidentColumnView,
-    ResidentDependencyStamp, ResidentDispatchBundle, ResidentGeometryExactSnapshot,
-    ResidentInputBundle, ResidentKeyDecoder, ResidentLoadError, ResidentLoadEstimate,
-    ResidentRelationEvidence, ResidentRelationStatus, ResolvedArtifactBundle,
-    ResolvedDerivedInputs, SelectedRelation, SelectedRelationsEnsureOutcome,
-    StagedDerivedPreflight, StagedTransformPreflight, StagedTransformWorkspace,
-    build_ephemeral_derived_artifact_with_report,
+    ResidentDependencyStamp, ResidentDispatchBundle, ResidentGeometryExactSelection,
+    ResidentGeometryExactSnapshot, ResidentInputBundle, ResidentKeyDecoder, ResidentLoadError,
+    ResidentLoadEstimate, ResidentNumericColumnStats, ResidentRelationEvidence,
+    ResidentRelationStatus, ResolvedArtifactBundle, ResolvedDerivedInputs, SelectedRelation,
+    SelectedRelationsEnsureOutcome, StagedDerivedPreflight, StagedTransformPreflight,
+    StagedTransformWorkspace, build_ephemeral_derived_artifact_with_report,
     build_ephemeral_staged_device_transform_artifact_with_report, ensure_derived_artifact,
     ensure_derived_artifact_with_report, ensure_device_derived_artifact,
     ensure_device_derived_artifact_with_report, ensure_selected_relations,
     ensure_staged_device_derived_artifact, ensure_staged_device_derived_artifact_with_report,
     ensure_staged_device_transform_artifact, ensure_staged_device_transform_artifact_with_report,
-    estimate_selected_relation, probe_derived_artifact, register_derived_artifact,
-    resident_budget_snapshot, resident_geometry_exact_snapshot_words, resident_live_bytes,
-    resident_selected_relation_rows, revalidate_loaded_estimates, revalidate_planner_dependencies,
-    shape_digest, snapshot_resident_geometry_exact, with_derived_artifact,
-    with_derived_artifact_inputs, with_ephemeral_artifact_inputs, with_resident_column,
-    with_resolved_artifact,
+    estimate_selected_relation, prepare_resident_geometry_exact_selection, probe_derived_artifact,
+    refill_resident_geometry_exact_selection, register_derived_artifact, resident_budget_snapshot,
+    resident_geometry_exact_selection_words, resident_geometry_exact_snapshot_words,
+    resident_live_bytes, resident_selected_relation_rows, revalidate_loaded_estimates,
+    revalidate_planner_dependencies, shape_digest, snapshot_resident_geometry_exact,
+    with_derived_artifact, with_derived_artifact_inputs, with_ephemeral_artifact_inputs,
+    with_resident_column, with_resolved_artifact,
 };
 pub use store::{ResidentPlannerDependency, resident_planner_dependency};
+pub use store::{
+    build_ephemeral_host_device_derived_artifact_with_report,
+    ensure_host_device_derived_artifact_with_report,
+};
 
 /// Register residency shared memory. Must be called from `_PG_init`.
 pub fn init_shmem() {

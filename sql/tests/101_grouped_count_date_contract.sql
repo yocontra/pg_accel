@@ -200,10 +200,10 @@ BEGIN
     END LOOP;
     FOR plan_row IN
         EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-        SELECT bool_key, count(observed_i4)
+        SELECT bool_key, count(observed), min(observed_i4)
         FROM _date_count_contract GROUP BY bool_key
     LOOP
-        INSERT INTO _date_count_plan VALUES ('int4_measure', plan_row."QUERY PLAN");
+        INSERT INTO _date_count_plan VALUES ('date_count_int4_min', plan_row."QUERY PLAN");
     END LOOP;
     FOR plan_row IN
         EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)

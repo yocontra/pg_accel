@@ -1,0 +1,14 @@
+Finalize GroupAggregate
+  Output: region, sum(price) FILTER (WHERE ((price > adjustment) OR (adjustment IS NULL))), avg(price) FILTER (WHERE ((price > adjustment) OR (adjustment IS NULL))), count(price) FILTER (WHERE ((price > adjustment) OR (adjustment IS NULL))), min(price) FILTER (WHERE ((price > adjustment) OR (adjustment IS NULL))), max(price) FILTER (WHERE ((price > adjustment) OR (adjustment IS NULL))), count(*)
+  Group Key: bench_scalar_sales.region
+  ->  Gather Merge
+        Output: region, (PARTIAL sum(price) FILTER (WHERE ((price > adjustment) OR (adjustment IS NULL)))), (PARTIAL avg(price) FILTER (WHERE ((price > adjustment) OR (adjustment IS NULL)))), (PARTIAL count(price) FILTER (WHERE ((price > adjustment) OR (adjustment IS NULL)))), (PARTIAL min(price) FILTER (WHERE ((price > adjustment) OR (adjustment IS NULL)))), (PARTIAL max(price) FILTER (WHERE ((price > adjustment) OR (adjustment IS NULL)))), (PARTIAL count(*))
+        Workers Planned: 7
+        ->  Sort
+              Output: region, (PARTIAL sum(price) FILTER (WHERE ((price > adjustment) OR (adjustment IS NULL)))), (PARTIAL avg(price) FILTER (WHERE ((price > adjustment) OR (adjustment IS NULL)))), (PARTIAL count(price) FILTER (WHERE ((price > adjustment) OR (adjustment IS NULL)))), (PARTIAL min(price) FILTER (WHERE ((price > adjustment) OR (adjustment IS NULL)))), (PARTIAL max(price) FILTER (WHERE ((price > adjustment) OR (adjustment IS NULL)))), (PARTIAL count(*))
+              Sort Key: bench_scalar_sales.region
+              ->  Partial HashAggregate
+                    Output: region, PARTIAL sum(price) FILTER (WHERE ((price > adjustment) OR (adjustment IS NULL))), PARTIAL avg(price) FILTER (WHERE ((price > adjustment) OR (adjustment IS NULL))), PARTIAL count(price) FILTER (WHERE ((price > adjustment) OR (adjustment IS NULL))), PARTIAL min(price) FILTER (WHERE ((price > adjustment) OR (adjustment IS NULL))), PARTIAL max(price) FILTER (WHERE ((price > adjustment) OR (adjustment IS NULL))), PARTIAL count(*)
+                    Group Key: bench_scalar_sales.region
+                    ->  Parallel Seq Scan on public.bench_scalar_sales
+                          Output: region, price, adjustment

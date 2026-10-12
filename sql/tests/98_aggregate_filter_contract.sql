@@ -1,6 +1,6 @@
 -- 98_aggregate_filter_contract.sql: exact selected-path boundary for a
 -- bounded same-column int4 aggregate FILTER on SUM, paired with an unfiltered
--- COUNT(*). Adjacent aggregate modifiers remain PostgreSQL-native.
+-- COUNT(*). Adjacent unsupported INT8 filter expressions remain native.
 
 \echo '=== 98_aggregate_filter_contract ==='
 
@@ -166,15 +166,15 @@ BEGIN
 
     FOR plan_row IN
         EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-        SELECT product_id, sum(price) FILTER (WHERE price <= 800), count(*)
+        SELECT product_id, sum(price) FILTER (WHERE price <= 200 OR quantity::int8 >= 800), count(*)
         FROM _aggregate_filter_contract GROUP BY product_id
     LOOP
-        INSERT INTO _aggregate_filter_plan VALUES ('one_sided', plan_row."QUERY PLAN");
+        INSERT INTO _aggregate_filter_plan VALUES ('disjunction', plan_row."QUERY PLAN");
     END LOOP;
     FOR plan_row IN
         EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
         SELECT product_id,
-               sum(price) FILTER (WHERE quantity >= 2 AND quantity <= 8),
+               sum(price) FILTER (WHERE quantity::int8 >= 2 AND price <= 8),
                count(*)
         FROM _aggregate_filter_contract GROUP BY product_id
     LOOP
@@ -184,7 +184,7 @@ BEGIN
         EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
         SELECT product_id,
                sum(price) FILTER (WHERE price >= 200 AND price <= 800),
-               count(*) FILTER (WHERE price >= 200 AND price <= 800)
+               count(*) FILTER (WHERE price >= 200 AND quantity::int8 <= 800)
         FROM _aggregate_filter_contract GROUP BY product_id
     LOOP
         INSERT INTO _aggregate_filter_plan VALUES ('filtered_count', plan_row."QUERY PLAN");

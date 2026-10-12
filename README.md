@@ -77,6 +77,13 @@ release matrix runs it for PG18 and PG19 on both macOS arm64 and Linux x86_64.
 Each archive's platform-qualified `.smoke.txt` result is attached to the tagged
 release, avoiding ambiguous evidence between operating systems.
 
+For source development, `just install-pg-accel` starts its local PostgreSQL
+server with a soft open-file limit of at least 4096 and records it in install
+provenance. Larger limits are preserved; an insufficient hard limit stops
+installation before changing the server. Raising only the client shell's limit
+does not change an already-running server's inherited limit. Separately managed
+PostgreSQL services need their own resource-limit configuration.
+
 ### AdaptiveCpp provenance and installation burden
 
 The Metal toolchain is not an upstream binary dependency. The setup path clones
@@ -209,11 +216,11 @@ native and have no registered executor.
 
 | Capability | Implementation surface | Production planner | Current boundary |
 |---|---|---|---|
-| Resident reducing or grouped aggregate | Present | Selectable | Covered `AggQuerySpec` shapes become `Custom Scan (GpuAccelAgg)` after shape, type, residency, device, and cost gates. This includes qualified 250K–1M nullable bool-key / distinct nullable bool, int2, int8, float4, float8, date, timestamp, or timestamptz `COUNT(column)` envelopes, plus exact bool-keyed `SUM(value), AVG(value), COUNT(*)` for one nullable int2 or int4 fact value. Integer SUM widens to int8 and AVG is finalized with PostgreSQL NUMERIC division; global, filtered, joined, non-boolean-grouped, `HAVING`, and broader variants remain native. Stored generated columns are physical base attributes and remain selectable when their types and aggregate shape pass those same gates. |
-| Scalar row or aggregate-local predicate inside a resident aggregate | Present | Selectable for exact qualified shapes | Two int4 bounds on the left operand of one grouped `SUM(lhs * rhs), COUNT(*)` are fused into one inclusive device interval and reuse the loaded lhs in `parallel_dense_integer`. One grouped direct-int4 `SUM(value) FILTER (WHERE value BETWEEN lo AND hi), COUNT(*)` applies the proper bounded interval only to SUM. Both released envelopes use 250K–1M fact rows with one distinct dense fact key, no joins or `HAVING`, and exact nullable semantics. One-sided, degenerate, wrong-input, joined, and broader variants remain PostgreSQL-native. |
+| Resident reducing or grouped aggregate | Present | Selectable | Covered `AggQuerySpec` shapes become `Custom Scan (GpuAccelAgg)` after shape, type, residency, device, and cost gates. This includes qualified 250K–1M nullable bool-key / distinct nullable bool, int2, int8, float4, float8, date, timestamp, or timestamptz `COUNT(column)` envelopes, plus exact SUM/AVG/COUNT for up to four independent nullable int2/int4 fact values (up to three with `COUNT(*)`), globally or grouped by up to three supported nullable dictionary keys (including text, date, integer, floating-point and boolean keys). Dense dictionary capacity remains bounded. Integer SUM widens to int8 and AVG is finalized with PostgreSQL NUMERIC division. Independent int4 interval FILTER predicates can reference a raw value column already represented by an integer measure state, including single-column AND/OR/NOT and constant IN/NOT IN/ANY/ALL predicates when their exact NULL-preserving normalization fits one to four intervals. Filtered COUNT(*) and COUNT(int2/int4) can share these states or execute independently, including global conditional aggregates. Broader aggregate-local predicates and Boolean filtered counts use the separate typed scalar lane described below; other types and joins remain outside this expansion. Nonvolatile `HAVING` can execute in PostgreSQL after GPU aggregation, including native ordering/limits. Hidden HAVING aggregates and grouping/sort keys are materialized internally when the complete shape passes the same kernel gates; they need not appear in SQL output. Stored generated columns are physical base attributes and remain selectable when their types and aggregate shape pass those same gates. |
+| Scalar row or aggregate-local predicate inside a resident aggregate | Present | Selectable for exact qualified shapes | Single-column INT4 predicates retain their interval fast path. The typed scalar lane accepts multi-column INT4/Boolean/DATE WHERE and aggregate FILTER expressions, including CASE/IN and filtered COUNT(*), with lazy argument evaluation. WHERE removes rows before group activity; aggregate FILTER does not. A typed WHERE carrier consumes a state within the four-state cap. Supported SQL HAVING is evaluated separately by PostgreSQL. Joined, NUMERIC-state and broader-type scalar predicates remain native. |
 | Resident star join plus aggregate | Present | Selectable | The join is represented inside one childless aggregate descriptor; this is not a row-returning join path. Qualified counted-dimension global `COUNT(*)` converts duplicate dimension matches into exact device-side weights and preserves unmatched/NULL fact-key semantics. |
-| H3-derived group key inside a resident aggregate | Present | Selectable | Production shape extraction selects the independently qualified fused `h3_cell_to_parent(cell, 0), COUNT(*)` lane. Other valid parent resolutions decline with `h3_parent_resolution_unqualified`; `h3_latlng_to_cell` descriptor support is not yet reachable from production planning. |
-| PostGIS spatial filter inside a resident aggregate | Present | Selectable | Production selection is limited to resident `ST_Intersects(point_column, one_ring_polygon_constant)` inside an ungrouped `COUNT(*)`, with matching fixed nonzero SRIDs and the qualified cost envelope. |
+| H3-derived group key inside a resident aggregate | Present | Selectable | `h3_cell_to_parent(cell, resolution), COUNT(*)` supports constant resolutions 0–15 under the normal type, residency, cost and memory gates. Compact COUNT capacity is bounded by input rows, the H3 resolution universe, hardware-derived memory budgets and a 16Mi-group ceiling. Large results use parallel device finalization; reusable parent artifacts retain validated group counts to right-size later allocations. Native HAVING/order/limits can compose with this lane. `h3_latlng_to_cell` descriptor support is not yet reachable from production planning. |
+| PostGIS spatial filter inside a resident aggregate | Present | Selectable | Resident point/Polygon or MultiPolygon `ST_Intersects` (either orientation), `ST_Contains(area, point)`, `ST_Within(point, area)`, `ST_Covers(area, point)` and `ST_CoveredBy(point, area)` inside ungrouped `COUNT(*)` or the exact integer/decimal/mixed rollups described below, including per-component holes and exact PostGIS boundary rechecks. Requires matching fixed nonzero SRIDs, a nonempty exact resident snapshot, and cost/memory/work gates. Total coordinate complexity bounds chunk size. Covers/CoveredBy include boundaries; their uncertain rows use the original PostGIS predicate for exact rechecks. Spatial joins are not yet selectable. |
 | Standalone PostGIS or H3 function/SRF | Aggregate primitives and adapter registry metadata remain; standalone executor removed | Not selectable | PostgreSQL executes standalone calls. Function and target-list SRF hooks record `no_gpu_resident_pipeline`. |
 | Base scan, WHERE filter, or projection | No registered Custom Scan executor; host-staged implementation retired | Not selectable | PostgreSQL executes the base path. The production hook observes and records declines but injects no scan CustomPath. |
 | Row-returning hash or inequality join | No registered row-returning executor; host-staged implementation retired | Not selectable | PostgreSQL executes the join. Resident join membership exists only inside childless `GpuAccelAgg` descriptors. |
@@ -252,11 +259,126 @@ The adapter constructors are the source of truth at
 `pg_accel/src/adapters/postgis.rs:14-22` and
 `pg_accel/src/adapters/h3.rs:53-135`.
 
+NUMERIC columns can be pinned losslessly as native-endian decimal digits,
+including arbitrary precision/scale, NaN, infinities and NULLs. Warm resident
+SUM/AVG now use exact GPU decimal accumulation, globally or with up to three
+ordinary dictionary grouping keys. Up to four value states can share
+SUM/AVG/COUNT outputs (three with COUNT(*)). PostgreSQL finalizes AVG without a
+floating-point conversion. Admission checks exact digit metadata, memory,
+dense capacity, row count and cost; the current decimal row floor uses the
+grouped-aggregate threshold even for global queries. Independent decimal
+COUNT states read NULL status without computing an unused SUM or allocating digit buckets,
+and can compose with SUM/AVG states. Exact NUMERIC and int2/int4 SUM/AVG/COUNT
+states can share one dispatch, including independent filters and conditional
+COUNT(*). NUMERIC grouping, joins and expressions remain native. Aggregates
+in this family may use independent FILTER predicates normalized to
+exact ranges over a fact-table INT4 column; other FILTER shapes remain native.
+Query-level WHERE also accepts bounded single-column INT4 Boolean/IN ranges
+and stored Boolean columns. Rejected rows do not create groups or contribute
+to COUNT(*). A new integer WHERE input uses one hidden value state within the
+same four-state limit; Boolean masks do not consume an aggregate state.
+Qualified point/constant-Polygon or MultiPolygon predicates can also feed
+these decimal/mixed rollups and integer-only SUM/AVG/COUNT, with exact PostGIS boundary rechecks before
+aggregation. Intersects, Contains/Within and Covers/CoveredBy retain their
+existing orientation, SRID, topology, residency and work limits. Spatial joins
+remain outside this expansion. Integer-only rollups, including spatial rollups,
+accept independent INT4 aggregate FILTER inputs even when those columns appear
+in no aggregate. Predicate-only FILTER columns consume no aggregate state.
+Integer-only rollups also accept query-level WHERE using bounded single-column
+INT4 ranges or stored Boolean masks. Predicate-only WHERE columns consume a
+hidden state within the same four-state limit; masks need no extra state.
+WHERE rejection excludes rows from groups and COUNT(*) before aggregate FILTER.
+Integer-only rollups also support MIN/MAX independently or alongside
+SUM/AVG/COUNT, including independent FILTER inputs and spatial restrictions.
+Extrema retain int2/int4 result types, return NULL for empty/all-NULL inputs,
+and share a state with other outputs over the same expression and filter.
+Atomic and bounded partial execution support these combinations; INT8/NUMERIC
+extrema and extrema mixed with decimal states remain native.
+Two direct INT4 columns can feed checked `+`, `-` and `*` measures across
+SUM/AVG/COUNT/MIN/MAX, including mixed measures and supported FILTER/WHERE/geo
+restrictions. Overflow remains an error even for `COUNT(a*b)`; a NULL operand
+makes the expression NULL. Independent arithmetic FILTER inputs may need a
+hidden raw-column state within the four-state cap. A separate fact-only dense
+scalar lane supports nested INT4 arithmetic (including division/remainder),
+searched/simple CASE, COALESCE, literals, Boolean/NULL expressions and bounded
+constant INT4/Boolean IN/NOT IN lists (including NULL/empty-array semantics).
+Dynamic arrays and other ANY/ALL comparisons remain native. INT4 results
+feed SUM/AVG/COUNT/MIN/MAX; Boolean results feed COUNT. Typed DATE comparisons,
+DATE±INT4, INT4+DATE and DATE-DATE also compose with CASE/COALESCE and FILTER.
+DATE results feed COUNT/MIN/MAX; differences feed integer aggregates. Strict
+NULL propagation, infinity and finite date bounds follow PostgreSQL; date
+errors retain SQLSTATE 22008. DATE arrays, timestamp/interval operations and
+casts remain native in this lane. Identical expression and
+FILTER combinations share one evaluation state. Lazy branches preserve error
+timing; division by zero/overflow propagate even for COUNT when PostgreSQL
+retains its expression evaluation. PostgreSQL's own COUNT simplifications are
+honored. This lane
+also supports aggregate FILTER with multi-column INT4 comparisons/arithmetic,
+Boolean/NULL expressions, CASE and constant IN/NOT IN. The filter runs before
+the argument; false/UNKNOWN skips argument evaluation without removing its
+group. Filtered COUNT(*) counts accepted rows independently of argument NULLs.
+The existing interval fast path is retained, and the four-state, type, memory,
+cost and relation-occurrence gates still apply. Fact-only dense integer/scalar
+rollups also accept typed Boolean WHERE programs over INT4/BOOL/DATE columns,
+including multi-column comparisons, CASE/COALESCE and bounded constant membership.
+NULL-safe `IS [NOT] DISTINCT FROM` over INT4/BOOL/DATE and all six Boolean
+`IS [NOT] TRUE/FALSE/UNKNOWN` tests are supported in typed expressions, FILTER
+and WHERE, including qualified spatial conjunctions. Comparison operands still
+execute before the non-NULL result is formed; NULL does not hide their errors.
+PostgreSQL's own earlier simplifications remain authoritative—for example,
+PG19 can replace COUNT of a provably non-NULL expression with COUNT(*).
+Typed INT4/BOOL/DATE `NULLIF`, `GREATEST` and `LEAST` also compose with
+aggregates, FILTER/WHERE, CASE and qualified spatial rollups. This includes
+zero-safe ratios such as `price/NULLIF(quantity,0)` and row-wise bounds.
+Extrema ignore NULL operands (all NULL yields NULL), but every argument still
+executes; neither a NULL nor an earlier extremal value hides later errors.
+These rollups also work through derived tables, inline CTEs and views that
+PostgreSQL fully flattens into supported base-table operations, including geo
+filters and nested report aliases. Live subplans, materialized CTEs, security
+barriers and RLS remain native. Definer views accelerate only when their base
+permissions use the current role; changing roles invalidates that planning
+assumption. This is flattened-query support, not general subquery execution.
+WHERE runs before group activity and aggregate-argument evaluation; FALSE/NULL
+removes the row entirely. Implicit conjuncts follow PostgreSQL's stable
+per-tuple-cost order, preserving cheap guards before throwing expressions;
+nested CASE/Boolean order is unchanged. A matching Boolean scalar state carries
+the predicate,
+consuming one of four states unless it already exists. When another value state
+exists, the predicate carrier has no row worker: its COUNT is derived from
+selected rows during the checked merge. A sole carrier retains its worker.
+Costs include predicate evaluation by each remaining value-state worker.
+Qualified point/polygon conjunctions also accept these typed predicates: the
+existing exact SQL spatial mask is read inside the WHERE program in native
+qualifier order. Scalar errors outside the polygon are not silently suppressed;
+cheap guards and CASE retain their short circuits. Spatial OR, scalar joins
+and NUMERIC states remain outside this lane.
+This lane
+also shares COUNT(*) with a requested scalar expression's COUNT lane when every
+successful path is proved non-NULL and the FILTER is identical. Expression
+evaluation and errors are retained; nullable expressions keep a separate count.
+This can fit four distinct scalar expressions plus COUNT(*) in four states. It
+requires exact loaded resident evidence before normal cost admission; refresh
+after invalidating DML when planning a new query. Existing selected prepared
+plans revalidate and reload at execution. Qualified resident point/polygon
+spatial masks also compose with these scalar expressions, retaining exact
+boundary/hole rechecks before expression evaluation. Simple CASE evaluates its
+INT4/Boolean/DATE test once, including nested cases. Casts, domains,
+arbitrary functions, scalar join compositions and floating/decimal
+arithmetic remain outside this scalar lane.
+Spatial WHERE can also be conjoined with exact single-column INT4 range/IN/NOT
+predicates in these integer/decimal rollups. Both predicates execute before
+grouping, using the spatial mask and scalar range in one aggregate dispatch.
+Predicate-only scalar inputs remain within the four-state bound. Spatial OR,
+and predicates involving multiple scalar columns remain native; single-column
+NULL-accepting predicates are supported.
+Cold decimal inputs require an explicit pin before admission.
+
 **Correctness boundary:** production resident aggregate execution has no CPU
 fallback; an uncertain aggregate result or GPU failure raises an error after
-selection. The non-production spatial descriptor test lane is the one explicit
-exception: it retains exact GSERIALIZED values and rechecks uncertain rows with
-PostGIS on the PostgreSQL backend thread before patching the device mask. See
+selection. The spatial predicate producer separately retains exact GSERIALIZED
+values and rechecks uncertain classifications with PostGIS on the PostgreSQL
+backend thread before patching the device mask consumed by aggregation. This
+is an explicit predicate stage, not an aggregate-error fallback. See
 `pg_accel/src/engine/executor/agg/output.rs:66-80` and
 `pg_accel/src/engine/executor/agg/spatial.rs:1067-1115`.
 
@@ -381,6 +503,12 @@ logs, server logs, expected/actual diffs and results, PostgreSQL tarball and
 configure identity, source and module hashes, Git status/diff, and a complete
 `SHA256SUMS` seal. CI runs this gate independently for PostgreSQL 18 and 19.
 
+`just extension-catalog-test 18` (or `19`) separately exercises preload-only,
+CREATE/DROP EXTENSION, rollback and prepared plans in an owned temporary
+database. Preloading alone does not authorize GPU paths in a database without
+the extension's SQL installation. The catalog test also requires normal GPU
+dispatch when a device is available and the extension is installed.
+
 ## Benchmarks
 
 The repository does not publish candidate performance numbers as current
@@ -399,6 +527,133 @@ A benchmark workload can intentionally prove native decline; its existence is
 not evidence that the production planner selects it. See
 [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for the evidence contract and
 [docs/EXPLAIN_EXAMPLES.md](docs/EXPLAIN_EXAMPLES.md) for plan interpretation.
+
+For real-data characterization, the opt-in [NYC taxi corpus](benchmarks/corpora/nyc-yellow-2015-01/README.md)
+preserves original pickup coordinates and exact monetary values. It includes
+H3 grouping, complete JFK multipolygon queries with and without GiST, and fare
+rollups; unsupported queries remain visible rather than being omitted.
+
+The [local exact-NUMERIC characterization](benchmarks/evidence/numeric-20260929/README.md)
+records ordinary-planner taxi and decimal rollups, exact-result and dispatch
+evidence, loading costs, and shared-host limitations. These warm-resident
+measurements are not a cold-query or whole-system performance claim.
+The [independent decimal FILTER characterization](benchmarks/evidence/numeric-filter-20260929/README.md)
+adds conditional rollups with exact results and verified GPU execution, while
+retaining the initial native-only run and separate loading costs.
+The [independent decimal COUNT characterization](benchmarks/evidence/numeric-count-20260929/README.md)
+adds count-only states without decimal sum arithmetic, including conditional
+counts composed with SUM/AVG, and records matched warm measurements and tests.
+The [mixed integer/decimal characterization](benchmarks/evidence/numeric-mixed-20260929/README.md)
+adds independent integer measures and conditional counts alongside decimal
+aggregates, including a complete-month NYC passenger/fare/distance rollup.
+The [filtered decimal/mixed characterization](benchmarks/evidence/numeric-where-20260929/README.md)
+adds query-level integer ranges and stored Boolean masks, composed with
+independent aggregate filters, plus a filtered NYC fare/distance rollup.
+The [spatial decimal/mixed characterization](benchmarks/evidence/spatial-numeric-20260929/README.md)
+combines exact area predicates with these rollups, including a JFK
+fare/distance/passenger query and prepared-query empty-input verification.
+The [global integer characterization](benchmarks/evidence/global-integer-20260929/README.md)
+adds SUM/AVG and conditional counts without grouping keys, with exact empty-input
+semantics, verified GPU execution and separate first-use costs.
+The [spatial integer characterization](benchmarks/evidence/spatial-integer-20260929/README.md)
+adds area-filtered integer-only rollups and conditional measures, including
+complete-month JFK passenger totals and exact averages without decimal inputs.
+The [integer WHERE characterization](benchmarks/evidence/integer-where-20260929/README.md)
+adds query-level ranges and Boolean masks, including hidden predicate columns,
+conditional rollups and a complete-month vendor-filtered NYC passenger query.
+The [independent integer FILTER characterization](benchmarks/evidence/integer-filter-inputs-20260929/README.md)
+removes the requirement to aggregate predicate columns, including conditional
+NYC passenger totals with and without a JFK spatial restriction.
+The [spatial plus scalar WHERE characterization](benchmarks/evidence/spatial-scalar-20260929/README.md)
+combines exact area predicates with INT4 ranges, including complete-month
+JFK/vendor passenger and fare/distance queries and separate first-use costs.
+The [spatial scalar-program characterization](benchmarks/evidence/scalar-geo-20261005/README.md)
+adds nested CASE/COALESCE arithmetic and Boolean COUNT inside qualified spatial
+rollups. Global/grouped full-scan benchmarks win warm at 1M/2M rows; substantial
+host variance, slower bounded grouping, and loading/refresh losses are retained.
+The [bounded aggregate optimization](benchmarks/evidence/scalar-bounded-20261006/README.md)
+then reduces the 2M grouped spatial median from 66.28 to 8.42 ms by reusing atomic
+batches under an exact prefix-safety proof. A non-spatial 2M grouped COALESCE
+rollup measures 6.49 ms versus native 64.01 ms. Variance and cold-path losses
+remain explicit; these are local warm-workload results, not universal ratios.
+The [simple CASE characterization](benchmarks/evidence/simple-case-20261006/README.md)
+adds once-evaluated INT4/Boolean cases to OLAP and geo rollups. Removing redundant
+stack operations enables a conditional-pricing benchmark to select normally:
+5.2–7.0x warm speedups at 250K–2M rows. At that stage a more complex CASE probe remained native;
+host variance, first-use dispatch warnings and loading/refresh losses remain
+explicit in the evidence.
+The [scalar instruction fusion follow-up](benchmarks/evidence/scalar-fusion-20261006/README.md)
+removes intermediate equality/branch and literal-COALESCE work across OLAP and
+geo. At that stage complex CASE selects at 250K rows (2.38 vs 18.31 ms); its 1M/2M
+scales remain native. Single-WHEN CASE measures 3.49 vs 55.83 ms at 1M, and the
+2M full-scan geo rollup measures 9.12 vs 183.05 ms. These noisy local warm ratios
+are not a matched old/new comparison; refresh still loses and a 5.2-second
+first-use dispatch warning remains recorded.
+The [constant-membership characterization](benchmarks/evidence/scalar-membership-20261006/README.md)
+adds bounded INT4/Boolean IN/NOT IN inside aggregate expressions, including
+computed inputs, NULL/empty arrays and geo composition. At 2M rows the new
+conditional-membership OLAP query measures 9.73 vs 147.65 ms, and its full-scan
+geo counterpart 7.64 vs 176.01 ms. All registered scales select normally with
+exact oracles and no fallback. These are local warm ratios; loading and slower
+large/spatial refresh paths remain separate. Fresh pristine/loaded PostgreSQL
+18/19 regression and isolation schedules pass all 1448 scheduled executions.
+The [arithmetic fusion follow-up](benchmarks/evidence/scalar-arithmetic-20261006/README.md)
+removes literal-RHS and coalesced-RHS interpreter work. The formerly native
+complex CASE now selects at 1M/2M: 4.70/8.46 ms versus parallel PostgreSQL
+38.64/66.75 ms, without changing cost coefficients or admission thresholds.
+All 16 measured OLAP/geo scales select with exact oracles and zero fallback;
+2M geo scalar and membership rollups measure 7.54/6.68 ms versus
+121.46/131.06 ms. These are noisy local warm ratios, not matched old/new binary
+comparisons; every refresh-inclusive probe still loses.
+The [typed aggregate FILTER follow-up](benchmarks/evidence/scalar-filter-20261006/README.md)
+adds multi-column INT4/Boolean predicates, CASE/IN and filtered COUNT(*), with
+lazy argument evaluation and preserved rejected-row groups. At 2M rows its
+spatial benchmark selects and measures 6.45 vs 117.87 ms. The standalone
+public-table OLAP benchmark remains native at every scale; its below-parity
+native results are retained. Warm geo gains do not remove loading/refresh
+losses, and predicate-work sharing/cost qualification remains open.
+The [typed DATE follow-up](benchmarks/evidence/scalar-date-20261006/README.md)
+adds checked date arithmetic/comparisons to scalar OLAP and geo aggregates,
+including DATE COUNT/MIN/MAX and date-difference integer rollups. At 2M rows,
+the new date-span workloads measure 6.40 vs parallel PostgreSQL 41.97 ms for
+OLAP and 6.85 vs 100.76 ms for geo. All five registered scales select normally
+with exact oracles and zero fallback. These are local warm-resident results;
+every refresh-inclusive probe loses, and date bucketing/casts remain open.
+The [typed WHERE follow-up](benchmarks/evidence/scalar-where-20261006/README.md)
+adds multi-column INT4/BOOL/DATE predicates to fact-only dense rollups, with
+row rejection before group activity and lazy argument evaluation. PG18/19
+each select 24/28 semantic-matrix shapes with four explicit cost declines.
+The public-table benchmark remains native at 250K/1M/2M; no GPU speedup is
+claimed. Predicate work is still repeated across value-state workers.
+The [WHERE carrier optimization](benchmarks/evidence/where-carrier-20261006/README.md)
+removes the redundant predicate-state row worker when another value state exists.
+Both PostgreSQL versions now select all 28 semantic-matrix shapes, with checked
+COUNT derivation across chunks. The same public-table benchmark still stays
+native at all three scales; this is not yet a measured GPU speedup.
+The [integer extrema characterization](benchmarks/evidence/integer-extrema-20260929/README.md)
+adds independent MIN/MAX and combined MIN/MAX/SUM/AVG/COUNT, including
+complete-month passenger summaries with and without a JFK restriction.
+The [bigint aggregation characterization](benchmarks/evidence/bigint-numeric-20260929/README.md)
+extends exact SUM/AVG beyond int64 range using raw bigint resident buffers,
+including mixed decimal/integer states, independent filters and geo rollups.
+The [NULL-aware predicate characterization](benchmarks/evidence/null-predicates-20260929/README.md)
+adds INT4 IS NULL and NULL-or-range filters, correct conditional COUNT(*) and
+their composition with integer/decimal aggregates and exact spatial WHERE.
+Warm measurements and slower first-use refresh/classification are separate.
+The [device-mask publication characterization](benchmarks/evidence/spatial-mask-publication-20260929/README.md)
+removes the geo mask's host round trip and records matched preparation costs,
+memory/transfer savings and the remaining first-use losses.
+The [computed integer characterization](benchmarks/evidence/computed-integer-20260929/README.md)
+adds checked two-column arithmetic across SUM/AVG/COUNT/MIN/MAX, including
+filters and geo restrictions. It records global warm wins, first-use losses,
+and a grouped query that remains native under normal cost-based planning.
+The [bounded atomic-count characterization](benchmarks/evidence/fused-integer-20260929/README.md)
+records fewer contended atomic updates, local warm improvements and remaining
+first-use losses. An unsuccessful row-fusion experiment is retained as evidence,
+not as a production optimization.
+The [Covers/CoveredBy characterization](benchmarks/evidence/covers-20260929/README.md)
+records boundary-inclusive point/area counts, prepared-plan lifecycle checks,
+and warm-mask measurements alongside their slower fresh-classification costs.
 
 ## Development references
 

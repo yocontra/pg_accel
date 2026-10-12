@@ -1,0 +1,17 @@
+{
+  "schema_version": 2,
+  "selected_custom_scan_rows": 1,
+  "passed_rows": 1,
+  "failed_rows": 0,
+  "ignored_non_custom_scan_rows": 2,
+  "rows": [
+    {
+      "workload": "grouped_simple_case",
+      "rows": 250000,
+      "gpu_kernel_dispatched": true,
+      "gpu_resident_pipeline": "reported",
+      "status": "reported_resident_pipeline",
+      "detail": "selected Custom Scan reported a GPU-resident pipeline"
+    }
+  ]
+}

@@ -8,6 +8,15 @@ pub struct GroupedInt2SumAvgCandidate;
 /// Released exact nullable INT4 SUM/AVG grouped by boolean.
 pub struct GroupedInt4SumAvgCandidate;
 
+/// GPU integer aggregation followed by PostgreSQL HAVING and ordering.
+pub struct GroupedInt4NativeHaving;
+
+/// Native HAVING/ordering consumes COUNT(*) without returning it to SQL.
+pub struct GroupedInt4HiddenHaving;
+
+/// Exact NUMERIC AVG with neither SUM nor COUNT(*) requested by SQL.
+pub struct GroupedInt4AvgOnly;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ExpectedGroup {
     sum: i64,
@@ -212,9 +221,225 @@ impl Workload for GroupedInt4SumAvgCandidate {
     }
 }
 
+impl Workload for GroupedInt4NativeHaving {
+    fn name(&self) -> &'static str {
+        "grouped_int4_native_having"
+    }
+
+    fn description(&self) -> &'static str {
+        "Exact GPU SUM/AVG/COUNT followed by native HAVING on NUMERIC AVG and ORDER BY"
+    }
+
+    fn setup_sql(&self, rows: usize) -> Vec<String> {
+        GroupedInt4SumAvgCandidate.setup_sql(rows)
+    }
+
+    fn query_sql(&self) -> String {
+        format!(
+            "{} HAVING avg(observed) IS NOT NULL \
+             ORDER BY count(*) DESC, bool_key",
+            GroupedInt4SumAvgCandidate.query_sql()
+        )
+    }
+
+    fn row_scales(&self) -> &'static [usize] {
+        GROUPED_INTEGER_SUM_AVG_ROWS
+    }
+
+    fn result_oracle(&self, rows: usize) -> Option<ResultOracle> {
+        let [f, t, _] = expected_groups(rows, int4_value);
+        Some(ResultOracle::one_row(
+            format!(
+                "SELECT count(*)::int8, coalesce(bool_and(\
+                   CASE WHEN bool_key THEN \
+                     observed_sum = {ts} AND input_rows = {tn} \
+                     AND observed_avg = {ts}::numeric / {tc}::numeric \
+                   WHEN NOT bool_key THEN \
+                     observed_sum = {fs} AND input_rows = {fnn} \
+                     AND observed_avg = {fs}::numeric / {fc}::numeric \
+                   ELSE false END), false) FROM ({query}) AS actual",
+                ts = t.sum,
+                tn = t.row_count,
+                tc = t.nonnull_count,
+                fs = f.sum,
+                fnn = f.row_count,
+                fc = f.nonnull_count,
+                query = self.query_sql(),
+            ),
+            vec![ExpectedResultValue::I64(2), ExpectedResultValue::Bool(true)],
+        ))
+    }
+
+    fn cleanup_sql(&self) -> Vec<String> {
+        GroupedInt4SumAvgCandidate.cleanup_sql()
+    }
+}
+
+impl Workload for GroupedInt4HiddenHaving {
+    fn name(&self) -> &'static str {
+        "grouped_int4_hidden_having"
+    }
+
+    fn description(&self) -> &'static str {
+        "Exact GPU SUM/AVG with hidden COUNT(*) for native HAVING and ordering"
+    }
+
+    fn setup_sql(&self, rows: usize) -> Vec<String> {
+        GroupedInt4SumAvgCandidate.setup_sql(rows)
+    }
+
+    fn query_sql(&self) -> String {
+        "SELECT bool_key, sum(observed) AS observed_sum, avg(observed) AS observed_avg \
+         FROM bench_grouped_int4_sum_avg GROUP BY bool_key \
+         HAVING count(*) > 0 AND avg(observed) IS NOT NULL \
+         ORDER BY count(*) DESC, bool_key"
+            .to_owned()
+    }
+
+    fn row_scales(&self) -> &'static [usize] {
+        GROUPED_INTEGER_SUM_AVG_ROWS
+    }
+
+    fn result_oracle(&self, rows: usize) -> Option<ResultOracle> {
+        let [f, t, _] = expected_groups(rows, int4_value);
+        Some(ResultOracle::one_row(
+            format!(
+                "SELECT count(*)::int8, coalesce(bool_and(\
+                 CASE WHEN bool_key THEN observed_sum = {ts} \
+                   AND observed_avg = {ts}::numeric / {tc}::numeric \
+                 WHEN NOT bool_key THEN observed_sum = {fs} \
+                   AND observed_avg = {fs}::numeric / {fc}::numeric \
+                 ELSE false END), false) FROM ({query}) AS actual",
+                ts = t.sum,
+                tc = t.nonnull_count,
+                fs = f.sum,
+                fc = f.nonnull_count,
+                query = self.query_sql(),
+            ),
+            vec![ExpectedResultValue::I64(2), ExpectedResultValue::Bool(true)],
+        ))
+    }
+
+    fn cleanup_sql(&self) -> Vec<String> {
+        GroupedInt4SumAvgCandidate.cleanup_sql()
+    }
+}
+
+impl Workload for GroupedInt4AvgOnly {
+    fn name(&self) -> &'static str {
+        "grouped_int4_avg_only"
+    }
+
+    fn description(&self) -> &'static str {
+        "Exact nullable INT4 AVG grouped by nullable bool, without SUM or COUNT(*) outputs"
+    }
+
+    fn setup_sql(&self, rows: usize) -> Vec<String> {
+        GroupedInt4SumAvgCandidate.setup_sql(rows)
+    }
+
+    fn query_sql(&self) -> String {
+        "SELECT bool_key, avg(observed) AS observed_avg \
+         FROM bench_grouped_int4_sum_avg GROUP BY bool_key"
+            .to_owned()
+    }
+
+    fn row_scales(&self) -> &'static [usize] {
+        GROUPED_INTEGER_SUM_AVG_ROWS
+    }
+
+    fn result_oracle(&self, rows: usize) -> Option<ResultOracle> {
+        let [f, t, _] = expected_groups(rows, int4_value);
+        Some(ResultOracle::one_row(
+            format!(
+                "SELECT count(*)::int8, coalesce(bool_and(\
+                 CASE WHEN bool_key THEN observed_avg IS NOT DISTINCT FROM {ts}::numeric / {tc}::numeric \
+                 WHEN NOT bool_key THEN observed_avg IS NOT DISTINCT FROM {fs}::numeric / {fc}::numeric \
+                 ELSE observed_avg IS NULL END), false) \
+                 AND count(*) FILTER (WHERE bool_key IS FALSE) = 1 \
+                 AND count(*) FILTER (WHERE bool_key IS TRUE) = 1 \
+                 AND count(*) FILTER (WHERE bool_key IS NULL) = 1 \
+                 FROM ({query}) AS actual",
+                ts = t.sum,
+                tc = t.nonnull_count,
+                fs = f.sum,
+                fc = f.nonnull_count,
+                query = self.query_sql(),
+            ),
+            vec![ExpectedResultValue::I64(3), ExpectedResultValue::Bool(true)],
+        ))
+    }
+
+    fn cleanup_sql(&self) -> Vec<String> {
+        GroupedInt4SumAvgCandidate.cleanup_sql()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn avg_only_uses_independent_numeric_oracle_without_extra_aggregate_outputs() {
+        let workload = GroupedInt4AvgOnly;
+        assert!(!workload.query_sql().contains("sum("));
+        assert!(!workload.query_sql().contains("count("));
+        for rows in workload.row_scales() {
+            let oracle = workload.result_oracle(*rows).expect("output oracle");
+            assert!(oracle.query_sql.contains(&workload.query_sql()));
+            assert!(oracle.query_sql.contains("ELSE observed_avg IS NULL"));
+            assert_eq!(
+                oracle.expected_row,
+                [ExpectedResultValue::I64(3), ExpectedResultValue::Bool(true)]
+            );
+        }
+    }
+
+    #[test]
+    fn hidden_having_keeps_count_out_of_sql_output_and_checks_exact_values() {
+        let workload = GroupedInt4HiddenHaving;
+        let query = workload.query_sql();
+        assert!(
+            !query
+                .split("FROM")
+                .next()
+                .expect("SELECT")
+                .contains("count(*)")
+        );
+        assert!(query.contains("HAVING count(*) > 0"));
+        for rows in workload.row_scales() {
+            let oracle = workload.result_oracle(*rows).expect("output oracle");
+            assert!(oracle.query_sql.contains(&query));
+            assert!(oracle.query_sql.contains("observed_sum ="));
+            assert!(oracle.query_sql.contains("observed_avg ="));
+            assert_eq!(
+                oracle.expected_row,
+                [ExpectedResultValue::I64(2), ExpectedResultValue::Bool(true)]
+            );
+        }
+    }
+
+    #[test]
+    fn native_having_oracle_checks_filtered_outputs_not_only_input_counts() {
+        let workload = GroupedInt4NativeHaving;
+        assert!(
+            workload
+                .query_sql()
+                .contains("HAVING avg(observed) IS NOT NULL")
+        );
+        for rows in workload.row_scales() {
+            let oracle = workload
+                .result_oracle(*rows)
+                .expect("independent result oracle");
+            assert!(oracle.query_sql.contains(&workload.query_sql()));
+            assert!(oracle.query_sql.contains("observed_sum ="));
+            assert!(oracle.query_sql.contains("observed_avg ="));
+            assert_eq!(
+                oracle.expected_row,
+                [ExpectedResultValue::I64(2), ExpectedResultValue::Bool(true)]
+            );
+        }
+    }
 
     #[test]
     fn fixtures_cover_widened_endpoints_and_all_null_group() {

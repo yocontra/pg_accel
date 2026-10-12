@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "workload": "numeric_where_mask",
+  "rows": 250000,
+  "status": "pass",
+  "order_sensitive": false,
+  "accel_rows": 1,
+  "baseline_rows": 1,
+  "accel_minus_baseline_count": 0,
+  "baseline_minus_accel_count": 0,
+  "sample_limit": 20,
+  "accel_minus_baseline_samples": [],
+  "baseline_minus_accel_samples": [],
+  "accel_query_sql": "SELECT count(*) n,sum(v) s,avg(w) a,avg(qty) q FROM bench_numeric_rollup WHERE b",
+  "baseline_query_sql": "SELECT count(*) n,sum(v) s,avg(w) a,avg(qty) q FROM bench_numeric_rollup WHERE b",
+  "error": null
+}

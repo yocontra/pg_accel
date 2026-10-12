@@ -1,0 +1,44 @@
+Test project /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+    Start 22: test_grouped_agg
+1/2 Test #22: test_grouped_agg .................   Passed  103.26 sec
+    Start 23: test_grouped_agg_hash
+2/2 Test #23: test_grouped_agg_hash ............***Failed   25.19 sec
+--- hash COUNT(column) metadata contracts (no device initialization) ---
+--- hash FILTER metadata contracts (protected row storage) ---
+--- Boolean/NULL SQL mask exhaustive byte pairs and exact output spans ---
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:485: execute_with_workspace(desc, req, workspace, &output.out, &detail) returned -1, expected 0
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:485: execute_with_workspace(desc, req, workspace, &output.out, &detail) returned -1, expected 0
+--- hash COUNT(column) exact NULL groups, types, merge sort, and failures ---
+--- hash FILTER preserves zero-count groups, NULLs, failures and retries ---
+--- hash INT32 extrema: subsets, sort alignment, NULLs and failure barriers ---
+--- hash duplicates/nulls/high-bits/collisions/warm workspace ---
+--- hash empty/all-null/capacity boundaries ---
+--- hash fixed-seed differential ---
+--- hash million-row hot groups ---
+--- parallel hash compaction/sort, non-power-of-two cardinalities ---
+parallel case: groups=16383 nullable=0
+parallel case: groups=16383 nullable=1
+parallel case: groups=16385 nullable=0
+parallel case: groups=16385 nullable=1
+parallel case: groups=32771 nullable=0
+parallel case: groups=32771 nullable=1
+parallel case: groups=1048583 nullable=0
+parallel case: groups=1048583 nullable=1
+--- hash qualification ceiling: 16Mi distinct groups including NULL ---
+--- fused H3 parent hash exactness/validation ---
+--- hash hard failure and unsupported shapes ---
+test_grouped_agg_hash: 10309037 passed, 2 failed
+gpu-noise[test_grouped_agg_hash]: suppressed archive-write=22, kernel-cache=1; raw log: /Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs/test_grouped_agg_hash-20261012-143033-32094.log
+gpu-test[test_grouped_agg_hash]: failed with exit code 1
+--- failure summary from /Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs/test_grouped_agg_hash-20261012-143033-32094.log ---
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:485: execute_with_workspace(desc, req, workspace, &output.out, &detail) returned -1, expected 0 (repeated 2x)
+PGACCEL_TEST_RESULT name=test_grouped_agg_hash exit_code=1 result=FAIL raw_lines=48 body_sha256=a8b56a7be6d1a7396dd874babd61b9e2a9e789490927fcf1a13e565acc20d9ff binding_sha256=2df4b332b21092f02282fc70c6056d4ac943cac2e36858dc4cd56774bd9eabca
+
+
+50% tests passed, 1 tests failed out of 2
+
+Total Test time (real) = 128.46 sec
+
+The following tests FAILED:
+	 23 - test_grouped_agg_hash (Failed)
+Errors while running CTest

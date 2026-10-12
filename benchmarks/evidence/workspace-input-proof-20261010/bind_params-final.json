@@ -1,0 +1,528 @@
+{
+  "calls": [
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb2388ef10",
+      "conditional": false,
+      "destination_id": "0xb238841d8",
+      "destination_name": "params",
+      "destination_path": [
+        "measures",
+        "[*]",
+        "value",
+        "values"
+      ],
+      "end": 5799695,
+      "local_reads": [
+        "0xb2388e538"
+      ],
+      "nullable": true,
+      "start": 5799626
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23892400",
+      "conditional": false,
+      "destination_id": "0xb238841d8",
+      "destination_name": "params",
+      "destination_path": [
+        "active"
+      ],
+      "end": 5800624,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5800582
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23892b80",
+      "conditional": false,
+      "destination_id": "0xb238841d8",
+      "destination_name": "params",
+      "destination_path": [
+        "staged_group_codes"
+      ],
+      "end": 5800710,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5800657
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23893300",
+      "conditional": false,
+      "destination_id": "0xb238841d8",
+      "destination_name": "params",
+      "destination_path": [
+        "hash_owners"
+      ],
+      "end": 5800784,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5800736
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23893300",
+      "conditional": false,
+      "destination_id": "0xb238841d8",
+      "destination_name": "params",
+      "destination_path": [
+        "hash_counts"
+      ],
+      "end": 5800858,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5800810
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23893300",
+      "conditional": false,
+      "destination_id": "0xb238841d8",
+      "destination_name": "params",
+      "destination_path": [
+        "hash_group_count"
+      ],
+      "end": 5800942,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5800889
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23894210",
+      "conditional": false,
+      "destination_id": "0xb238841d8",
+      "destination_name": "params",
+      "destination_path": [
+        "hash_sort_keys"
+      ],
+      "end": 5801022,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5800971
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23894210",
+      "conditional": false,
+      "destination_id": "0xb238841d8",
+      "destination_name": "params",
+      "destination_path": [
+        "hash_sort_counts"
+      ],
+      "end": 5801106,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5801053
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23893300",
+      "conditional": false,
+      "destination_id": "0xb238841d8",
+      "destination_name": "params",
+      "destination_path": [
+        "dense_chunk_counts"
+      ],
+      "end": 5801194,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5801139
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23893300",
+      "conditional": false,
+      "destination_id": "0xb238841d8",
+      "destination_name": "params",
+      "destination_path": [
+        "dense_selected_counts"
+      ],
+      "end": 5801288,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5801230
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23894210",
+      "conditional": false,
+      "destination_id": "0xb238841d8",
+      "destination_name": "params",
+      "destination_path": [
+        "dense_weighted_chunk_counts"
+      ],
+      "end": 5801400,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5801336
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23895c10",
+      "conditional": false,
+      "destination_id": "0xb238841d8",
+      "destination_name": "params",
+      "destination_path": [
+        "dense_integer_atomic_sum"
+      ],
+      "end": 5801729,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5801662
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23896390",
+      "conditional": false,
+      "destination_id": "0xb238841d8",
+      "destination_name": "params",
+      "destination_path": [
+        "dense_integer_atomic_min"
+      ],
+      "end": 5801828,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5801768
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23896390",
+      "conditional": false,
+      "destination_id": "0xb238841d8",
+      "destination_name": "params",
+      "destination_path": [
+        "dense_integer_atomic_max"
+      ],
+      "end": 5801927,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5801867
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23895c10",
+      "conditional": false,
+      "destination_id": "0xb238841d8",
+      "destination_name": "params",
+      "destination_path": [
+        "dense_integer_atomic_nonnull"
+      ],
+      "end": 5802047,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5801976
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23895c10",
+      "conditional": false,
+      "destination_id": "0xb238841d8",
+      "destination_name": "params",
+      "destination_path": [
+        "dense_integer_atomic_count"
+      ],
+      "end": 5802163,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5802094
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23897670",
+      "conditional": false,
+      "destination_id": "0xb238841d8",
+      "destination_name": "params",
+      "destination_path": [
+        "dense_integer_partials"
+      ],
+      "end": 5802276,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5802206
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23895c10",
+      "conditional": false,
+      "destination_id": "0xb238841d8",
+      "destination_name": "params",
+      "destination_path": [
+        "numeric_rows"
+      ],
+      "end": 5802430,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5802375
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23895c10",
+      "conditional": false,
+      "destination_id": "0xb238841d8",
+      "destination_name": "params",
+      "destination_path": [
+        "numeric_buckets",
+        "[*]"
+      ],
+      "end": 5802841,
+      "local_reads": [
+        "0xb23897d98"
+      ],
+      "nullable": true,
+      "start": 5802777
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb238999f0",
+      "conditional": false,
+      "destination_id": "0xb238841d8",
+      "destination_name": "params",
+      "destination_path": [
+        "numeric_groups",
+        "[*]"
+      ],
+      "end": 5802956,
+      "local_reads": [
+        "0xb23897d98"
+      ],
+      "nullable": true,
+      "start": 5802890
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb2389a420",
+      "conditional": false,
+      "destination_id": "0xb238841d8",
+      "destination_name": "params",
+      "destination_path": [
+        "meta"
+      ],
+      "end": 5803094,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5803051
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23892400",
+      "conditional": false,
+      "destination_id": "0xb238841d8",
+      "destination_name": "params",
+      "destination_path": [
+        "staged_key_values",
+        "[*]"
+      ],
+      "end": 5803235,
+      "local_reads": [
+        "0xb2389a690"
+      ],
+      "nullable": true,
+      "start": 5803179
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23892400",
+      "conditional": false,
+      "destination_id": "0xb238841d8",
+      "destination_name": "params",
+      "destination_path": [
+        "staged_key_nulls",
+        "[*]"
+      ],
+      "end": 5803326,
+      "local_reads": [
+        "0xb2389a690"
+      ],
+      "nullable": true,
+      "start": 5803271
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23894210",
+      "conditional": false,
+      "destination_id": "0xb2389b6c0",
+      "destination_name": "buffers",
+      "destination_path": [
+        "sum"
+      ],
+      "end": 5803544,
+      "local_reads": [
+        "0xb2389b248"
+      ],
+      "nullable": true,
+      "start": 5803508
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23894210",
+      "conditional": false,
+      "destination_id": "0xb2389b6c0",
+      "destination_name": "buffers",
+      "destination_path": [
+        "min"
+      ],
+      "end": 5803600,
+      "local_reads": [
+        "0xb2389b248"
+      ],
+      "nullable": true,
+      "start": 5803564
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23894210",
+      "conditional": false,
+      "destination_id": "0xb2389b6c0",
+      "destination_name": "buffers",
+      "destination_path": [
+        "max"
+      ],
+      "end": 5803656,
+      "local_reads": [
+        "0xb2389b248"
+      ],
+      "nullable": true,
+      "start": 5803620
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23894210",
+      "conditional": false,
+      "destination_id": "0xb2389b6c0",
+      "destination_name": "buffers",
+      "destination_path": [
+        "sumsq"
+      ],
+      "end": 5803716,
+      "local_reads": [
+        "0xb2389b248"
+      ],
+      "nullable": true,
+      "start": 5803678
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23894210",
+      "conditional": false,
+      "destination_id": "0xb2389b6c0",
+      "destination_name": "buffers",
+      "destination_path": [
+        "count"
+      ],
+      "end": 5803776,
+      "local_reads": [
+        "0xb2389b248"
+      ],
+      "nullable": true,
+      "start": 5803738
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23894210",
+      "conditional": false,
+      "destination_id": "0xb2389b6c0",
+      "destination_name": "buffers",
+      "destination_path": [
+        "nonnull"
+      ],
+      "end": 5803840,
+      "local_reads": [
+        "0xb2389b248"
+      ],
+      "nullable": true,
+      "start": 5803800
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23894210",
+      "conditional": false,
+      "destination_id": "0xb2389b6c0",
+      "destination_name": "buffers",
+      "destination_path": [
+        "rhs_sum"
+      ],
+      "end": 5803904,
+      "local_reads": [
+        "0xb2389b248"
+      ],
+      "nullable": true,
+      "start": 5803864
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23894210",
+      "conditional": false,
+      "destination_id": "0xb2389b6c0",
+      "destination_name": "buffers",
+      "destination_path": [
+        "rhs_count"
+      ],
+      "end": 5803972,
+      "local_reads": [
+        "0xb2389b248"
+      ],
+      "nullable": true,
+      "start": 5803930
+    },
+    {
+      "base_declaration": "0xb23884158",
+      "base_parameter": 2,
+      "callee_id": "0xb23894210",
+      "conditional": false,
+      "destination_id": "0xb2389b6c0",
+      "destination_name": "buffers",
+      "destination_path": [
+        "rhs_nonnull"
+      ],
+      "end": 5804044,
+      "local_reads": [
+        "0xb2389b248"
+      ],
+      "nullable": true,
+      "start": 5804000
+    }
+  ],
+  "detail": "stable workspace parameter, checked offset initializer/update expressions, typed call arguments and returned-alias facts; caller not approved",
+  "offset_inputs": [
+    "0xb2388e538",
+    "0xb23897d98",
+    "0xb2389a690",
+    "0xb2389b248"
+  ],
+  "ok": true,
+  "source_sha256": "dc3fcc9d4e27a1131b8c8cbf643878442fc40992bdeae9c0d572f183b62d4d93"
+}

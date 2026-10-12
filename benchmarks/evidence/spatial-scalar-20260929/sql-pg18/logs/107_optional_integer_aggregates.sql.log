@@ -1,0 +1,32 @@
+=== 107_optional_integer_aggregates ===
+SET
+SET
+CREATE TABLE
+INSERT 0 500000
+ANALYZE
+DO
+PGACCEL_ASSERT_OK:107_optional_integer_aggregates.assert_001
+SET
+PREPARE
+DO
+PGACCEL_ASSERT_OK:107_optional_integer_aggregates.assert_002
+TRUNCATE TABLE
+DO
+PGACCEL_ASSERT_OK:107_optional_integer_aggregates.assert_003
+DEALLOCATE
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ f
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:107_optional_integer_aggregates

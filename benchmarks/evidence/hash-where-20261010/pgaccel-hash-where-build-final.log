@@ -1,0 +1,11 @@
+[  7%] Built target pgaccel_metadata
+[100%] Built target pgaccel_kernels_shared
+[  6%] Built target pgaccel_metadata
+[ 93%] Built target pgaccel_kernels_shared
+[100%] Building CXX object CMakeFiles/test_grouped_agg_hash.dir/test/test_grouped_agg_hash.cpp.o
+[100%] Linking CXX executable test_grouped_agg_hash
+[100%] Built target test_grouped_agg_hash
+[  6%] Built target pgaccel_metadata
+[ 87%] Built target pgaccel_kernels_shared
+[ 93%] Linking CXX executable test_grouped_agg
+[100%] Built target test_grouped_agg

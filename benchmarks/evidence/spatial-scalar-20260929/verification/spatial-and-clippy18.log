@@ -1,0 +1,35 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Checking pg_accel_bench v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel_bench)
+error: unnecessary structure name repetition
+   --> pg_accel/src/engine/spec/mod.rs:150:22
+    |
+150 |         spatial: Box<FilterSpec>,
+    |                      ^^^^^^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#use_self
+    = note: `-D clippy::use-self` implied by `-D clippy::nursery`
+    = help: to override `-D clippy::nursery` add `#[allow(clippy::use_self)]`
+
+error: unnecessary structure name repetition
+   --> pg_accel/src/engine/spec/mod.rs:151:21
+    |
+151 |         scalar: Box<FilterSpec>,
+    |                     ^^^^^^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#use_self
+
+error: could not compile `pg_accel` (lib) due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: creating a new box
+    --> pg_accel/src/engine/spec/codec.rs:1612:9
+     |
+1612 |         *scalar = Box::new(original);
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace existing content with inner value instead: `**scalar = original`
+     |
+     = note: this creates a needless allocation
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#replace_box
+     = note: `-D clippy::replace-box` implied by `-D clippy::all`
+     = help: to override `-D clippy::all` add `#[allow(clippy::replace_box)]`
+
+error: could not compile `pg_accel` (lib test) due to 3 previous errors
+error: Recipe `lint` failed with exit code 101

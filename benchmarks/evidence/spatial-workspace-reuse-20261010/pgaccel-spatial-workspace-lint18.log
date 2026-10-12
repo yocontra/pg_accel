@@ -1,0 +1,44 @@
+    Checking pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error: used `unwrap()` on an `Option` value
+    --> pg_accel/src/engine/executor/agg/spatial.rs:1550:17
+     |
+1550 |                 padded_base_device_bytes(&shape(1_000_001)).unwrap()
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is `None`, it will panic
+     = help: consider using `expect()` to provide a better panic message
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+     = note: requested on the command line with `-D clippy::unwrap-used`
+
+error: used `unwrap()` on an `Option` value
+    --> pg_accel/src/engine/executor/agg/spatial.rs:1551:23
+     |
+1551 |                     + polygon.device_bytes().unwrap()
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is `None`, it will panic
+     = help: consider using `expect()` to provide a better panic message
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+    --> pg_accel/src/engine/executor/agg/spatial.rs:1553:23
+     |
+1553 |                     + chunk_device_bytes(preflight.chunk_limit).unwrap()
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is `None`, it will panic
+     = help: consider using `expect()` to provide a better panic message
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+    --> pg_accel/src/engine/executor/agg/spatial.rs:1691:17
+     |
+1691 |                 padded_base_device_bytes(&shape(rows)).unwrap() + 160 + rows as u64 + scratch
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is `None`, it will panic
+     = help: consider using `expect()` to provide a better panic message
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+
+error: could not compile `pg_accel` (lib test) due to 4 previous errors
+error: Recipe `lint` failed with exit code 101

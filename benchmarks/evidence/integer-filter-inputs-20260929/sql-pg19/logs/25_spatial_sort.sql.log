@@ -1,0 +1,44 @@
+=== 25_spatial_sort ===
+BEGIN
+CREATE TABLE
+INSERT 0 5000
+SELECT 1
+ANALYZE
+ANALYZE
+--- spatial + ORDER BY val (ON vs OFF) ---
+SET
+SELECT 590
+SET
+SET
+SELECT 590
+psql:/Users/contra/Projects/pg_accel/sql/tests/25_spatial_sort.sql:64: NOTICE:  spatial+sort row count OK: 590
+DO
+PGACCEL_ASSERT_OK:25_spatial_sort.assert_001
+psql:/Users/contra/Projects/pg_accel/sql/tests/25_spatial_sort.sql:84: NOTICE:  spatial+sort order OK: all rows match
+DO
+--- spatial + ORDER BY val DESC LIMIT 20 ---
+SET
+SELECT 20
+SET
+SET
+SELECT 20
+psql:/Users/contra/Projects/pg_accel/sql/tests/25_spatial_sort.sql:118: NOTICE:  spatial+sort+limit OK
+DO
+--- spatial + ORDER BY name (text) ---
+SET
+SELECT 50
+SET
+SET
+SELECT 50
+psql:/Users/contra/Projects/pg_accel/sql/tests/25_spatial_sort.sql:152: NOTICE:  spatial+sort text key OK
+DO
+--- ST_DWithin + ORDER BY ---
+SET
+SELECT 442
+SET
+SET
+SELECT 442
+psql:/Users/contra/Projects/pg_accel/sql/tests/25_spatial_sort.sql:184: NOTICE:  ST_DWithin+sort OK: 442 rows
+DO
+ROLLBACK
+PGACCEL_FILE_OK:25_spatial_sort

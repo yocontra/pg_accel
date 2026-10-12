@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "total_measured_rows": 2,
+  "ship_gate_failure_count": 0,
+  "h3_lane_gate_failure_count": 0,
+  "crash_count": 0,
+  "rows_below_parity_count": 2,
+  "gpu_dispatched_below_parity_count": 0,
+  "native_below_parity_count": 2,
+  "planner_declined_below_parity_count": 2,
+  "stock_fallback_rows": 0,
+  "custom_scan_selected_not_dispatched_rows": 0,
+  "unique_work_items": 2,
+  "rows": [
+    {
+      "workload": "numeric_grouped_filtered",
+      "rows": 250000,
+      "category": "gpu_hashagg",
+      "kernel_class": "hash_agg",
+      "classification": "planner_declined_native",
+      "priority": "p2_architecture_gap",
+      "next_track": "resident_groupagg_small_input_overhead",
+      "sources": [
+        "native_below_parity"
+      ],
+      "speedup_median_vs_parallel": 0.9242053953730036,
+      "accel_median_ms": 15.504896500000001,
+      "parallel_median_ms": 14.329709000000001,
+      "details": [
+        "native/planner-declined row below 0.98x parity"
+      ]
+    },
+    {
+      "workload": "numeric_grouped_filtered",
+      "rows": 1000000,
+      "category": "gpu_hashagg",
+      "kernel_class": "hash_agg",
+      "classification": "planner_declined_native",
+      "priority": "p2_architecture_gap",
+      "next_track": "resident_groupagg_small_input_overhead",
+      "sources": [
+        "native_below_parity"
+      ],
+      "speedup_median_vs_parallel": 0.975123888439669,
+      "accel_median_ms": 27.9861665,
+      "parallel_median_ms": 27.2899795,
+      "details": [
+        "native/planner-declined row below 0.98x parity"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error[E0277]: can't compare `u16` with `i32`
+    --> pg_accel/src/engine/ffi/planner_hooks/shape/tests.rs:1729:43
+     |
+1729 |         let bit = |n| mask & (1_u16 << n) != 0;
+     |                                           ^^ no implementation for `u16 == i32`
+     |
+     = help: the trait `PartialEq<i32>` is not implemented for `u16`
+help: `u16` implements trait `PartialEq<Rhs>`
+    --> /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/cmp.rs:1875:12
+     |
+     = note: `PartialEq`
+    ::: /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/cmp.rs:1899:5
+     |
+     = note: in this macro invocation
+     |
+    ::: /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/serde_json-1.0.149/src/value/partial_eq.rs:76:13
+     |
+  76 |               impl PartialEq<Value> for $ty {
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `PartialEq<serde_json::Value>`
+...
+  97 | / partialeq_numeric! {
+  98 | |     eq_i64[i8 i16 i32 i64 isize]
+  99 | |     eq_u64[u8 u16 u32 u64 usize]
+ 100 | |     eq_f32[f32]
+ 101 | |     eq_f64[f64]
+ 102 | |     eq_bool[bool]
+ 103 | | }
+     | |_- in this macro invocation
+     = note: this error originates in the macro `partial_eq_impl` which comes from the expansion of the macro `partialeq_numeric` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `pg_accel` (lib test) due to 1 previous error
+error: Recipe `test-standalone` failed with exit code 101

@@ -1,0 +1,4 @@
+[ 92%] Built target pgaccel_kernels_shared
+[ 92%] Building CXX object CMakeFiles/test_join_rows.dir/test/test_join_rows.cpp.o
+[100%] Linking CXX executable test_join_rows
+[100%] Built target test_join_rows

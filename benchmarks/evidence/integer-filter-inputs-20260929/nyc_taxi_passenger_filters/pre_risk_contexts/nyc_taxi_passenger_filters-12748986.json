@@ -1,0 +1,29 @@
+{
+  "workload": "nyc_taxi_passenger_filters",
+  "rows": 12748986,
+  "seed": 42,
+  "iterations": 10,
+  "warmup": 5,
+  "timing_mode": "raw",
+  "cache_mode": "warm",
+  "realistic_gucs": false,
+  "skip_guc_verify": false,
+  "capture_plans": true,
+  "capture_planner_stages": false,
+  "native_parity_pairing": false,
+  "backend_pid": 93866,
+  "backend_pid_error": null,
+  "setup_sql": [
+    "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pgaccel_corpus.manifests WHERE dataset_id = 'nyc-yellow-2015-01-aviz-raw-v1' AND source_sha256 = '435108d38567a54e3a58ffd5b21b641db57fcd1be05fe3b8b84fb3b66f3d94bf' AND source_rows = 12748986) THEN RAISE EXCEPTION 'Pinned NYC corpus missing or mismatched; run scripts/nyc_taxi_corpus.py import'; END IF; END $$",
+    "DROP TABLE IF EXISTS bench_nyc_taxi",
+    "CREATE TABLE bench_nyc_taxi AS SELECT id, vendor_id, passenger_count FROM pgaccel_corpus.nyc_yellow_2015_01 WHERE id <= 12748986 ORDER BY id",
+    "DO $$ BEGIN IF (SELECT count(*) FROM bench_nyc_taxi) <> 12748986 THEN RAISE EXCEPTION 'NYC corpus prefix is incomplete'; END IF; END $$",
+    "ANALYZE bench_nyc_taxi"
+  ],
+  "pre_query_sql": [],
+  "accel_query_sql": "SELECT sum(passenger_count) FILTER (WHERE vendor_id=1) AS passengers_1,avg(passenger_count) FILTER (WHERE vendor_id=1) AS mean_1,sum(passenger_count) FILTER (WHERE vendor_id=2) AS passengers_2,avg(passenger_count) FILTER (WHERE vendor_id=2) AS mean_2,count(*) AS n FROM bench_nyc_taxi",
+  "baseline_query_sql": "SELECT sum(passenger_count) FILTER (WHERE vendor_id=1) AS passengers_1,avg(passenger_count) FILTER (WHERE vendor_id=1) AS mean_1,sum(passenger_count) FILTER (WHERE vendor_id=2) AS passengers_2,avg(passenger_count) FILTER (WHERE vendor_id=2) AS mean_2,count(*) AS n FROM bench_nyc_taxi",
+  "explain_sql": "EXPLAIN (VERBOSE, COSTS OFF) SELECT sum(passenger_count) FILTER (WHERE vendor_id=1) AS passengers_1,avg(passenger_count) FILTER (WHERE vendor_id=1) AS mean_1,sum(passenger_count) FILTER (WHERE vendor_id=2) AS passengers_2,avg(passenger_count) FILTER (WHERE vendor_id=2) AS mean_2,count(*) AS n FROM bench_nyc_taxi",
+  "explain": "Custom Scan (GpuAccelAgg)\n  Output: (sum(passenger_count) FILTER (WHERE (vendor_id = 1))), (avg(passenger_count) FILTER (WHERE (vendor_id = 1))), (sum(passenger_count) FILTER (WHERE (vendor_id = 2))), (avg(passenger_count) FILTER (WHERE (vendor_id = 2))), (count(*))\n  Strategy: GpuAgg\n  Plan Selected: true\n  Batch Size: 65536\n  Expected Threads: 1\n  GPU Resident Pipeline: true\n  GPU Resident Proof Version: 2\n  GPU Resident Operator Class: resident_groupagg\n  GPU Physical Kernel Mode: parallel_dense_integer\n  GPU Descriptor Strategy: descriptor_ungrouped_aggregate\n  GPU Descriptor Specialization: dense_filtered_integer_sum_avg_plain\n  GPU Descriptor Specialization Cache: miss\n  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)\n  GPU Descriptor Group Keys: none\n  GPU Descriptor Aggregates: m0:column(2246831.3:type=23) -> value.sum; value.avg; m1:column(2246831.3:type=23) -> value.sum; value.avg; m2:count_star -> value.count\n  GPU Descriptor Filter: fact=none; measures=[m0=ranges(input=2246831.2:type=23, count=1); m1=ranges(input=2246831.2:type=23, count=1); m2=none]; dimensions=[none]\n  GPU Descriptor Star Dimensions: none\n  GPU Descriptor Output: slot0:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot2:aggregate[m1].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot3:aggregate[m1].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot4:aggregate[m2].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false\n  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)\n  GPU Descriptor Artifact: not initialized\n  GPU Descriptor Generations: not inspected\n  GPU Descriptor Bytes: not inspected\n  GPU Resident Stage Mask: 16395\n  GPU Resident Device Columns: 2\n  GPU Resident Boundary: none: no CPU boundary\n",
+  "explain_error": null
+}

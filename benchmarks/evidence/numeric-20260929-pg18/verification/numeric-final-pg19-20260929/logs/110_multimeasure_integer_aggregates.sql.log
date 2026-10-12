@@ -1,0 +1,32 @@
+=== 110_multimeasure_integer_aggregates ===
+SET
+SET
+SELECT 300000
+ANALYZE
+DO
+PGACCEL_ASSERT_OK:110_multimeasure_integer_aggregates.assert_001
+SET
+PREPARE
+DO
+PGACCEL_ASSERT_OK:110_multimeasure_integer_aggregates.assert_002
+DEALLOCATE
+INSERT 0 1000017
+ANALYZE
+DO
+PGACCEL_ASSERT_OK:110_multimeasure_integer_aggregates.assert_003
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ t
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:110_multimeasure_integer_aggregates

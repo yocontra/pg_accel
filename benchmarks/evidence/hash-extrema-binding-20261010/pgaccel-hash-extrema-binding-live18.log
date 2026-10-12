@@ -1,0 +1,22 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error: wildcard matches only a single variant and will also match any future added variants
+   --> pg_accel/src/engine/executor/agg/h3_count_test.rs:367:25
+    |
+367 |                         _ => unreachable!("integer fixture output"),
+    |                         ^ help: try: `AggregateKind::StddevSamp`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#match_wildcard_for_single_variants
+    = note: `-D clippy::match-wildcard-for-single-variants` implied by `-D clippy::pedantic`
+    = help: to override `-D clippy::pedantic` add `#[allow(clippy::match_wildcard_for_single_variants)]`
+
+error: wildcard matches only a single variant and will also match any future added variants
+   --> pg_accel/src/engine/executor/agg/h3_count_test.rs:893:41
+    |
+893 | ...                   _ => unreachable!(),
+    |                       ^ help: try: `AggregateKind::StddevSamp`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#match_wildcard_for_single_variants
+
+error: could not compile `pg_accel` (lib) due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `pg_accel` (lib test) due to 2 previous errors

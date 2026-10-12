@@ -1,0 +1,80 @@
+[32m[1m       Using[0m[39m [37m[1mCliArgument("pg18")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/bin/pg_config[39m
+CARGO_TARGET_DIR="/Users/contra/Projects/pg_accel/target" PGRX_ALL_FEATURES="false" PGRX_BUILD_PROFILE="dev" PGRX_FEATURES="pg18 pg_test" PGRX_MANIFEST_PATH="/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" PGRX_NO_DEFAULT_FEATURES="true" PGRX_NO_SCHEMA="false" "/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "test" "--manifest-path" "/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" "--features" "pg18 pg_test" "--no-default-features" "numeric_residency"
+    Blocking waiting for file lock on build directory
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 05s
+     Running unittests src/lib.rs (target/debug/deps/pg_accel-ed206a68dc782b00)
+
+running 7 tests
+test tests::numeric_residency::tests::pg_pg_numeric_dense_capacity_uses_individual_postgres_domains ... [32m[1m       Using[0m[39m [37m[1mPgConfig("pg18")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/bin/pg_config[39m
+[32m[1m    Building[0m[39m extension with features [36mpg18 pg_test[39m
+[32m[1m     Running[0m[39m command [36m"/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "rustc" "--lib" "--manifest-path" "/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" "--features" "pg18 pg_test" "--no-default-features" "--message-format=json-render-diagnostics"[39m
+    Blocking waiting for file lock on build directory
+   Compiling memchr v2.8.0
+   Compiling icu_properties_data v2.1.2
+   Compiling icu_normalizer_data v2.1.1
+   Compiling zerofrom v0.1.6
+   Compiling anyhow v1.0.103
+   Compiling owo-colors v4.3.0
+   Compiling cargo_toml v0.22.3
+   Compiling serde v1.0.228
+   Compiling bitflags v2.13.0
+   Compiling regex-syntax v0.8.10
+   Compiling getrandom v0.4.2
+   Compiling futures-channel v0.3.32
+   Compiling yoke v0.8.1
+   Compiling opentelemetry_sdk v0.31.0
+   Compiling zerovec v0.11.5
+   Compiling zerotrie v0.2.3
+   Compiling aho-corasick v1.1.4
+   Compiling nom v7.1.3
+   Compiling serde_json v1.0.149
+   Compiling tinystr v0.8.2
+   Compiling potential_utf v0.1.4
+   Compiling icu_collections v2.1.1
+   Compiling icu_locale_core v2.1.1
+   Compiling regex-automata v0.4.14
+   Compiling icu_provider v2.1.1
+   Compiling pathsearch v0.2.0
+   Compiling tracing-serde v0.2.0
+   Compiling icu_normalizer v2.1.1
+   Compiling icu_properties v2.1.2
+   Compiling uuid v1.23.3
+   Compiling serde_cbor v0.11.2
+   Compiling cexpr v0.6.0
+   Compiling idna_adapter v1.2.1
+   Compiling idna v1.1.0
+   Compiling matchers v0.2.0
+   Compiling url v2.5.8
+   Compiling tracing-subscriber v0.3.23
+   Compiling regex v1.12.3
+   Compiling bindgen v0.72.1
+   Compiling pgrx-pg-config v0.19.1
+   Compiling tracing-opentelemetry v0.32.1
+   Compiling pgrx-bindgen v0.19.1
+   Compiling pgrx-pg-sys v0.19.1
+   Compiling pgrx v0.19.1
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 40.44s
+[32m[1m  Installing[0m[39m extension
+[32m[1m     Copying[0m[39m control file to [36m.pgaccel/postgres/install/18.4/share/extension/pg_accel.control[39m
+[32m[1m     Copying[0m[39m shared library to [36m.pgaccel/postgres/install/18.4/lib/pg_accel.dylib[39m
+[32m[1m  Discovered[0m[39m [36m[1m303[0m[39m SQL entities: [36m[1m24[0m[39m schemas ([36m[1m3[0m[39m unique), [36m[1m277[0m[39m functions, [36m[1m0[0m[39m types, [36m[1m0[0m[39m enums, [36m[1m1[0m[39m sqls, [36m[1m0[0m[39m ords, [36m[1m0[0m[39m hashes, [36m[1m0[0m[39m aggregates, [36m[1m1[0m[39m triggers
+[32m[1m     Writing[0m[39m SQL entities to /Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/share/extension/pg_accel--1.0.0-rc1.sql
+[32m[1m    Finished[0m[39m installing pg_accel
+ok
+test tests::numeric_residency::tests::pg_pg_numeric_descriptor_binding_and_materialization ... ok
+test tests::numeric_residency::tests::pg_pg_numeric_execution_memory_budget_and_pool_ownership ... ok
+test tests::numeric_residency::tests::pg_pg_numeric_native_sum_matches_postgres ... ok
+test tests::numeric_residency::tests::pg_pg_numeric_resident_refresh_rollback_nulls_and_empty ... ok
+test tests::numeric_residency::tests::pg_pg_numeric_resident_wire_roundtrip_full_precision_and_toast ... ok
+test tests::numeric_residency::tests::pg_pg_numeric_sql_planner_preserves_projection_and_results ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 1625 filtered out; finished in 51.02s
+
+     Running tests/correctness_tests.rs (target/debug/deps/correctness_tests-4d5632827da0de27)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+

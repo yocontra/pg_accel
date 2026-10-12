@@ -1,0 +1,12 @@
+PGACCEL_TEST_START name=test_grouped_agg_hash
+--- hash COUNT(column) metadata contracts (no device initialization) ---
+--- hash FILTER metadata contracts (protected row storage) ---
+[;35m[AdaptiveCpp Warning] [0mmetal_hardware_manager: MTLCopyAllDevices returned no devices
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:1165: pgaccel_init() returned -5, expected 0
+--- Boolean/NULL SQL mask exhaustive byte pairs and exact output spans ---
+[;35m[AdaptiveCpp Warning] [0mmetal_hardware_manager: MTLCopyAllDevices returned no devices
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+FAIL: unexpected test exception: shared USM allocation failed
+test_grouped_agg_hash: 1909 passed, 2 failed
+PGACCEL_TEST_RESULT name=test_grouped_agg_hash exit_code=1 result=FAIL raw_lines=10 body_sha256=3cdc7a09c013caae3f36a4e9c13bb92129188a1cd6f07b0331c6e0ea54430b31 binding_sha256=eaa3f50f103ad8d3bf451fdb64cd8eccb28f10cab401d692a34702cf0e0774b1

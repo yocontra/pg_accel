@@ -7,7 +7,28 @@
 
 mod builder;
 mod cost;
+mod int4_predicate;
 mod postgres;
+mod postgres_scalar;
+
+pub use postgres_scalar::{LoweredScalarExpression, lower_scalar_expression};
+
+/// Live-test entry to the same aggregate extraction used by production hooks.
+///
+/// # Safety
+/// Both pointers must belong to the live analyzed/simplified Query on the
+/// backend main thread and remain valid throughout this synchronous call.
+#[cfg(feature = "pg_test")]
+pub(crate) unsafe fn test_parse_scalar_aggregate(
+    node: *mut pg_sys::Node,
+    query: &pg_sys::Query,
+) -> Result<AggregateExpr, ShapeDecline> {
+    // SAFETY: forward the caller's planner-tree/main-thread contract.
+    unsafe { postgres::parse_aggregate(node, query) }
+}
+
+pub(crate) use postgres::aggregate_scan_target_list;
+pub(super) use postgres::mark_permission_role_dependency;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
@@ -26,6 +47,8 @@ pub use crate::engine::spec::{
 
 pub use builder::build_shape;
 pub(super) use cost::dense_atomic_fact_row_floor;
+pub(super) use cost::h3_group_bound;
+pub(super) use cost::numeric_fact_row_floor;
 pub use cost::{ShapeCost, ShapeCostGate, estimate_shape_cost};
 pub(super) use cost::{
     dense_atomic_sum_count_cost, dense_atomic_sum_count_lifecycle, dense_lifecycle_call_count,
@@ -226,7 +249,7 @@ pub struct DerivedGroupKeyRequirement {
     pub result_type_oid: u32,
 }
 
-/// Begin-time grouping implementation selected for the logical AQS3 spec.
+/// Begin-time grouping implementation selected for the logical AQS6 spec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DescriptorGroupingMode {
     DenseDictionary,
@@ -298,6 +321,9 @@ pub struct ShapePlan {
     /// Conservative PostgreSQL aggregate cardinality after any exact H3
     /// universe bound. This is the cardinality advertised by the CustomPath.
     pub estimated_output_rows: u64,
+    /// Individual PostgreSQL key estimates, before resident NULL slots are
+    /// added. Their product can exceed joint output groups and input rows.
+    pub estimated_dense_key_cardinalities: Option<Vec<u64>>,
     /// Stable words consumed by Phase 5A's `shape_digest`.
     pub digest_words: Vec<i32>,
     pub descriptor_resolution: DescriptorResolution,
@@ -325,6 +351,9 @@ pub enum ShapeDecline {
     SetOperations,
     RowMarks,
     UnsupportedRangeTableEntry {
+        varno: pg_sys::Index,
+    },
+    UnsupportedPermissionContext {
         varno: pg_sys::Index,
     },
     TableSample,
@@ -464,6 +493,7 @@ impl ShapeDecline {
             Self::SetOperations => "shape_set_operations",
             Self::RowMarks => "shape_row_marks",
             Self::UnsupportedRangeTableEntry { .. } => "shape_unsupported_rte",
+            Self::UnsupportedPermissionContext { .. } => "shape_permission_context",
             Self::TableSample => "shape_table_sample",
             Self::UnsupportedOuterJoin => "shape_outer_join",
             Self::UnsupportedPredicate => "shape_unsupported_predicate",
@@ -693,8 +723,90 @@ pub unsafe fn extract_shape(
             model.planner.auto_load_amortization_queries,
         )
     }?;
-    build_shape(input, model)
+    let mut shape = build_shape(input, model)?;
+    if shape.spec.measures.iter().any(|measure| {
+        measure.requires_numeric_accumulator()
+            || matches!(measure.expression, MeasureExpr::Bytecode { .. })
+    }) {
+        let rows = shape
+            .residency
+            .relations
+            .iter()
+            .find(|relation| relation.relation_oid == shape.spec.fact_rel)
+            .map_or(0, |relation| relation.estimated_rows);
+        // SAFETY: root remains owned by this live planner invocation. The
+        // function only obtains per-key PostgreSQL estimates, never device data.
+        // Scalar workspace forecasts need the same Cartesian dictionary-slot
+        // estimate as NUMERIC; a joint output-row estimate cannot replace it.
+        shape.estimated_dense_key_cardinalities =
+            unsafe { postgres::estimate_dense_key_cardinalities(root, rows) };
+    }
+    Ok(shape)
 }
 
 #[cfg(test)]
 mod tests;
+
+/// Dictionary capacity is a Cartesian product, not a joint group estimate.
+/// PostgreSQL ndistinct does not reserve our explicit NULL code. Extra slots
+/// are conservative if an estimate already happens to include the NULL group.
+pub(crate) fn dense_slot_product(cardinalities: &[u64], nullable: &[bool]) -> Option<u64> {
+    if cardinalities.len() != nullable.len() {
+        return None;
+    }
+    cardinalities
+        .iter()
+        .zip(nullable)
+        .try_fold(1_u64, |slots, (&count, &has_null)| {
+            slots.checked_mul(count.checked_add(u64::from(has_null))?.max(1))
+        })
+}
+
+// Read-only live-planner observation: exercise PostgreSQL's per-key estimates
+// before NUMERIC SQL admission is enabled. This never injects or forces a path.
+#[cfg(feature = "pg_test")]
+struct TestDenseSlotCapture {
+    rows: u64,
+    estimates: Vec<Option<Vec<u64>>>,
+}
+
+#[cfg(feature = "pg_test")]
+thread_local! {
+    static TEST_DENSE_SLOTS: std::cell::RefCell<Option<TestDenseSlotCapture>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(feature = "pg_test")]
+pub(crate) fn test_capture_dense_slots(rows: u64, f: impl FnOnce()) -> Vec<Option<Vec<u64>>> {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_DENSE_SLOTS.with(|state| *state.borrow_mut() = None);
+        }
+    }
+    TEST_DENSE_SLOTS.with(|state| {
+        let mut state = state.borrow_mut();
+        assert!(state.is_none(), "nested dense-slot capture");
+        *state = Some(TestDenseSlotCapture {
+            rows,
+            estimates: Vec::new(),
+        });
+    });
+    let _reset = Reset;
+    f();
+    TEST_DENSE_SLOTS.with(|state| state.borrow_mut().take().expect("capture active").estimates)
+}
+
+#[cfg(feature = "pg_test")]
+pub(super) unsafe fn observe_test_dense_slots(root: *mut pg_sys::PlannerInfo) {
+    let rows = TEST_DENSE_SLOTS.with(|state| state.borrow().as_ref().map(|capture| capture.rows));
+    if let Some(rows) = rows {
+        // SAFETY: caller supplies the live GROUP_AGG root, just as extract_shape.
+        let estimate = unsafe { postgres::estimate_dense_key_cardinalities(root, rows) };
+        TEST_DENSE_SLOTS.with(|state| {
+            if let Some(capture) = state.borrow_mut().as_mut() {
+                capture.estimates.push(estimate);
+            }
+        });
+    }
+}

@@ -97,6 +97,7 @@ pub(crate) enum TestInjectedPostgresError {
 #[cfg(feature = "pg_test")]
 thread_local! {
     static TEST_INJECTED_POSTGRES_ERROR: Cell<Option<TestInjectedPostgresError>> = const { Cell::new(None) };
+    static TEST_POSTGRES_ERROR_SKIP_CALLS: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(feature = "pg_test")]
@@ -104,21 +105,40 @@ pub(crate) fn with_test_injected_postgres_error<R>(
     error: TestInjectedPostgresError,
     f: impl FnOnce() -> R,
 ) -> R {
-    struct Restore(Option<TestInjectedPostgresError>);
+    with_test_injected_postgres_error_after(error, 0, f)
+}
+
+/// Permit real calls to populate extension caches before exercising unwinding.
+#[cfg(feature = "pg_test")]
+pub(crate) fn with_test_injected_postgres_error_after<R>(
+    error: TestInjectedPostgresError,
+    skip_calls: usize,
+    f: impl FnOnce() -> R,
+) -> R {
+    struct Restore(Option<TestInjectedPostgresError>, usize);
 
     impl Drop for Restore {
         fn drop(&mut self) {
             TEST_INJECTED_POSTGRES_ERROR.with(|slot| slot.set(self.0));
+            TEST_POSTGRES_ERROR_SKIP_CALLS.with(|slot| slot.set(self.1));
         }
     }
 
     let prior = TEST_INJECTED_POSTGRES_ERROR.with(|slot| slot.replace(Some(error)));
-    let _restore = Restore(prior);
+    let prior_skip = TEST_POSTGRES_ERROR_SKIP_CALLS.with(|slot| slot.replace(skip_calls));
+    let _restore = Restore(prior, prior_skip);
     f()
 }
 
 #[cfg(feature = "pg_test")]
 pub(crate) fn inject_test_postgres_error() {
+    if TEST_POSTGRES_ERROR_SKIP_CALLS.with(|slot| {
+        let remaining = slot.get();
+        slot.set(remaining.saturating_sub(1));
+        remaining != 0
+    }) {
+        return;
+    }
     let error = TEST_INJECTED_POSTGRES_ERROR.with(Cell::take);
     match error {
         Some(TestInjectedPostgresError::Ordinary) => pgrx::ereport!(

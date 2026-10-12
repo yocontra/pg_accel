@@ -1,0 +1,15 @@
+=== 121_integer_where_aggregates ===
+SET
+SET
+SELECT 1000017
+ANALYZE
+psql:sql/tests/121_integer_where_aggregates.sql:67: ERROR:  121 missing normal integer dispatch: SELECT count(*) n,sum(v) s,avg(v) a,count(v) c FROM _integer_where_agg WHERE g IN (0,2) / shape_unsupported_predicate / Aggregate (actual rows=1.00 loops=1)
+  Buffers: local read=7232 written=1
+  ->  Seq Scan on _integer_where_agg (actual rows=395884.00 loops=1)
+        Filter: (g = ANY ('{0,2}'::integer[]))
+        Rows Removed by Filter: 604133
+        Buffers: local read=7232 written=1
+Planning Time: 0.105 ms
+Execution Time: 72.144 ms
+
+CONTEXT:  PL/pgSQL function inline_code_block line 47 at RAISE

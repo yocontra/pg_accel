@@ -1,0 +1,51 @@
+=== 132_scalar_where ===
+SET
+SET
+SELECT 250017
+ANALYZE
+psql:/Users/contra/Projects/pg_accel/sql/tests/132_scalar_where.sql:72: NOTICE:  132 scalar WHERE selected 28 of 28 shapes
+DO
+PGACCEL_ASSERT_OK:132_scalar_where.assert_001
+SET
+PREPARE
+DO
+DEALLOCATE
+RESET
+PGACCEL_ASSERT_OK:132_scalar_where.assert_002
+TRUNCATE TABLE
+INSERT 0 1000017
+UPDATE 1
+ANALYZE
+ pg_accel_refresh 
+------------------
+          1000017
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:132_scalar_where.assert_003
+DO
+PGACCEL_ASSERT_OK:132_scalar_where.assert_004
+UPDATE 58824
+ANALYZE
+ pg_accel_refresh 
+------------------
+          1000017
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:132_scalar_where.assert_005
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ t
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:132_scalar_where

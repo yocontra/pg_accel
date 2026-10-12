@@ -1,0 +1,31 @@
+PostgreSQL 18.4 test extensions installed:
+  h3:             /Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/share/extension/h3.control
+  postgis:        /Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/share/extension/postgis.control
+  postgis_raster: /Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/share/extension/postgis_raster.control
+[32m[1m       Using[0m[39m [37m[1mPgConfig("pg18")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/bin/pg_config[39m
+[32m[1m    Building[0m[39m extension with features [36mpg18[39m
+[32m[1m     Running[0m[39m command [36m"/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "rustc" "--lib" "--package" "pg_accel" "--release" "--features" "pg18" "--no-default-features" "--message-format=json-render-diagnostics"[39m
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `release` profile [optimized] target(s) in 38.08s
+[32m[1m  Installing[0m[39m extension
+[32m[1m     Copying[0m[39m control file to [36m.pgaccel/postgres/install/18.4/share/extension/pg_accel.control[39m
+[32m[1m     Copying[0m[39m shared library to [36m.pgaccel/postgres/install/18.4/lib/pg_accel.dylib[39m
+[32m[1m  Discovered[0m[39m [36m[1m32[0m[39m SQL entities: [36m[1m0[0m[39m schemas ([36m[1m0[0m[39m unique), [36m[1m30[0m[39m functions, [36m[1m0[0m[39m types, [36m[1m0[0m[39m enums, [36m[1m1[0m[39m sqls, [36m[1m0[0m[39m ords, [36m[1m0[0m[39m hashes, [36m[1m0[0m[39m aggregates, [36m[1m1[0m[39m triggers
+[32m[1m     Writing[0m[39m SQL entities to /Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/share/extension/pg_accel--1.0.0-rc1.sql
+[32m[1m    Finished[0m[39m installing pg_accel
+[32m[1m    Starting[0m[39m Postgres v18 on port [36m[1m28818[0m[39m
+install-provenance:
+  pg=18
+  pg_config=/Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/bin/pg_config
+  pg_version=PostgreSQL 18.4
+  pkglibdir=/Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/lib
+  extension_dir=/Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/share/extension
+  module_file=/Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/lib/pg_accel.dylib
+  module_sha256=613d6e525dee0cf6dd19c5bdfd1e6aaea1facd8632dfd3c5fe53c75014e17a69
+  control_file=/Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/share/extension/pg_accel.control
+  control_default_version=1.0.0-rc1
+  extension_sql_files=2
+  pgrx_port=28818
+  shared_preload_libraries=pg_accel
+  git_head=5c7fbd0a6381f823befd823ec47137a8a602e94d
+  git_tree=dirty

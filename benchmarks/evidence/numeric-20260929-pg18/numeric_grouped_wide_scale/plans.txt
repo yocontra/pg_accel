@@ -1,0 +1,95 @@
+=== pg_accel benchmark plans - captured once per workload/scale ===
+
+=== numeric_grouped_wide_scale @ rows=250000 ===
+Custom Scan (GpuAccelAgg)  (cost=5.00..706.40 rows=5 width=76) (actual time=23.095..23.100 rows=6.00 loops=1)
+  Output: g, (sum(v)), (avg(v)), (count(v))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_numeric
+  GPU Dispatched Physical Kernel Mode: parallel_dense_numeric
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: dense_numeric_sum_avg_plain
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=1000000 ephemeral_bytes=1000000 construction_time_us=84 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=0 ephemeral_build_launches=0 consumer_launches=1 budget_headroom_bytes=8583674168
+  GPU Descriptor Group Keys: k0:fact(2209828.1:type=23) type=23 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(2209828.4:type=1700) -> value.sum; value.avg; value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.sum source_type=1700 result_type=1700 typmod=-1 collation=0 nullable=true; slot2:aggregate[m0].value.avg source_type=1700 result_type=1700 typmod=-1 collation=0 nullable=true; slot3:aggregate[m0].value.count source_type=1700 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=2209828 generation=1 global=1 relfilenode=2209828
+  GPU Descriptor Bytes: raw=6260424 derived=1000000 artifact=1000000 total=7260424
+  GPU Resident Stage Mask: 16393
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 250000
+  Batches: 2
+  Rows Per Batch: 125000.000
+  Dispatch Time: 22.689 ms
+  Avg Dispatch Time Per Batch: 11.345 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 1.774 ms
+Planning:
+  Buffers: shared hit=112
+Planning Time: 0.429 ms
+Execution Time: 25.018 ms
+
+=== numeric_grouped_wide_scale @ rows=1000000 ===
+Custom Scan (GpuAccelAgg)  (cost=5.00..2786.71 rows=5 width=76) (actual time=26.686..26.693 rows=6.00 loops=1)
+  Output: g, (sum(v)), (avg(v)), (count(v))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_numeric
+  GPU Dispatched Physical Kernel Mode: parallel_dense_numeric
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: dense_numeric_sum_avg_plain
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=4000000 ephemeral_bytes=4000000 construction_time_us=334 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=0 ephemeral_build_launches=0 consumer_launches=1 budget_headroom_bytes=8564892922
+  GPU Descriptor Group Keys: k0:fact(2209844.1:type=23) type=23 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(2209844.4:type=1700) -> value.sum; value.avg; value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.sum source_type=1700 result_type=1700 typmod=-1 collation=0 nullable=true; slot2:aggregate[m0].value.avg source_type=1700 result_type=1700 typmod=-1 collation=0 nullable=true; slot3:aggregate[m0].value.count source_type=1700 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=2209844 generation=1 global=1 relfilenode=2209844
+  GPU Descriptor Bytes: raw=25041670 derived=4000000 artifact=4000000 total=29041670
+  GPU Resident Stage Mask: 16393
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 1000000
+  Batches: 2
+  Rows Per Batch: 500000.000
+  Dispatch Time: 26.228 ms
+  Avg Dispatch Time Per Batch: 13.114 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 7.043 ms
+Planning:
+  Buffers: shared hit=112
+Planning Time: 0.474 ms
+Execution Time: 33.873 ms

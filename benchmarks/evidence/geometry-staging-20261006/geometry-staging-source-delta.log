@@ -1,0 +1,2 @@
+pg_accel/src/engine/residency/geometry.rs
+pg_accel/src/engine/residency/loader.rs

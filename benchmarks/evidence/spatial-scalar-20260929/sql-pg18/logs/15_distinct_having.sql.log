@@ -1,0 +1,48 @@
+=== 15_distinct_having ===
+psql:/Users/contra/Projects/pg_accel/sql/tests/15_distinct_having.sql:10: NOTICE:  table "_dh_data" does not exist, skipping
+psql:/Users/contra/Projects/pg_accel/sql/tests/15_distinct_having.sql:10: NOTICE:  table "_dh1_off" does not exist, skipping
+psql:/Users/contra/Projects/pg_accel/sql/tests/15_distinct_having.sql:10: NOTICE:  table "_dh1_on" does not exist, skipping
+psql:/Users/contra/Projects/pg_accel/sql/tests/15_distinct_having.sql:10: NOTICE:  table "_dh2_off" does not exist, skipping
+psql:/Users/contra/Projects/pg_accel/sql/tests/15_distinct_having.sql:10: NOTICE:  table "_dh2_on" does not exist, skipping
+psql:/Users/contra/Projects/pg_accel/sql/tests/15_distinct_having.sql:10: NOTICE:  table "_dh3_off" does not exist, skipping
+psql:/Users/contra/Projects/pg_accel/sql/tests/15_distinct_having.sql:10: NOTICE:  table "_dh3_on" does not exist, skipping
+psql:/Users/contra/Projects/pg_accel/sql/tests/15_distinct_having.sql:10: NOTICE:  table "_dh4_off" does not exist, skipping
+psql:/Users/contra/Projects/pg_accel/sql/tests/15_distinct_having.sql:10: NOTICE:  table "_dh4_on" does not exist, skipping
+psql:/Users/contra/Projects/pg_accel/sql/tests/15_distinct_having.sql:10: NOTICE:  table "_dh5_off" does not exist, skipping
+psql:/Users/contra/Projects/pg_accel/sql/tests/15_distinct_having.sql:10: NOTICE:  table "_dh5_on" does not exist, skipping
+psql:/Users/contra/Projects/pg_accel/sql/tests/15_distinct_having.sql:10: NOTICE:  table "_dh6_off" does not exist, skipping
+psql:/Users/contra/Projects/pg_accel/sql/tests/15_distinct_having.sql:10: NOTICE:  table "_dh6_on" does not exist, skipping
+DROP TABLE
+BEGIN
+CREATE TABLE
+INSERT 0 4000
+ANALYZE
+SET
+SELECT 101
+SET
+SELECT 101
+SET
+SELECT 8
+SET
+SELECT 8
+SET
+SELECT 402
+SET
+SELECT 402
+SET
+SELECT 20
+SET
+SELECT 20
+SET
+SELECT 20
+SET
+SELECT 20
+SET
+SELECT 396
+SET
+SELECT 396
+DO
+PGACCEL_ASSERT_OK:15_distinct_having.assert_001
+DROP TABLE
+COMMIT
+PGACCEL_FILE_OK:15_distinct_having

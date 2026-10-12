@@ -1,0 +1,26 @@
+PGACCEL_TEST_START name=test_grouped_agg_hash
+--- hash COUNT(column) metadata contracts (no device initialization) ---
+--- hash FILTER metadata contracts (protected row storage) ---
+--- Boolean/NULL SQL mask exhaustive byte pairs and exact output spans ---
+--- hash COUNT(column) exact NULL groups, types, merge sort, and failures ---
+--- hash FILTER preserves zero-count groups, NULLs, failures and retries ---
+--- hash WHERE states, independent FILTER, empty input and failure barriers ---
+--- hash INT32 extrema: subsets, sort alignment, NULLs and failure barriers ---
+--- hash duplicates/nulls/high-bits/collisions/warm workspace ---
+--- hash empty/all-null/capacity boundaries ---
+--- hash fixed-seed differential ---
+--- hash million-row hot groups ---
+--- parallel hash compaction/sort, non-power-of-two cardinalities ---
+parallel case: groups=16383 nullable=0
+parallel case: groups=16383 nullable=1
+parallel case: groups=16385 nullable=0
+parallel case: groups=16385 nullable=1
+parallel case: groups=32771 nullable=0
+parallel case: groups=32771 nullable=1
+parallel case: groups=1048583 nullable=0
+parallel case: groups=1048583 nullable=1
+--- hash qualification ceiling: 16Mi distinct groups including NULL ---
+--- fused H3 parent hash exactness/validation ---
+--- hash hard failure and unsupported shapes ---
+test_grouped_agg_hash: 10309427 passed, 0 failed
+PGACCEL_TEST_RESULT name=test_grouped_agg_hash exit_code=0 result=PASS raw_lines=24 body_sha256=54c7a10e1047f28267e45edcfd38750e93b647fdccba71003bc1f54f3eb2b1e1 binding_sha256=a00bd95f4f309c00876130e14b5ac2e6f18618f8c1f7b40ac44083d50b9cf4c0

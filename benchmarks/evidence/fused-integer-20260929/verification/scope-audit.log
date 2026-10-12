@@ -1,0 +1,1 @@
+coverage scope audit: PASS (220 Rust files, 16 C++ sources, 32 CTests, 90 SQL files, 418 SQL semantic assertions, 37 SQL semantic families, threshold 90%)

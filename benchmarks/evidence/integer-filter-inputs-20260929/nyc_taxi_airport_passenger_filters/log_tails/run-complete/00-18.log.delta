@@ -1,0 +1,31 @@
+source: /Users/contra/.pgrx/18.log
+run_start_offset_bytes: 1782539
+delta_start_offset_bytes: 1782539
+capture_end_offset_bytes: 1786390
+delta_max_bytes: 262144
+truncated_to_last_delta_bytes: false
+---
+2026-09-29 15:49:43.686 PDT [68592] LOG:  checkpoint starting: immediate force wait
+2026-09-29 15:49:43.733 PDT [68592] LOG:  checkpoint complete: wrote 9421 buffers (0.4%), wrote 1 SLRU buffers; 0 WAL file(s) added, 4 removed, 2 recycled; write=0.034 s, sync=0.003 s, total=0.047 s; sync files=41, longest=0.001 s, average=0.001 s; distance=102788 kB, estimate=457689 kB; lsn=53C/1F550938, redo lsn=53C/1F5508E0
+2026-09-29 15:49:48.646 PDT [68592] LOG:  checkpoints are occurring too frequently (5 seconds apart)
+2026-09-29 15:49:48.646 PDT [68592] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 15:49:48.646 PDT [68592] LOG:  checkpoint starting: wal
+2026-09-29 15:49:52.344 PDT [68592] LOG:  checkpoint complete: wrote 44 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=2.958 s, sync=0.737 s, total=3.698 s; sync files=29, longest=0.736 s, average=0.026 s; distance=540782 kB, estimate=540782 kB; lsn=53C/5E666748, redo lsn=53C/4056C350
+2026-09-29 15:49:52.633 PDT [68592] LOG:  checkpoints are occurring too frequently (4 seconds apart)
+2026-09-29 15:49:52.633 PDT [68592] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 15:49:52.633 PDT [68592] LOG:  checkpoint starting: wal
+2026-09-29 15:49:54.989 PDT [68592] LOG:  checkpoint complete: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=2.346 s, sync=0.001 s, total=2.357 s; sync files=1, longest=0.001 s, average=0.001 s; distance=544543 kB, estimate=544543 kB; lsn=53C/7F86CDF0, redo lsn=53C/61934198
+2026-09-29 15:49:55.154 PDT [68592] LOG:  checkpoints are occurring too frequently (3 seconds apart)
+2026-09-29 15:49:55.154 PDT [68592] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 15:49:55.158 PDT [68592] LOG:  checkpoint starting: wal
+2026-09-29 15:49:57.095 PDT [68592] LOG:  checkpoint complete: wrote 44726 buffers (2.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 2 removed, 32 recycled; write=1.881 s, sync=0.007 s, total=1.937 s; sync files=12, longest=0.007 s, average=0.001 s; distance=547632 kB, estimate=547632 kB; lsn=53C/A20012E0, redo lsn=53C/83000408
+2026-09-29 15:49:57.235 PDT [68592] LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-09-29 15:49:57.235 PDT [68592] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 15:49:57.235 PDT [68592] LOG:  checkpoint starting: wal
+2026-09-29 15:49:59.551 PDT [68592] LOG:  checkpoint complete: wrote 69790 buffers (3.3%), wrote 0 SLRU buffers; 0 WAL file(s) added, 1 removed, 33 recycled; write=2.250 s, sync=0.001 s, total=2.317 s; sync files=3, longest=0.001 s, average=0.001 s; distance=557059 kB, estimate=557059 kB; lsn=53C/C38320B0, redo lsn=53C/A50011A8
+2026-09-29 15:49:59.693 PDT [68592] LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-09-29 15:49:59.693 PDT [68592] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 15:49:59.693 PDT [68592] LOG:  checkpoint starting: wal
+2026-09-29 15:50:18.666 PDT [68592] LOG:  checkpoint complete: wrote 67608 buffers (3.2%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 34 recycled; write=18.955 s, sync=0.014 s, total=18.973 s; sync files=12, longest=0.013 s, average=0.002 s; distance=557057 kB, estimate=557059 kB; lsn=53C/E3AD5810, redo lsn=53C/C7001608
+2026-09-29 15:50:18.666 PDT [68592] LOG:  checkpoint starting: immediate force wait
+2026-09-29 15:50:18.820 PDT [68592] LOG:  checkpoint complete: wrote 51629 buffers (2.5%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 28 recycled; write=0.149 s, sync=0.003 s, total=0.155 s; sync files=30, longest=0.001 s, average=0.001 s; distance=469840 kB, estimate=548337 kB; lsn=53C/E3AD58E0, redo lsn=53C/E3AD5888

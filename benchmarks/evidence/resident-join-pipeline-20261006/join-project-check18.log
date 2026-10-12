@@ -1,0 +1,114 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error: enum `JoinSide` is never used
+  --> pg_accel/src/gpu/join_project.rs:54:10
+   |
+54 | pub enum JoinSide {
+   |          ^^^^^^^^
+   |
+   = note: `-D dead-code` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error: enum `JoinProjectionColumn` is never used
+  --> pg_accel/src/gpu/join_project.rs:63:10
+   |
+63 | pub enum JoinProjectionColumn<'a> {
+   |          ^^^^^^^^^^^^^^^^^^^^
+
+error: struct `JoinProjectionInput` is never constructed
+  --> pg_accel/src/gpu/join_project.rs:80:12
+   |
+80 | pub struct JoinProjectionInput<'a> {
+   |            ^^^^^^^^^^^^^^^^^^^
+
+error: function `error` is never used
+  --> pg_accel/src/gpu/join_project.rs:85:4
+   |
+85 | fn error(status: GpuStatusDetail, detail: &'static str) -> GpuError {
+   |    ^^^^^
+
+error: function `bind` is never used
+  --> pg_accel/src/gpu/join_project.rs:94:4
+   |
+94 | fn bind<T>(
+   |    ^^^^
+
+error: struct `ResidentProjectedColumn` is never constructed
+   --> pg_accel/src/gpu/join_project.rs:124:12
+    |
+124 | pub struct ResidentProjectedColumn<T> {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^
+
+error: associated items `values`, `nulls`, and `allocate` are never used
+   --> pg_accel/src/gpu/join_project.rs:131:12
+    |
+130 | impl<T> ResidentProjectedColumn<T> {
+    | ---------------------------------- associated items in this implementation
+131 |     pub fn values(&self) -> Option<&ExprDeviceBuffer<T>> {
+    |            ^^^^^^
+...
+134 |     pub fn nulls(&self) -> Option<&ExprDeviceBuffer<u8>> {
+    |            ^^^^^
+...
+138 |     fn allocate(rows: usize, column: &mut NativeProjectColumn) -> GpuResult<Self> {
+    |        ^^^^^^^^
+
+error: enum `ProjectedJoinColumn` is never used
+   --> pg_accel/src/gpu/join_project.rs:169:10
+    |
+169 | pub enum ProjectedJoinColumn {
+    |          ^^^^^^^^^^^^^^^^^^^
+
+error: struct `ResidentJoinProjection` is never constructed
+   --> pg_accel/src/gpu/join_project.rs:178:12
+    |
+178 | pub struct ResidentJoinProjection {
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+
+error: methods `column`, `column_count`, `len`, `is_empty`, and `kernel_launches` are never used
+   --> pg_accel/src/gpu/join_project.rs:188:12
+    |
+187 | impl ResidentJoinProjection {
+    | --------------------------- methods in this implementation
+188 |     pub fn column(&self, index: usize) -> Option<&ProjectedJoinColumn> {
+    |            ^^^^^^
+...
+191 |     pub fn column_count(&self) -> usize {
+    |            ^^^^^^^^^^^^
+...
+194 |     pub fn len(&self) -> usize {
+    |            ^^^
+...
+197 |     pub fn is_empty(&self) -> bool {
+    |            ^^^^^^^^
+...
+200 |     pub fn kernel_launches(&self) -> u64 {
+    |            ^^^^^^^^^^^^^^^
+
+error: method `project` is never used
+   --> pg_accel/src/gpu/join_project.rs:207:12
+    |
+206 | impl ResidentJoinOutput {
+    | ----------------------- method in this implementation
+207 |     pub fn project(&self, inputs: &[JoinProjectionInput<'_>]) -> GpuResult<ResidentJoinProjection> {
+    |            ^^^^^^^
+
+error: fields `outer_rows` and `inner_rows` are never read
+   --> pg_accel/src/gpu/join_rows.rs:292:5
+    |
+289 | pub struct ResidentJoinOutput {
+    |            ------------------ fields in this struct
+...
+292 |     outer_rows: usize,
+    |     ^^^^^^^^^^
+293 |     inner_rows: usize,
+    |     ^^^^^^^^^^
+
+error: method `origin_rows` is never used
+   --> pg_accel/src/gpu/join_rows.rs:300:19
+    |
+299 | impl ResidentJoinOutput {
+    | ----------------------- method in this implementation
+300 |     pub(super) fn origin_rows(&self) -> (usize, usize) {
+    |                   ^^^^^^^^^^^
+
+error: could not compile `pg_accel` (lib) due to 13 previous errors

@@ -1,0 +1,85 @@
+Test project /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+    Start 23: test_grouped_agg_hash
+1/1 Test #23: test_grouped_agg_hash ............***Failed    0.07 sec
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:356: status returned -2, expected -1
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:356: status returned -2, expected -1
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:356: status returned -2, expected -1
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:356: status returned -2, expected -1
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:356: status returned -2, expected -1
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:356: status returned -2, expected -1
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:356: status returned -2, expected -1
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:356: status returned -2, expected -1
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:356: status returned -2, expected -1
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2
+--- hash COUNT(column) metadata contracts (no device initialization) ---
+--- hash FILTER metadata contracts (protected row storage) ---
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:1058: pgaccel_init() returned -5, expected 0
+--- hash COUNT(column) exact NULL groups, types, merge sort, and failures ---
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+FAIL: unexpected test exception: shared USM allocation failed
+test_grouped_agg_hash: 1835 passed, 59 failed
+gpu-noise[test_grouped_agg_hash]: suppressed metal-no-devices=2; raw log: /Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs/test_grouped_agg_hash-20261010-032552-69381.log
+gpu-test[test_grouped_agg_hash]: failed with exit code 1
+--- failure summary from /Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs/test_grouped_agg_hash-20261010-032552-69381.log ---
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:356: status returned -2, expected -1 (repeated 9x)
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:364: status returned -1, expected -2 (repeated 48x)
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:1058: pgaccel_init() returned -5, expected 0
+FAIL: unexpected test exception: shared USM allocation failed
+PGACCEL_TEST_RESULT name=test_grouped_agg_hash exit_code=1 result=FAIL raw_lines=67 body_sha256=b6b6249def0d9b4750e19f3600ec37c68f20ac758d5cad3c51d3c8f7bcdd4faa binding_sha256=92329fec3cdfe608e7c8edbae4172c45b859dc2af162b86f172c28afd8ded3e7
+
+
+0% tests passed, 1 tests failed out of 1
+
+Total Test time (real) =   0.07 sec
+
+The following tests FAILED:
+	 23 - test_grouped_agg_hash (Failed)
+Errors while running CTest

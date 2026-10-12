@@ -1,0 +1,16 @@
+Finalize GroupAggregate
+  Output: region, sum(price), avg(price), count(price), min(price), max(price), count(*)
+  Group Key: bench_scalar_sales.region
+  ->  Gather Merge
+        Output: region, (PARTIAL sum(price)), (PARTIAL avg(price)), (PARTIAL count(price)), (PARTIAL min(price)), (PARTIAL max(price)), (PARTIAL count(*))
+        Workers Planned: 8
+        ->  Sort
+              Output: region, (PARTIAL sum(price)), (PARTIAL avg(price)), (PARTIAL count(price)), (PARTIAL min(price)), (PARTIAL max(price)), (PARTIAL count(*))
+              Sort Key: bench_scalar_sales.region
+              ->  Partial HashAggregate
+                    Output: region, PARTIAL sum(price), PARTIAL avg(price), PARTIAL count(price), PARTIAL min(price), PARTIAL max(price), PARTIAL count(*)
+                    Group Key: bench_scalar_sales.region
+                    ->  Parallel Seq Scan on public.bench_scalar_sales
+                          Output: region, price, adjustment
+                          Filter: (bench_scalar_sales.price > bench_scalar_sales.adjustment)
+pg_accel planner rejection reason: no_gpu_resident_pipeline

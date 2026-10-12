@@ -1,0 +1,1342 @@
+Start testing: Oct 06 03:21 PDT
+----------------------------------------------------------
+1/33 Testing: test_host_api_contract
+1/33 Test: test_host_api_contract
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_host_api_contract" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_host_api_contract"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_host_api_contract" start time: Oct 06 03:21 PDT
+Output:
+----------------------------------------------------------
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+host API no-device contracts: 23 passed, 0 failed
+host API contracts: 191 passed, 0 failed
+<end of output>
+Test time =   0.61 sec
+----------------------------------------------------------
+Test Passed.
+"test_host_api_contract" end time: Oct 06 03:21 PDT
+"test_host_api_contract" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/33 Testing: test_device
+2/33 Test: test_device
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_device" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_device"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_device" start time: Oct 06 03:21 PDT
+Output:
+----------------------------------------------------------
+pgaccel: FATAL: init failed: injected out-of-order queue construction failure
+pgaccel: grouped aggregate scratch cleanup failed: injected scratch cleanup failure
+=== Device Info ===
+  Device:          Apple M2 Max
+  Backend:         metal
+  Compute Units:   38
+  Max Alloc:       41747087360 bytes
+  FP64:            no
+  Atomic64:        no
+
+=== Platform Caps ===
+  Backend:         metal
+  FP64:            no
+  Atomic64:        no
+  OOO Queue:       yes
+  Compute Units:   38
+  Max Alloc:       41747087360 bytes
+
+All fields consistent between device_info and caps.
+Shutdown OK.
+<end of output>
+Test time =   0.31 sec
+----------------------------------------------------------
+Test Passed.
+"test_device" end time: Oct 06 03:21 PDT
+"test_device" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/33 Testing: test_bbox
+3/33 Test: test_bbox
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_bbox" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_bbox"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_bbox" start time: Oct 06 03:21 PDT
+Output:
+----------------------------------------------------------
+Running bbox overlap tests...
+
+Results: 66 passed, 0 failed
+<end of output>
+Test time =   0.39 sec
+----------------------------------------------------------
+Test Passed.
+"test_bbox" end time: Oct 06 03:21 PDT
+"test_bbox" time elapsed: 00:00:00
+----------------------------------------------------------
+
+4/33 Testing: test_spatial
+4/33 Test: test_spatial
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_spatial" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_spatial"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_spatial" start time: Oct 06 03:21 PDT
+Output:
+----------------------------------------------------------
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+=== pgaccel spatial predicate tests ===
+
+--- spatial APIs: no-device lifecycle ---
+
+=== Results: 18/18 passed ===
+=== pgaccel spatial predicate tests ===
+
+--- point_in_ring: basic ---
+--- point_in_ring: edge cases ---
+--- point_in_ring: fp32 ---
+--- point_in_ring: triangle ---
+--- point_in_ring: fp64 bulk (1k/64k/256k/1M) ---
+--- point_in_ring: fp64 GPU dispatch counter ---
+--- point_in_polygon_bulk: simple kernel path ---
+--- point_in_polygon_bulk: all bbox-outside device dispatch ---
+--- point_in_polygon_bulk: simple kernel hole boundary ---
+--- point_in_polygon_bulk: simple slab large batch ---
+--- point_in_polygon_bulk: cooperative kernel path ---
+--- point_in_polygon_bulk: cooperative kernel hole boundary ---
+--- point_in_polygon_bulk: cooperative slab large batch with hole ---
+--- point_in_polygon_bulk: cooperative implicit and short rings ---
+--- sphere_distance: basic ---
+--- sphere_distance: edge cases ---
+--- sphere_distance: fp32 ---
+--- sphere_distance: fp64 (post-split) ---
+--- segment_intersects: basic ---
+--- segment_intersects: edge cases ---
+--- segment_intersects: fp32 ---
+--- st_area_bulk: basic fp32 ---
+--- st_area_bulk: orientation invariance ---
+--- st_area_bulk: empty input ---
+--- st_length_bulk: closed ring (Polygon perimeter) ---
+--- st_length_bulk: open path (LineString) ---
+--- st_length_bulk: degenerate inputs ---
+--- st_length_bulk: fp64 (post-split) ---
+--- st_distance_polygon_polygon: disjoint pair ---
+--- st_distance_polygon_polygon: touching boundaries ---
+--- st_distance_polygon_polygon: degenerate row -> UNCERTAIN ---
+--- spatial CSR: zero-capacity rows and reverse distance sweep ---
+--- st_equals_bulk ---
+--- spatial pairwise: implicit rings and staging validation ---
+--- algorithmic predicate: staging overflow contract ---
+--- algorithmic predicates: device equality adversarial cases ---
+--- st_touches_bulk ---
+--- st_crosses_bulk ---
+--- st_overlaps_bulk ---
+--- algorithmic predicates: slab GPU dispatch ---
+
+=== Results: 223/223 passed ===
+<end of output>
+Test time =   0.49 sec
+----------------------------------------------------------
+Test Passed.
+"test_spatial" end time: Oct 06 03:21 PDT
+"test_spatial" time elapsed: 00:00:00
+----------------------------------------------------------
+
+5/33 Testing: test_spatial_dispatch
+5/33 Test: test_spatial_dispatch
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_spatial_dispatch" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_spatial_dispatch"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_spatial_dispatch" start time: Oct 06 03:21 PDT
+Output:
+----------------------------------------------------------
+spatial_dispatch tests
+  empty_inputs                                       OK
+  legacy_cross_product_declines                      OK
+  pairwise_recheck_boundaries                        OK
+  malformed_pairwise_rings_decline_before_dispatch   OK
+  pairwise_contract_and_geometry_boundaries          OK
+  points_vs_polygon                                  OK
+  all_bbox_miss                                      OK
+  point_vs_point                                     OK
+  line_vs_line                                       OK
+  pairwise_reverse_polygon_and_line_boundaries       OK
+  unknown_geom_type                                  OK
+  total_partitioning                                 OK
+  point_in_polygon_bulk_simple_100k_selectivity_sweep OK
+  point_in_polygon_bulk_coop_1024v_100k              OK
+  point_in_polygon_ring_and_hole_boundaries          OK
+  unsupported_pairs_are_uncertain                    OK
+
+16 passed, 0 failed
+<end of output>
+Test time =   0.38 sec
+----------------------------------------------------------
+Test Passed.
+"test_spatial_dispatch" end time: Oct 06 03:21 PDT
+"test_spatial_dispatch" time elapsed: 00:00:00
+----------------------------------------------------------
+
+6/33 Testing: test_spatial_pairwise_boundary
+6/33 Test: test_spatial_pairwise_boundary
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_spatial_pairwise_boundary" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_spatial_pairwise_boundary"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_spatial_pairwise_boundary" start time: Oct 06 03:21 PDT
+Output:
+----------------------------------------------------------
+PASS rows=0
+PASS rows=1
+PASS rows=255
+PASS rows=256
+PASS rows=65535
+PASS rows=65536
+PASS rows=65537
+PASS rows=79999
+PASS rows=80000
+PASS rows=99999
+PASS rows=100000
+PASS rows=150000
+PASS rows=150001
+<end of output>
+Test time =   1.12 sec
+----------------------------------------------------------
+Test Passed.
+"test_spatial_pairwise_boundary" end time: Oct 06 03:21 PDT
+"test_spatial_pairwise_boundary" time elapsed: 00:00:01
+----------------------------------------------------------
+
+7/33 Testing: test_spatial_resident
+7/33 Test: test_spatial_resident
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_spatial_resident" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_spatial_resident"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_spatial_resident" start time: Oct 06 03:21 PDT
+Output:
+----------------------------------------------------------
+test_spatial_resident: 2094 passed, 0 failed
+<end of output>
+Test time =   1.23 sec
+----------------------------------------------------------
+Test Passed.
+"test_spatial_resident" end time: Oct 06 03:21 PDT
+"test_spatial_resident" time elapsed: 00:00:01
+----------------------------------------------------------
+
+8/33 Testing: test_h3
+8/33 Test: test_h3
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_h3" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_h3"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_h3" start time: Oct 06 03:21 PDT
+Output:
+----------------------------------------------------------
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+=== pg_accel H3 kernel tests ===
+
+--- H3 APIs: no-device lifecycle ---
+
+=== Results: 23 passed, 0 failed ===
+=== pg_accel H3 kernel tests ===
+
+--- test_get_resolution ---
+--- test_get_base_cell ---
+--- test_is_valid_cell ---
+--- test_is_pentagon ---
+--- test_is_res_class_iii ---
+--- test_cell_to_parent ---
+--- test_cell_to_parent_resident ---
+--- test_lat_lng_to_cell_resident ---
+--- test_cell_to_center_child ---
+--- test_grid_distance ---
+--- test_lat_lng_to_cell ---
+--- test_lat_lng_to_cell_bulk_edge_randomized ---
+--- test_lat_lng_to_cell_fp32_exact_matrix ---
+--- test_cell_to_parent_count_bulk ---
+--- test_lat_lng_count_bulk ---
+--- test_lat_lng_count_bulk_all_res_duplicate_edges ---
+--- test_lat_lng_count_bulk_f32_exact_all_res_edge_randomized ---
+--- test_lat_lng_count_resident_low_high_matrix ---
+--- test_lat_lng_res7_exact_edge_fixups ---
+--- test_lat_lng_to_cell fp64 bulk (1k/64k/256k/1M) ---
+--- test_null_pointers ---
+--- test_api_contract_matrix ---
+--- test_grid_disk ---
+--- test_grid_ring_unsafe ---
+--- test_cell_to_children ---
+--- test_cell_to_boundary ---
+--- test_polyfill ---
+--- test_cells_to_multi_polygon ---
+--- test_executed_h3_branch_matrix ---
+
+=== Results: 1135 passed, 0 failed ===
+<end of output>
+Test time =   1.48 sec
+----------------------------------------------------------
+Test Passed.
+"test_h3" end time: Oct 06 03:21 PDT
+"test_h3" time elapsed: 00:00:01
+----------------------------------------------------------
+
+9/33 Testing: test_raster_resident
+9/33 Test: test_raster_resident
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_raster_resident" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_raster_resident"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_raster_resident" start time: Oct 06 03:21 PDT
+Output:
+----------------------------------------------------------
+=== pgaccel exact resident raster tests ===
+
+  PASS: ABI layout and public failure bits
+  PASS: NULL/empty/zero-band actions and multiband preservation
+  PASS: integer source and output extrema matrix
+  PASS: float32/64 FLT_EQ epsilon, NaN, and infinity
+  PASS: HAS_NODATA/IS_NODATA source semantics
+  PASS: little/big WKB normalized source lanes
+  PASS: nonzero slices, zero output, 64-rule cap, and unmatched zero
+  PASS: signed-zero and NaN nodata semantics
+  PASS: device validation is typed and output-atomic
+  PASS: host spans/caps/overlap/overflow are hard failures
+  PASS: contract and device-validation boundary matrix
+  PASS: >chunk row and pixel stress
+
+=== Results: 12 passed, 0 failed ===
+<end of output>
+Test time =   0.52 sec
+----------------------------------------------------------
+Test Passed.
+"test_raster_resident" end time: Oct 06 03:21 PDT
+"test_raster_resident" time elapsed: 00:00:00
+----------------------------------------------------------
+
+10/33 Testing: test_correctness
+10/33 Test: test_correctness
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_correctness" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_correctness"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_correctness" start time: Oct 06 03:21 PDT
+Output:
+----------------------------------------------------------
+=== pgaccel Phase 8 correctness tests ===
+
+
+== Spatial Predicates ==
+--- point_in_ring: point exactly on edge ---
+--- point_in_ring: point exactly on vertex ---
+--- point_in_ring: degenerate ring (2 points) ---
+--- point_in_ring: all identical vertices ---
+--- point_in_ring: large ring (1000 vertices circle) ---
+--- point_in_ring: bulk with 0 points ---
+--- point_in_ring: bulk with 1 point ---
+--- point_in_ring: concave L-shaped polygon ---
+--- point_in_ring: fp32 near edge ---
+--- sphere_distance: identical points (distance=0) ---
+--- sphere_distance: antipodal points ---
+--- sphere_distance: near-antipodal points ---
+--- sphere_distance: points at poles ---
+--- sphere_distance: bulk with 0 pairs ---
+--- sphere_distance: fp32 very close points ---
+--- sphere_distance: batch with mixed definite/uncertain ---
+--- segment_intersects: collinear segments ---
+--- segment_intersects: touching at endpoint ---
+--- segment_intersects: parallel non-overlapping ---
+--- segment_intersects: perpendicular crossing ---
+--- segment_intersects: bulk with 0 segments ---
+--- segment_intersects: T-junction ---
+--- segment_intersects: L-shaped endpoint ---
+--- segment_intersects: nearly parallel ---
+
+== Spatial Dispatch ==
+--- dispatch: 0 geometries in A ---
+--- dispatch: 0 geometries in B ---
+--- dispatch: point vs point (equal within epsilon) ---
+--- dispatch: point vs point (not equal) ---
+--- dispatch: linestring vs linestring crossing ---
+--- dispatch: linestring vs linestring parallel ---
+--- dispatch: polygon with hole, point in hole ---
+--- dispatch: polygon with hole, point in shell ---
+--- dispatch: unknown geometry type ---
+--- dispatch: geometry with NULL bbox ---
+
+== H3 ==
+--- h3: get_resolution 0 through 15 ---
+--- h3: cell_to_parent same resolution ---
+--- h3: cell_to_parent resolution 0 ---
+--- h3: grid_distance same cell ---
+--- h3: grid_distance adjacent cells ---
+--- h3: grid_distance different resolutions ---
+--- h3: cell_to_parent higher resolution ---
+--- h3: lat_lng_to_cell at poles ---
+--- h3: lat_lng_to_cell at antimeridian ---
+--- h3: lat_lng_to_cell at origin ---
+--- h3: lat_lng_to_cell bulk with 0 elements ---
+--- h3: lat_lng_to_cell fp32 at low resolution ---
+--- h3: lat_lng_to_cell fp32 at high resolution ---
+--- h3: get_resolution on invalid cell ---
+
+== Bbox ==
+--- bbox: identical boxes ---
+--- bbox: touching at edge ---
+--- bbox: touching at corner ---
+--- bbox: zero-area box (point) ---
+--- bbox: 0 elements in A ---
+--- bbox: 0 elements in B ---
+--- bbox: large batch (100x100) ---
+--- bbox: fully separated boxes ---
+--- bbox: one box inside another ---
+
+== fp64 round-trip ==
+
+=== Results: 247/247 passed ===
+<end of output>
+Test time =   0.59 sec
+----------------------------------------------------------
+Test Passed.
+"test_correctness" end time: Oct 06 03:21 PDT
+"test_correctness" time elapsed: 00:00:00
+----------------------------------------------------------
+
+11/33 Testing: test_exec_gpu
+11/33 Test: test_exec_gpu
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_exec_gpu" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_exec_gpu"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_exec_gpu" start time: Oct 06 03:21 PDT
+Output:
+----------------------------------------------------------
+test_exec_gpu: initializing GPU...
+test_exec_gpu: device=Apple M2 Max, CUs=38
+test_exec_gpu: status=0 count=38910530 expected=38910530 gpu_exec_count=2
+test_exec_gpu: PASS
+<end of output>
+Test time =   0.45 sec
+----------------------------------------------------------
+Test Passed.
+"test_exec_gpu" end time: Oct 06 03:21 PDT
+"test_exec_gpu" time elapsed: 00:00:00
+----------------------------------------------------------
+
+12/33 Testing: test_fork
+12/33 Test: test_fork
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_fork" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_fork"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_fork" start time: Oct 06 03:21 PDT
+Output:
+----------------------------------------------------------
+=== Fork GPU Test (PG pattern: parent loads lib, child inits GPU) ===
+Parent PID: 13352
+
+Parent: library loaded (static constructors ran), NOT calling pgaccel_init()
+
+Parent: forking...
+
+Child PID: 13353 (parent was 13352)
+Child: pgaccel_init OK — device=Apple M2 Max backend=metal CUs=38
+[child] reduce_sum_f32: 25000.000000 OK
+[child] reduce_min_f32: 25.000000 OK
+[child] reduce_max_f32: 25.000000 OK
+[child] metalar files before fp64 matrix: 8412
+[child] fp64 matrix: reduce_sum_f64 OK
+=== Fork GPU Test (PG pattern: parent loads lib, child inits GPU) ===
+Parent PID: 13352
+
+Parent: library loaded (static constructors ran), NOT calling pgaccel_init()
+
+Parent: forking...
+
+=== Results ===
+PASS: GPU works in forked child (PG backend pattern).
+gpu-noise[test_fork]: suppressed kernel-cache=1; raw log: /Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs/test_fork-20261006-032122-13351.log
+<end of output>
+Test time =   0.61 sec
+----------------------------------------------------------
+Test Passed.
+"test_fork" end time: Oct 06 03:21 PDT
+"test_fork" time elapsed: 00:00:00
+----------------------------------------------------------
+
+13/33 Testing: test_fork_warmed
+13/33 Test: test_fork_warmed
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_fork_warmed" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_fork_warmed"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_fork_warmed" start time: Oct 06 03:21 PDT
+Output:
+----------------------------------------------------------
+=== Fork Policy Test (PG postmaster→backend flow) ===
+Parent PID: 13355
+
+Parent: calling pgaccel_prefork_warmup()...
+Parent: pre-fork policy ready, forking...
+
+
+=== Fork cycle 1/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 2/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 3/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 4/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 5/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 6/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 7/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 8/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Warm-parent failed child reinitialization ===
+pgaccel: fork detected (parent=13355, child=13364) — attempting fresh GPU init
+pgaccel: FATAL: injected failure after fork-state invalidation
+
+PASS: all 8 pre-fork policy GPU cycles completed.
+<end of output>
+Test time =   0.75 sec
+----------------------------------------------------------
+Test Passed.
+"test_fork_warmed" end time: Oct 06 03:21 PDT
+"test_fork_warmed" time elapsed: 00:00:00
+----------------------------------------------------------
+
+14/33 Testing: test_fork_cold
+14/33 Test: test_fork_cold
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_fork_cold" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_fork_cold"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_fork_cold" start time: Oct 06 03:21 PDT
+Output:
+----------------------------------------------------------
+=== Cold Fork GPU Test ===
+Parent PID: 13366
+Parent does NOT call pgaccel_init() — no Metal state to inherit.
+
+Parent: forking WITHOUT any GPU initialization...
+
+=== Final Result ===
+PASS: Cold Metal init after fork WORKS.
+→ Direct Metal dispatch in forked backends confirmed.
+<end of output>
+Test time =   0.43 sec
+----------------------------------------------------------
+Test Passed.
+"test_fork_cold" end time: Oct 06 03:21 PDT
+"test_fork_cold" time elapsed: 00:00:00
+----------------------------------------------------------
+
+15/33 Testing: test_fork_cold_barrier
+15/33 Test: test_fork_cold_barrier
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_fork_cold_barrier" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_fork_cold_barrier"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_fork_cold_barrier" start time: Oct 06 03:21 PDT
+Output:
+----------------------------------------------------------
+=== Synchronized cold-fork GPU boundary test ===
+parent_pid=13369 workers=2 rounds=1 stage_timeout_s=180
+parent will not call pgaccel_init or any other pgaccel API
+round=1 releasing 2 children into pgaccel_init
+round=1 releasing 2 children into first GPU dispatch
+worker=0 pid=13370 init_ms=30.46 dispatch_ms=22.23 sum=100000.0 gpu_delta=1 exit=ok
+worker=1 pid=13371 init_ms=30.46 dispatch_ms=22.23 sum=100000.0 gpu_delta=1 exit=ok
+RESULT: PASS - 2 synchronized children x 1 rounds
+<end of output>
+Test time =   0.40 sec
+----------------------------------------------------------
+Test Passed.
+"test_fork_cold_barrier" end time: Oct 06 03:21 PDT
+"test_fork_cold_barrier" time elapsed: 00:00:00
+----------------------------------------------------------
+
+16/33 Testing: test_sycl_basic
+16/33 Test: test_sycl_basic
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_sycl_basic" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_sycl_basic"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_sycl_basic" start time: Oct 06 03:21 PDT
+Output:
+----------------------------------------------------------
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: test_sycl_basic: GPU kernel failure: synthetic kernel failure
+pgaccel: test_sycl_basic: GPU kernel failure: unknown C++ exception
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: pgaccel_grouped_agg_workspace_free: runtime init failed with status -5; allocation leaked
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+Test 1 (single_task write): 42 (expected 42)
+Test 2 (parallel_for write): 1 2 3 4 5 6 7 8 (expected 1 2 3 4 5 6 7 8)
+Test 3 (read+write shared): 20 20 20 20 20 20 20 20 (expected 20 20 20 20 20 20 20 20)
+Test 5 (nd_range tree reduce): 8 (expected 8)
+Test 6 (sycl::reduction): 8 (expected 8)
+<end of output>
+Test time =   0.40 sec
+----------------------------------------------------------
+Test Passed.
+"test_sycl_basic" end time: Oct 06 03:21 PDT
+"test_sycl_basic" time elapsed: 00:00:00
+----------------------------------------------------------
+
+17/33 Testing: test_scalar
+17/33 Test: test_scalar
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_scalar" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_scalar"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_scalar" start time: Oct 06 03:21 PDT
+Output:
+----------------------------------------------------------
+Full CFG proof: 168 shared valid, 70 invalid programs passed
+SPG1: 3899 host/device cases passed (168 shared Rust oracle cases); no SQL admission
+<end of output>
+Test time =   0.37 sec
+----------------------------------------------------------
+Test Passed.
+"test_scalar" end time: Oct 06 03:21 PDT
+"test_scalar" time elapsed: 00:00:00
+----------------------------------------------------------
+
+18/33 Testing: test_reduce_stats
+18/33 Test: test_reduce_stats
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_reduce_stats" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_reduce_stats"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_reduce_stats" start time: Oct 06 03:21 PDT
+Output:
+----------------------------------------------------------
+Device: Apple M2 Max backend=metal has_native_fp64=0
+
+=== fp64 singleton device reductions ===
+  OK  fp64 singleton device reductions
+
+=== fp64 reduce @ N=1024 ===
+  OK  reduce_sum_f64: got 520.34561917016595 expected 520.34561917016413 (ulp_dist=16 ≤ 320)
+  OK  reduce_min_f64: got -99.932705524146087 expected -99.932705524146087 (ulp_dist=0 ≤ 0)
+  OK  reduce_max_f64: got 99.734874651657805 expected 99.734874651657805 (ulp_dist=0 ≤ 0)
+  OK  reduce_multi_f64 sum: got 520.34561917016595 expected 520.34561917016413 (ulp_dist=16 ≤ 320)
+  OK  reduce_multi_f64 min: got -99.932705524146087 expected -99.932705524146087 (ulp_dist=0 ≤ 0)
+  OK  reduce_multi_f64 max: got 99.734874651657805 expected 99.734874651657805 (ulp_dist=0 ≤ 0)
+  OK  reduce_multi_f64 count: 1024
+  OK  reduce_sum_sq_f64: got 3321003.0342797274 expected 3321003.0342797264 (ulp_dist=2 ≤ 320)
+  OK  reduce_stats_f64 count: 1024
+  OK  reduce_stats_f64 sum: got 520.34561917016595 expected 520.34561917016413 (ulp_dist=16 ≤ 320)
+  OK  reduce_stats_f64 sum_sq: got 3321003.0342797274 expected 3321003.0342797264 (ulp_dist=2 ≤ 320)
+  OK  reduce_stats_f64 avg (derived): got 0.50815001872086518 expected 0.50815001872086341 (ulp_dist=16 ≤ 320)
+  OK  var_pop (derived): got 3242.9088092222701 expected 3242.9088092222696 (ulp_dist=1 ≤ 320)
+  OK  var_samp (derived): got 3246.0788080582643 expected 3246.0788080582638 (ulp_dist=1 ≤ 320)
+  OK  stddev_pop (derived): got 56.946543435245218 expected 56.946543435245211 (ulp_dist=1 ≤ 320)
+  OK  stddev_samp (derived): got 56.974369746915713 expected 56.974369746915706 (ulp_dist=1 ≤ 320)
+
+=== fp64 reduce @ N=65536 ===
+  OK  reduce_sum_f64: got -11708.990273276468 expected -11708.990273276553 (ulp_dist=47 ≤ 512)
+  OK  reduce_min_f64: got -99.991260563687831 expected -99.991260563687831 (ulp_dist=0 ≤ 0)
+  OK  reduce_max_f64: got 99.984917524766729 expected 99.984917524766729 (ulp_dist=0 ≤ 0)
+  OK  reduce_multi_f64 sum: got -11708.990273276468 expected -11708.990273276553 (ulp_dist=47 ≤ 512)
+  OK  reduce_multi_f64 min: got -99.991260563687831 expected -99.991260563687831 (ulp_dist=0 ≤ 0)
+  OK  reduce_multi_f64 max: got 99.984917524766729 expected 99.984917524766729 (ulp_dist=0 ≤ 0)
+  OK  reduce_multi_f64 count: 65536
+  OK  reduce_sum_sq_f64: got 219419901.26951236 expected 219419901.26951388 (ulp_dist=51 ≤ 512)
+  OK  reduce_stats_f64 count: 65536
+  OK  reduce_stats_f64 sum: got -11708.990273276468 expected -11708.990273276553 (ulp_dist=47 ≤ 512)
+  OK  reduce_stats_f64 sum_sq: got 219419901.26951236 expected 219419901.26951388 (ulp_dist=51 ≤ 512)
+  OK  reduce_stats_f64 avg (derived): got -0.17866501271478985 expected -0.17866501271479115 (ulp_dist=47 ≤ 512)
+  OK  var_pop (derived): got 3348.0500683992968 expected 3348.0500683993137 (ulp_dist=37 ≤ 512)
+  OK  var_samp (derived): got 3348.1011563686016 expected 3348.1011563686184 (ulp_dist=37 ≤ 512)
+  OK  stddev_pop (derived): got 57.862337218602711 expected 57.86233721860286 (ulp_dist=21 ≤ 512)
+  OK  stddev_samp (derived): got 57.862778678253967 expected 57.862778678254109 (ulp_dist=20 ≤ 512)
+
+=== fp64 reduce @ N=262144 ===
+  OK  reduce_sum_f64: got -35788.089711119537 expected -35788.089711119625 (ulp_dist=12 ≤ 576)
+  OK  reduce_min_f64: got -99.998828012144457 expected -99.998828012144457 (ulp_dist=0 ≤ 0)
+  OK  reduce_max_f64: got 99.999948955025772 expected 99.999948955025772 (ulp_dist=0 ≤ 0)
+  OK  reduce_multi_f64 sum: got -35788.089711119537 expected -35788.089711119625 (ulp_dist=12 ≤ 576)
+  OK  reduce_multi_f64 min: got -99.998828012144457 expected -99.998828012144457 (ulp_dist=0 ≤ 0)
+  OK  reduce_multi_f64 max: got 99.999948955025772 expected 99.999948955025772 (ulp_dist=0 ≤ 0)
+  OK  reduce_multi_f64 count: 262144
+  OK  reduce_sum_sq_f64: got 874017395.42813706 expected 874017395.42813134 (ulp_dist=48 ≤ 576)
+  OK  reduce_stats_f64 count: 262144
+  OK  reduce_stats_f64 sum: got -35788.089711119537 expected -35788.089711119625 (ulp_dist=12 ≤ 576)
+  OK  reduce_stats_f64 sum_sq: got 874017395.42813706 expected 874017395.42813134 (ulp_dist=48 ≤ 576)
+  OK  reduce_stats_f64 avg (derived): got -0.13652072796294989 expected -0.13652072796295023 (ulp_dist=12 ≤ 576)
+  OK  var_pop (derived): got 3334.0931305392355 expected 3334.0931305393151 (ulp_dist=175 ≤ 576)
+  OK  var_samp (derived): got 3334.1058491437016 expected 3334.1058491437811 (ulp_dist=175 ≤ 576)
+  OK  stddev_pop (derived): got 57.741606580863646 expected 57.741606580864328 (ulp_dist=96 ≤ 576)
+  OK  stddev_samp (derived): got 57.741716714553107 expected 57.741716714553796 (ulp_dist=97 ≤ 576)
+
+=== fp64 reduce @ N=1048576 ===
+  OK  reduce_sum_f64: got 83690.664830747279 expected 83690.664830742229 (ulp_dist=347 ≤ 640)
+  OK  reduce_min_f64: got -99.999484317941196 expected -99.999484317941196 (ulp_dist=0 ≤ 0)
+  OK  reduce_max_f64: got 99.999935040509655 expected 99.999935040509655 (ulp_dist=0 ≤ 0)
+  OK  reduce_multi_f64 sum: got 83690.664830747279 expected 83690.664830742229 (ulp_dist=347 ≤ 640)
+  OK  reduce_multi_f64 min: got -99.999484317941196 expected -99.999484317941196 (ulp_dist=0 ≤ 0)
+  OK  reduce_multi_f64 max: got 99.999935040509655 expected 99.999935040509655 (ulp_dist=0 ≤ 0)
+  OK  reduce_multi_f64 count: 1048576
+  OK  reduce_sum_sq_f64: got 3494068617.8048863 expected 3494068617.8048353 (ulp_dist=107 ≤ 640)
+  OK  reduce_stats_f64 count: 1048576
+  OK  reduce_stats_f64 sum: got 83690.664830747279 expected 83690.664830742229 (ulp_dist=347 ≤ 640)
+  OK  reduce_stats_f64 sum_sq: got 3494068617.8048863 expected 3494068617.8048353 (ulp_dist=107 ≤ 640)
+  OK  reduce_stats_f64 avg (derived): got 0.079813637572047499 expected 0.079813637572042684 (ulp_dist=347 ≤ 640)
+  OK  var_pop (derived): got 3332.1971303448631 expected 3332.1971303448545 (ulp_dist=19 ≤ 640)
+  OK  var_samp (derived): got 3332.2003081787143 expected 3332.2003081787057 (ulp_dist=19 ≤ 640)
+  OK  stddev_pop (derived): got 57.725186273799615 expected 57.725186273799537 (ulp_dist=11 ≤ 640)
+  OK  stddev_samp (derived): got 57.725213799333083 expected 57.725213799333005 (ulp_dist=11 ≤ 640)
+
+=== fp32 regression ([1..100] coverage) ===
+  OK  sum_sq_f32: 338350.0000
+  OK  stats_f32: count=100 sum=5050.0000 sum_sq=338350.0000
+  OK  fp32 singleton device reductions
+  OK  fp32 cross-group device finalization
+  OK  fp32 cross-group IEEE propagation
+  OK  stats_f32 N=0 zero-init
+
+PASS
+<end of output>
+Test time =   0.51 sec
+----------------------------------------------------------
+Test Passed.
+"test_reduce_stats" end time: Oct 06 03:21 PDT
+"test_reduce_stats" time elapsed: 00:00:00
+----------------------------------------------------------
+
+19/33 Testing: test_reduce_bool_bit
+19/33 Test: test_reduce_bool_bit
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_reduce_bool_bit" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_reduce_bool_bit"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_reduce_bool_bit" start time: Oct 06 03:21 PDT
+Output:
+----------------------------------------------------------
+PASS bool_and
+PASS bool_or
+PASS bit_and_i16
+PASS bit_and_i32
+PASS bit_and_i64
+PASS bit_or_i16
+PASS bit_or_i32
+PASS bit_or_i64
+PASS bit_xor_i16
+PASS bit_xor_i32
+PASS bit_xor_i64
+ALL PASS
+<end of output>
+Test time =   0.42 sec
+----------------------------------------------------------
+Test Passed.
+"test_reduce_bool_bit" end time: Oct 06 03:21 PDT
+"test_reduce_bool_bit" time elapsed: 00:00:00
+----------------------------------------------------------
+
+20/33 Testing: test_grouped_agg
+20/33 Test: test_grouped_agg
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_grouped_agg" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_grouped_agg"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_grouped_agg" start time: Oct 06 03:21 PDT
+Output:
+----------------------------------------------------------
+--- workspace and descriptor validation ---
+--- dense chunk lifecycle equivalence ---
+pgaccel: pgaccel_grouped_agg_execute_ex: GPU kernel failure: injected grouped aggregate lifecycle failure
+pgaccel: pgaccel_grouped_agg_execute_ex: GPU kernel failure: injected grouped aggregate lifecycle failure
+pgaccel: pgaccel_grouped_agg_execute_ex: GPU kernel failure: injected grouped aggregate lifecycle failure
+pgaccel: pgaccel_grouped_agg_execute_ex: GPU kernel failure: injected grouped aggregate lifecycle failure
+--- dense chunk lifecycle fail closed ---
+--- empty ungrouped active semantics ---
+--- parallel dense COUNT(*) lifecycle ---
+parallel dense COUNT(*) 262144 rows/17 groups: 0.929 ms
+--- parallel dense nullable INT2 column COUNT ---
+--- parallel dense nullable INT8 column COUNT ---
+--- parallel dense nullable DATE column COUNT ---
+--- parallel dense nullable TIMESTAMP column COUNT ---
+--- parallel dense nullable FLOAT column COUNT ---
+--- parallel dense Phase2 integer lanes ---
+parallel dense SUM/MIN/MAX+COUNT(*) 262144 rows/17 groups: 1.306 ms
+--- parallel dense integer SUM/non-NULL state without COUNT(*) ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- parallel dense multiple independent integer SUM/AVG states ---
+--- parallel dense multiple independent integer SUM/AVG states ---
+--- parallel independent aggregate ranges and predicate NULLs ---
+--- parallel independent count-only states without SUM allocation ---
+--- checked computed INT4 measures ---
+--- fused integer row ownership and independent measures ---
+--- fused scalar CASE/COALESCE and aggregate lifecycle ---
+--- bounded atomic batches retain ordered overflow fallback ---
+--- parallel dense int4 product SUM+COUNT(*) ---
+parallel dense int4 MUL/SUM+COUNT(*) 263157 rows/128 groups: 1.034 ms
+--- parallel dense aggregate-local INT4 range FILTER ---
+--- parallel dense SUM+COUNT(*) mask/two unique dimensions ---
+row-parallel dense SUM+COUNT(*) 262144 rows/35 groups: 1.257 ms
+--- parallel dense COUNT(*) unique dimension ---
+--- parallel dense weighted global COUNT(*) ---
+--- row-parallel dense SUM low-word carry ---
+--- row-parallel dense negative nullable SUM publication ---
+--- dense I64 four-measure lanes ---
+--- dense F64 stats pair and NaN ordering ---
+--- I64 stats pair and F64 binary measures ---
+--- global and per-measure filters ---
+--- predicate-only physical COUNT lanes ---
+--- ordered physical MIN/MAX/COUNT lanes ---
+--- four dimensions and multiplicity ---
+--- mixed radix compact and keyed empty ---
+--- device publication variable-width/no-write contract ---
+--- grouped allocation/copy/wait/materialization failure lifecycle ---
+--- group activity ignores measure validity ---
+--- generic device error and rejection matrix ---
+--- specialized dense branch matrix ---
+--- weighted overflow branch matrix ---
+--- compact full-lane state copy ---
+--- grouped output descriptor validation ---
+--- grouped pointer span validation ---
+--- integer expression overflow semantics ---
+--- error and unsupported statuses ---
+--- fixed-seed mixed-radix fuzz ---
+--- dense full-lane reference ---
+--- filtered product reference ---
+--- two-key dimension reference ---
+--- three-key dimension reference ---
+--- dimension subtraction reference ---
+test_grouped_agg: 53226 passed, 0 failed
+gpu-noise[test_grouped_agg]: suppressed archive-write=76, kernel-cache=1; raw log: /Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs/test_grouped_agg-20261006-032126-13388.log
+<end of output>
+Test time =  33.28 sec
+----------------------------------------------------------
+Test Passed.
+"test_grouped_agg" end time: Oct 06 03:21 PDT
+"test_grouped_agg" time elapsed: 00:00:33
+----------------------------------------------------------
+
+21/33 Testing: test_grouped_agg_hash
+21/33 Test: test_grouped_agg_hash
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_grouped_agg_hash" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_grouped_agg_hash"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_grouped_agg_hash" start time: Oct 06 03:21 PDT
+Output:
+----------------------------------------------------------
+--- hash duplicates/nulls/high-bits/collisions/warm workspace ---
+--- hash empty/all-null/capacity boundaries ---
+--- hash fixed-seed differential ---
+--- hash million-row hot groups ---
+--- parallel hash compaction/sort, non-power-of-two cardinalities ---
+parallel case: groups=16383 nullable=0
+parallel case: groups=16383 nullable=1
+parallel case: groups=16385 nullable=0
+parallel case: groups=16385 nullable=1
+parallel case: groups=32771 nullable=0
+parallel case: groups=32771 nullable=1
+parallel case: groups=1048583 nullable=0
+parallel case: groups=1048583 nullable=1
+--- hash qualification ceiling: 16Mi distinct groups including NULL ---
+--- fused H3 parent hash exactness/validation ---
+--- hash hard failure and unsupported shapes ---
+test_grouped_agg_hash: 314 passed, 0 failed
+gpu-noise[test_grouped_agg_hash]: suppressed archive-write=7, kernel-cache=1; raw log: /Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs/test_grouped_agg_hash-20261006-032159-16353.log
+<end of output>
+Test time =   4.27 sec
+----------------------------------------------------------
+Test Passed.
+"test_grouped_agg_hash" end time: Oct 06 03:22 PDT
+"test_grouped_agg_hash" time elapsed: 00:00:04
+----------------------------------------------------------
+
+22/33 Testing: test_grouped_agg_workspace
+22/33 Test: test_grouped_agg_workspace
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_grouped_agg_workspace" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_grouped_agg_workspace"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_grouped_agg_workspace" start time: Oct 06 03:22 PDT
+Output:
+----------------------------------------------------------
+grouped workspace: all checks passed
+<end of output>
+Test time =   0.37 sec
+----------------------------------------------------------
+Test Passed.
+"test_grouped_agg_workspace" end time: Oct 06 03:22 PDT
+"test_grouped_agg_workspace" time elapsed: 00:00:00
+----------------------------------------------------------
+
+23/33 Testing: test_hash_agg_partial
+23/33 Test: test_hash_agg_partial
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_hash_agg_partial" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_hash_agg_partial"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_hash_agg_partial" start time: Oct 06 03:22 PDT
+Output:
+----------------------------------------------------------
+=== resident grouped COUNT stress tests ===
+--- resident count collision chain ---
+--- resident count result ownership ---
+--- resident count permutation invariance ---
+--- resident count single-group capacity ---
+resident grouped COUNT stress: 16 checks, 0 failures
+<end of output>
+Test time =   0.37 sec
+----------------------------------------------------------
+Test Passed.
+"test_hash_agg_partial" end time: Oct 06 03:22 PDT
+"test_hash_agg_partial" time elapsed: 00:00:00
+----------------------------------------------------------
+
+24/33 Testing: test_hash_agg_keys
+24/33 Test: test_hash_agg_keys
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_hash_agg_keys" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_hash_agg_keys"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_hash_agg_keys" start time: Oct 06 03:22 PDT
+Output:
+----------------------------------------------------------
+=== resident grouped COUNT key tests ===
+--- resident count invalid/empty contract ---
+--- resident count duplicate/extreme keys ---
+--- resident count high cardinality/hints ---
+--- resident count underestimated bound ---
+resident grouped COUNT keys: 58 checks, 0 failures
+<end of output>
+Test time =   0.48 sec
+----------------------------------------------------------
+Test Passed.
+"test_hash_agg_keys" end time: Oct 06 03:22 PDT
+"test_hash_agg_keys" time elapsed: 00:00:00
+----------------------------------------------------------
+
+25/33 Testing: test_hash_join
+25/33 Test: test_hash_join
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_hash_join" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_hash_join"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_hash_join" start time: Oct 06 03:22 PDT
+Output:
+----------------------------------------------------------
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+=== pgaccel resident hash join tests ===
+
+PASS=4 FAIL=0
+=== pgaccel resident hash join tests ===
+
+PASS=63 FAIL=0
+<end of output>
+Test time =   0.42 sec
+----------------------------------------------------------
+Test Passed.
+"test_hash_join" end time: Oct 06 03:22 PDT
+"test_hash_join" time elapsed: 00:00:00
+----------------------------------------------------------
+
+26/33 Testing: test_hash_domain_matrix
+26/33 Test: test_hash_domain_matrix
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_hash_domain_matrix" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_hash_domain_matrix"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_hash_domain_matrix" start time: Oct 06 03:22 PDT
+Output:
+----------------------------------------------------------
+=== pgaccel hash domain matrix ===
+failures=0
+<end of output>
+Test time =   0.42 sec
+----------------------------------------------------------
+Test Passed.
+"test_hash_domain_matrix" end time: Oct 06 03:22 PDT
+"test_hash_domain_matrix" time elapsed: 00:00:00
+----------------------------------------------------------
+
+27/33 Testing: test_hashagg_spatial_matrix
+27/33 Test: test_hashagg_spatial_matrix
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_hashagg_spatial_matrix" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_hashagg_spatial_matrix"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_hashagg_spatial_matrix" start time: Oct 06 03:22 PDT
+Output:
+----------------------------------------------------------
+resident-count/spatial matrix: 180 checks, 0 failures
+<end of output>
+Test time =   0.47 sec
+----------------------------------------------------------
+Test Passed.
+"test_hashagg_spatial_matrix" end time: Oct 06 03:22 PDT
+"test_hashagg_spatial_matrix" time elapsed: 00:00:00
+----------------------------------------------------------
+
+28/33 Testing: test_reduce_matrix
+28/33 Test: test_reduce_matrix
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_reduce_matrix" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_reduce_matrix"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_reduce_matrix" start time: Oct 06 03:22 PDT
+Output:
+----------------------------------------------------------
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+reduce no-device matrix: 0 failure(s)
+reduce matrix: 0 failure(s)
+<end of output>
+Test time =   0.45 sec
+----------------------------------------------------------
+Test Passed.
+"test_reduce_matrix" end time: Oct 06 03:22 PDT
+"test_reduce_matrix" time elapsed: 00:00:00
+----------------------------------------------------------
+
+29/33 Testing: test_expr_memory
+29/33 Test: test_expr_memory
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_expr_memory" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_expr_memory"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_expr_memory" start time: Oct 06 03:22 PDT
+Output:
+----------------------------------------------------------
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+expr memory no-device: 10 checks, 0 failures
+expr memory: 37 checks, 0 failures
+<end of output>
+Test time =   0.36 sec
+----------------------------------------------------------
+Test Passed.
+"test_expr_memory" end time: Oct 06 03:22 PDT
+"test_expr_memory" time elapsed: 00:00:00
+----------------------------------------------------------
+
+30/33 Testing: test_expr_vm_matrix
+30/33 Test: test_expr_vm_matrix
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_expr_vm_matrix" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_expr_vm_matrix"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_expr_vm_matrix" start time: Oct 06 03:22 PDT
+Output:
+----------------------------------------------------------
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+test_expr_vm_matrix no-device: 5 check(s)
+test_expr_vm_matrix no-device: 0 failure(s)
+test_expr_vm_matrix: 231 check(s)
+test_expr_vm_matrix: 0 failure(s)
+<end of output>
+Test time =   0.61 sec
+----------------------------------------------------------
+Test Passed.
+"test_expr_vm_matrix" end time: Oct 06 03:22 PDT
+"test_expr_vm_matrix" time elapsed: 00:00:00
+----------------------------------------------------------
+
+31/33 Testing: test_oom_invariant
+31/33 Test: test_oom_invariant
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_oom_invariant" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_oom_invariant"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_oom_invariant" start time: Oct 06 03:22 PDT
+Output:
+----------------------------------------------------------
+Device: Apple M2 Max backend=metal has_native_fp64=0 max_alloc_bytes=41747087360
+PGACCEL_DEVICE_PROOF device="Apple M2 Max" backend="metal" compute_units=38 max_alloc_bytes=41747087360 real_device=1
+
+Plan:
+  N (doubles) = 2 * max_alloc / sizeof(double) = 10436771840
+  N_capped    = 268435456 (2.15 GB per-family input)
+  RSS ceiling = 3 * max_alloc = 125.24 GB
+
+-- reduce_f64 @ N=268435456 (2.00 GB raw input) --
+   status=0 (OK=1) got=268435456 expected=268435456 correct=1  dispatches=1 rss_before=2.19GB peak=4.36GB delta=2.17GB ceiling=125.24GB under=1
+
+-- expr_vm_f64 @ values=268435456 (2.00 GB logical raw input, 8 cols x 33554432 rows) --
+   status=0 (OK=1) values_ok=1 processed_values=268435456 logical_bytes=2147483648 rss_before=4.40GB peak=4.40GB delta=0.00GB ceiling=125.24GB dispatches=64 under=1
+
+-- grouped_agg_i32_mul @ rows=67108864 (2.00 GB logical input, 32 B/row: 3 int32 keys + 3 int32 dimension keys + 2 int32 MUL inputs, 65536 groups) --
+   status=0 detail=0 status_ok=1 correct=1 processed_rows=67108864 lifecycle_calls=69 logical_bytes=2147483648 rss_before=4.40GB peak=4.43GB delta=0.03GB ceiling=125.24GB dispatches=69 under=1
+
+-- spatial_f64 (PIP) @ N=134217728 points (2.00 GB raw input) --
+   status=0 (OK=1) all_inside=1  rss_before=4.52GB peak=6.67GB delta=2.15GB ceiling=125.24GB dispatches=1 under=1
+
+-- h3_f64 @ N=134217728 (2.00 GB raw lat+lng input) --
+   status=0 (OK=1) all_same_valid=1  rss_before=9.89GB peak=9.89GB delta=0.00GB ceiling=125.24GB dispatches=129 under=1
+
+=== OOM-never invariant summary ===
+  reduce_f64     PASS  peak_rss=4.36GB ceiling=125.24GB status_ok=1 correct=1 under_ceiling=1 note=""
+PGACCEL_OOM_FAMILY family=reduce_f64 result=PASS dispatches=1 peak_rss_bytes=4361994240 rss_baseline_bytes=2194866176 rss_delta_bytes=2167128064 rss_limit_bytes=125241262080
+  expr_vm_f64    PASS  peak_rss=4.40GB ceiling=125.24GB status_ok=1 correct=1 under_ceiling=1 note=""
+PGACCEL_OOM_FAMILY family=expr_vm_f64 result=PASS dispatches=64 peak_rss_bytes=4396154880 rss_baseline_bytes=4395565056 rss_delta_bytes=589824 rss_limit_bytes=125241262080
+  grouped_agg_i32_mul PASS  peak_rss=4.43GB ceiling=125.24GB status_ok=1 correct=1 under_ceiling=1 note=""
+PGACCEL_OOM_FAMILY family=grouped_agg_i32_mul result=PASS dispatches=69 peak_rss_bytes=4429365248 rss_baseline_bytes=4396171264 rss_delta_bytes=33193984 rss_limit_bytes=125241262080
+  spatial_f64    PASS  peak_rss=6.67GB ceiling=125.24GB status_ok=1 correct=1 under_ceiling=1 note=""
+PGACCEL_OOM_FAMILY family=spatial_f64 result=PASS dispatches=1 peak_rss_bytes=6672531456 rss_baseline_bytes=4524589056 rss_delta_bytes=2147942400 rss_limit_bytes=125241262080
+  h3_f64         PASS  peak_rss=9.89GB ceiling=125.24GB status_ok=1 correct=1 under_ceiling=1 note=""
+PGACCEL_OOM_FAMILY family=h3_f64 result=PASS dispatches=129 peak_rss_bytes=9894772736 rss_baseline_bytes=9893806080 rss_delta_bytes=966656 rss_limit_bytes=125241262080
+PGACCEL_OOM_INVARIANT result=PASS families=5 max_alloc_bytes=41747087360 input_doubles=268435456 rss_limit_bytes=125241262080
+
+PASS — all live kernel families honor OOM-never invariant.
+gpu-noise[test_oom_invariant]: suppressed archive-write=1, kernel-cache=1; raw log: /Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs/test_oom_invariant-20261006-032207-16657.log
+<end of output>
+Test time =  48.46 sec
+----------------------------------------------------------
+Test Passed.
+"test_oom_invariant" end time: Oct 06 03:22 PDT
+"test_oom_invariant" time elapsed: 00:00:48
+----------------------------------------------------------
+
+32/33 Testing: test_fp64_mul_probe
+32/33 Test: test_fp64_mul_probe
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_fp64_mul_probe" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_fp64_mul_probe"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_fp64_mul_probe" start time: Oct 06 03:22 PDT
+Output:
+----------------------------------------------------------
+
+=== Probe A: v * v (same SSA) ===
+  v*v                          got=1 (0x3ff0000000000000)  expected=1 (0x3ff0000000000000)  xor=0x0000000000000000  OK
+  v*v                          got=0.25 (0x3fd0000000000000)  expected=0.25 (0x3fd0000000000000)  xor=0x0000000000000000  OK
+  v*v                          got=4 (0x4010000000000000)  expected=4 (0x4010000000000000)  xor=0x0000000000000000  OK
+  v*v                          got=9 (0x4022000000000000)  expected=9 (0x4022000000000000)  xor=0x0000000000000000  OK
+  v*v                          got=10000 (0x40c3880000000000)  expected=10000 (0x40c3880000000000)  xor=0x0000000000000000  OK
+  v*v                          got=2.25 (0x4002000000000000)  expected=2.25 (0x4002000000000000)  xor=0x0000000000000000  OK
+  v*v                          got=1e-300 (0x01a56e1fc2f8f359)  expected=1e-300 (0x01a56e1fc2f8f359)  xor=0x0000000000000000  OK
+  v*v                          got=16 (0x4030000000000000)  expected=16 (0x4030000000000000)  xor=0x0000000000000000  OK
+
+=== Probe B: v * w (separate loads of same addr) ===
+  v*w                          got=1 (0x3ff0000000000000)  expected=1 (0x3ff0000000000000)  xor=0x0000000000000000  OK
+  v*w                          got=0.25 (0x3fd0000000000000)  expected=0.25 (0x3fd0000000000000)  xor=0x0000000000000000  OK
+  v*w                          got=4 (0x4010000000000000)  expected=4 (0x4010000000000000)  xor=0x0000000000000000  OK
+  v*w                          got=9 (0x4022000000000000)  expected=9 (0x4022000000000000)  xor=0x0000000000000000  OK
+  v*w                          got=10000 (0x40c3880000000000)  expected=10000 (0x40c3880000000000)  xor=0x0000000000000000  OK
+  v*w                          got=2.25 (0x4002000000000000)  expected=2.25 (0x4002000000000000)  xor=0x0000000000000000  OK
+  v*w                          got=1e-300 (0x01a56e1fc2f8f359)  expected=1e-300 (0x01a56e1fc2f8f359)  xor=0x0000000000000000  OK
+  v*w                          got=16 (0x4030000000000000)  expected=16 (0x4030000000000000)  xor=0x0000000000000000  OK
+
+=== Probe C: v * 2.0 (immediate const operand) ===
+  v*2.0                        got=2 (0x4000000000000000)  expected=2 (0x4000000000000000)  xor=0x0000000000000000  OK
+  v*2.0                        got=1 (0x3ff0000000000000)  expected=1 (0x3ff0000000000000)  xor=0x0000000000000000  OK
+  v*2.0                        got=4 (0x4010000000000000)  expected=4 (0x4010000000000000)  xor=0x0000000000000000  OK
+  v*2.0                        got=6 (0x4018000000000000)  expected=6 (0x4018000000000000)  xor=0x0000000000000000  OK
+  v*2.0                        got=-200 (0xc069000000000000)  expected=-200 (0xc069000000000000)  xor=0x0000000000000000  OK
+  v*2.0                        got=3 (0x4008000000000000)  expected=3 (0x4008000000000000)  xor=0x0000000000000000  OK
+  v*2.0                        got=2e-150 (0x20da2fe76a3f9475)  expected=2e-150 (0x20da2fe76a3f9475)  xor=0x0000000000000000  OK
+  v*2.0                        got=8 (0x4020000000000000)  expected=8 (0x4020000000000000)  xor=0x0000000000000000  OK
+
+=== Probe D: v + v (pure add, control) ===
+  v+v                          got=2 (0x4000000000000000)  expected=2 (0x4000000000000000)  xor=0x0000000000000000  OK
+  v+v                          got=1 (0x3ff0000000000000)  expected=1 (0x3ff0000000000000)  xor=0x0000000000000000  OK
+  v+v                          got=4 (0x4010000000000000)  expected=4 (0x4010000000000000)  xor=0x0000000000000000  OK
+  v+v                          got=6 (0x4018000000000000)  expected=6 (0x4018000000000000)  xor=0x0000000000000000  OK
+  v+v                          got=-200 (0xc069000000000000)  expected=-200 (0xc069000000000000)  xor=0x0000000000000000  OK
+  v+v                          got=3 (0x4008000000000000)  expected=3 (0x4008000000000000)  xor=0x0000000000000000  OK
+  v+v                          got=2e-150 (0x20da2fe76a3f9475)  expected=2e-150 (0x20da2fe76a3f9475)  xor=0x0000000000000000  OK
+  v+v                          got=8 (0x4020000000000000)  expected=8 (0x4020000000000000)  xor=0x0000000000000000  OK
+
+=== Ratio summary (got/expected) ===
+  in=1  v*v_ratio=1  v*w_ratio=1  v*2.0_ratio=1
+  in=0.5  v*v_ratio=1  v*w_ratio=1  v*2.0_ratio=1
+  in=2  v*v_ratio=1  v*w_ratio=1  v*2.0_ratio=1
+  in=3  v*v_ratio=1  v*w_ratio=1  v*2.0_ratio=1
+  in=-100  v*v_ratio=1  v*w_ratio=1  v*2.0_ratio=1
+  in=1.5  v*v_ratio=1  v*w_ratio=1  v*2.0_ratio=1
+  in=1e-150  v*v_ratio=1  v*w_ratio=1  v*2.0_ratio=1
+  in=4  v*v_ratio=1  v*w_ratio=1  v*2.0_ratio=1
+<end of output>
+Test time =   0.44 sec
+----------------------------------------------------------
+Test Passed.
+"test_fp64_mul_probe" end time: Oct 06 03:22 PDT
+"test_fp64_mul_probe" time elapsed: 00:00:00
+----------------------------------------------------------
+
+33/33 Testing: test_kernel_failure_status
+33/33 Test: test_kernel_failure_status
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py" "--label" "test_kernel_failure_status" "--log-dir" "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs" "--" "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_kernel_failure_status"
+Directory: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+"test_kernel_failure_status" start time: Oct 06 03:22 PDT
+Output:
+----------------------------------------------------------
+pgaccel: test_native_error_handoff: GPU kernel failure: native error handoff sentinel
+pgaccel: <unknown>: GPU kernel failure: unknown C++ exception
+pgaccel: pgaccel_grouped_agg_workspace_free: runtime queue unavailable; allocation leaked
+  expr_eval_project with 2^59-row staging -> PGACCEL_OOM (honest failure)
+  pgaccel_expr_shared_alloc(2^62 bytes) -> PGACCEL_OOM (honest failure)
+  pgaccel_expr_device_alloc(2^62 bytes) -> PGACCEL_OOM (honest failure)
+  pgaccel_expr_device_alloc_copy(2^62 bytes) -> PGACCEL_OOM (honest failure)
+  pgaccel_grouped_agg_workspace_alloc(2^62 bytes) -> PGACCEL_OOM (honest failure)
+  h3_get_resolution with 2^59 rows -> PGACCEL_OOM (honest failure)
+  h3_get_base_cell with 2^59 rows -> PGACCEL_OOM (honest failure)
+  h3_is_valid_cell with 2^59 rows -> PGACCEL_OOM (honest failure)
+  h3_is_pentagon with 2^59 rows -> PGACCEL_OOM (honest failure)
+  h3_is_res_class_iii with 2^59 rows -> PGACCEL_OOM (honest failure)
+  h3_cell_to_parent with 2^59 rows -> PGACCEL_OOM (honest failure)
+  h3_cell_to_center_child with 2^59 rows -> PGACCEL_OOM (honest failure)
+  h3_grid_distance with 2^59 rows -> PGACCEL_OOM (honest failure)
+  h3 fp64 lat/lng with overflowing 2^61-row output span -> PGACCEL_OOM (honest failure)
+  h3 fp32 lat/lng with overflowing 2^61-row output span -> PGACCEL_OOM (honest failure)
+  h3 lat/lng count with 2^57 rows -> PGACCEL_OOM (honest failure)
+  h3 fp32-exact count with 2^57 rows -> PGACCEL_OOM (honest failure)
+  h3 resident count with 2^57 rows -> PGACCEL_OOM (honest failure)
+  point_in_ring with 2^59 points -> PGACCEL_OOM (honest failure)
+  sphere_distance with 2^59 pairs -> PGACCEL_OOM (honest failure)
+  segment_intersects with 2^58 pairs -> PGACCEL_OOM (honest failure)
+  point_in_ring partial-allocation cleanup -> PGACCEL_OOM (honest failure)
+  sphere_distance fp32 partial-allocation cleanup -> PGACCEL_OOM (honest failure)
+  sphere_distance fp64 partial-allocation cleanup -> PGACCEL_OOM (honest failure)
+  segment_intersects partial-allocation cleanup -> PGACCEL_OOM (honest failure)
+  point_in_polygon simple staging with 2^59 points -> PGACCEL_OOM (honest failure)
+  point_in_polygon cooperative staging with 2^59 points -> PGACCEL_OOM (honest failure)
+  bbox f32 with 2^58 boxes -> PGACCEL_OOM (honest failure)
+  bbox f64 with 2^58 boxes -> PGACCEL_OOM (honest failure)
+  reduce sum with 2^59 rows -> PGACCEL_OOM (honest failure)
+  reduce min with 2^59 rows -> PGACCEL_OOM (honest failure)
+  reduce count with 2^59 rows -> PGACCEL_OOM (honest failure)
+  reduce multi with 2^59 rows -> PGACCEL_OOM (honest failure)
+  reduce masked multi with 2^59 rows -> PGACCEL_OOM (honest failure)
+  reduce sumsq with 2^59 rows -> PGACCEL_OOM (honest failure)
+  reduce stats with 2^59 rows -> PGACCEL_OOM (honest failure)
+test_kernel_failure_status: 68 passed, 0 failed
+<end of output>
+Test time =   0.39 sec
+----------------------------------------------------------
+Test Passed.
+"test_kernel_failure_status" end time: Oct 06 03:22 PDT
+"test_kernel_failure_status" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Oct 06 03:22 PDT
+
+host =   0.61 sec*proc
+

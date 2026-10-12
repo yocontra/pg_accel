@@ -1,0 +1,9 @@
+test_array_initializer_calls_are_not_hidden_as_lambda_bodies (test_output_container_escape.OutputContainerEscapeTests.test_array_initializer_calls_are_not_hidden_as_lambda_bodies) ... ok
+test_escape_before_device_work_or_failure_still_requires_review (test_output_container_escape.OutputContainerEscapeTests.test_escape_before_device_work_or_failure_still_requires_review) ... ok
+test_gpu_array_stores_and_unrelated_host_arrays_still_pass (test_output_container_escape.OutputContainerEscapeTests.test_gpu_array_stores_and_unrelated_host_arrays_still_pass) ... ok
+test_host_pointer_tables_cannot_hide_post_device_finalization (test_output_container_escape.OutputContainerEscapeTests.test_host_pointer_tables_cannot_hide_post_device_finalization) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.497s
+
+OK

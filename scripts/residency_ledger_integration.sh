@@ -124,6 +124,15 @@ CREATE TABLE ledger_probe (
 INSERT INTO ledger_probe
 SELECT n, n % 127, n * 3 FROM generate_series(1, 500000) AS n;
 ANALYZE ledger_probe;
+CREATE TABLE ledger_numeric AS
+SELECT n % 7 AS g,
+       CASE WHEN n % 11 = 0 THEN NULL ELSE (n % 10001 - 5000)::numeric / 100 END AS v
+FROM generate_series(1, 500000) AS n;
+ANALYZE ledger_numeric;
+SET pg_accel.enabled = off;
+CREATE TABLE ledger_numeric_expected AS
+SELECT g, sum(v) AS s, avg(v) AS a, count(v) AS c
+FROM ledger_numeric GROUP BY g;
 CREATE TABLE ledger_sync (
     phase text PRIMARY KEY,
     backend_pid integer NOT NULL,
@@ -160,6 +169,7 @@ if [ "$seed_pinned" -ne 500000 ]; then
     echo "error: seed trigger installation pinned $seed_pinned rows, expected 500000" >&2
     exit 1
 fi
+run_db "$seed_db" "SELECT pg_accel_pin('ledger_numeric', ARRAY['g', 'v'])" >/dev/null
 
 run_base "CREATE DATABASE $db_a TEMPLATE $seed_db"
 run_base "CREATE DATABASE $db_b TEMPLATE $seed_db"
@@ -392,6 +402,80 @@ fi
 expected_refreshed=$((baseline + refreshed_bytes + b_bytes))
 wait_for_live_bytes "$db_a" "$expected_refreshed"
 
+# Keep both owners alive, but submit their GPU work sequentially. This tests
+# production shared-ledger ownership, not simultaneous GPU throughput. Existing
+# integer pools are uncharged; measure the new NUMERIC pool capacity separately.
+numeric_probe() {
+    cat <<'SQL'
+SET pg_accel.enabled = on;
+SET pg_accel.gpu_enabled = on;
+SET pg_accel.auto_load = off;
+SELECT pg_accel_pin('ledger_numeric', ARRAY['g', 'v']);
+DO $$
+DECLARE
+    before_pool bigint;
+    after_pool bigint;
+    before_live bigint;
+    before_workspace_hits bigint;
+    before_output_hits bigint;
+    plan_row record;
+    plan text := '';
+BEGIN
+    SELECT w.retained_bytes + o.retained_bytes INTO before_pool
+    FROM pg_accel_grouped_workspace_pool_stats() w,
+         pg_accel_grouped_output_pool_stats() o;
+    CREATE TEMP TABLE numeric_actual AS
+    SELECT g, sum(v) AS s, avg(v) AS a, count(v) AS c
+    FROM ledger_numeric GROUP BY g;
+    IF EXISTS ((SELECT row_to_json(r)::text FROM numeric_actual r EXCEPT ALL
+                SELECT row_to_json(r)::text FROM ledger_numeric_expected r)
+               UNION ALL
+               (SELECT row_to_json(r)::text FROM ledger_numeric_expected r EXCEPT ALL
+                SELECT row_to_json(r)::text FROM numeric_actual r)) THEN
+        RAISE EXCEPTION 'cross-backend NUMERIC result differs from PostgreSQL';
+    END IF;
+    SELECT pg_accel_resident_live_bytes() INTO before_live;
+    SELECT w.hits, o.hits INTO before_workspace_hits, before_output_hits
+    FROM pg_accel_grouped_workspace_pool_stats() w,
+         pg_accel_grouped_output_pool_stats() o;
+    FOR plan_row IN EXECUTE
+        'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF) SELECT g, sum(v), avg(v), count(v) FROM ledger_numeric GROUP BY g'
+    LOOP
+        plan := plan || plan_row."QUERY PLAN" || E'\n';
+        INSERT INTO ledger_plans VALUES ('numeric', plan_row."QUERY PLAN");
+    END LOOP;
+    IF position('GPU Dispatched Physical Kernel Mode: parallel_dense_numeric' IN plan) = 0 THEN
+        RAISE EXCEPTION 'cross-backend NUMERIC probe did not dispatch: %', plan;
+    END IF;
+    IF pg_accel_resident_live_bytes() <> before_live OR
+       (SELECT hits FROM pg_accel_grouped_workspace_pool_stats()) <= before_workspace_hits OR
+       (SELECT hits FROM pg_accel_grouped_output_pool_stats()) <= before_output_hits THEN
+        RAISE EXCEPTION 'NUMERIC pool reuse changed ledger charge or failed to reuse buffers';
+    END IF;
+    SELECT w.retained_bytes + o.retained_bytes INTO after_pool
+    FROM pg_accel_grouped_workspace_pool_stats() w,
+         pg_accel_grouped_output_pool_stats() o;
+    IF after_pool <= before_pool THEN
+        RAISE EXCEPTION 'NUMERIC execution did not retain positively sized buffers';
+    END IF;
+    INSERT INTO ledger_sync
+    SELECT 'numeric_ready', pg_backend_pid(), generation,
+           raw_bytes + derived_bytes + after_pool - before_pool
+    FROM pg_accel_resident_status() WHERE relid = 'ledger_numeric'::regclass;
+END $$;
+SQL
+}
+
+numeric_probe >&3
+wait_for_phase "$db_a" numeric_ready
+IFS='|' read -r _ a_numeric_bytes _ <<<"$(read_phase "$db_a" numeric_ready)"
+wait_for_live_bytes "$db_a" "$((expected_refreshed + a_numeric_bytes))"
+numeric_probe >&4
+wait_for_phase "$db_b" numeric_ready
+IFS='|' read -r _ b_numeric_bytes _ <<<"$(read_phase "$db_b" numeric_ready)"
+wait_for_live_bytes "$db_a" "$((expected_refreshed + a_numeric_bytes + b_numeric_bytes))"
+a_owned_bytes=$((refreshed_bytes + a_numeric_bytes))
+
 # A PostgreSQL FATAL exit must run the registered shared-memory cleanup and
 # release exactly this backend's charge without disturbing the other database.
 run_db "$db_a" "SELECT pg_terminate_backend($b_backend_pid)" >/dev/null
@@ -407,13 +491,13 @@ if [ "$(run_db "$db_a" "SELECT count(*) FROM pg_stat_activity WHERE pid = $b_bac
     echo "error: terminated ledger backend remains in pg_stat_activity" >&2
     exit 1
 fi
-wait_for_live_bytes "$db_a" "$((baseline + refreshed_bytes))"
+wait_for_live_bytes "$db_a" "$((baseline + a_owned_bytes))"
 
 # Reuse a released backend slot in the second database, then prove its normal
 # exit also returns the temporary charge.
 run_db "$db_b" "SELECT pg_accel_pin('ledger_probe', ARRAY['g', 'v']); SELECT pg_accel_resident_live_bytes()" \
     >"$artifact_dir/slot-reuse.log"
-wait_for_live_bytes "$db_a" "$((baseline + refreshed_bytes))"
+wait_for_live_bytes "$db_a" "$((baseline + a_owned_bytes))"
 
 printf '\\quit\n' >&3
 wait "$client_a"
@@ -424,4 +508,5 @@ succeeded=1
 echo "residency-ledger integration: PASS"
 echo "  relation_oid=$oid_a baseline_bytes=$baseline"
 echo "  database_a_bytes=$refreshed_bytes database_b_bytes=$b_bytes"
+echo "  numeric_a_bytes=$a_numeric_bytes numeric_b_bytes=$b_numeric_bytes (raw, derived and retained execution buffers)"
 echo "  generation=$a_generation->$invalidated_generation->$refreshed_generation"

@@ -1,0 +1,770 @@
+{
+  "schema_version": 1,
+  "base": "repository root",
+  "selected_bundle_count": 101,
+  "selected_existing_file_count": 10318,
+  "selected_existing_bytes": 419353320,
+  "directories": [
+    "benchmarks/evidence/batched-null-staging-20261010",
+    "benchmarks/evidence/bigint-numeric-20260929",
+    "benchmarks/evidence/borrowed-dictionary-20261010",
+    "benchmarks/evidence/catalog-compatibility-20260929",
+    "benchmarks/evidence/computed-integer-20260929",
+    "benchmarks/evidence/covers-20260929",
+    "benchmarks/evidence/dense-memory-accounting-20261010",
+    "benchmarks/evidence/fused-integer-20260929",
+    "benchmarks/evidence/geometry-staging-20261006",
+    "benchmarks/evidence/global-integer-20260929",
+    "benchmarks/evidence/group-output-cursor-20261010",
+    "benchmarks/evidence/hash-capacity-learning-20261010",
+    "benchmarks/evidence/hash-count-binding-20261010",
+    "benchmarks/evidence/hash-count-column-20261010",
+    "benchmarks/evidence/hash-count-live-tests-20261010",
+    "benchmarks/evidence/hash-extrema-binding-20261010",
+    "benchmarks/evidence/hash-filter-20261010",
+    "benchmarks/evidence/hash-filter-binding-20261010",
+    "benchmarks/evidence/hash-filter-cache-20261010",
+    "benchmarks/evidence/hash-fused-cancel-20261010",
+    "benchmarks/evidence/hash-int2-binding-20261010",
+    "benchmarks/evidence/hash-int4-avg-20261010",
+    "benchmarks/evidence/hash-int4-sum-20261010",
+    "benchmarks/evidence/hash-int4-sum-binding-20261010",
+    "benchmarks/evidence/hash-live-20261012",
+    "benchmarks/evidence/hash-memory-accounting-20261010",
+    "benchmarks/evidence/hash-narrow-keys-20261010",
+    "benchmarks/evidence/hash-native-extrema-20261010",
+    "benchmarks/evidence/hash-preparation-cancel-20261010",
+    "benchmarks/evidence/hash-where-20261010",
+    "benchmarks/evidence/hash-where-binding-20261010",
+    "benchmarks/evidence/integer-extrema-20260929",
+    "benchmarks/evidence/integer-filter-inputs-20260929",
+    "benchmarks/evidence/integer-where-20260929",
+    "benchmarks/evidence/join-scan-capture-20261010",
+    "benchmarks/evidence/native-live-20261012",
+    "benchmarks/evidence/null-predicates-20260929",
+    "benchmarks/evidence/null-safe-scalar-20261006",
+    "benchmarks/evidence/null-staging-one-growth-20261010",
+    "benchmarks/evidence/null-staging-perf-20261010",
+    "benchmarks/evidence/nullsafe-compatibility-20261006",
+    "benchmarks/evidence/numeric-20260929",
+    "benchmarks/evidence/numeric-20260929-pg18",
+    "benchmarks/evidence/numeric-20260929-pg18-final",
+    "benchmarks/evidence/numeric-count-20260929",
+    "benchmarks/evidence/numeric-filter-20260929",
+    "benchmarks/evidence/numeric-mixed-20260929",
+    "benchmarks/evidence/numeric-where-20260929",
+    "benchmarks/evidence/output-container-proof-20261010",
+    "benchmarks/evidence/pulled-up-reports-20261006",
+    "benchmarks/evidence/raster-launch-20261010",
+    "benchmarks/evidence/raster-lookup-20261010",
+    "benchmarks/evidence/raw-bigint-hash-20261010",
+    "benchmarks/evidence/resident-join-binding-20261009",
+    "benchmarks/evidence/resident-join-bounded-20261009",
+    "benchmarks/evidence/resident-join-bounded-project-20261009",
+    "benchmarks/evidence/resident-join-count-20261009",
+    "benchmarks/evidence/resident-join-interrupts-20261009",
+    "benchmarks/evidence/resident-join-layout-20261010",
+    "benchmarks/evidence/resident-join-metadata-build-20261010",
+    "benchmarks/evidence/resident-join-metadata-link-20261010",
+    "benchmarks/evidence/resident-join-metadata-proof-20261010",
+    "benchmarks/evidence/resident-join-pipeline-20261006",
+    "benchmarks/evidence/resident-join-prune-20261009",
+    "benchmarks/evidence/resident-join-reduce-20261009",
+    "benchmarks/evidence/resident-join-where-20261009",
+    "benchmarks/evidence/scalar-accounting-20261005",
+    "benchmarks/evidence/scalar-arithmetic-20261006",
+    "benchmarks/evidence/scalar-binding-20260929",
+    "benchmarks/evidence/scalar-bounded-20261006",
+    "benchmarks/evidence/scalar-contract-20260929",
+    "benchmarks/evidence/scalar-count-share-20261005",
+    "benchmarks/evidence/scalar-date-20261006",
+    "benchmarks/evidence/scalar-filter-20261006",
+    "benchmarks/evidence/scalar-fused-20260929",
+    "benchmarks/evidence/scalar-fusion-20261006",
+    "benchmarks/evidence/scalar-geo-20261005",
+    "benchmarks/evidence/scalar-grouped-20261005",
+    "benchmarks/evidence/scalar-lowering-20260929",
+    "benchmarks/evidence/scalar-membership-20261006",
+    "benchmarks/evidence/scalar-nullif-extrema-20261006",
+    "benchmarks/evidence/scalar-ownership-20260929",
+    "benchmarks/evidence/scalar-qualification-20261005",
+    "benchmarks/evidence/scalar-where-20261006",
+    "benchmarks/evidence/simple-case-20261006",
+    "benchmarks/evidence/spatial-integer-20260929",
+    "benchmarks/evidence/spatial-mask-publication-20260929",
+    "benchmarks/evidence/spatial-numeric-20260929",
+    "benchmarks/evidence/spatial-scalar-20260929",
+    "benchmarks/evidence/spatial-selected-exact-20261010",
+    "benchmarks/evidence/spatial-where-20261006",
+    "benchmarks/evidence/spatial-workspace-reuse-20261010",
+    "benchmarks/evidence/sql-live-20261012",
+    "benchmarks/evidence/tpch-full-20261010",
+    "benchmarks/evidence/uniform-budget-live-20261012",
+    "benchmarks/evidence/where-carrier-20261006",
+    "benchmarks/evidence/where-order-20261006",
+    "benchmarks/evidence/workspace-address-proof-20261010",
+    "benchmarks/evidence/workspace-base-proof-20261010",
+    "benchmarks/evidence/workspace-call-proof-20261010",
+    "benchmarks/evidence/workspace-input-proof-20261010"
+  ],
+  "source_auxiliary_paths": [
+    ".gitignore",
+    "TODO.md"
+  ],
+  "excluded_already_committed": [
+    "benchmarks/evidence/corpus-importer-20261012",
+    "benchmarks/evidence/workspace-control-proof-20261012"
+  ],
+  "excluded_unreferenced": [
+    "benchmarks/evidence/resident-join-rows-20261006"
+  ],
+  "withheld": [
+    {
+      "path": "benchmarks/evidence/resident-join-binding-20261009/initial-metal-abort.ips",
+      "sha256": "2969b7b33c1b1b8804b5f9f40b163112d4ed311b454a3204177383b9eb5695e0",
+      "reason": "Host/user/process identifying crash report; retained locally, ignored and unpublished."
+    }
+  ],
+  "historical_manifests": [
+    {
+      "directory": "benchmarks/evidence/batched-null-staging-20261010",
+      "manifest": "benchmarks/evidence/batched-null-staging-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 30,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/bigint-numeric-20260929",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/borrowed-dictionary-20261010",
+      "manifest": "benchmarks/evidence/borrowed-dictionary-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 16,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/catalog-compatibility-20260929",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/computed-integer-20260929",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/covers-20260929",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/dense-memory-accounting-20261010",
+      "manifest": "benchmarks/evidence/dense-memory-accounting-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 12,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/fused-integer-20260929",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/geometry-staging-20261006",
+      "manifest": "benchmarks/evidence/geometry-staging-20261006/SHA256SUMS",
+      "base": ".",
+      "entries": 112,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/global-integer-20260929",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/group-output-cursor-20261010",
+      "manifest": "benchmarks/evidence/group-output-cursor-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 11,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/hash-capacity-learning-20261010",
+      "manifest": "benchmarks/evidence/hash-capacity-learning-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 11,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/hash-count-binding-20261010",
+      "manifest": "benchmarks/evidence/hash-count-binding-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 11,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/hash-count-column-20261010",
+      "manifest": "benchmarks/evidence/hash-count-column-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 21,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/hash-count-live-tests-20261010",
+      "manifest": "benchmarks/evidence/hash-count-live-tests-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 18,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/hash-extrema-binding-20261010",
+      "manifest": "benchmarks/evidence/hash-extrema-binding-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 20,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/hash-filter-20261010",
+      "manifest": "benchmarks/evidence/hash-filter-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 28,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/hash-filter-binding-20261010",
+      "manifest": "benchmarks/evidence/hash-filter-binding-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 28,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/hash-filter-cache-20261010",
+      "manifest": "benchmarks/evidence/hash-filter-cache-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 19,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/hash-fused-cancel-20261010",
+      "manifest": "benchmarks/evidence/hash-fused-cancel-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 18,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/hash-int2-binding-20261010",
+      "manifest": "benchmarks/evidence/hash-int2-binding-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 12,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/hash-int4-avg-20261010",
+      "manifest": "benchmarks/evidence/hash-int4-avg-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 12,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/hash-int4-sum-20261010",
+      "manifest": "benchmarks/evidence/hash-int4-sum-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 19,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/hash-int4-sum-binding-20261010",
+      "manifest": "benchmarks/evidence/hash-int4-sum-binding-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 13,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/hash-live-20261012",
+      "manifest": "benchmarks/evidence/hash-live-20261012/SHA256SUMS",
+      "base": ".",
+      "entries": 30,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/hash-memory-accounting-20261010",
+      "manifest": "benchmarks/evidence/hash-memory-accounting-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 13,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/hash-narrow-keys-20261010",
+      "manifest": "benchmarks/evidence/hash-narrow-keys-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 20,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/hash-native-extrema-20261010",
+      "manifest": "benchmarks/evidence/hash-native-extrema-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 15,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/hash-preparation-cancel-20261010",
+      "manifest": "benchmarks/evidence/hash-preparation-cancel-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 17,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/hash-where-20261010",
+      "manifest": "benchmarks/evidence/hash-where-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 20,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/hash-where-binding-20261010",
+      "manifest": "benchmarks/evidence/hash-where-binding-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 12,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/integer-extrema-20260929",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/integer-filter-inputs-20260929",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/integer-where-20260929",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/join-scan-capture-20261010",
+      "manifest": "benchmarks/evidence/join-scan-capture-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 25,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/native-live-20261012",
+      "manifest": "benchmarks/evidence/native-live-20261012/SHA256SUMS",
+      "base": ".",
+      "entries": 44,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/null-predicates-20260929",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/null-safe-scalar-20261006",
+      "manifest": "benchmarks/evidence/null-safe-scalar-20261006/SHA256SUMS",
+      "base": ".",
+      "entries": 132,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/null-staging-one-growth-20261010",
+      "manifest": "benchmarks/evidence/null-staging-one-growth-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 48,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/null-staging-perf-20261010",
+      "manifest": "benchmarks/evidence/null-staging-perf-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 23,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/nullsafe-compatibility-20261006",
+      "manifest": "benchmarks/evidence/nullsafe-compatibility-20261006/SHA256SUMS",
+      "base": ".",
+      "entries": 32,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/numeric-20260929",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/numeric-20260929-pg18",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/numeric-20260929-pg18-final",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/numeric-count-20260929",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/numeric-filter-20260929",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/numeric-mixed-20260929",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/numeric-where-20260929",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/output-container-proof-20261010",
+      "manifest": "benchmarks/evidence/output-container-proof-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 9,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/pulled-up-reports-20261006",
+      "manifest": "benchmarks/evidence/pulled-up-reports-20261006/SHA256SUMS",
+      "base": ".",
+      "entries": 229,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/raster-launch-20261010",
+      "manifest": "benchmarks/evidence/raster-launch-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 19,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/raster-lookup-20261010",
+      "manifest": "benchmarks/evidence/raster-lookup-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 29,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/raw-bigint-hash-20261010",
+      "manifest": "benchmarks/evidence/raw-bigint-hash-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 15,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/resident-join-binding-20261009",
+      "manifest": "benchmarks/evidence/resident-join-binding-20261009/PUBLIC_SHA256SUMS",
+      "base": ".",
+      "entries": 40,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/resident-join-bounded-20261009",
+      "manifest": "benchmarks/evidence/resident-join-bounded-20261009/SHA256SUMS",
+      "base": ".",
+      "entries": 16,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/resident-join-bounded-project-20261009",
+      "manifest": "benchmarks/evidence/resident-join-bounded-project-20261009/SHA256SUMS",
+      "base": ".",
+      "entries": 17,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/resident-join-count-20261009",
+      "manifest": "benchmarks/evidence/resident-join-count-20261009/SHA256SUMS",
+      "base": ".",
+      "entries": 23,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/resident-join-interrupts-20261009",
+      "manifest": "benchmarks/evidence/resident-join-interrupts-20261009/SHA256SUMS",
+      "base": ".",
+      "entries": 16,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/resident-join-layout-20261010",
+      "manifest": "benchmarks/evidence/resident-join-layout-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 19,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/resident-join-metadata-build-20261010",
+      "manifest": "benchmarks/evidence/resident-join-metadata-build-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 24,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/resident-join-metadata-link-20261010",
+      "manifest": "benchmarks/evidence/resident-join-metadata-link-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 22,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/resident-join-metadata-proof-20261010",
+      "manifest": "benchmarks/evidence/resident-join-metadata-proof-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 21,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/resident-join-pipeline-20261006",
+      "manifest": "benchmarks/evidence/resident-join-pipeline-20261006/SHA256SUMS",
+      "base": ".",
+      "entries": 39,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/resident-join-prune-20261009",
+      "manifest": "benchmarks/evidence/resident-join-prune-20261009/SHA256SUMS",
+      "base": ".",
+      "entries": 18,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/resident-join-reduce-20261009",
+      "manifest": "benchmarks/evidence/resident-join-reduce-20261009/SHA256SUMS",
+      "base": ".",
+      "entries": 19,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/resident-join-where-20261009",
+      "manifest": "benchmarks/evidence/resident-join-where-20261009/SHA256SUMS",
+      "base": ".",
+      "entries": 14,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/scalar-accounting-20261005",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/scalar-arithmetic-20261006",
+      "manifest": "benchmarks/evidence/scalar-arithmetic-20261006/SHA256SUMS",
+      "base": "benchmarks/evidence/scalar-arithmetic-20261006",
+      "entries": 1,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/scalar-binding-20260929",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/scalar-bounded-20261006",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/scalar-contract-20260929",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/scalar-count-share-20261005",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/scalar-date-20261006",
+      "manifest": "benchmarks/evidence/scalar-date-20261006/SHA256SUMS",
+      "base": ".",
+      "entries": 1,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/scalar-filter-20261006",
+      "manifest": "benchmarks/evidence/scalar-filter-20261006/SHA256SUMS",
+      "base": "benchmarks/evidence/scalar-filter-20261006",
+      "entries": 1,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/scalar-fused-20260929",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/scalar-fusion-20261006",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/scalar-geo-20261005",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/scalar-grouped-20261005",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/scalar-lowering-20260929",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/scalar-membership-20261006",
+      "manifest": "benchmarks/evidence/scalar-membership-20261006/SHA256SUMS",
+      "base": "benchmarks/evidence/scalar-membership-20261006",
+      "entries": 3,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/scalar-nullif-extrema-20261006",
+      "manifest": "benchmarks/evidence/scalar-nullif-extrema-20261006/SHA256SUMS",
+      "base": ".",
+      "entries": 140,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/scalar-ownership-20260929",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/scalar-qualification-20261005",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/scalar-where-20261006",
+      "manifest": "benchmarks/evidence/scalar-where-20261006/SHA256SUMS",
+      "base": ".",
+      "entries": 115,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/simple-case-20261006",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/spatial-integer-20260929",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/spatial-mask-publication-20260929",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/spatial-numeric-20260929",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/spatial-scalar-20260929",
+      "manifest": null,
+      "base": null
+    },
+    {
+      "directory": "benchmarks/evidence/spatial-selected-exact-20261010",
+      "manifest": "benchmarks/evidence/spatial-selected-exact-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 26,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/spatial-where-20261006",
+      "manifest": "benchmarks/evidence/spatial-where-20261006/SHA256SUMS",
+      "base": ".",
+      "entries": 93,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/spatial-workspace-reuse-20261010",
+      "manifest": "benchmarks/evidence/spatial-workspace-reuse-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 22,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/sql-live-20261012",
+      "manifest": "benchmarks/evidence/sql-live-20261012/SHA256SUMS",
+      "base": "benchmarks/evidence/sql-live-20261012",
+      "entries": 383,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/tpch-full-20261010",
+      "manifest": "benchmarks/evidence/tpch-full-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 19,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/uniform-budget-live-20261012",
+      "manifest": "benchmarks/evidence/uniform-budget-live-20261012/SHA256SUMS",
+      "base": "benchmarks/evidence/uniform-budget-live-20261012",
+      "entries": 12,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/where-carrier-20261006",
+      "manifest": "benchmarks/evidence/where-carrier-20261006/SHA256SUMS",
+      "base": ".",
+      "entries": 75,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/where-order-20261006",
+      "manifest": "benchmarks/evidence/where-order-20261006/SHA256SUMS",
+      "base": ".",
+      "entries": 29,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/workspace-address-proof-20261010",
+      "manifest": "benchmarks/evidence/workspace-address-proof-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 11,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/workspace-base-proof-20261010",
+      "manifest": "benchmarks/evidence/workspace-base-proof-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 13,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/workspace-call-proof-20261010",
+      "manifest": "benchmarks/evidence/workspace-call-proof-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 13,
+      "unresolved": []
+    },
+    {
+      "directory": "benchmarks/evidence/workspace-input-proof-20261010",
+      "manifest": "benchmarks/evidence/workspace-input-proof-20261010/SHA256SUMS",
+      "base": ".",
+      "entries": 21,
+      "unresolved": []
+    }
+  ],
+  "manifest_policy": "base is the required verification working directory; null means no top-level SHA256SUMS, not missing payload. This inventory does not retroactively seal or requalify historical results. Binding bundle uses PUBLIC_SHA256SUMS; preserve original manifest unmodified."
+}

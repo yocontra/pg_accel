@@ -1,0 +1,16 @@
+test_release_disables_rust_postlink_stripping (scripts.tests.test_release_profile.ReleaseProfileTests.test_release_disables_rust_postlink_stripping) ... FAIL
+test_release_preserves_inherited_optimization_settings (scripts.tests.test_release_profile.ReleaseProfileTests.test_release_preserves_inherited_optimization_settings) ... ok
+
+======================================================================
+FAIL: test_release_disables_rust_postlink_stripping (scripts.tests.test_release_profile.ReleaseProfileTests.test_release_disables_rust_postlink_stripping)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_release_profile.py", line 16, in test_release_disables_rust_postlink_stripping
+    self.assertEqual(release.get("strip"), "none")
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None != 'none'
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.001s
+
+FAILED (failures=1)

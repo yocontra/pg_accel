@@ -1,0 +1,19 @@
+=== 137_pulled_up_reports ===
+SET
+SET
+SELECT 1000017
+ANALYZE
+CREATE VIEW
+CREATE VIEW
+CREATE VIEW
+CREATE FUNCTION
+psql:sql/tests/137_pulled_up_reports.sql:83: NOTICE:  137 pulled-up reports selected 28 of 28 shapes
+DO
+PGACCEL_ASSERT_OK:137_pulled_up_reports.assert_001
+DO
+PGACCEL_ASSERT_OK:137_pulled_up_reports.assert_002
+SET
+PREPARE
+psql:sql/tests/137_pulled_up_reports.sql:119: NOTICE:  137 failed query=EXECUTE _pullup_prepared reason=setop_no_gpu_kernel plan=HashAggregate (actual rows=5.00 loops=1)  Group Key: _pullup.g  Batches: 1  Memory Usage: 32kB  Buffers: local read=10048 written=1  I/O Timings: local read=7.929 write=0.010  ->  Seq Scan on _pullup (actual rows=1000017.00 loops=1)        Buffers: local read=10048 written=1        I/O Timings: local read=7.929 write=0.010Planning Time: 0.003 msExecution Time: 137.194 ms
+psql:sql/tests/137_pulled_up_reports.sql:119: ERROR:  137 report prepared lifecycle failed phase=0
+CONTEXT:  PL/pgSQL function inline_code_block line 14 at RAISE

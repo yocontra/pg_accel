@@ -1,0 +1,133 @@
+=== 119_global_integer_aggregates ===
+SET
+SET
+SELECT 1000017
+ANALYZE
+DO
+PGACCEL_ASSERT_OK:119_global_integer_aggregates.assert_001
+SET
+PREPARE
+DO
+PGACCEL_ASSERT_OK:119_global_integer_aggregates.assert_002
+DEALLOCATE
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ f
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:119_global_integer_aggregates
+=== 107_optional_integer_aggregates ===
+SET
+SET
+CREATE TABLE
+INSERT 0 500000
+ANALYZE
+DO
+PGACCEL_ASSERT_OK:107_optional_integer_aggregates.assert_001
+SET
+PREPARE
+DO
+PGACCEL_ASSERT_OK:107_optional_integer_aggregates.assert_002
+TRUNCATE TABLE
+DO
+PGACCEL_ASSERT_OK:107_optional_integer_aggregates.assert_003
+DEALLOCATE
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ f
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:107_optional_integer_aggregates
+=== 111_independent_aggregate_filters ===
+SET
+SET
+SELECT 300000
+ANALYZE
+DO
+PGACCEL_ASSERT_OK:111_independent_aggregate_filters.assert_001
+DO
+PGACCEL_ASSERT_OK:111_independent_aggregate_filters.assert_003
+SET
+PREPARE
+DO
+PGACCEL_ASSERT_OK:111_independent_aggregate_filters.assert_002
+DEALLOCATE
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ f
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:111_independent_aggregate_filters
+=== 115_filtered_integer_counts ===
+SET
+SET
+SELECT 300000
+ANALYZE
+DO
+PGACCEL_ASSERT_OK:115_filtered_integer_counts.assert_001
+SET
+PREPARE
+DO
+PGACCEL_ASSERT_OK:115_filtered_integer_counts.assert_002
+DEALLOCATE
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ f
+(1 row)
+
+DROP TABLE
+SELECT 1000017
+ANALYZE
+DO
+PGACCEL_ASSERT_OK:115_filtered_integer_counts.assert_003
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ t
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:115_filtered_integer_counts

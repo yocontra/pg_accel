@@ -1,0 +1,10 @@
+PGACCEL_TEST_START name=test_hash_join
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+=== pgaccel resident hash join tests ===
+
+PASS=4 FAIL=0
+=== pgaccel resident hash join tests ===
+
+PASS=63 FAIL=0
+PGACCEL_TEST_RESULT name=test_hash_join exit_code=0 result=PASS raw_lines=8 body_sha256=9091ee4e506d0e2ff2d81740ed1c6b062857995a59d1d674662c6ae8cf2b86cd binding_sha256=3d46f749e2632bc6bd1e3161af9eafbb57308a0a3e5ae33f2b4925d97f2bbd4b

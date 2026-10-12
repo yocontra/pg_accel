@@ -25,6 +25,9 @@ use crate::engine::stats;
 mod dsm;
 mod explain;
 mod private_data;
+pub(in crate::engine::ffi) use private_data::{
+    AGG_OUTPUT_PROJECTION_SENTINEL, AGG_QUERY_SPEC_SENTINEL,
+};
 
 use explain::{explain_custom_scan, resolve_thread_count};
 #[cfg(feature = "pg_test")]
@@ -617,7 +620,7 @@ unsafe fn seal_custom_scan_private(
 
 /// Convert a strict childless descriptor aggregate path into a `CustomScan`.
 ///
-/// The AQS3/AOP2 contract is copied into framed plan-private data. No child
+/// The AQS6/AOP2 contract is copied into framed plan-private data. No child
 /// plan or retired aggregate metadata is accepted.
 ///
 /// # Safety
@@ -625,7 +628,7 @@ unsafe fn seal_custom_scan_private(
 /// Called by the PostgreSQL planner on the main backend thread.
 #[pgrx::pg_guard]
 unsafe extern "C-unwind" fn plan_custom_path_agg(
-    _root: *mut pg_sys::PlannerInfo,
+    root: *mut pg_sys::PlannerInfo,
     _rel: *mut pg_sys::RelOptInfo,
     best_path: *mut pg_sys::CustomPath,
     tlist: *mut pg_sys::List,
@@ -646,20 +649,38 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
         let path_priv = (*best_path).custom_private;
         let (spec, projection) =
             deserialize_agg_query_path_contract(path_priv).unwrap_or_else(|error| {
-                pgrx::error!("pg_accel: malformed aggregate AQS3/AOP2 path contract: {error}")
+                pgrx::error!("pg_accel: malformed aggregate AQS6/AOP2 path contract: {error}")
             });
         if !custom_plans.is_null() && pg_sys::list_length(custom_plans) != 0 {
             pgrx::error!("pg_accel: descriptor aggregate path unexpectedly has child plans");
         }
 
-        // The descriptor executor materializes the complete output itself.
-        // Preserve the planner's ordered expressions on both target lists so
-        // the wire projection binds to the concrete tuple descriptor.
-        // SAFETY: copyObjectImpl deep-copies the list in CurrentMemoryContext.
-        (*cscan).custom_scan_tlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
+        if root.is_null() || (*root).parse.is_null() {
+            pgrx::error!("pg_accel: aggregate path has no planner query");
+        }
+        // Reconstruct the same deterministic internal layout used for shape
+        // extraction. It can include hidden HAVING aggregates and junk keys;
+        // PostgreSQL's result projection consumes only the requested columns.
+        (*cscan).custom_scan_tlist =
+            super::planner_hooks::shape::aggregate_scan_target_list(&*(*root).parse)
+                .unwrap_or_else(|error| {
+                    pgrx::error!("pg_accel: invalid internal projection: {error:?}")
+                });
         (*cscan).scan.plan.targetlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
 
         (*cscan).scan.plan.qual = pg_sys::extract_actual_clauses(clauses, false);
+        // Upper-relation CustomPaths do not receive HAVING in scan clauses.
+        // Preserve it as an ordinary PostgreSQL qual: setrefs rewrites its
+        // projected Aggrefs/keys to INDEX_VAR against custom_scan_tlist.
+        if !root.is_null() && !(*root).parse.is_null() {
+            let having = (*(*root).parse).havingQual;
+            if !having.is_null() {
+                (*cscan).scan.plan.qual = pg_sys::list_concat(
+                    (*cscan).scan.plan.qual,
+                    pg_sys::copyObjectImpl(having.cast()).cast(),
+                );
+            }
+        }
         (*cscan).scan.plan.startup_cost = (*best_path).path.startup_cost;
         (*cscan).scan.plan.total_cost = (*best_path).path.total_cost;
         (*cscan).scan.plan.plan_rows = (*best_path).path.rows;
@@ -668,7 +689,7 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
         (*cscan).scan.scanrelid = 0;
         (*cscan).methods = &raw const AGG_SCAN_METHODS.0;
 
-        // Serialize the common header followed immediately by AQS3/AOP2.
+        // Serialize the common header followed immediately by AQS6/AOP2.
         let batch_size = gucs::min_batch_size();
         let expected_threads = resolve_thread_count();
 
@@ -814,13 +835,10 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     }
 
     if let Some(projection) = &private.agg_output_projection {
-        // SAFETY: ExecInitCustomScan initialized both slots.
-        let slots = unsafe {
-            [
-                ("scan", (*node).ss.ss_ScanTupleSlot),
-                ("result", (*node).ss.ps.ps_ResultTupleSlot),
-            ]
-        };
+        // Only the internal scan slot has the device projection layout. The
+        // result slot is PostgreSQL's independently validated SQL projection.
+        // SAFETY: ExecInitCustomScan initialized the scan slot.
+        let slots = unsafe { [("scan", (*node).ss.ss_ScanTupleSlot)] };
         for (name, slot) in slots {
             if slot.is_null() {
                 pgrx::error!("pg_accel: aggregate output projection has no {name} tuple slot");
@@ -867,7 +885,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 .agg_query_spec
                 .zip(private.agg_output_projection)
                 .unwrap_or_else(|| {
-                    pgrx::error!("pg_accel: aggregate plan is missing its AQS3/AOP2 contract")
+                    pgrx::error!("pg_accel: aggregate plan is missing its AQS6/AOP2 contract")
                 });
             let explain_only = (eflags as u32 & pg_sys::EXEC_FLAG_EXPLAIN_ONLY) != 0;
             let exec = AggExecState::new_descriptor_unprepared(spec, projection, explain_only)
@@ -950,28 +968,17 @@ unsafe extern "C-unwind" fn exec_custom_scan(
     pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
         // SAFETY: strategy and executor were installed together in Begin.
         unsafe {
-            let strategy = GpuStrategy::decode((*state).accel.strategy);
-            let dyn_state: &mut dyn crate::engine::executor::ExecutorState = match strategy {
-                GpuStrategy::Agg => &mut *executor.cast::<AggExecState>(),
-                GpuStrategy::Raster => &mut *executor.cast::<RasterExecState>(),
-                _ => {
-                    pgrx::error!(
-                        "pg_accel: retired {strategy:?} strategy reached resident executor"
-                    )
-                }
-            };
-            let slot = dyn_state.exec(node);
-            (*state).accel.rows_dispatched = dyn_state.rows_dispatched();
-            (*state).accel.batches_executed = dyn_state.batches_executed();
-            (*state).accel.dispatch_time_us = dyn_state.dispatch_time_us();
-            dsm::record_parallel_agg_counters_once(
-                state,
-                strategy,
-                dyn_state.rows_dispatched(),
-                dyn_state.batches_executed(),
-                dyn_state.dispatch_time_us(),
-            );
-            slot
+            if (*node).ss.ps.qual.is_null() && (*node).ss.ps.ps_ProjInfo.is_null() {
+                fetch_resident_scan_tuple(node.cast())
+            } else {
+                // ExecScan owns per-tuple memory reset, SQL NULL/Boolean
+                // semantics, projection and rows-removed instrumentation.
+                pg_sys::ExecScan(
+                    &raw mut (*node).ss,
+                    Some(fetch_resident_scan_tuple),
+                    Some(recheck_resident_scan_tuple),
+                )
+            }
         }
     }))
     .catch_others(|caught| {
@@ -982,6 +989,46 @@ unsafe extern "C-unwind" fn exec_custom_scan(
         caught.rethrow()
     })
     .execute()
+}
+
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn fetch_resident_scan_tuple(
+    scan: *mut pg_sys::ScanState,
+) -> *mut pg_sys::TupleTableSlot {
+    let node = scan.cast::<pg_sys::CustomScanState>();
+    let state = scan.cast::<GpuAccelScanState>();
+    // SAFETY: ScanState is the first field of CustomScanState, which is the
+    // first field of our allocation. Begin installed the matching executor.
+    unsafe {
+        let executor = (*state).accel.executor;
+        let strategy = GpuStrategy::decode((*state).accel.strategy);
+        let dyn_state: &mut dyn crate::engine::executor::ExecutorState = match strategy {
+            GpuStrategy::Agg => &mut *executor.cast::<AggExecState>(),
+            GpuStrategy::Raster => &mut *executor.cast::<RasterExecState>(),
+            _ => pgrx::error!("pg_accel: retired {strategy:?} strategy reached resident executor"),
+        };
+        let slot = dyn_state.exec(node);
+        (*state).accel.rows_dispatched = dyn_state.rows_dispatched();
+        (*state).accel.batches_executed = dyn_state.batches_executed();
+        (*state).accel.dispatch_time_us = dyn_state.dispatch_time_us();
+        dsm::record_parallel_agg_counters_once(
+            state,
+            strategy,
+            dyn_state.rows_dispatched(),
+            dyn_state.batches_executed(),
+            dyn_state.dispatch_time_us(),
+        );
+        slot
+    }
+}
+
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn recheck_resident_scan_tuple(
+    _scan: *mut pg_sys::ScanState,
+    _slot: *mut pg_sys::TupleTableSlot,
+) -> bool {
+    // Row-marked/modifying queries are rejected during shape extraction.
+    pgrx::error!("pg_accel: resident aggregate cannot perform EvalPlanQual rechecks");
 }
 
 /// Release one concrete resident executor.

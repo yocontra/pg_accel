@@ -1,0 +1,177 @@
+=== pg_accel benchmark plans - captured once per workload/scale ===
+
+=== numeric_grouped_filtered @ rows=250000 ===
+Finalize GroupAggregate  (cost=2908.32..2909.63 rows=5 width=84) (actual time=11.011..13.508 rows=6.00 loops=1)
+  Output: g, count(*), sum(v) FILTER (WHERE (h = ANY ('{1,3,5}'::integer[]))), avg(w) FILTER (WHERE (k = 1)), count(w) FILTER (WHERE (k = 1))
+  Group Key: bench_numeric_rollup.g
+  Buffers: shared hit=1845
+  ->  Gather Merge  (cost=2908.32..2908.94 rows=35 width=84) (actual time=10.986..13.451 rows=48.00 loops=1)
+        Output: g, (PARTIAL count(*)), (PARTIAL sum(v) FILTER (WHERE (h = ANY ('{1,3,5}'::integer[])))), (PARTIAL avg(w) FILTER (WHERE (k = 1))), (PARTIAL count(w) FILTER (WHERE (k = 1)))
+        Workers Planned: 7
+        Workers Launched: 7
+        Buffers: shared hit=1845
+        ->  Sort  (cost=2908.20..2908.21 rows=5 width=84) (actual time=7.388..7.388 rows=6.00 loops=8)
+              Output: g, (PARTIAL count(*)), (PARTIAL sum(v) FILTER (WHERE (h = ANY ('{1,3,5}'::integer[])))), (PARTIAL avg(w) FILTER (WHERE (k = 1))), (PARTIAL count(w) FILTER (WHERE (k = 1)))
+              Sort Key: bench_numeric_rollup.g
+              Sort Method: quicksort  Memory: 26kB
+              Buffers: shared hit=1845
+              Worker 0:  actual time=5.774..5.775 rows=6.00 loops=1
+                Sort Method: quicksort  Memory: 26kB
+                Buffers: shared hit=206
+              Worker 1:  actual time=6.373..6.373 rows=6.00 loops=1
+                Sort Method: quicksort  Memory: 26kB
+                Buffers: shared hit=225
+              Worker 2:  actual time=6.697..6.698 rows=6.00 loops=1
+                Sort Method: quicksort  Memory: 26kB
+                Buffers: shared hit=231
+              Worker 3:  actual time=6.669..6.669 rows=6.00 loops=1
+                Sort Method: quicksort  Memory: 26kB
+                Buffers: shared hit=187
+              Worker 4:  actual time=7.271..7.271 rows=6.00 loops=1
+                Sort Method: quicksort  Memory: 26kB
+                Buffers: shared hit=217
+              Worker 5:  actual time=7.773..7.773 rows=6.00 loops=1
+                Sort Method: quicksort  Memory: 26kB
+                Buffers: shared hit=263
+              Worker 6:  actual time=7.825..7.825 rows=6.00 loops=1
+                Sort Method: quicksort  Memory: 26kB
+                Buffers: shared hit=265
+              ->  Partial HashAggregate  (cost=2908.07..2908.14 rows=5 width=84) (actual time=7.368..7.371 rows=6.00 loops=8)
+                    Output: g, PARTIAL count(*), PARTIAL sum(v) FILTER (WHERE (h = ANY ('{1,3,5}'::integer[]))), PARTIAL avg(w) FILTER (WHERE (k = 1)), PARTIAL count(w) FILTER (WHERE (k = 1))
+                    Group Key: bench_numeric_rollup.g
+                    Batches: 1  Memory Usage: 32kB
+                    Buffers: shared hit=1792
+                    Worker 0:  actual time=5.752..5.758 rows=6.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=195
+                    Worker 1:  actual time=6.356..6.359 rows=6.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=218
+                    Worker 2:  actual time=6.673..6.679 rows=6.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=224
+                    Worker 3:  actual time=6.632..6.635 rows=6.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=180
+                    Worker 4:  actual time=7.255..7.258 rows=6.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=210
+                    Worker 5:  actual time=7.754..7.757 rows=6.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=256
+                    Worker 6:  actual time=7.808..7.810 rows=6.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=258
+                    ->  Parallel Seq Scan on public.bench_numeric_rollup  (cost=0.00..2149.14 rows=35714 width=28) (actual time=0.006..1.528 rows=31250.00 loops=8)
+                          Output: g, h, k, v, w
+                          Buffers: shared hit=1792
+                          Worker 0:  actual time=0.005..1.229 rows=27895.00 loops=1
+                            Buffers: shared hit=195
+                          Worker 1:  actual time=0.005..1.335 rows=30614.00 loops=1
+                            Buffers: shared hit=218
+                          Worker 2:  actual time=0.005..1.475 rows=31906.00 loops=1
+                            Buffers: shared hit=224
+                          Worker 3:  actual time=0.012..1.803 rows=25606.00 loops=1
+                            Buffers: shared hit=180
+                          Worker 4:  actual time=0.006..1.528 rows=29903.00 loops=1
+                            Buffers: shared hit=210
+                          Worker 5:  actual time=0.005..1.686 rows=36490.00 loops=1
+                            Buffers: shared hit=256
+                          Worker 6:  actual time=0.006..1.589 rows=36681.00 loops=1
+                            Buffers: shared hit=258
+Planning:
+  Buffers: shared hit=225
+Planning Time: 0.579 ms
+Execution Time: 13.542 ms
+
+=== numeric_grouped_filtered @ rows=1000000 ===
+Finalize GroupAggregate  (cost=10946.53..10948.05 rows=5 width=84) (actual time=27.987..30.214 rows=6.00 loops=1)
+  Output: g, count(*), sum(v) FILTER (WHERE (h = ANY ('{1,3,5}'::integer[]))), avg(w) FILTER (WHERE (k = 1)), count(w) FILTER (WHERE (k = 1))
+  Group Key: bench_numeric_rollup.g
+  Buffers: shared hit=7096
+  ->  Gather Merge  (cost=10946.53..10947.27 rows=40 width=84) (actual time=27.968..30.175 rows=54.00 loops=1)
+        Output: g, (PARTIAL count(*)), (PARTIAL sum(v) FILTER (WHERE (h = ANY ('{1,3,5}'::integer[])))), (PARTIAL avg(w) FILTER (WHERE (k = 1))), (PARTIAL count(w) FILTER (WHERE (k = 1)))
+        Workers Planned: 8
+        Workers Launched: 8
+        Buffers: shared hit=7096
+        ->  Sort  (cost=10946.38..10946.40 rows=5 width=84) (actual time=24.109..24.109 rows=6.00 loops=9)
+              Output: g, (PARTIAL count(*)), (PARTIAL sum(v) FILTER (WHERE (h = ANY ('{1,3,5}'::integer[])))), (PARTIAL avg(w) FILTER (WHERE (k = 1))), (PARTIAL count(w) FILTER (WHERE (k = 1)))
+              Sort Key: bench_numeric_rollup.g
+              Sort Method: quicksort  Memory: 26kB
+              Buffers: shared hit=7096
+              Worker 0:  actual time=21.884..21.885 rows=6.00 loops=1
+                Sort Method: quicksort  Memory: 26kB
+                Buffers: shared hit=735
+              Worker 1:  actual time=22.950..22.950 rows=6.00 loops=1
+                Sort Method: quicksort  Memory: 26kB
+                Buffers: shared hit=792
+              Worker 2:  actual time=23.525..23.525 rows=6.00 loops=1
+                Sort Method: quicksort  Memory: 26kB
+                Buffers: shared hit=693
+              Worker 3:  actual time=23.777..23.777 rows=6.00 loops=1
+                Sort Method: quicksort  Memory: 26kB
+                Buffers: shared hit=807
+              Worker 4:  actual time=24.107..24.108 rows=6.00 loops=1
+                Sort Method: quicksort  Memory: 26kB
+                Buffers: shared hit=714
+              Worker 5:  actual time=24.379..24.379 rows=6.00 loops=1
+                Sort Method: quicksort  Memory: 26kB
+                Buffers: shared hit=801
+              Worker 6:  actual time=24.611..24.612 rows=6.00 loops=1
+                Sort Method: quicksort  Memory: 26kB
+                Buffers: shared hit=856
+              Worker 7:  actual time=24.058..24.058 rows=6.00 loops=1
+                Sort Method: quicksort  Memory: 26kB
+                Buffers: shared hit=711
+              ->  Partial HashAggregate  (cost=10946.25..10946.32 rows=5 width=84) (actual time=24.090..24.093 rows=6.00 loops=9)
+                    Output: g, PARTIAL count(*), PARTIAL sum(v) FILTER (WHERE (h = ANY ('{1,3,5}'::integer[]))), PARTIAL avg(w) FILTER (WHERE (k = 1)), PARTIAL count(w) FILTER (WHERE (k = 1))
+                    Group Key: bench_numeric_rollup.g
+                    Batches: 1  Memory Usage: 32kB
+                    Buffers: shared hit=7040
+                    Worker 0:  actual time=21.859..21.865 rows=6.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=728
+                    Worker 1:  actual time=22.934..22.937 rows=6.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=785
+                    Worker 2:  actual time=23.509..23.511 rows=6.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=686
+                    Worker 3:  actual time=23.761..23.763 rows=6.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=800
+                    Worker 4:  actual time=24.090..24.092 rows=6.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=707
+                    Worker 5:  actual time=24.361..24.363 rows=6.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=794
+                    Worker 6:  actual time=24.593..24.595 rows=6.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=849
+                    Worker 7:  actual time=24.020..24.022 rows=6.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=704
+                    ->  Parallel Seq Scan on public.bench_numeric_rollup  (cost=0.00..8290.00 rows=125000 width=28) (actual time=0.012..4.633 rows=111111.11 loops=9)
+                          Output: g, h, k, v, w
+                          Buffers: shared hit=7040
+                          Worker 0:  actual time=0.011..4.434 rows=103997.00 loops=1
+                            Buffers: shared hit=728
+                          Worker 1:  actual time=0.009..4.395 rows=112152.00 loops=1
+                            Buffers: shared hit=785
+                          Worker 2:  actual time=0.009..4.833 rows=96144.00 loops=1
+                            Buffers: shared hit=686
+                          Worker 3:  actual time=0.010..4.772 rows=113739.00 loops=1
+                            Buffers: shared hit=800
+                          Worker 4:  actual time=0.019..4.777 rows=101008.00 loops=1
+                            Buffers: shared hit=707
+                          Worker 5:  actual time=0.011..4.573 rows=112600.00 loops=1
+                            Buffers: shared hit=794
+                          Worker 6:  actual time=0.011..4.748 rows=120317.00 loops=1
+                            Buffers: shared hit=849
+                          Worker 7:  actual time=0.021..4.854 rows=99852.00 loops=1
+                            Buffers: shared hit=704
+Planning:
+  Buffers: shared hit=226
+Planning Time: 0.534 ms
+Execution Time: 30.252 ms

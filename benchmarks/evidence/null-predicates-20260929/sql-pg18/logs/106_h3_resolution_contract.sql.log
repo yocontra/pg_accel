@@ -1,0 +1,36 @@
+=== 106_h3_resolution_contract ===
+SET
+SET
+CREATE TABLE
+INSERT 0 500000
+ANALYZE
+DO
+PGACCEL_ASSERT_OK:106_h3_resolution_contract.assert_001
+SET
+SELECT 17
+SET
+SELECT 17
+DO
+DROP TABLE
+PGACCEL_ASSERT_OK:106_h3_resolution_contract.assert_002
+SET
+PREPARE
+DO
+DEALLOCATE
+RESET
+PGACCEL_ASSERT_OK:106_h3_resolution_contract.assert_003
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ t
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:106_h3_resolution_contract

@@ -1,11 +1,14 @@
 //! Strict PostGIS geometry staging and device-resident ownership.
 
-use crate::gpu::ExprDeviceBuffer;
+use crate::gpu::{
+    ExprDeviceBuffer, PGACCEL_RESIDENT_GEOMETRY_EDGE_BLOCK_PAIRS,
+    resident_geometry_edge_index_boxes,
+};
 
 use super::domain::{
-    RESIDENT_GEOMETRY_BBOX_VALID, RESIDENT_GEOMETRY_LINESTRING, RESIDENT_GEOMETRY_POINT,
-    RESIDENT_GEOMETRY_POLYGON, ResidentByteAccounting, ResidentGeometryData, ResidentGeometryRow,
-    RetainedExactValues,
+    RESIDENT_GEOMETRY_BBOX_VALID, RESIDENT_GEOMETRY_LINESTRING, RESIDENT_GEOMETRY_MULTIPOLYGON,
+    RESIDENT_GEOMETRY_POINT, RESIDENT_GEOMETRY_POLYGON, RESIDENT_GEOMETRY_RING_COMPONENT_START,
+    ResidentByteAccounting, ResidentGeometryData, ResidentGeometryRow, RetainedExactValues,
 };
 
 const GSERIALIZED_HEADER_BYTES: usize = 8;
@@ -22,8 +25,27 @@ const GSERIALIZED_SUPPORTED_FLAGS: u8 = GSERIALIZED_FLAG_BBOX | GSERIALIZED_FLAG
 struct ParsedGeometry {
     geom_type: u32,
     srid: i32,
-    coordinates: Vec<f64>,
-    ring_offsets: Vec<usize>,
+    coordinates: ParsedCoordinates,
+    ring_offsets: Vec<u64>,
+}
+
+/// Keep ordinary points on the stack while larger geometries retain their
+/// checked heap allocation. Neither variant borrows the table slot.
+#[derive(Debug)]
+enum ParsedCoordinates {
+    Point([f64; 2]),
+    Heap(Vec<f64>),
+}
+
+impl std::ops::Deref for ParsedCoordinates {
+    type Target = [f64];
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Point(point) => point,
+            Self::Heap(values) => values,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,7 +100,7 @@ fn read_coordinate_pairs(
     bytes: &[u8],
     offset: usize,
     pair_count: usize,
-) -> Result<(Vec<f64>, usize), String> {
+) -> Result<(ParsedCoordinates, usize), String> {
     let scalar_count = pair_count
         .checked_mul(2)
         .ok_or_else(|| "geometry coordinate count overflow".to_owned())?;
@@ -91,11 +113,7 @@ fn read_coordinate_pairs(
     let raw = bytes
         .get(offset..end)
         .ok_or_else(|| "geometry coordinate payload is truncated".to_owned())?;
-    let mut coordinates = Vec::new();
-    coordinates
-        .try_reserve_exact(scalar_count)
-        .map_err(|error| format!("geometry coordinate allocation failed: {error}"))?;
-    for scalar in raw.chunks_exact(std::mem::size_of::<f64>()) {
+    let decode = |scalar: &[u8]| -> Result<f64, String> {
         let value = f64::from_le_bytes(
             scalar
                 .try_into()
@@ -104,9 +122,22 @@ fn read_coordinate_pairs(
         if !value.is_finite() {
             return Err("geometry contains a non-finite coordinate".to_owned());
         }
-        coordinates.push(value);
+        Ok(value)
+    };
+    if pair_count == 1 {
+        return Ok((
+            ParsedCoordinates::Point([decode(&raw[..8])?, decode(&raw[8..])?]),
+            end,
+        ));
     }
-    Ok((coordinates, end))
+    let mut coordinates = Vec::new();
+    coordinates
+        .try_reserve_exact(scalar_count)
+        .map_err(|error| format!("geometry coordinate allocation failed: {error}"))?;
+    for scalar in raw.chunks_exact(std::mem::size_of::<f64>()) {
+        coordinates.push(decode(scalar)?);
+    }
+    Ok((ParsedCoordinates::Heap(coordinates), end))
 }
 
 fn decode_srid(bytes: &[u8]) -> Result<i32, String> {
@@ -160,6 +191,25 @@ fn parse_gserialized(bytes: &[u8], max_exact_value_bytes: usize) -> Result<Parse
             0
         })
         .ok_or_else(|| "geometry header byte count overflow".to_owned())?;
+    let (parsed, end) = parse_geometry_body(bytes, geometry_start, srid, true)?;
+    if end != bytes.len() {
+        return Err(format!(
+            "geometry has {} trailing bytes after its canonical 2D payload",
+            bytes.len() - end
+        ));
+    }
+    Ok(parsed)
+}
+
+// GSERIALIZED collection bodies contain a type/count followed by child
+// geometry bodies, without child headers/SRIDs/bboxes. Only Polygon children
+// are admitted here: no recursive collection traversal or depth ambiguity.
+fn parse_geometry_body(
+    bytes: &[u8],
+    geometry_start: usize,
+    srid: i32,
+    allow_multi: bool,
+) -> Result<(ParsedGeometry, usize), String> {
     let geom_type = read_u32(bytes, geometry_start, "geometry type")?;
     let count_offset = geometry_start
         .checked_add(std::mem::size_of::<u32>())
@@ -196,6 +246,9 @@ fn parse_gserialized(bytes: &[u8], max_exact_value_bytes: usize) -> Result<Parse
             let ring_counts_offset = count_offset
                 .checked_add(std::mem::size_of::<u32>())
                 .ok_or_else(|| "polygon ring-count offset overflow".to_owned())?;
+            if ring_count > bytes.len().saturating_sub(ring_counts_offset) / 4 {
+                return Err("polygon ring counts exceed the serialized payload".to_owned());
+            }
             let mut point_counts = Vec::new();
             point_counts
                 .try_reserve_exact(ring_count)
@@ -238,7 +291,10 @@ fn parse_gserialized(bytes: &[u8], max_exact_value_bytes: usize) -> Result<Parse
                 .map_err(|error| format!("polygon ring-offset allocation failed: {error}"))?;
             let mut start = 0_usize;
             for (ring, point_count) in point_counts.into_iter().enumerate() {
-                ring_offsets.push(start);
+                ring_offsets.push(
+                    u64::try_from(start)
+                        .map_err(|_| "polygon ring offset exceeds u64".to_owned())?,
+                );
                 let ring_end = start
                     .checked_add(point_count)
                     .ok_or_else(|| "polygon ring end overflow".to_owned())?;
@@ -259,24 +315,64 @@ fn parse_gserialized(bytes: &[u8], max_exact_value_bytes: usize) -> Result<Parse
             }
             (coordinates, ring_offsets, end)
         }
+        RESIDENT_GEOMETRY_MULTIPOLYGON if allow_multi => {
+            let count = usize::try_from(read_u32(bytes, count_offset, "polygon component count")?)
+                .map_err(|_| "component count exceeds usize".to_owned())?;
+            let mut end = count_offset
+                .checked_add(4)
+                .ok_or_else(|| "component offset overflow".to_owned())?;
+            if count > bytes.len().saturating_sub(end) / 8 {
+                return Err("polygon components exceed the serialized payload".to_owned());
+            }
+            let mut coordinates = Vec::new();
+            let mut rings = Vec::new();
+            for _ in 0..count {
+                if read_u32(bytes, end, "polygon component type")? != RESIDENT_GEOMETRY_POLYGON {
+                    return Err("MULTIPOLYGON child is not a POLYGON".to_owned());
+                }
+                let (child, next) = parse_geometry_body(bytes, end, srid, false)?;
+                let base = u64::try_from(coordinates.len() / 2)
+                    .map_err(|_| "component coordinate base exceeds u64".to_owned())?;
+                coordinates
+                    .try_reserve(child.coordinates.len())
+                    .map_err(|error| format!("component coordinate allocation failed: {error}"))?;
+                rings
+                    .try_reserve(child.ring_offsets.len())
+                    .map_err(|error| format!("component ring allocation failed: {error}"))?;
+                for (ring, offset) in child.ring_offsets.into_iter().enumerate() {
+                    let offset = base
+                        .checked_add(offset)
+                        .filter(|offset| offset & RESIDENT_GEOMETRY_RING_COMPONENT_START == 0)
+                        .ok_or_else(|| "component ring offset overflow".to_owned())?;
+                    rings.push(
+                        offset
+                            | if ring == 0 {
+                                RESIDENT_GEOMETRY_RING_COMPONENT_START
+                            } else {
+                                0
+                            },
+                    );
+                }
+                coordinates.extend_from_slice(&child.coordinates);
+                end = next;
+            }
+            (ParsedCoordinates::Heap(coordinates), rings, end)
+        }
         other => {
             return Err(format!(
-                "geometry type tag {other} is not POINT, LINESTRING, or POLYGON"
+                "geometry type tag {other} is not a supported POINT, LINESTRING, POLYGON or MULTIPOLYGON"
             ));
         }
     };
-    if end != bytes.len() {
-        return Err(format!(
-            "geometry has {} trailing bytes after its canonical 2D payload",
-            bytes.len() - end
-        ));
-    }
-    Ok(ParsedGeometry {
-        geom_type,
-        srid,
-        coordinates,
-        ring_offsets,
-    })
+    Ok((
+        ParsedGeometry {
+            geom_type,
+            srid,
+            coordinates,
+            ring_offsets,
+        },
+        end,
+    ))
 }
 
 pub fn validate_resident_geometry_value(
@@ -330,12 +426,19 @@ impl ResidentGeometryBuilder {
         };
         reserve(self.bboxes.try_reserve(additional))?;
         reserve(self.rows.try_reserve(additional))?;
-        reserve(self.nulls.try_reserve(additional))?;
+        super::nulls::reserve(&mut self.nulls, self.saw_null, self.rows.len(), additional)?;
         reserve(self.geometry_offsets.try_reserve(additional))?;
         reserve(self.exact_offsets.try_reserve(additional))
     }
 
+    #[cfg(test)]
     pub(super) fn push(&mut self, exact: Option<Vec<u8>>) -> Result<(), String> {
+        self.push_borrowed(exact.as_deref())
+    }
+
+    /// Validate and copy into retained column storage before the caller releases
+    /// the source. No table-slot or detoast pointer escapes this call.
+    pub(super) fn push_borrowed(&mut self, exact: Option<&[u8]>) -> Result<(), String> {
         let Some(exact) = exact else {
             self.bboxes.push([0.0; 4]);
             self.rows.push(ResidentGeometryRow::default());
@@ -352,7 +455,7 @@ impl ResidentGeometryBuilder {
             return Ok(());
         };
 
-        let parsed = parse_gserialized(&exact, self.max_exact_value_bytes)?;
+        let parsed = parse_gserialized(exact, self.max_exact_value_bytes)?;
         if parsed.coordinate_pairs() > self.max_vertices_per_row {
             return Err(format!(
                 "resident geometry has {} coordinate pairs; device maximum is {}",
@@ -374,14 +477,16 @@ impl ResidentGeometryBuilder {
             .map_err(|error| format!("resident geometry exact-byte allocation failed: {error}"))?;
 
         for offset in &parsed.ring_offsets {
-            let global = coordinate_base
-                .checked_add(*offset)
-                .and_then(|value| u64::try_from(value).ok())
+            let tag = offset & RESIDENT_GEOMETRY_RING_COMPONENT_START;
+            let global = u64::try_from(coordinate_base)
+                .ok()
+                .and_then(|base| base.checked_add(offset & !RESIDENT_GEOMETRY_RING_COMPONENT_START))
+                .filter(|offset| offset & RESIDENT_GEOMETRY_RING_COMPONENT_START == 0)
                 .ok_or_else(|| "geometry global ring offset overflow".to_owned())?;
-            self.ring_offsets.push(global);
+            self.ring_offsets.push(global | tag);
         }
         let coordinate_pairs = parsed.coordinate_pairs();
-        self.coordinates.extend(parsed.coordinates);
+        self.coordinates.extend_from_slice(&parsed.coordinates);
         self.bboxes.push(bbox);
         self.rows.push(ResidentGeometryRow {
             geom_type: parsed.geom_type,
@@ -402,7 +507,7 @@ impl ResidentGeometryBuilder {
             .and_then(|value| u64::try_from(value).ok())
             .ok_or_else(|| "geometry coordinate end exceeds u64".to_owned())?;
         self.geometry_offsets.push(coordinate_end);
-        self.exact_bytes.extend(exact);
+        self.exact_bytes.extend_from_slice(exact);
         self.exact_offsets.push(
             u64::try_from(self.exact_bytes.len())
                 .map_err(|_| "geometry exact-byte count exceeds u64".to_owned())?,
@@ -416,8 +521,8 @@ impl ResidentGeometryBuilder {
             bboxes: self.bboxes,
             geometry_offsets: self.geometry_offsets,
             ring_offsets: self.ring_offsets,
+            nulls: super::nulls::finish(self.nulls, self.saw_null, self.rows.len())?,
             rows: self.rows,
-            nulls: self.saw_null.then_some(self.nulls),
             exact: RetainedExactValues {
                 offsets: self.exact_offsets.into_boxed_slice(),
                 bytes: self.exact_bytes.into_boxed_slice(),
@@ -507,6 +612,7 @@ pub struct ResidentGeometryColumn {
     row_count: usize,
     coordinate_pair_count: usize,
     ring_count: usize,
+    edge_index: bool,
 }
 
 impl ResidentGeometryColumn {
@@ -515,6 +621,22 @@ impl ResidentGeometryColumn {
         referenced_bytes: ResidentGeometryReferencedBytes,
         max_exact_value_bytes: usize,
         label: &str,
+    ) -> Result<Self, String> {
+        Self::materialize_with_edge_index(
+            data,
+            referenced_bytes,
+            max_exact_value_bytes,
+            label,
+            false,
+        )
+    }
+
+    fn materialize_with_edge_index(
+        data: ResidentGeometryData,
+        mut referenced_bytes: ResidentGeometryReferencedBytes,
+        max_exact_value_bytes: usize,
+        label: &str,
+        prepare_edge_index: bool,
     ) -> Result<Self, String> {
         let mut accounting = data
             .accounting(max_exact_value_bytes)
@@ -526,8 +648,26 @@ impl ResidentGeometryColumn {
         let row_count = data.rows.len();
         let coordinate_pair_count = data.coordinates.len() / 2;
         let ring_count = data.ring_offsets.len();
+        let edge_index = prepare_edge_index
+            && row_count == 1
+            && matches!(
+                data.rows[0].geom_type,
+                RESIDENT_GEOMETRY_POLYGON | RESIDENT_GEOMETRY_MULTIPOLYGON
+            )
+            && resident_geometry_edge_index_boxes(coordinate_pair_count) != 0;
+        let mut host_bboxes = data.bboxes;
+        if edge_index {
+            let index_bytes = append_edge_boxes(&data.coordinates, &mut host_bboxes)?;
+            accounting.device_bytes = accounting
+                .device_bytes
+                .checked_add(index_bytes)
+                .ok_or_else(|| "geometry edge-index accounting overflow".to_owned())?;
+            referenced_bytes.prefix[1] = referenced_bytes.prefix[1]
+                .checked_add(index_bytes)
+                .ok_or_else(|| "geometry edge-index byte-prefix overflow".to_owned())?;
+        }
         let coordinates = copy_optional(&data.coordinates, &format!("{label} coordinates"))?;
-        let bboxes = copy_optional(&data.bboxes, &format!("{label} bboxes"))?;
+        let bboxes = copy_optional(&host_bboxes, &format!("{label} bboxes"))?;
         let geometry_offsets = ExprDeviceBuffer::copy_from_slice(&data.geometry_offsets)
             .ok_or_else(|| format!("device allocation/copy failed for {label} row offsets"))?;
         let ring_offsets = copy_optional(&data.ring_offsets, &format!("{label} ring offsets"))?;
@@ -551,6 +691,7 @@ impl ResidentGeometryColumn {
             row_count,
             coordinate_pair_count,
             ring_count,
+            edge_index,
         })
     }
 
@@ -574,6 +715,7 @@ impl ResidentGeometryColumn {
             row_count: self.row_count,
             coordinate_pair_count: self.coordinate_pair_count,
             ring_count: self.ring_count,
+            edge_index: self.edge_index,
         }
     }
 }
@@ -593,6 +735,7 @@ pub struct ResidentGeometryColumnView<'a> {
     pub row_count: usize,
     pub coordinate_pair_count: usize,
     pub ring_count: usize,
+    pub edge_index: bool,
 }
 
 impl ResidentGeometryColumnView<'_> {
@@ -617,15 +760,52 @@ pub fn materialize_resident_geometry_constant(
 ) -> Result<ResidentGeometryColumn, String> {
     let mut builder = ResidentGeometryBuilder::new(max_exact_value_bytes, max_vertices_per_row);
     builder.try_reserve_rows(1)?;
-    builder.push(Some(exact.to_vec()))?;
+    builder.push_borrowed(Some(exact))?;
     let data = builder.finish()?;
     let referenced_bytes = ResidentGeometryReferencedBytes::build(&data)?;
-    ResidentGeometryColumn::materialize(
+    ResidentGeometryColumn::materialize_with_edge_index(
         data,
         referenced_bytes,
         max_exact_value_bytes,
         "spatial constant",
+        true,
     )
+}
+
+/// Geometry preparation, like the ordinary row bbox, never classifies query
+/// points. The GPU independently verifies these conservative boxes before
+/// using them to prune edges. Include the following vertex to cover the edge
+/// crossing every block boundary; ring/component jumps only widen a box.
+fn append_edge_boxes(coordinates: &[f64], boxes: &mut Vec<[f64; 4]>) -> Result<u64, String> {
+    if !coordinates.len().is_multiple_of(2) || coordinates.iter().any(|value| !value.is_finite()) {
+        return Err("edge-index coordinates must be finite x/y pairs".to_owned());
+    }
+    let pairs = coordinates.len() / 2;
+    let count = resident_geometry_edge_index_boxes(pairs);
+    boxes
+        .try_reserve_exact(count)
+        .map_err(|error| format!("edge-index box allocation failed: {error}"))?;
+    for block in 0..count {
+        let begin = block * PGACCEL_RESIDENT_GEOMETRY_EDGE_BLOCK_PAIRS;
+        let end = (begin + PGACCEL_RESIDENT_GEOMETRY_EDGE_BLOCK_PAIRS + 1).min(pairs);
+        let mut bbox = [
+            coordinates[begin * 2],
+            coordinates[begin * 2 + 1],
+            coordinates[begin * 2],
+            coordinates[begin * 2 + 1],
+        ];
+        for point in coordinates[begin * 2..end * 2].chunks_exact(2) {
+            bbox[0] = bbox[0].min(point[0]);
+            bbox[1] = bbox[1].min(point[1]);
+            bbox[2] = bbox[2].max(point[0]);
+            bbox[3] = bbox[3].max(point[1]);
+        }
+        boxes.push(bbox);
+    }
+    count
+        .checked_mul(std::mem::size_of::<[f64; 4]>())
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| "edge-index byte count overflow".to_owned())
 }
 
 fn referenced_geometry_bytes(
@@ -650,6 +830,58 @@ fn referenced_geometry_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edge_boxes_cover_block_boundary_vertices_and_charge_exact_bytes() {
+        for count in [0, 5, 32, 33, 63, 64, 65, 1_025] {
+            let mut coordinates = Vec::new();
+            for index in 0..count {
+                let value = f64::from(u32::try_from(index).expect("small fixture"));
+                coordinates.extend_from_slice(&[value, -value]);
+            }
+            // A large extremum at the vertex shared by adjacent blocks must
+            // appear in BOTH boxes, not just the block that owns its index.
+            if count > 32 {
+                coordinates[64] = 1_000_000.0;
+                coordinates[65] = -1_000_000.0;
+            }
+            let original = [11.0, 12.0, 13.0, 14.0];
+            let mut boxes = vec![original];
+            let bytes = append_edge_boxes(&coordinates, &mut boxes).expect("edge boxes");
+            let expected_count = resident_geometry_edge_index_boxes(count);
+            assert_eq!(boxes.len(), expected_count + 1);
+            assert_eq!(boxes[0], original);
+            assert_eq!(
+                bytes,
+                u64::try_from(expected_count * 32).expect("small bytes")
+            );
+            for edge in 0..count.saturating_sub(1) {
+                if expected_count == 0 {
+                    break;
+                }
+                let bbox = boxes[1 + edge / PGACCEL_RESIDENT_GEOMETRY_EDGE_BLOCK_PAIRS];
+                for vertex in [edge, edge + 1] {
+                    let x = coordinates[vertex * 2];
+                    let y = coordinates[vertex * 2 + 1];
+                    assert!(bbox[0] <= x && x <= bbox[2]);
+                    assert!(bbox[1] <= y && y <= bbox[3]);
+                }
+            }
+            if count > 32 {
+                assert_eq!(boxes[1][2], 1_000_000.0);
+                assert_eq!(boxes[2][2], 1_000_000.0);
+            }
+        }
+    }
+
+    #[test]
+    fn edge_boxes_reject_nonfinite_and_unpaired_input_without_publication() {
+        for bad in [vec![0.0], vec![f64::NAN, 0.0], vec![0.0, f64::INFINITY]] {
+            let mut boxes = vec![[1.0; 4]];
+            assert!(append_edge_boxes(&bad, &mut boxes).is_err());
+            assert_eq!(boxes, vec![[1.0; 4]]);
+        }
+    }
 
     fn header(srid: u32, flags: u8) -> Vec<u8> {
         vec![
@@ -695,13 +927,77 @@ mod tests {
     }
 
     #[test]
+    fn multipolygon_preserves_components_holes_and_global_ring_offsets() {
+        let shell = [(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 0.0)];
+        let hole = [(1.0, 1.0), (2.0, 1.0), (2.0, 2.0), (1.0, 1.0)];
+        let island = [(8.0, 8.0), (9.0, 8.0), (9.0, 9.0), (8.0, 8.0)];
+        let mut bytes = polygon(&[]);
+        bytes[8..12].copy_from_slice(&RESIDENT_GEOMETRY_MULTIPOLYGON.to_le_bytes());
+        bytes[12..16].copy_from_slice(&3_u32.to_le_bytes());
+        bytes.extend_from_slice(&polygon(&[&shell, &hole])[8..]);
+        bytes.extend_from_slice(&polygon(&[])[8..]); // Empty component retains no rings.
+        bytes.extend_from_slice(&polygon(&[&island])[8..]);
+        let parsed = parse_gserialized(&bytes, 4096).expect("multipolygon");
+        let tag = RESIDENT_GEOMETRY_RING_COMPONENT_START;
+        assert_eq!(parsed.ring_offsets, [tag, 4, tag | 8]);
+        assert_eq!(parsed.coordinate_pairs(), 12);
+        let mut builder = ResidentGeometryBuilder::new(4096, 100);
+        builder
+            .push(Some(point(4326, Some((-1.0, -1.0)))))
+            .expect("preceding point");
+        builder.push(Some(bytes.clone())).expect("multipolygon row");
+        builder.push(None).expect("NULL row");
+        let data = builder.finish().expect("validated mixed geometry lane");
+        assert_eq!(data.ring_offsets, [tag | 1, 5, tag | 9]);
+        assert_eq!(data.geometry_offsets, [0, 1, 13, 13]);
+        assert_eq!(data.rows[1].geom_type, RESIDENT_GEOMETRY_MULTIPOLYGON);
+        let mut invalid = data.clone();
+        invalid.ring_offsets[0] &= !tag;
+        assert!(invalid.validate(4096).is_err());
+        invalid = data.clone();
+        invalid.rows[1].geom_type = RESIDENT_GEOMETRY_POLYGON;
+        assert!(invalid.validate(4096).is_err());
+        invalid = data;
+        invalid.ring_offsets[2] = tag | 3; // Non-monotone after removing tags.
+        assert!(invalid.validate(4096).is_err());
+        for end in 0..bytes.len() {
+            assert!(parse_gserialized(&bytes[..end], 4096).is_err());
+        }
+        bytes.push(0);
+        assert!(parse_gserialized(&bytes, 4096).is_err());
+    }
+
+    #[test]
+    fn multipolygon_rejects_wrong_children_and_unbounded_counts() {
+        let mut bytes = polygon(&[]);
+        bytes[8..12].copy_from_slice(&RESIDENT_GEOMETRY_MULTIPOLYGON.to_le_bytes());
+        let empty = bytes.clone();
+        assert!(
+            parse_gserialized(&empty, 4096)
+                .expect("empty multipolygon")
+                .coordinates
+                .is_empty()
+        );
+        bytes[12..16].copy_from_slice(&1_u32.to_le_bytes());
+        for child in [point(4326, None), empty] {
+            let mut invalid = bytes.clone();
+            invalid.extend_from_slice(&child[8..]);
+            assert!(parse_gserialized(&invalid, 4096).is_err());
+        }
+        bytes[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(parse_gserialized(&bytes, 4096).is_err());
+        bytes[8..12].copy_from_slice(&RESIDENT_GEOMETRY_POLYGON.to_le_bytes());
+        assert!(parse_gserialized(&bytes, 4096).is_err());
+    }
+
+    #[test]
     fn parser_preserves_fp64_point_and_canonical_empty() {
         let mut encoded = point(4_326, Some((1.25, -2.5)));
         encoded[7] = GSERIALIZED_FLAG_VERSION_2;
         let parsed = parse_gserialized(&encoded, 1_024).expect("version-2 point parses");
         assert_eq!(parsed.geom_type, RESIDENT_GEOMETRY_POINT);
         assert_eq!(parsed.srid, 4_326);
-        assert_eq!(parsed.coordinates, [1.25, -2.5]);
+        assert_eq!(&*parsed.coordinates, [1.25, -2.5]);
         assert_eq!(parsed.bbox().expect("bbox"), [1.25, -2.5, 1.25, -2.5]);
 
         let empty = parse_gserialized(&point(4_326, None), 1_024).expect("empty point parses");
@@ -763,6 +1059,94 @@ mod tests {
         assert_eq!(data.rows[1], ResidentGeometryRow::default());
         assert_eq!(data.bboxes[1], [0.0; 4]);
         assert_eq!(data.bboxes[2], [0.0; 4]);
+    }
+
+    #[test]
+    fn lazy_geometry_nulls_preserve_prefix_empty_and_exact_storage() {
+        let point = point(4326, Some((1.0, 2.0)));
+        let empty = super::tests::point(4326, None);
+        let mut builder = ResidentGeometryBuilder::new(1024, 16);
+        builder
+            .try_reserve_rows(8192)
+            .expect("reserve geometry rows");
+        for row in 0..16385 {
+            if row % super::super::nulls::STAGING_ROWS == 0 {
+                builder
+                    .try_reserve_rows(super::super::nulls::STAGING_ROWS)
+                    .expect("next geometry batch");
+            }
+            builder.push_borrowed(Some(&point)).expect("point prefix");
+        }
+        assert!(builder.nulls.capacity() <= super::super::nulls::STAGING_ROWS);
+        assert!(builder.push_borrowed(Some(&[0])).is_err());
+        assert!(builder.nulls.capacity() <= super::super::nulls::STAGING_ROWS);
+        builder.push_borrowed(None).expect("late NULL");
+        builder
+            .push_borrowed(Some(&empty))
+            .expect("empty is not NULL");
+        let data = builder.finish().expect("complete geometry");
+        let nulls = data.nulls.as_ref().expect("late mask");
+        assert_eq!(nulls.len(), 16387);
+        assert!(nulls[..16385].iter().all(|null| *null == 0));
+        assert_eq!(&nulls[16385..], &[1, 0]);
+        assert_eq!(data.exact.value(16384), Some(point.as_slice()));
+        assert_eq!(data.exact.value(16385), Some([].as_slice()));
+        assert_eq!(data.exact.value(16386), Some(empty.as_slice()));
+    }
+
+    #[test]
+    fn point_coordinates_are_inline_with_unchanged_validation() {
+        for version in [0, GSERIALIZED_FLAG_VERSION_2] {
+            for bbox in [false, true] {
+                let mut exact = point(4326, Some((-0.0, 1.25)));
+                exact[7] = version | if bbox { GSERIALIZED_FLAG_BBOX } else { 0 };
+                if bbox {
+                    exact.splice(8..8, [0_u8; GSERIALIZED_BBOX_BYTES_2D]);
+                }
+                let parsed = parse_gserialized(&exact, 1024).expect("point");
+                assert!(matches!(parsed.coordinates, ParsedCoordinates::Point(_)));
+                assert_eq!(parsed.coordinates[0].to_bits(), (-0.0_f64).to_bits());
+                assert_eq!(parsed.coordinates[1], 1.25);
+                for end in 0..exact.len() {
+                    assert!(parse_gserialized(&exact[..end], 1024).is_err());
+                }
+                assert!(parse_gserialized(&exact, exact.len() - 1).is_err());
+            }
+        }
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for coordinates in [(bad, 1.0), (1.0, bad)] {
+                assert!(parse_gserialized(&point(4326, Some(coordinates)), 1024).is_err());
+            }
+        }
+        let empty = parse_gserialized(&point(4326, None), 1024).expect("empty point");
+        assert!(matches!(empty.coordinates, ParsedCoordinates::Heap(ref v) if v.capacity() == 0));
+    }
+
+    #[test]
+    fn borrowed_geometry_staging_owns_bytes_and_rejects_before_appending() {
+        let mut input = point(4326, Some((1.25, -2.5)));
+        let expected = input.clone();
+        let mut builder = ResidentGeometryBuilder::new(1024, 16);
+        builder.push_borrowed(Some(&input)).expect("borrowed point");
+        input.fill(0xff);
+        assert!(builder.push_borrowed(Some(&input)).is_err());
+        assert!(
+            builder
+                .push_borrowed(Some(&expected[..expected.len() - 1]))
+                .is_err()
+        );
+        drop(input);
+        builder.push_borrowed(None).expect("NULL");
+        let empty = point(4326, None);
+        builder.push_borrowed(Some(&empty)).expect("empty");
+        let data = builder
+            .finish()
+            .expect("owned geometry after source release");
+        assert_eq!(data.coordinates, [1.25, -2.5]);
+        assert_eq!(data.geometry_offsets, [0, 1, 1, 1]);
+        assert_eq!(data.exact.value(0), Some(expected.as_slice()));
+        assert_eq!(data.exact.value(2), Some(empty.as_slice()));
+        assert_eq!(data.nulls, Some(vec![0, 1, 0]));
     }
 
     #[test]

@@ -1,0 +1,388 @@
+=== 95_selected_lifecycle_contract ===
+SET
+SET
+SET
+SELECT 1
+CREATE TABLE
+CREATE TABLE
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+psql:/Users/contra/Projects/pg_accel/sql/tests/95_selected_lifecycle_contract.sql:253: NOTICE:  table "_lifecycle_grouped" does not exist, skipping
+DROP TABLE
+CREATE TABLE
+INSERT 0 500000
+ANALYZE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+DO
+SET
+SELECT 65
+SELECT 65
+SELECT 65
+SELECT 65
+SELECT 3
+SELECT 3
+SELECT 3
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 65
+ lifecycle_refresh_if_gpu 
+--------------------------
+ 
+(1 row)
+
+ lifecycle_explain 
+-------------------
+ 
+(1 row)
+
+SELECT 65
+ lifecycle_refresh_if_gpu 
+--------------------------
+ 
+(1 row)
+
+ lifecycle_explain 
+-------------------
+ 
+(1 row)
+
+SELECT 65
+ lifecycle_refresh_if_gpu 
+--------------------------
+ 
+(1 row)
+
+ lifecycle_explain 
+-------------------
+ 
+(1 row)
+
+SELECT 65
+ lifecycle_refresh_if_gpu 
+--------------------------
+ 
+(1 row)
+
+ lifecycle_explain 
+-------------------
+ 
+(1 row)
+
+SELECT 3
+ lifecycle_refresh_if_gpu 
+--------------------------
+ 
+(1 row)
+
+ lifecycle_explain 
+-------------------
+ 
+(1 row)
+
+SELECT 3
+ lifecycle_refresh_if_gpu 
+--------------------------
+ 
+(1 row)
+
+ lifecycle_explain 
+-------------------
+ 
+(1 row)
+
+SELECT 3
+ lifecycle_refresh_if_gpu 
+--------------------------
+ 
+(1 row)
+
+ lifecycle_explain 
+-------------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:95_selected_lifecycle_contract.assert_001
+psql:/Users/contra/Projects/pg_accel/sql/tests/95_selected_lifecycle_contract.sql:593: NOTICE:  table "_lifecycle_fact4" does not exist, skipping
+DROP TABLE
+psql:/Users/contra/Projects/pg_accel/sql/tests/95_selected_lifecycle_contract.sql:594: NOTICE:  table "_lifecycle_dim4a" does not exist, skipping
+DROP TABLE
+psql:/Users/contra/Projects/pg_accel/sql/tests/95_selected_lifecycle_contract.sql:595: NOTICE:  table "_lifecycle_dim4b" does not exist, skipping
+DROP TABLE
+psql:/Users/contra/Projects/pg_accel/sql/tests/95_selected_lifecycle_contract.sql:596: NOTICE:  table "_lifecycle_dim4c" does not exist, skipping
+DROP TABLE
+psql:/Users/contra/Projects/pg_accel/sql/tests/95_selected_lifecycle_contract.sql:597: NOTICE:  table "_lifecycle_dim4d" does not exist, skipping
+DROP TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+INSERT 0 100
+INSERT 0 100
+INSERT 0 100
+INSERT 0 100
+SELECT 500000
+ANALYZE
+ANALYZE
+ANALYZE
+ANALYZE
+ANALYZE
+PREPARE
+PREPARE
+DO
+SET
+SELECT 1
+SELECT 62
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 1
+ lifecycle_refresh_if_gpu 
+--------------------------
+ 
+(1 row)
+
+ lifecycle_refresh_if_gpu 
+--------------------------
+ 
+(1 row)
+
+ lifecycle_refresh_if_gpu 
+--------------------------
+ 
+(1 row)
+
+ lifecycle_refresh_if_gpu 
+--------------------------
+ 
+(1 row)
+
+ lifecycle_refresh_if_gpu 
+--------------------------
+ 
+(1 row)
+
+ lifecycle_explain 
+-------------------
+ 
+(1 row)
+
+SELECT 62
+ lifecycle_refresh_if_gpu 
+--------------------------
+ 
+(1 row)
+
+ lifecycle_refresh_if_gpu 
+--------------------------
+ 
+(1 row)
+
+ lifecycle_refresh_if_gpu 
+--------------------------
+ 
+(1 row)
+
+ lifecycle_refresh_if_gpu 
+--------------------------
+ 
+(1 row)
+
+ lifecycle_refresh_if_gpu 
+--------------------------
+ 
+(1 row)
+
+ lifecycle_explain 
+-------------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:95_selected_lifecycle_contract.assert_002
+psql:/Users/contra/Projects/pg_accel/sql/tests/95_selected_lifecycle_contract.sql:739: NOTICE:  table "_lifecycle_fact8" does not exist, skipping
+DROP TABLE
+psql:/Users/contra/Projects/pg_accel/sql/tests/95_selected_lifecycle_contract.sql:740: NOTICE:  table "_lifecycle_dim8a" does not exist, skipping
+DROP TABLE
+psql:/Users/contra/Projects/pg_accel/sql/tests/95_selected_lifecycle_contract.sql:741: NOTICE:  table "_lifecycle_dim8b" does not exist, skipping
+DROP TABLE
+CREATE TABLE
+CREATE TABLE
+INSERT 0 100
+INSERT 0 100
+SELECT 500000
+ANALYZE
+ANALYZE
+ANALYZE
+PREPARE
+DO
+SET
+SELECT 77
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 77
+ lifecycle_refresh_if_gpu 
+--------------------------
+ 
+(1 row)
+
+ lifecycle_refresh_if_gpu 
+--------------------------
+ 
+(1 row)
+
+ lifecycle_refresh_if_gpu 
+--------------------------
+ 
+(1 row)
+
+ lifecycle_explain 
+-------------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:95_selected_lifecycle_contract.assert_003
+psql:/Users/contra/Projects/pg_accel/sql/tests/95_selected_lifecycle_contract.sql:934: NOTICE:  table "_lifecycle_h3" does not exist, skipping
+DO
+PGACCEL_ASSERT_OK:95_selected_lifecycle_contract.assert_004
+psql:/Users/contra/Projects/pg_accel/sql/tests/95_selected_lifecycle_contract.sql:939: NOTICE:  table "_lifecycle_spatial" does not exist, skipping
+DROP TABLE
+CREATE TABLE
+INSERT 0 1000000
+ANALYZE
+PREPARE
+DO
+SET
+SELECT 1
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 1
+ lifecycle_refresh_if_gpu 
+--------------------------
+ 
+(1 row)
+
+ lifecycle_explain 
+-------------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:95_selected_lifecycle_contract.assert_005
+psql:/Users/contra/Projects/pg_accel/sql/tests/95_selected_lifecycle_contract.sql:1039: NOTICE:  table "_lifecycle_raster" does not exist, skipping
+DROP TABLE
+CREATE TABLE
+INSERT 0 10000
+ANALYZE
+PREPARE
+DO
+SET
+SELECT 10000
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 10000
+ lifecycle_refresh_if_gpu 
+--------------------------
+ 
+(1 row)
+
+ lifecycle_explain 
+-------------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:95_selected_lifecycle_contract.assert_006
+psql:/Users/contra/Projects/pg_accel/sql/tests/95_selected_lifecycle_contract.sql:1148: NOTICE:  table "_lifecycle_bool_count" does not exist, skipping
+DROP TABLE
+CREATE TABLE
+INSERT 0 995904
+ANALYZE
+PREPARE
+DO
+SET
+SELECT 3
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 3
+ lifecycle_refresh_if_gpu 
+--------------------------
+ 
+(1 row)
+
+ lifecycle_explain 
+-------------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:95_selected_lifecycle_contract.assert_007
+DEALLOCATE
+DEALLOCATE
+DEALLOCATE
+DEALLOCATE
+DEALLOCATE
+DEALLOCATE
+DEALLOCATE
+DEALLOCATE
+DEALLOCATE
+DEALLOCATE
+DO
+DEALLOCATE
+DEALLOCATE
+DEALLOCATE
+RESET
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+PGACCEL_FILE_OK:95_selected_lifecycle_contract

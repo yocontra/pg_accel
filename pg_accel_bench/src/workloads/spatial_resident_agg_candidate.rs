@@ -10,6 +10,118 @@ const SPATIAL_RESIDENT_AGG_ROWS: &[usize] = &[1_000_000];
 /// each point and does not invoke PostGIS.
 pub struct SpatialResidentAggCandidate;
 
+/// Synthetic topology expansion, deliberately without a spatial index.
+pub struct SpatialPolygonHoles(pub &'static str);
+
+impl SpatialPolygonHoles {
+    fn inclusive(&self) -> bool {
+        matches!(
+            self.0,
+            "spatial_holes_intersects" | "spatial_holes_covers" | "spatial_holes_coveredby"
+        )
+    }
+}
+
+fn rectangle_ring(lo: f64, hi: f64, subdivisions: usize) -> String {
+    let mut points = Vec::new();
+    for edge in 0..4 {
+        for i in 0..subdivisions {
+            let offset = (hi - lo) * i as f64 / subdivisions as f64;
+            let (x, y) = match edge {
+                0 => (lo + offset, lo),
+                1 => (hi, lo + offset),
+                2 => (hi - offset, hi),
+                _ => (lo, hi - offset),
+            };
+            points.push(format!("{x:.8} {y:.8}"));
+        }
+    }
+    points.push(points[0].clone());
+    format!("({})", points.join(","))
+}
+
+pub(super) fn holes_polygon_wkt() -> String {
+    format!(
+        "SRID=4326;POLYGON({},{},{})",
+        rectangle_ring(5.0, 15.0, 128),
+        rectangle_ring(7.0, 9.0, 64),
+        rectangle_ring(11.0, 13.0, 64),
+    )
+}
+
+impl Workload for SpatialPolygonHoles {
+    fn name(&self) -> &'static str {
+        self.0
+    }
+
+    fn description(&self) -> &'static str {
+        "Resident point/polygon COUNT with two holes, NULLs and exact boundary rechecks; synthetic full-scan fixture with independent integer oracle"
+    }
+
+    fn setup_sql(&self, rows: usize) -> Vec<String> {
+        SpatialResidentAggCandidate.setup_sql(rows)
+    }
+
+    fn query_sql(&self) -> String {
+        let polygon = format!("'{}'::geometry", holes_polygon_wkt());
+        let predicate = match self.0 {
+            "spatial_holes_intersects" => format!("ST_Intersects(geom,{polygon})"),
+            "spatial_holes_contains" => format!("ST_Contains({polygon},geom)"),
+            "spatial_holes_within" => format!("ST_Within(geom,{polygon})"),
+            "spatial_holes_covers" => format!("ST_Covers({polygon},geom)"),
+            "spatial_holes_coveredby" => format!("ST_CoveredBy(geom,{polygon})"),
+            _ => unreachable!("registered topology workload"),
+        };
+        format!("SELECT count(*) FROM bench_spatial_resident_agg WHERE {predicate}")
+    }
+
+    fn row_scales(&self) -> &'static [usize] {
+        &[1_000_000, 2_000_000]
+    }
+
+    fn result_oracle(&self, rows: usize) -> Option<ResultOracle> {
+        let inclusive = self.inclusive();
+        let expected = (1..=rows)
+            .filter(|row| {
+                let x = row % 1000;
+                let y = (row / 1000) % 1000;
+                let square = |lo, hi, closed| {
+                    if closed {
+                        (lo..=hi).contains(&x) && (lo..=hi).contains(&y)
+                    } else {
+                        x > lo && x < hi && y > lo && y < hi
+                    }
+                };
+                row % 97 != 0
+                    && square(250, 750, inclusive)
+                    && !square(350, 450, !inclusive)
+                    && !square(550, 650, !inclusive)
+            })
+            .count();
+        let square_sql = |lo, hi, closed| {
+            let (low, high) = if closed { (">=", "<=") } else { (">", "<") };
+            format!(
+                "(id % 1000 {low} {lo} AND id % 1000 {high} {hi} AND (id / 1000) % 1000 {low} {lo} AND (id / 1000) % 1000 {high} {hi})"
+            )
+        };
+        Some(ResultOracle::one_row(
+            format!(
+                "SELECT count(*) FROM bench_spatial_resident_agg WHERE id % 97 <> 0 AND {} AND NOT {} AND NOT {}",
+                square_sql(250, 750, inclusive),
+                square_sql(350, 450, !inclusive),
+                square_sql(550, 650, !inclusive)
+            ),
+            vec![ExpectedResultValue::I64(
+                i64::try_from(expected).expect("count fits int8"),
+            )],
+        ))
+    }
+
+    fn cleanup_sql(&self) -> Vec<String> {
+        SpatialResidentAggCandidate.cleanup_sql()
+    }
+}
+
 fn candidate_polygon_wkt() -> String {
     const POINTS_PER_EDGE: usize = 256;
     let mut coordinates = Vec::with_capacity(4 * POINTS_PER_EDGE + 1);
@@ -114,6 +226,50 @@ impl Workload for SpatialResidentAggCandidate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn topology_fixture_has_two_holes_and_distinct_boundary_oracles() {
+        let wkt = holes_polygon_wkt();
+        assert_eq!(wkt.matches("),(").count(), 2);
+        assert_eq!(wkt.matches(',').count() + 1, 1027);
+        let intersects = SpatialPolygonHoles("spatial_holes_intersects");
+        let contains = SpatialPolygonHoles("spatial_holes_contains");
+        let within = SpatialPolygonHoles("spatial_holes_within");
+        for name in ["spatial_holes_covers", "spatial_holes_coveredby"] {
+            let workload = SpatialPolygonHoles(name);
+            assert_eq!(
+                workload
+                    .result_oracle(1_000_000)
+                    .expect("inclusive oracle")
+                    .query_sql,
+                intersects
+                    .result_oracle(1_000_000)
+                    .expect("intersection oracle")
+                    .query_sql
+            );
+            assert!(workload.query_sql().contains("ST_Cover"));
+        }
+        assert_ne!(
+            intersects
+                .result_oracle(1_000_000)
+                .expect("Intersects oracle")
+                .query_sql,
+            contains
+                .result_oracle(1_000_000)
+                .expect("Contains oracle")
+                .query_sql
+        );
+        assert_eq!(
+            contains
+                .result_oracle(1_000_000)
+                .expect("Contains oracle")
+                .query_sql,
+            within
+                .result_oracle(1_000_000)
+                .expect("Within oracle")
+                .query_sql
+        );
+    }
 
     #[test]
     fn candidate_polygon_is_closed_and_clears_the_1m_work_floor() {

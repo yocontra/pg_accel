@@ -1,0 +1,6 @@
+PGACCEL_TEST_START name=test_exec_gpu
+test_exec_gpu: initializing GPU...
+test_exec_gpu: device=Apple M2 Max, CUs=38
+test_exec_gpu: status=0 count=38910530 expected=38910530 gpu_exec_count=2
+test_exec_gpu: PASS
+PGACCEL_TEST_RESULT name=test_exec_gpu exit_code=0 result=PASS raw_lines=4 body_sha256=3c920d0d47d9ae1406b980cbb25323793a098471bf81bd465857bf1869f12609 binding_sha256=d20982adda08f24bfae79239dbb16360499e1bb7f4584f007cb1907f7b5ea0a3

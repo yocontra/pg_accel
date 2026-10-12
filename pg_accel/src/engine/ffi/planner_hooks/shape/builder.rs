@@ -108,19 +108,17 @@ fn validate_group_key_type(type_oid: u32) -> Result<(), ShapeDecline> {
     }
 }
 
-fn exact_bounded_int4_filter(filter: &FilterSpec, value: &crate::engine::spec::ColumnRef) -> bool {
-    let FilterSpec::Ranges { input, ranges } = filter else {
+fn exact_int4_measure_filter(filter: &FilterSpec, value: &crate::engine::spec::ColumnRef) -> bool {
+    let Some((input, ranges, accept_null)) = filter.range_parts() else {
         return false;
     };
-    let [range] = ranges.as_slice() else {
-        return false;
-    };
-    let (crate::engine::spec::ScalarValue::I32(lo), crate::engine::spec::ScalarValue::I32(hi)) =
-        (range.lo, range.hi)
-    else {
-        return false;
-    };
-    input == value && value.type_oid == 23 && lo != i32::MIN && hi != i32::MAX && lo < hi
+    input.relation_oid == value.relation_oid
+        && input.type_oid == 23
+        && matches!(value.type_oid, 20 | 21 | 23 | 1700)
+        && (accept_null || !ranges.is_empty())
+        && ranges.len() <= crate::engine::spec::abi::PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES
+        && ranges.iter().all(|range| matches!((range.lo, range.hi),
+            (crate::engine::spec::ScalarValue::I32(lo), crate::engine::spec::ScalarValue::I32(hi)) if lo <= hi))
 }
 
 fn validate_measure_descriptor_capability(
@@ -135,19 +133,31 @@ fn validate_measure_descriptor_capability(
     const DATEOID: u32 = 1082;
     const TIMESTAMPOID: u32 = 1114;
     const TIMESTAMPTZOID: u32 = 1184;
-    if matches!(aggregate.filter, FilterSpec::Spatial { .. }) {
+    const NUMERICOID: u32 = 1700;
+    if aggregate.filter.spatial().is_some() {
         return Err(ShapeDecline::SpatialFilterOutsideFactRelation);
     }
     if aggregate.output.source != AggregateSource::Value {
         return Err(ShapeDecline::UnsupportedAggregateModifier);
     }
     if aggregate.filter != FilterSpec::None
+        && !(aggregate.expression == MeasureExpr::CountStar
+            && aggregate.output.kind == AggregateKind::Count
+            && aggregate
+                .filter
+                .range_parts()
+                .is_some_and(|(input, _, _)| exact_int4_measure_filter(&aggregate.filter, &input)))
         && !matches!(
             &aggregate.expression,
-            MeasureExpr::Column(column)
-                if aggregate.output.kind == AggregateKind::Sum
-                    && exact_bounded_int4_filter(&aggregate.filter, column)
+            MeasureExpr::Column(column) | MeasureExpr::Binary { lhs: column, .. }
+                if matches!(aggregate.output.kind, AggregateKind::Sum | AggregateKind::Avg | AggregateKind::Count | AggregateKind::Min | AggregateKind::Max)
+                    && exact_int4_measure_filter(&aggregate.filter, column)
         )
+        && !(matches!(aggregate.expression, MeasureExpr::Bytecode { .. })
+            && aggregate
+                .filter
+                .range_parts()
+                .is_some_and(|(input, _, _)| exact_int4_measure_filter(&aggregate.filter, &input)))
     {
         return Err(ShapeDecline::UnsupportedAggregateModifier);
     }
@@ -165,14 +175,12 @@ fn validate_measure_descriptor_capability(
                 type_oid: column.type_oid,
             }),
             (
-                INT4OID | INT8OID | FLOAT8OID,
+                INT2OID | INT4OID | INT8OID | FLOAT8OID,
                 AggregateKind::Count | AggregateKind::Min | AggregateKind::Max,
             )
-            | (INT2OID | INT4OID, AggregateKind::Sum | AggregateKind::Avg) => Ok(()),
-            (INT8OID, AggregateKind::Avg | AggregateKind::Sum) => {
-                Err(ShapeDecline::NumericAccumulatorTypeUnavailable {
-                    type_oid: column.type_oid,
-                })
+            | (INT2OID | INT4OID | INT8OID, AggregateKind::Sum | AggregateKind::Avg)
+            | (NUMERICOID, AggregateKind::Sum | AggregateKind::Avg | AggregateKind::Count) => {
+                Ok(())
             }
             (FLOAT8OID, AggregateKind::Sum | AggregateKind::Avg | AggregateKind::StddevSamp) => {
                 Err(ShapeDecline::FloatingAccumulatorSemantics)
@@ -222,10 +230,46 @@ fn validate_measure_descriptor_capability(
             if lhs.type_oid == INT8OID && *op == crate::engine::spec::BinaryMeasureOp::Mul {
                 return Err(ShapeDecline::IntegerExpressionOverflowSemantics);
             }
+            if lhs.type_oid == INT8OID
+                && matches!(
+                    aggregate.output.kind,
+                    AggregateKind::Sum | AggregateKind::Avg
+                )
+            {
+                return Err(ShapeDecline::UnsupportedAggregateInput {
+                    kind: aggregate.output.kind,
+                    type_oid: INT8OID,
+                });
+            }
             validate_column(lhs)
         }
         MeasureExpr::StatsPair { .. } => Err(ShapeDecline::FloatingAccumulatorSemantics),
-        MeasureExpr::Bytecode { .. } => Err(ShapeDecline::UnsupportedMeasureExpression),
+        MeasureExpr::Bytecode {
+            inputs,
+            result_type_oid,
+            ..
+        } => {
+            crate::engine::executor::agg::scalar_measure_program(
+                &aggregate.expression,
+                inputs.first().map_or(0, |column| column.relation_oid),
+            )
+            .map_err(|_| ShapeDecline::UnsupportedMeasureExpression)?;
+            // DATE extrema are qualified for a typed scalar producer, not
+            // for the otherwise unchanged raw-column specialization.
+            if *result_type_oid == DATEOID
+                && matches!(
+                    aggregate.output.kind,
+                    AggregateKind::Count | AggregateKind::Min | AggregateKind::Max
+                )
+            {
+                return Ok(());
+            }
+            validate_column(&crate::engine::spec::ColumnRef {
+                relation_oid: 0,
+                attno: 1,
+                type_oid: *result_type_oid,
+            })
+        }
     }
 }
 
@@ -263,11 +307,12 @@ fn expected_aggregate_result_type(source_type_oid: u32, kind: AggregateKind) -> 
     match (source_type_oid, kind) {
         (
             0 | BOOLOID | INT2OID | INT4OID | INT8OID | FLOAT4OID | FLOAT8OID | DATEOID
-            | TIMESTAMPOID | TIMESTAMPTZOID,
+            | TIMESTAMPOID | TIMESTAMPTZOID | NUMERICOID,
             AggregateKind::Count,
         )
         | (INT2OID | INT4OID, AggregateKind::Sum) => Some(INT8OID),
-        (INT2OID | INT4OID, AggregateKind::Avg) => Some(NUMERICOID),
+        (INT2OID | INT4OID, AggregateKind::Avg)
+        | (NUMERICOID | INT8OID, AggregateKind::Sum | AggregateKind::Avg) => Some(NUMERICOID),
         (
             source @ (INT2OID | INT4OID | INT8OID | FLOAT4OID | FLOAT8OID | DATEOID | TIMESTAMPOID
             | TIMESTAMPTZOID),
@@ -323,10 +368,19 @@ fn validate_relations(input: &ShapeInput) -> Result<(), ShapeDecline> {
             });
         }
         let referenced_relation = match filter {
-            FilterSpec::None => Some(*relation_oid),
-            FilterSpec::Ranges { input, .. } | FilterSpec::Mask { input, .. } => {
-                Some(input.relation_oid)
+            FilterSpec::SpatialAnd { .. } => {
+                let mut columns = BTreeMap::new();
+                collect_filter_columns(&mut columns, filter);
+                Some(if columns.keys().all(|oid| oid == relation_oid) {
+                    *relation_oid
+                } else {
+                    0
+                })
             }
+            FilterSpec::None => Some(*relation_oid),
+            FilterSpec::Ranges { input, .. }
+            | FilterSpec::NullOrRanges { input, .. }
+            | FilterSpec::Mask { input, .. } => Some(input.relation_oid),
             FilterSpec::Bytecode { inputs, .. } => inputs.first().map(|input| input.relation_oid),
             FilterSpec::Spatial { left, right, .. } => {
                 let mut columns = [left, right]
@@ -559,12 +613,14 @@ fn validate_dimension_filter(filter: &FilterSpec) -> Result<(), ShapeDecline> {
             input,
             kind: MaskKind::Sql,
         } if input.type_oid == 16 => Ok(()),
-        FilterSpec::Ranges { input, .. } | FilterSpec::Mask { input, .. } => {
-            Err(ShapeDecline::UnsupportedFilterType {
-                type_oid: input.type_oid,
-            })
+        FilterSpec::Ranges { input, .. }
+        | FilterSpec::NullOrRanges { input, .. }
+        | FilterSpec::Mask { input, .. } => Err(ShapeDecline::UnsupportedFilterType {
+            type_oid: input.type_oid,
+        }),
+        FilterSpec::Spatial { .. } | FilterSpec::SpatialAnd { .. } => {
+            Err(ShapeDecline::SpatialFilterOutsideFactRelation)
         }
-        FilterSpec::Spatial { .. } => Err(ShapeDecline::SpatialFilterOutsideFactRelation),
         FilterSpec::Bytecode { .. } => Err(ShapeDecline::UnsupportedPredicate),
     }
 }
@@ -581,8 +637,14 @@ fn collect_required_column(
 
 fn collect_filter_columns(required: &mut BTreeMap<u32, BTreeSet<i32>>, filter: &FilterSpec) {
     match filter {
+        FilterSpec::SpatialAnd { spatial, scalar } => {
+            collect_filter_columns(required, spatial);
+            collect_filter_columns(required, scalar);
+        }
         FilterSpec::None => {}
-        FilterSpec::Ranges { input, .. } | FilterSpec::Mask { input, .. } => {
+        FilterSpec::Ranges { input, .. }
+        | FilterSpec::NullOrRanges { input, .. }
+        | FilterSpec::Mask { input, .. } => {
             collect_required_column(required, *input);
         }
         FilterSpec::Bytecode { inputs, .. } => {
@@ -651,6 +713,11 @@ fn fact_filter_binding(
             actual: measures.len(),
             maximum: PGACCEL_GROUPED_AGG_MAX_MEASURES,
         })?;
+    if let FilterSpec::SpatialAnd { scalar, .. } = fact_filter {
+        let mut binding = fact_filter_binding(measures, scalar)?;
+        binding.derived_spatial_mask = true;
+        return Ok(binding);
+    }
     let input = match fact_filter {
         FilterSpec::None => {
             return Ok(DescriptorMeasurePlan {
@@ -673,12 +740,14 @@ fn fact_filter_binding(
                 derived_spatial_mask: false,
             });
         }
-        FilterSpec::Ranges { input, .. }
+        FilterSpec::Ranges { input, .. } | FilterSpec::NullOrRanges { input, .. }
             if matches!(input.type_oid, 20 | 23 | 700 | 701 | 1082 | 1114 | 1184) =>
         {
             input
         }
-        FilterSpec::Ranges { input, .. } | FilterSpec::Mask { input, .. } => {
+        FilterSpec::Ranges { input, .. }
+        | FilterSpec::NullOrRanges { input, .. }
+        | FilterSpec::Mask { input, .. } => {
             return Err(ShapeDecline::UnsupportedFilterType {
                 type_oid: input.type_oid,
             });
@@ -692,7 +761,53 @@ fn fact_filter_binding(
                 derived_spatial_mask: true,
             });
         }
-        FilterSpec::Bytecode { .. } => {
+        FilterSpec::Bytecode { inputs, program } => {
+            let expression = MeasureExpr::Bytecode {
+                inputs: inputs.clone(),
+                program: program.clone(),
+                result_type_oid: 16,
+            };
+            let relation = inputs
+                .first()
+                .ok_or(ShapeDecline::UnsupportedPredicate)?
+                .relation_oid;
+            crate::engine::executor::agg::scalar_measure_program(&expression, relation)
+                .map_err(|_| ShapeDecline::UnsupportedPredicate)?;
+            let existing = measures.iter().position(|measure| {
+                measure.expression == expression && measure.filter == FilterSpec::None
+            });
+            let index = if let Some(index) = existing {
+                index
+            } else {
+                if measures.len() == PGACCEL_GROUPED_AGG_MAX_MEASURES {
+                    return Err(ShapeDecline::TooManyMeasures {
+                        actual: measures.len() + 1,
+                        maximum: PGACCEL_GROUPED_AGG_MAX_MEASURES,
+                    });
+                }
+                measures.push(MeasureSpec {
+                    expression,
+                    outputs: vec![crate::engine::spec::AggregateOutput {
+                        source: AggregateSource::Value,
+                        kind: AggregateKind::Count,
+                    }],
+                    filter: FilterSpec::None,
+                });
+                measures.len() - 1
+            };
+            return Ok(DescriptorMeasurePlan {
+                projected_measure_count,
+                descriptor_measure_count: measures.len() as u32,
+                fact_filter: Some(DescriptorFilterBinding {
+                    measure_index: index as u32,
+                    source: AggregateSource::Value,
+                    hidden: existing.is_none(),
+                }),
+                derived_fact_mask: None,
+                derived_spatial_mask: false,
+            });
+        }
+        FilterSpec::SpatialAnd { .. } => {
             return Err(ShapeDecline::UnsupportedPredicate);
         }
     };
@@ -945,8 +1060,37 @@ pub fn build_shape(input: ShapeInput, model: &TypedCostModel) -> Result<ShapePla
     let mut aggregate_locations = Vec::with_capacity(input.aggregates.len());
     for aggregate in &input.aggregates {
         validate_measure_descriptor_capability(aggregate)?;
+        // COUNT(*) may consume an already-required scalar's COUNT lane when
+        // that program is non-NULL on every successful path. Keep evaluation
+        // (including errors), require identical FILTERs, and resolve this before
+        // the state cap so SQL target order cannot create a redundant fifth state.
+        // Strict FILTER lowering represents COUNT(*) as COUNT(predicate input).
+        // Such a count also covers every accepted row; NULL-accepting ranges do
+        // not prove that property for an ordinary column count.
+        let counts_every_accepted_row = aggregate.output.kind == AggregateKind::Count
+            && (aggregate.expression == MeasureExpr::CountStar
+                || matches!((&aggregate.expression, &aggregate.filter),
+                    (MeasureExpr::Column(column), FilterSpec::Ranges { input, .. })
+                        if column == input));
+        let expression = if counts_every_accepted_row {
+            input
+                .aggregates
+                .iter()
+                .find(|candidate| {
+                    matches!(candidate.expression, MeasureExpr::Bytecode { .. })
+                        && candidate.filter == aggregate.filter
+                        && crate::engine::executor::agg::scalar_measure_program(
+                            &candidate.expression,
+                            fact.relation_oid,
+                        )
+                        .is_ok_and(|proof| proof.result_is_non_null())
+                })
+                .map_or(&aggregate.expression, |candidate| &candidate.expression)
+        } else {
+            &aggregate.expression
+        };
         let measure_index = if let Some(index) = measures.iter().position(|measure| {
-            measure.expression == aggregate.expression && measure.filter == aggregate.filter
+            &measure.expression == expression && measure.filter == aggregate.filter
         }) {
             if !measures[index].outputs.contains(&aggregate.output) {
                 measures[index].outputs.push(aggregate.output);
@@ -960,13 +1104,90 @@ pub fn build_shape(input: ShapeInput, model: &TypedCostModel) -> Result<ShapePla
                 });
             }
             measures.push(MeasureSpec {
-                expression: aggregate.expression.clone(),
+                expression: expression.clone(),
                 outputs: vec![aggregate.output],
                 filter: aggregate.filter.clone(),
             });
             measures.len() - 1
         };
         aggregate_locations.push(measure_index);
+    }
+
+    let fact_filter = relation_filter(&input, fact.relation_oid)?;
+    if fact_filter.spatial().is_some() && spatial_point_polygon_vertices(&fact_filter).is_none() {
+        return Err(ShapeDecline::SpatialWorkShapeUnproved);
+    }
+    // Bind hidden WHERE inputs before the COUNT(*) reorder, so every value
+    // slot (including a hidden predicate carrier) precedes the final count.
+    let projected_measure_count = measures.len() as u32;
+    // Binary expressions need their RHS for arithmetic. Bind otherwise absent
+    // FILTER inputs as ordinary raw COLUMN counters, within the same state cap.
+    let binary_predicates: Vec<_> = measures
+        .iter()
+        .filter_map(|measure| {
+            if matches!(measure.expression, MeasureExpr::Binary { .. }) {
+                measure.filter.range_parts().map(|(input, _, _)| input)
+            } else {
+                None
+            }
+        })
+        .collect();
+    for input in binary_predicates {
+        let bound = measures.iter().any(|measure| match measure.expression {
+            MeasureExpr::Column(column) => column == input,
+            MeasureExpr::Binary { lhs, .. } => lhs == input,
+            _ => false,
+        });
+        if !bound {
+            if measures.len() == PGACCEL_GROUPED_AGG_MAX_MEASURES {
+                return Err(ShapeDecline::TooManyMeasures {
+                    actual: measures.len() + 1,
+                    maximum: PGACCEL_GROUPED_AGG_MAX_MEASURES,
+                });
+            }
+            measures.push(MeasureSpec {
+                expression: MeasureExpr::Column(input),
+                outputs: vec![crate::engine::spec::AggregateOutput {
+                    source: AggregateSource::Value,
+                    kind: AggregateKind::Count,
+                }],
+                filter: FilterSpec::None,
+            });
+        }
+    }
+    let mut descriptor_measures = fact_filter_binding(&mut measures, &fact_filter)?;
+    descriptor_measures.projected_measure_count = projected_measure_count;
+    if let Some(binding) = &mut descriptor_measures.fact_filter {
+        binding.hidden |= binding.measure_index >= projected_measure_count;
+    }
+    // Dense integer/decimal kernels keep COUNT(*) after their value states.
+    // SQL target order is independent: remap references before projecting them.
+    if measures.iter().any(|measure| {
+        matches!(measure.expression,
+        MeasureExpr::Column(column) if matches!(column.type_oid, 20 | 21 | 23 | 1700))
+            || measure.filtered_count_input().is_some()
+            || matches!(measure.expression, MeasureExpr::Binary { lhs, rhs, .. }
+                if lhs.type_oid == 23 && rhs.type_oid == 23)
+            || matches!(measure.expression, MeasureExpr::Bytecode { .. })
+    }) && let Some(index) = measures.iter().position(|measure| {
+        measure.expression == MeasureExpr::CountStar && measure.filter == FilterSpec::None
+    }) {
+        let count = measures.remove(index);
+        measures.push(count);
+        for location in &mut aggregate_locations {
+            if *location == index {
+                *location = measures.len() - 1;
+            } else if *location > index {
+                *location -= 1;
+            }
+        }
+        if let Some(binding) = &mut descriptor_measures.fact_filter {
+            if binding.measure_index as usize == index {
+                binding.measure_index = measures.len() as u32 - 1;
+            } else if binding.measure_index as usize > index {
+                binding.measure_index -= 1;
+            }
+        }
     }
 
     let mut projections = Vec::with_capacity(input.projections.len());
@@ -1052,8 +1273,20 @@ pub fn build_shape(input: ShapeInput, model: &TypedCostModel) -> Result<ShapePla
                     return Err(ShapeDecline::UnsupportedProjection);
                 }
                 let measure_index = aggregate_locations[aggregate_index_usize];
+                let mut physical_output = *output;
+                if aggregate.output.kind == AggregateKind::Count
+                    && aggregate.expression != measures[measure_index].expression
+                    && let MeasureExpr::Bytecode {
+                        result_type_oid, ..
+                    } = measures[measure_index].expression
+                {
+                    // Validate the original SQL COUNT(*) metadata above, then
+                    // describe the physical scalar COUNT lane in AOP2. The SQL
+                    // result remains non-NULL INT8; only its source changes.
+                    physical_output.source_type_oid = result_type_oid;
+                }
                 (
-                    *output,
+                    physical_output,
                     ProjectionSource::Aggregate {
                         measure_index: u32::try_from(measure_index)
                             .map_err(|_| ShapeDecline::UnsupportedProjection)?,
@@ -1073,13 +1306,9 @@ pub fn build_shape(input: ShapeInput, model: &TypedCostModel) -> Result<ShapePla
         });
     }
 
-    let fact_filter = relation_filter(&input, fact.relation_oid)?;
-    if matches!(fact_filter, FilterSpec::Spatial { .. })
-        && spatial_point_polygon_vertices(&fact_filter).is_none()
-    {
-        return Err(ShapeDecline::SpatialWorkShapeUnproved);
-    }
-    let descriptor_measures = fact_filter_binding(&mut measures, &fact_filter)?;
+    // Qualified integer and decimal COLUMN states bind independent INT4
+    // predicates through the inactive RHS. Predicate-only inputs do not
+    // consume aggregate transitions; runtime capability validates composition.
     let spec = AggQuerySpec {
         fact_rel: fact.relation_oid,
         group_keys,
@@ -1198,11 +1427,13 @@ pub fn build_shape(input: ShapeInput, model: &TypedCostModel) -> Result<ShapePla
             max_group_count: model.memory.gpu_hash_agg_max_groups.get(),
         }
     };
+    let estimated_dense_key_cardinalities = spec.group_keys.is_empty().then(Vec::new);
     Ok(ShapePlan {
         spec,
         projections: projection.slots,
         required_relations,
         estimated_output_rows,
+        estimated_dense_key_cardinalities,
         digest_words,
         descriptor_resolution,
         descriptor_measures,
@@ -1351,6 +1582,45 @@ mod tests {
     }
 
     #[test]
+    fn scalar_date_extrema_admission_does_not_broaden_raw_date_or_sum() {
+        use crate::engine::spec::scalar::{ScalarInstruction as I, ScalarProgram, ScalarType};
+        let date = column(100, 1, 1082);
+        let expression = MeasureExpr::Bytecode {
+            inputs: vec![date],
+            result_type_oid: 1082,
+            program: ScalarProgram::new(
+                vec![ScalarType::Date],
+                ScalarType::Date,
+                vec![I::Input(0), I::Int4(1), I::DateAddDays],
+            )
+            .expect("typed date program")
+            .encode(),
+        };
+        for kind in [AggregateKind::Count, AggregateKind::Min, AggregateKind::Max] {
+            assert_eq!(
+                validate_measure_descriptor_capability(&aggregate(expression.clone(), kind)),
+                Ok(())
+            );
+        }
+        for kind in [
+            AggregateKind::Sum,
+            AggregateKind::Avg,
+            AggregateKind::StddevSamp,
+        ] {
+            assert!(
+                validate_measure_descriptor_capability(&aggregate(expression.clone(), kind))
+                    .is_err()
+            );
+        }
+        for kind in [AggregateKind::Min, AggregateKind::Max] {
+            assert!(
+                validate_measure_descriptor_capability(&aggregate(MeasureExpr::Column(date), kind))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn descriptor_measure_capability_covers_every_expression_family() {
         let int4 = column(100, 1, 23);
         let int8 = column(100, 2, 20);
@@ -1402,6 +1672,8 @@ mod tests {
             (int2, AggregateKind::Sum),
             (int2, AggregateKind::Avg),
             (int4, AggregateKind::Avg),
+            (int8, AggregateKind::Sum),
+            (int8, AggregateKind::Avg),
         ] {
             assert_eq!(
                 validate_measure_descriptor_capability(&aggregate(
@@ -1411,13 +1683,6 @@ mod tests {
                 Ok(())
             );
         }
-        assert!(matches!(
-            validate_measure_descriptor_capability(&aggregate(
-                MeasureExpr::Column(int8),
-                AggregateKind::Sum
-            )),
-            Err(ShapeDecline::NumericAccumulatorTypeUnavailable { type_oid: 20 })
-        ));
         assert!(matches!(
             validate_measure_descriptor_capability(&aggregate(
                 MeasureExpr::Column(float8),
@@ -1513,20 +1778,26 @@ mod tests {
             }],
         };
         assert_eq!(validate_measure_descriptor_capability(&filtered), Ok(()));
-        filtered.output.kind = AggregateKind::Count;
+        let mut decimal_filtered = filtered.clone();
+        decimal_filtered.expression = MeasureExpr::Column(ColumnRef {
+            attno: 9,
+            type_oid: 1700,
+            ..int4
+        });
         assert_eq!(
-            validate_measure_descriptor_capability(&filtered),
-            Err(ShapeDecline::UnsupportedAggregateModifier)
+            validate_measure_descriptor_capability(&decimal_filtered),
+            Ok(())
         );
+        filtered.output.kind = AggregateKind::Count;
+        assert_eq!(validate_measure_descriptor_capability(&filtered), Ok(()));
         filtered.output.kind = AggregateKind::Sum;
         let FilterSpec::Ranges { ranges, .. } = &mut filtered.filter else {
             unreachable!("bounded filter fixture")
         };
         ranges[0].lo = ScalarValue::I32(i32::MIN);
-        assert_eq!(
-            validate_measure_descriptor_capability(&filtered),
-            Err(ShapeDecline::UnsupportedAggregateModifier)
-        );
+        assert_eq!(validate_measure_descriptor_capability(&filtered), Ok(()));
+        filtered.output.kind = AggregateKind::Avg;
+        assert_eq!(validate_measure_descriptor_capability(&filtered), Ok(()));
         filtered.output.source = AggregateSource::Rhs;
         filtered.filter = FilterSpec::None;
         assert_eq!(

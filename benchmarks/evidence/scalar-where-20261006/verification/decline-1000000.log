@@ -1,0 +1,47 @@
+SET
+SET
+SET
+SET
+SET
+SELECT 1000000
+ANALYZE
+ pg_accel_pin 
+--------------
+      1000000
+(1 row)
+
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+                                                        QUERY PLAN                                                         
+---------------------------------------------------------------------------------------------------------------------------
+ Finalize GroupAggregate  (cost=7540.94..7550.59 rows=32 width=68)
+   Group Key: region
+   ->  Gather Merge  (cost=7540.94..7545.71 rows=256 width=68)
+         Workers Planned: 8
+         ->  Sort  (cost=7540.79..7540.87 rows=32 width=68)
+               Sort Key: region
+               ->  Partial HashAggregate  (cost=7539.67..7539.99 rows=32 width=68)
+                     Group Key: region
+                     ->  Parallel Seq Scan on pgaccel_scalar_where_probe_20261006  (cost=0.00..6810.50 rows=41667 width=8)
+                           Filter: (price > adjustment)
+(10 rows)
+
+       last_reason        | cost_declines | missing_estimates | unsupported_predicates 
+--------------------------+---------------+-------------------+------------------------
+ no_gpu_resident_pipeline |             0 |                 0 |                      0
+(1 row)
+
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ t
+(1 row)
+
+DROP TABLE

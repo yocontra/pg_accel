@@ -785,13 +785,17 @@ cpp_coverage() (
     fi
     record_stage cpp build 0
 
-    local device_object_root="$build_dir/CMakeFiles/pgaccel_kernels_shared.dir"
+    # Include the proved host metadata object linked into the shared library.
+    # The complete 17-object inventory and all source coverage remain required.
+    local device_object_root="$build_dir/CMakeFiles"
     local device_objects=()
     local device_object_args=()
     while IFS= read -r -d '' object; do
         device_objects+=("$object")
         device_object_args+=(--object "$object")
-    done < <(find "$device_object_root" -type f -name '*.o' -print0 2>/dev/null)
+    done < <(find "$device_object_root/pgaccel_kernels_shared.dir" \
+        "$device_object_root/pgaccel_metadata.dir" \
+        -type f -name '*.o' -print0 2>/dev/null)
     cmake -E remove_directory "$output_dir/device-objects" >/dev/null 2>&1 || true
     if python3 scripts/coverage_tools.py audit-device-profile-intrinsics \
         "${device_object_args[@]}" --object-root "$device_object_root" \

@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "total_measured_rows": 2,
+  "ship_gate_failure_count": 2,
+  "h3_lane_gate_failure_count": 0,
+  "crash_count": 0,
+  "rows_below_parity_count": 2,
+  "gpu_dispatched_below_parity_count": 0,
+  "native_below_parity_count": 2,
+  "planner_declined_below_parity_count": 2,
+  "stock_fallback_rows": 0,
+  "custom_scan_selected_not_dispatched_rows": 0,
+  "unique_work_items": 2,
+  "rows": [
+    {
+      "workload": "grouped_computed_integer",
+      "rows": 250000,
+      "category": "gpu_hashagg",
+      "kernel_class": "hash_agg",
+      "classification": "planner_declined_native",
+      "priority": "p1_release_blocker",
+      "next_track": "resident_groupagg_small_input_overhead",
+      "sources": [
+        "benchmark_ship_gate",
+        "native_below_parity"
+      ],
+      "speedup_median_vs_parallel": 0.98018073468931,
+      "gate_floor": 1.0,
+      "accel_median_ms": 11.169687499999998,
+      "parallel_median_ms": 10.9483125,
+      "details": [
+        "expected_winner_missed_selection: expected GPU winner missed dispatch/selection in lane `resident_computed_integer_aggregate` (computed-measure resident integer aggregation warm gate)",
+        "native/planner-declined row below 1.00x parity"
+      ]
+    },
+    {
+      "workload": "grouped_computed_integer",
+      "rows": 1000000,
+      "category": "gpu_hashagg",
+      "kernel_class": "hash_agg",
+      "classification": "planner_declined_native",
+      "priority": "p1_release_blocker",
+      "next_track": "resident_groupagg_small_input_overhead",
+      "sources": [
+        "benchmark_ship_gate",
+        "native_below_parity"
+      ],
+      "speedup_median_vs_parallel": 0.9912010400175054,
+      "gate_floor": 1.0,
+      "accel_median_ms": 24.2784375,
+      "parallel_median_ms": 24.064812500000002,
+      "details": [
+        "expected_winner_missed_selection: expected GPU winner missed dispatch/selection in lane `resident_computed_integer_aggregate` (computed-measure resident integer aggregation warm gate)",
+        "native/planner-declined row below 1.00x parity"
+      ]
+    }
+  ]
+}

@@ -178,11 +178,12 @@ fn aggregate_result_type(source_type_oid: u32, kind: AggregateKind) -> Option<u3
         (0, AggregateKind::Count) => Some(INT8_OID),
         (
             BOOL_OID | INT2_OID | INT4_OID | INT8_OID | FLOAT4_OID | FLOAT8_OID | DATE_OID
-            | TIMESTAMP_OID | TIMESTAMPTZ_OID,
+            | TIMESTAMP_OID | TIMESTAMPTZ_OID | NUMERIC_OID,
             AggregateKind::Count,
         ) => Some(INT8_OID),
         (INT2_OID | INT4_OID, AggregateKind::Sum) => Some(INT8_OID),
         (INT2_OID | INT4_OID, AggregateKind::Avg) => Some(NUMERIC_OID),
+        (NUMERIC_OID | INT8_OID, AggregateKind::Sum | AggregateKind::Avg) => Some(NUMERIC_OID),
         (FLOAT8_OID, AggregateKind::Sum | AggregateKind::Avg | AggregateKind::StddevSamp) => {
             Some(FLOAT8_OID)
         }
@@ -890,6 +891,11 @@ mod tests {
             (INT4_OID, AggregateKind::Sum, INT8_OID),
             (INT2_OID, AggregateKind::Avg, NUMERIC_OID),
             (INT4_OID, AggregateKind::Avg, NUMERIC_OID),
+            (NUMERIC_OID, AggregateKind::Sum, NUMERIC_OID),
+            (INT8_OID, AggregateKind::Sum, NUMERIC_OID),
+            (INT8_OID, AggregateKind::Avg, NUMERIC_OID),
+            (NUMERIC_OID, AggregateKind::Avg, NUMERIC_OID),
+            (NUMERIC_OID, AggregateKind::Count, INT8_OID),
             (FLOAT8_OID, AggregateKind::Sum, FLOAT8_OID),
             (INT2_OID, AggregateKind::Min, INT2_OID),
             (INT4_OID, AggregateKind::Min, INT4_OID),
@@ -906,7 +912,9 @@ mod tests {
         }
         for (source, kind) in [
             (0, AggregateKind::Sum),
-            (INT8_OID, AggregateKind::Sum),
+            (NUMERIC_OID, AggregateKind::Min),
+            (NUMERIC_OID, AggregateKind::Max),
+            (NUMERIC_OID, AggregateKind::StddevSamp),
             (INT4_OID, AggregateKind::StddevSamp),
             (BOOL_OID, AggregateKind::Min),
             (FLOAT4_OID, AggregateKind::Sum),
@@ -1139,7 +1147,7 @@ mod tests {
         assert_eq!(
             int8_sum.validate(&int8_sum_spec),
             Err(ProjectionCodecError::InvalidProjection(
-                "aggregate source/kind has no canonical result type mapping"
+                "aggregate result type does not match source/kind semantics"
             ))
         );
 

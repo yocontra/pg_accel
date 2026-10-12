@@ -1,0 +1,53 @@
+-- pgaccel_kernels: SYCL (AdaptiveCpp) is the only supported backend; build fails without AdaptiveCpp
+-- Configuring done (0.3s)
+-- Generating done (0.1s)
+-- Build files have been written to: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+[ 24%] Built target pgaccel_kernels
+[ 26%] Built target pgaccel_kernels_shared
+[ 28%] Built target test_h3
+[ 30%] Built target test_grouped_agg_workspace
+[ 32%] Built target test_spatial_dispatch
+[ 33%] Built target test_fork_warmed
+[ 34%] Built target test_bbox
+[ 35%] Built target test_hash_domain_matrix
+[ 37%] Built target test_hash_agg_partial
+[ 38%] Built target test_reduce_bool_bit
+[ 39%] Built target test_spatial_pairwise_boundary
+[ 43%] Built target test_fork_cold_barrier
+[ 44%] Built target test_device
+[ 44%] Built target test_spatial
+[ 44%] Built target test_reduce_minimal
+[ 46%] Built target test_raster_resident
+[ 48%] Built target test_hashagg_spatial_matrix
+[ 49%] Built target test_host_api_contract
+[ 51%] Built target test_fork
+[ 52%] Built target test_hash_agg_keys
+[ 53%] Built target test_expr_vm_matrix
+[ 55%] Built target test_correctness
+[ 57%] Built target test_reduce_stats
+[ 59%] Built target test_hash_join
+[ 60%] Built target test_grouped_agg_hash
+[ 62%] Built target test_kernel_failure_status
+[ 64%] Built target test_fork_archive_stress
+[ 66%] Built target test_expr_memory
+[ 69%] Built target test_spatial_resident
+[ 69%] Built target test_fork_cold
+[ 71%] Built target test_scalar
+[ 72%] Building CXX object CMakeFiles/test_grouped_agg.dir/test/test_grouped_agg.cpp.o
+[ 74%] Built target test_exec_gpu
+[ 76%] Built target test_spatial_bench
+[ 77%] Built target test_fp64_probe_asin
+[ 79%] Built target test_fp64_probe_add
+[ 81%] Built target test_reduce_matrix
+[ 82%] Built target test_fp64_probe_haversine
+[ 84%] Built target test_oom_invariant
+[ 88%] Built target test_ooo_overlap
+[ 88%] Built target test_fp64_probe_mul
+[ 90%] Built target test_fp64_probe_cos
+[ 92%] Built target test_fp64_probe_atan2
+[ 95%] Built target test_fp64_mul_probe
+[ 95%] Built target test_fp64_probe_sin
+[ 99%] Built target test_fp64_probe_sqrt
+[ 99%] Built target test_sycl_basic
+[100%] Linking CXX executable test_grouped_agg
+[100%] Built target test_grouped_agg

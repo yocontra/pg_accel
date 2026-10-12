@@ -1,0 +1,1853 @@
+{
+  "hardware": {
+    "os": "macos",
+    "os_version": "26.4.1",
+    "arch": "aarch64",
+    "cpu": "Apple M2 Max",
+    "cpu_cores": 12,
+    "memory_gb": "64 GB"
+  },
+  "gucs": {
+    "settings": [
+      [
+        "pg_accel.enabled",
+        "on"
+      ],
+      [
+        "pg_accel.gpu_enabled",
+        "on"
+      ],
+      [
+        "pg_accel.min_batch_size",
+        "65536"
+      ],
+      [
+        "pg_accel.kernel_timeout_ms",
+        "5s"
+      ],
+      [
+        "max_parallel_workers_per_gather",
+        "8"
+      ],
+      [
+        "max_parallel_workers",
+        "12"
+      ],
+      [
+        "parallel_setup_cost",
+        "0"
+      ],
+      [
+        "parallel_tuple_cost",
+        "0"
+      ],
+      [
+        "work_mem",
+        "512MB"
+      ],
+      [
+        "shared_buffers",
+        "16GB"
+      ],
+      [
+        "effective_cache_size",
+        "48GB"
+      ],
+      [
+        "server_version",
+        "18.4"
+      ]
+    ]
+  },
+  "methodology": {
+    "iterations": 10,
+    "warmup": 5,
+    "row_scales": [
+      1000000,
+      2000000
+    ],
+    "ordering": "balanced randomized AB/BA crossover on distinct persistent PostgreSQL backends (`DISCARD ALL` before each arm)",
+    "statistical_tests": [
+      "Paired t-test (two-tailed, p < 0.05)",
+      "Bonferroni correction (family-wise alpha)",
+      "Cohen's d effect size (|d| >= 0.5 gate, action_items C9)",
+      "95% CI via t-distribution",
+      "Outlier detection (> 3 sigma)"
+    ],
+    "timing_mode": "raw-wallclock",
+    "cache_mode": "warm",
+    "harness_profile": "release",
+    "native_parity_pairing": false,
+    "native_parity_repetitions_per_arm": 1
+  },
+  "workloads": [
+    {
+      "name": "spatial_holes_coveredby",
+      "description": "Resident point/polygon COUNT with two holes, NULLs and exact boundary rechecks; synthetic full-scan fixture with independent integer oracle",
+      "category": "gpu_spatial",
+      "kernel_class": "point_in_ring",
+      "rows": 1000000,
+      "iterations": [
+        {
+          "accel_ms": 3.628208,
+          "parallel_ms": 62.62,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 3.602292,
+          "parallel_ms": 54.598417,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 3.487292,
+          "parallel_ms": 54.232625,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 3.433667,
+          "parallel_ms": 55.738375,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 4.025916,
+          "parallel_ms": 54.061,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 3.426375,
+          "parallel_ms": 55.026459,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 3.828208,
+          "parallel_ms": 58.820709,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 3.68925,
+          "parallel_ms": 60.712166,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 3.408375,
+          "parallel_ms": 59.554,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 3.73875,
+          "parallel_ms": 55.718667,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        }
+      ],
+      "artifact_lifecycle_probe": {
+        "phase": "lifecycle",
+        "iteration": {
+          "accel_ms": 303.226375,
+          "parallel_ms": 61.316708,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        "artifact": {
+          "hits": 0,
+          "builds": 1,
+          "rebuilds": 0,
+          "artifact_bytes_observed": 1000000,
+          "construction_bytes": 1000000,
+          "construction_us": 95895,
+          "preparation_us": 95895,
+          "raw_load_us": 0
+        },
+        "artifact_policy": "cached_reusable",
+        "refresh_us": 203218,
+        "refreshed_relations": 1,
+        "refreshed_rows": 1000000,
+        "dependencies_before": [
+          {
+            "relid": 2212671,
+            "generation": 1,
+            "global_generation": 1,
+            "relfilenode": 2212671,
+            "row_count": 1000000,
+            "raw_bytes": 128505192,
+            "derived_bytes": 1000000
+          }
+        ],
+        "dependencies_after": [
+          {
+            "relid": 2212671,
+            "generation": 1,
+            "global_generation": 1,
+            "relfilenode": 2212671,
+            "row_count": 1000000,
+            "raw_bytes": 128505192,
+            "derived_bytes": 1000000
+          }
+        ],
+        "queries_accelerated": 1,
+        "rows_dispatched": 1000000,
+        "batches_executed": 1,
+        "stock_exec_count": 0,
+        "gpu_rows_processed": 1000000,
+        "gpu_kernel_executions": 42,
+        "output_rows_consumed": 1
+      },
+      "artifact_steady_state_captures": [
+        {
+          "phase": "steady_state",
+          "pair_index": 0,
+          "iteration": {
+            "accel_ms": 3.628208,
+            "parallel_ms": 62.62,
+            "accel_first": false,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 1000000,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 48,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 2212671,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212671,
+              "row_count": 1000000,
+              "raw_bytes": 128505192,
+              "derived_bytes": 1000000
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 2212671,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212671,
+              "row_count": 1000000,
+              "raw_bytes": 128505192,
+              "derived_bytes": 1000000
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 1000000,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 1000000,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 1
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 1,
+          "iteration": {
+            "accel_ms": 3.602292,
+            "parallel_ms": 54.598417,
+            "accel_first": true,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 1000000,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 58,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 2212671,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212671,
+              "row_count": 1000000,
+              "raw_bytes": 128505192,
+              "derived_bytes": 1000000
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 2212671,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212671,
+              "row_count": 1000000,
+              "raw_bytes": 128505192,
+              "derived_bytes": 1000000
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 1000000,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 1000000,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 1
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 2,
+          "iteration": {
+            "accel_ms": 3.487292,
+            "parallel_ms": 54.232625,
+            "accel_first": false,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 1000000,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 48,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 2212671,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212671,
+              "row_count": 1000000,
+              "raw_bytes": 128505192,
+              "derived_bytes": 1000000
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 2212671,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212671,
+              "row_count": 1000000,
+              "raw_bytes": 128505192,
+              "derived_bytes": 1000000
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 1000000,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 1000000,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 1
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 3,
+          "iteration": {
+            "accel_ms": 3.433667,
+            "parallel_ms": 55.738375,
+            "accel_first": true,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 1000000,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 56,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 2212671,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212671,
+              "row_count": 1000000,
+              "raw_bytes": 128505192,
+              "derived_bytes": 1000000
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 2212671,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212671,
+              "row_count": 1000000,
+              "raw_bytes": 128505192,
+              "derived_bytes": 1000000
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 1000000,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 1000000,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 1
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 4,
+          "iteration": {
+            "accel_ms": 4.025916,
+            "parallel_ms": 54.061,
+            "accel_first": true,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 1000000,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 62,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 2212671,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212671,
+              "row_count": 1000000,
+              "raw_bytes": 128505192,
+              "derived_bytes": 1000000
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 2212671,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212671,
+              "row_count": 1000000,
+              "raw_bytes": 128505192,
+              "derived_bytes": 1000000
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 1000000,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 1000000,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 1
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 5,
+          "iteration": {
+            "accel_ms": 3.426375,
+            "parallel_ms": 55.026459,
+            "accel_first": true,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 1000000,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 50,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 2212671,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212671,
+              "row_count": 1000000,
+              "raw_bytes": 128505192,
+              "derived_bytes": 1000000
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 2212671,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212671,
+              "row_count": 1000000,
+              "raw_bytes": 128505192,
+              "derived_bytes": 1000000
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 1000000,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 1000000,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 1
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 6,
+          "iteration": {
+            "accel_ms": 3.828208,
+            "parallel_ms": 58.820709,
+            "accel_first": false,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 1000000,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 51,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 2212671,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212671,
+              "row_count": 1000000,
+              "raw_bytes": 128505192,
+              "derived_bytes": 1000000
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 2212671,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212671,
+              "row_count": 1000000,
+              "raw_bytes": 128505192,
+              "derived_bytes": 1000000
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 1000000,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 1000000,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 1
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 7,
+          "iteration": {
+            "accel_ms": 3.68925,
+            "parallel_ms": 60.712166,
+            "accel_first": false,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 1000000,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 59,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 2212671,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212671,
+              "row_count": 1000000,
+              "raw_bytes": 128505192,
+              "derived_bytes": 1000000
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 2212671,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212671,
+              "row_count": 1000000,
+              "raw_bytes": 128505192,
+              "derived_bytes": 1000000
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 1000000,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 1000000,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 1
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 8,
+          "iteration": {
+            "accel_ms": 3.408375,
+            "parallel_ms": 59.554,
+            "accel_first": true,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 1000000,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 50,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 2212671,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212671,
+              "row_count": 1000000,
+              "raw_bytes": 128505192,
+              "derived_bytes": 1000000
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 2212671,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212671,
+              "row_count": 1000000,
+              "raw_bytes": 128505192,
+              "derived_bytes": 1000000
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 1000000,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 1000000,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 1
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 9,
+          "iteration": {
+            "accel_ms": 3.73875,
+            "parallel_ms": 55.718667,
+            "accel_first": false,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 1000000,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 51,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 2212671,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212671,
+              "row_count": 1000000,
+              "raw_bytes": 128505192,
+              "derived_bytes": 1000000
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 2212671,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212671,
+              "row_count": 1000000,
+              "raw_bytes": 128505192,
+              "derived_bytes": 1000000
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 1000000,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 1000000,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 1
+        }
+      ],
+      "plan_selected": true,
+      "gpu_kernel_dispatched": true,
+      "function_srf_kernel_dispatched": false,
+      "planner_declined": false,
+      "custom_scan_selected_not_dispatched": false,
+      "function_kernel_count": 0,
+      "rows_returned_to_cpu": 10,
+      "gpu_resident_pipeline": "reported",
+      "warmup_iterations": [
+        {
+          "accel_ms": 127.197208,
+          "parallel_ms": 66.17475,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 4.150208,
+          "parallel_ms": 60.740834,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 3.943416,
+          "parallel_ms": 54.131458,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 3.928459,
+          "parallel_ms": 54.980042,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 3.509625,
+          "parallel_ms": 54.184583,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        }
+      ],
+      "warmup_accel_first_ms": 127.197208,
+      "warmup_accel_max_ms": 127.197208,
+      "warmup_accel_post_first_max_ms": 4.150208,
+      "warmup_parallel_first_ms": 66.17475,
+      "warmup_parallel_max_ms": 66.17475,
+      "dispatch_counter_captured": true,
+      "gpu_kernel_execution_delta": 10,
+      "pg_accel_queries_accelerated_delta": 10,
+      "pg_accel_rows_dispatched_delta": 10000000,
+      "pg_accel_batches_executed_delta": 10,
+      "pg_accel_gpu_rows_processed_delta": 10000000,
+      "pg_accel_stock_exec_delta": 0,
+      "physical_kernel_mode_counts": {
+        "parallel_hash": 0,
+        "parallel_dense_count": 10,
+        "parallel_dense_integer": 0,
+        "parallel_dense_numeric": 0,
+        "serial_generic": 0
+      },
+      "physical_kernel_mode": "parallel_dense_count",
+      "physical_kernel_mode_verified": true,
+      "accel_output_rows_consumed": 10,
+      "accel_mean_ms": 3.6268333000000004,
+      "accel_stddev_ms": 0.20042640138855622,
+      "accel_median_ms": 3.6152499999999996,
+      "accel_p25_ms": 3.44707325,
+      "accel_p75_ms": 3.726375,
+      "accel_p95_ms": 3.9369473999999998,
+      "accel_cv_pct": 5.526209362546555,
+      "accel_ci_95": [
+        3.483466850667789,
+        3.7701997493322117
+      ],
+      "accel_outliers": [],
+      "accel_min_ms": 3.408375,
+      "accel_max_ms": 4.025916,
+      "parallel_mean_ms": 57.108241799999995,
+      "parallel_stddev_ms": 3.060090286871971,
+      "parallel_median_ms": 55.728521,
+      "parallel_p25_ms": 54.7054275,
+      "parallel_p75_ms": 59.37067725,
+      "parallel_p95_ms": 61.7614747,
+      "parallel_cv_pct": 5.358403954351771,
+      "parallel_ci_95": [
+        54.919337164555735,
+        59.297146435444255
+      ],
+      "parallel_outliers": [],
+      "parallel_min_ms": 54.061,
+      "parallel_max_ms": 62.62,
+      "speedup_vs_parallel": 15.7460343710862,
+      "speedup_median_vs_parallel": 15.414845722979049,
+      "p_value_vs_parallel": 1.0869624425381122e-12,
+      "cohens_d_vs_parallel": 24.663463160968647,
+      "effect_size_meaningful": true,
+      "cv_ratio": 1.0313163041876496,
+      "plan_snippet": "Custom Scan (GpuAccelAgg)\n  Output: (count(*))\n  Strategy: GpuAgg\n  Plan Selected: true\n  Batch Size: 65536\n  Expected Threads: 1\n  GPU Resident Pipeline: true\n  GPU Resident Proof Version: 2\n  GPU Resident Operator Class: resident_groupagg\n  GPU Physical Kernel Mode: parallel_dense_count\n  GPU Descriptor Strategy: descriptor_ungrouped_aggregate\n  GPU Descriptor Specialization: dense_count_sql_mask\n  GPU Descriptor Specialization Cache: miss\n  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)\n  GPU Descriptor Group Keys: none\n  GPU Descriptor Aggregates: m0:count_star -> value.count\n  GPU Descriptor Filter: fact=spatial(predicate=coveredby, left=column(2212671.2:type=107033, kind=geometry, typmod=1107460, srid=4326), right=constant(kind=geometry, typmod=-1, srid=4326, bytes=16480), distance=false); measures=[m0=none]; dimensions=[none]\n  GPU Descriptor Star Dimensions: none\n  GPU Descriptor Output: slot0:aggregate[m0].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false\n  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)\n  GPU Descriptor Artifact: not initialized\n  GPU Descriptor Generations: not inspected\n  GPU Descriptor Bytes: not inspected\n  GPU Resident Stage Mask: 18441\n  GPU Resident Device Columns: 1\n  GPU Resident Boundary: none: no CPU boundary\npg_accel planner rejection reason: no_gpu_resident_pipeline\n",
+      "baseline_plan_snippet": "Finalize Aggregate\n  Output: count(*)\n  ->  Gather\n        Output: (PARTIAL count(*))\n        Workers Planned: 8\n        ->  Partial Aggregate\n              Output: PARTIAL count(*)\n              ->  Parallel Seq Scan on public.bench_spatial_resident_agg\n                    Output: id, geom\n                    Filter: st_coveredby(bench_spatial_resident_agg.geom, '0103000020E6100000030000000102000000000000000014400000000000001440000000000050144000000000000014400000000000A0144000000000000014400000000000F01440000000000000144000000000004015400000000000001440000000000090154000000000000014400000000000E01540000000000000144000000000003016400000000000001440000000000080164000000000000014400000000000D01640000000000000144000000000002017400000000000001440000000000070174000000000000014400000000000C01740000000000000144000000000001018400000000000001440000000000060184000000000000014400000000000B01840000000000000144000000000000019400000000000001440000000000050194000000000000014400000000000A0194000000000000014400000000000F0194000000000000014400000000000401A4000000000000014400000000000901A4000000000000014400000000000E01A4000000000000014400000000000301B4000000000000014400000000000801B4000000000000014400000000000D01B4000000000000014400000000000201C4000000000000014400000000000701C4000000000000014400000000000C01C4000000000000014400000000000101D4000000000000014400000000000601D4000000000000014400000000000B01D4000000000000014400000000000001E4000000000000014400000000000501E4000000000000014400000000000A01E4000000000000014400000000000F01E4000000000000014400000000000401F4000000000000014400000000000901F4000000000000014400000000000E01F400000000000001440000000000018204000000000000014400000000000402040000000000000144000000000006820400000000000001440000000000090204000000000000014400000000000B8204000000000000014400000000000E020400000000000001440000000000008214000000000000014400000000000302140000000000000144000000000005821400000000000001440000000000080214000000000000014400000000000A8214000000000000014400000000000D0214000000000000014400000000000F821400000000000001440000000000020224000000000000014400000000000482240000000000000144000000000007022400000000000001440000000000098224000000000000014400000000000C0224000000000000014400000000000E822400000000000001440000000000010234000000000000014400000000000382340000000000000144000000000006023400000000000001440000000000088234000000000000014400000000000B0234000000000000014400000000000D823400000000000001440000000000000244000000000000014400000000000282440000000000000144000000000005024400000000000001440000000000078244000000000000014400000000000A0244000000000000014400000000000C8244000000000000014400000000000F024400000000000001440000000000018254000000000000014400000000000402540000000000000144000000000006825400000000000001440000000000090254000000000000014400000000000B8254000000000000014400000000000E025400000000000001440000000000008264000000000000014400000000000302640000000000000144000000000005826400000000000001440000000000080264000000000000014400000000000A8264000000000000014400000000000D0264000000000000014400000000000F826400000000000001440000000000020274000000000000014400000000000482740000000000000144000000000007027400000000000001440000000000098274000000000000014400000000000C0274000000000000014400000000000E827400000000000001440000000000010284000000000000014400000000000382840000000000000144000000000006028400000000000001440000000000088284000000000000014400000000000B0284000000000000014400000000000D828400000000000001440000000000000294000000000000014400000000000282940000000000000144000000000005029400000000000001440000000000078294000000000000014400000000000A0294000000000000014400000000000C8294000000000000014400000000000F0294000000000000014400000000000182A4000000000000014400000000000402A4000000000000014400000000000682A4000000000000014400000000000902A4000000000000014400000000000B82A4000000000000014400000000000E02A4000000000000014400000000000082B4000000000000014400000000000302B4000000000000014400000000000582B4000000000000014400000000000802B4000000000000014400000000000A82B4000000000000014400000000000D02B4000000000000014400000000000F82B4000000000000014400000000000202C4000000000000014400000000000482C4000000000000014400000000000702C4000000000000014400000000000982C4000000000000014400000000000C02C4000000000000014400000000000E82C4000000000000014400000000000102D4000000000000014400000000000382D4000000000000014400000000000602D4000000000000014400000000000882D4000000000000014400000000000B02D4000000000000014400000000000D82D4000000000000014400000000000002E4000000000000014400000000000002E4000000000005014400000000000002E400000000000A014400000000000002E400000000000F014400000000000002E4000000000004015400000000000002E4000000000009015400000000000002E400000000000E015400000000000002E4000000000003016400000000000002E4000000000008016400000000000002E400000000000D016400000000000002E4000000000002017400000000000002E4000000000007017400000000000002E400000000000C017400000000000002E4000000000001018400000000000002E4000000000006018400000000000002E400000000000B018400000000000002E4000000000000019400000000000002E4000000000005019400000000000002E400000000000A019400000000000002E400000000000F019400000000000002E400000000000401A400000000000002E400000000000901A400000000000002E400000000000E01A400000000000002E400000000000301B400000000000002E400000000000801B400000000000002E400000000000D01B400000000000002E400000000000201C400000000000002E400000000000701C400000000000002E400000000000C01C400000000000002E400000000000101D400000000000002E400000000000601D400000000000002E400000000000B01D400000000000002E400000000000001E400000000000002E400000000000501E400000000000002E400000000000A01E400000000000002E400000000000F01E400000000000002E400000000000401F400000000000002E400000000000901F400000000000002E400000000000E01F400000000000002E4000000000001820400000000000002E4000000000004020400000000000002E4000000000006820400000000000002E4000000000009020400000000000002E400000000000B820400000000000002E400000000000E020400000000000002E4000000000000821400000000000002E4000000000003021400000000000002E4000000000005821400000000000002E4000000000008021400000000000002E400000000000A821400000000000002E400000000000D021400000000000002E400000000000F821400000000000002E4000000000002022400000000000002E4000000000004822400000000000002E4000000000007022400000000000002E4000000000009822400000000000002E400000000000C022400000000000002E400000000000E822400000000000002E4000000000001023400000000000002E4000000000003823400000000000002E4000000000006023400000000000002E4000000000008823400000000000002E400000000000B023400000000000002E400000000000D823400000000000002E4000000000000024400000000000002E4000000000002824400000000000002E4000000000005024400000000000002E4000000000007824400000000000002E400000000000A024400000000000002E400000000000C824400000000000002E400000000000F024400000000000002E4000000000001825400000000000002E4000000000004025400000000000002E4000000000006825400000000000002E4000000000009025400000000000002E400000000000B825400000000000002E400000000000E025400000000000002E4000000000000826400000000000002E4000000000003026400000000000002E4000000000005826400000000000002E4000000000008026400000000000002E400000000000A826400000000000002E400000000000D026400000000000002E400000000000F826400000000000002E4000000000002027400000000000002E4000000000004827400000000000002E4000000000007027400000000000002E4000000000009827400000000000002E400000000000C027400000000000002E400000000000E827400000000000002E4000000000001028400000000000002E4000000000003828400000000000002E4000000000006028400000000000002E4000000000008828400000000000002E400000000000B028400000000000002E400000000000D828400000000000002E4000000000000029400000000000002E4000000000002829400000000000002E4000000000005029400000000000002E4000000000007829400000000000002E400000000000A029400000000000002E400000000000C829400000000000002E400000000000F029400000000000002E400000000000182A400000000000002E400000000000402A400000000000002E400000000000682A400000000000002E400000000000902A400000000000002E400000000000B82A400000000000002E400000000000E02A400000000000002E400000000000082B400000000000002E400000000000302B400000000000002E400000000000582B400000000000002E400000000000802B400000000000002E400000000000A82B400000000000002E400000000000D02B400000000000002E400000000000F82B400000000000002E400000000000202C400000000000002E400000000000482C400000000000002E400000000000702C400000000000002E400000000000982C400000000000002E400000000000C02C400000000000002E400000000000E82C400000000000002E400000000000102D400000000000002E400000000000382D400000000000002E400000000000602D400000000000002E400000000000882D400000000000002E400000000000B02D400000000000002E400000000000D82D400000000000002E400000000000002E400000000000D82D400000000000002E400000000000B02D400000000000002E400000000000882D400000000000002E400000000000602D400000000000002E400000000000382D400000000000002E400000000000102D400000000000002E400000000000E82C400000000000002E400000000000C02C400000000000002E400000000000982C400000000000002E400000000000702C400000000000002E400000000000482C400000000000002E400000000000202C400000000000002E400000000000F82B400000000000002E400000000000D02B400000000000002E400000000000A82B400000000000002E400000000000802B400000000000002E400000000000582B400000000000002E400000000000302B400000000000002E400000000000082B400000000000002E400000000000E02A400000000000002E400000000000B82A400000000000002E400000000000902A400000000000002E400000000000682A400000000000002E400000000000402A400000000000002E400000000000182A400000000000002E400000000000F029400000000000002E400000000000C829400000000000002E400000000000A029400000000000002E4000000000007829400000000000002E4000000000005029400000000000002E4000000000002829400000000000002E4000000000000029400000000000002E400000000000D828400000000000002E400000000000B028400000000000002E4000000000008828400000000000002E4000000000006028400000000000002E4000000000003828400000000000002E4000000000001028400000000000002E400000000000E827400000000000002E400000000000C027400000000000002E4000000000009827400000000000002E4000000000007027400000000000002E4000000000004827400000000000002E4000000000002027400000000000002E400000000000F826400000000000002E400000000000D026400000000000002E400000000000A826400000000000002E4000000000008026400000000000002E4000000000005826400000000000002E4000000000003026400000000000002E4000000000000826400000000000002E400000000000E025400000000000002E400000000000B825400000000000002E4000000000009025400000000000002E4000000000006825400000000000002E4000000000004025400000000000002E4000000000001825400000000000002E400000000000F024400000000000002E400000000000C824400000000000002E400000000000A024400000000000002E4000000000007824400000000000002E4000000000005024400000000000002E4000000000002824400000000000002E4000000000000024400000000000002E400000000000D823400000000000002E400000000000B023400000000000002E4000000000008823400000000000002E4000000000006023400000000000002E4000000000003823400000000000002E4000000000001023400000000000002E400000000000E822400000000000002E400000000000C022400000000000002E4000000000009822400000000000002E4000000000007022400000000000002E4000000000004822400000000000002E4000000000002022400000000000002E400000000000F821400000000000002E400000000000D021400000000000002E400000000000A821400000000000002E4000000000008021400000000000002E4000000000005821400000000000002E4000000000003021400000000000002E4000000000000821400000000000002E400000000000E020400000000000002E400000000000B820400000000000002E4000000000009020400000000000002E4000000000006820400000000000002E4000000000004020400000000000002E4000000000001820400000000000002E400000000000E01F400000000000002E400000000000901F400000000000002E400000000000401F400000000000002E400000000000F01E400000000000002E400000000000A01E400000000000002E400000000000501E400000000000002E400000000000001E400000000000002E400000000000B01D400000000000002E400000000000601D400000000000002E400000000000101D400000000000002E400000000000C01C400000000000002E400000000000701C400000000000002E400000000000201C400000000000002E400000000000D01B400000000000002E400000000000801B400000000000002E400000000000301B400000000000002E400000000000E01A400000000000002E400000000000901A400000000000002E400000000000401A400000000000002E400000000000F019400000000000002E400000000000A019400000000000002E4000000000005019400000000000002E4000000000000019400000000000002E400000000000B018400000000000002E4000000000006018400000000000002E4000000000001018400000000000002E400000000000C017400000000000002E4000000000007017400000000000002E4000000000002017400000000000002E400000000000D016400000000000002E4000000000008016400000000000002E4000000000003016400000000000002E400000000000E015400000000000002E4000000000009015400000000000002E4000000000004015400000000000002E400000000000F014400000000000002E400000000000A014400000000000002E4000000000005014400000000000002E4000000000000014400000000000002E4000000000000014400000000000D82D4000000000000014400000000000B02D4000000000000014400000000000882D4000000000000014400000000000602D4000000000000014400000000000382D4000000000000014400000000000102D4000000000000014400000000000E82C4000000000000014400000000000C02C4000000000000014400000000000982C4000000000000014400000000000702C4000000000000014400000000000482C4000000000000014400000000000202C4000000000000014400000000000F82B4000000000000014400000000000D02B4000000000000014400000000000A82B4000000000000014400000000000802B4000000000000014400000000000582B4000000000000014400000000000302B4000000000000014400000000000082B4000000000000014400000000000E02A4000000000000014400000000000B82A4000000000000014400000000000902A4000000000000014400000000000682A4000000000000014400000000000402A4000000000000014400000000000182A4000000000000014400000000000F0294000000000000014400000000000C8294000000000000014400000000000A029400000000000001440000000000078294000000000000014400000000000502940000000000000144000000000002829400000000000001440000000000000294000000000000014400000000000D8284000000000000014400000000000B028400000000000001440000000000088284000000000000014400000000000602840000000000000144000000000003828400000000000001440000000000010284000000000000014400000000000E8274000000000000014400000000000C027400000000000001440000000000098274000000000000014400000000000702740000000000000144000000000004827400000000000001440000000000020274000000000000014400000000000F8264000000000000014400000000000D0264000000000000014400000000000A826400000000000001440000000000080264000000000000014400000000000582640000000000000144000000000003026400000000000001440000000000008264000000000000014400000000000E0254000000000000014400000000000B825400000000000001440000000000090254000000000000014400000000000682540000000000000144000000000004025400000000000001440000000000018254000000000000014400000000000F0244000000000000014400000000000C8244000000000000014400000000000A024400000000000001440000000000078244000000000000014400000000000502440000000000000144000000000002824400000000000001440000000000000244000000000000014400000000000D8234000000000000014400000000000B023400000000000001440000000000088234000000000000014400000000000602340000000000000144000000000003823400000000000001440000000000010234000000000000014400000000000E8224000000000000014400000000000C022400000000000001440000000000098224000000000000014400000000000702240000000000000144000000000004822400000000000001440000000000020224000000000000014400000000000F8214000000000000014400000000000D0214000000000000014400000000000A821400000000000001440000000000080214000000000000014400000000000582140000000000000144000000000003021400000000000001440000000000008214000000000000014400000000000E0204000000000000014400000000000B820400000000000001440000000000090204000000000000014400000000000682040000000000000144000000000004020400000000000001440000000000018204000000000000014400000000000E01F4000000000000014400000000000901F4000000000000014400000000000401F4000000000000014400000000000F01E4000000000000014400000000000A01E4000000000000014400000000000501E4000000000000014400000000000001E4000000000000014400000000000B01D4000000000000014400000000000601D4000000000000014400000000000101D4000000000000014400000000000C01C4000000000000014400000000000701C4000000000000014400000000000201C4000000000000014400000000000D01B4000000000000014400000000000801B4000000000000014400000000000301B4000000000000014400000000000E01A4000000000000014400000000000901A4000000000000014400000000000401A4000000000000014400000000000F0194000000000000014400000000000A01940000000000000144000000000005019400000000000001440000000000000194000000000000014400000000000B01840000000000000144000000000006018400000000000001440000000000010184000000000000014400000000000C01740000000000000144000000000007017400000000000001440000000000020174000000000000014400000000000D01640000000000000144000000000008016400000000000001440000000000030164000000000000014400000000000E01540000000000000144000000000009015400000000000001440000000000040154000000000000014400000000000F0144000000000000014400000000000A014400000000000001440000000000050144000000000000014400000000000001440010100000000000000001C400000000000001C400000000000201C400000000000001C400000000000401C400000000000001C400000000000601C400000000000001C400000000000801C400000000000001C400000000000A01C400000000000001C400000000000C01C400000000000001C400000000000E01C400000000000001C400000000000001D400000000000001C400000000000201D400000000000001C400000000000401D400000000000001C400000000000601D400000000000001C400000000000801D400000000000001C400000000000A01D400000000000001C400000000000C01D400000000000001C400000000000E01D400000000000001C400000000000001E400000000000001C400000000000201E400000000000001C400000000000401E400000000000001C400000000000601E400000000000001C400000000000801E400000000000001C400000000000A01E400000000000001C400000000000C01E400000000000001C400000000000E01E400000000000001C400000000000001F400000000000001C400000000000201F400000000000001C400000000000401F400000000000001C400000000000601F400000000000001C400000000000801F400000000000001C400000000000A01F400000000000001C400000000000C01F400000000000001C400000000000E01F400000000000001C4000000000000020400000000000001C4000000000001020400000000000001C4000000000002020400000000000001C4000000000003020400000000000001C4000000000004020400000000000001C4000000000005020400000000000001C4000000000006020400000000000001C4000000000007020400000000000001C4000000000008020400000000000001C4000000000009020400000000000001C400000000000A020400000000000001C400000000000B020400000000000001C400000000000C020400000000000001C400000000000D020400000000000001C400000000000E020400000000000001C400000000000F020400000000000001C4000000000000021400000000000001C4000000000001021400000000000001C4000000000002021400000000000001C4000000000003021400000000000001C4000000000004021400000000000001C4000000000005021400000000000001C4000000000006021400000000000001C4000000000007021400000000000001C4000000000008021400000000000001C4000000000009021400000000000001C400000000000A021400000000000001C400000000000B021400000000000001C400000000000C021400000000000001C400000000000D021400000000000001C400000000000E021400000000000001C400000000000F021400000000000001C4000000000000022400000000000001C4000000000000022400000000000201C4000000000000022400000000000401C4000000000000022400000000000601C4000000000000022400000000000801C4000000000000022400000000000A01C4000000000000022400000000000C01C4000000000000022400000000000E01C4000000000000022400000000000001D4000000000000022400000000000201D4000000000000022400000000000401D4000000000000022400000000000601D4000000000000022400000000000801D4000000000000022400000000000A01D4000000000000022400000000000C01D4000000000000022400000000000E01D4000000000000022400000000000001E4000000000000022400000000000201E4000000000000022400000000000401E4000000000000022400000000000601E4000000000000022400000000000801E4000000000000022400000000000A01E4000000000000022400000000000C01E4000000000000022400000000000E01E4000000000000022400000000000001F4000000000000022400000000000201F4000000000000022400000000000401F4000000000000022400000000000601F4000000000000022400000000000801F4000000000000022400000000000A01F4000000000000022400000000000C01F4000000000000022400000000000E01F400000000000002240000000000000204000000000000022400000000000102040000000000000224000000000002020400000000000002240000000000030204000000000000022400000000000402040000000000000224000000000005020400000000000002240000000000060204000000000000022400000000000702040000000000000224000000000008020400000000000002240000000000090204000000000000022400000000000A0204000000000000022400000000000B0204000000000000022400000000000C0204000000000000022400000000000D0204000000000000022400000000000E0204000000000000022400000000000F020400000000000002240000000000000214000000000000022400000000000102140000000000000224000000000002021400000000000002240000000000030214000000000000022400000000000402140000000000000224000000000005021400000000000002240000000000060214000000000000022400000000000702140000000000000224000000000008021400000000000002240000000000090214000000000000022400000000000A0214000000000000022400000000000B0214000000000000022400000000000C0214000000000000022400000000000D0214000000000000022400000000000E0214000000000000022400000000000F02140000000000000224000000000000022400000000000F0214000000000000022400000000000E0214000000000000022400000000000D0214000000000000022400000000000C0214000000000000022400000000000B0214000000000000022400000000000A021400000000000002240000000000090214000000000000022400000000000802140000000000000224000000000007021400000000000002240000000000060214000000000000022400000000000502140000000000000224000000000004021400000000000002240000000000030214000000000000022400000000000202140000000000000224000000000001021400000000000002240000000000000214000000000000022400000000000F0204000000000000022400000000000E0204000000000000022400000000000D0204000000000000022400000000000C0204000000000000022400000000000B0204000000000000022400000000000A020400000000000002240000000000090204000000000000022400000000000802040000000000000224000000000007020400000000000002240000000000060204000000000000022400000000000502040000000000000224000000000004020400000000000002240000000000030204000000000000022400000000000202040000000000000224000000000001020400000000000002240000000000000204000000000000022400000000000E01F4000000000000022400000000000C01F4000000000000022400000000000A01F4000000000000022400000000000801F4000000000000022400000000000601F4000000000000022400000000000401F4000000000000022400000000000201F4000000000000022400000000000001F4000000000000022400000000000E01E4000000000000022400000000000C01E4000000000000022400000000000A01E4000000000000022400000000000801E4000000000000022400000000000601E4000000000000022400000000000401E4000000000000022400000000000201E4000000000000022400000000000001E4000000000000022400000000000E01D4000000000000022400000000000C01D4000000000000022400000000000A01D4000000000000022400000000000801D4000000000000022400000000000601D4000000000000022400000000000401D4000000000000022400000000000201D4000000000000022400000000000001D4000000000000022400000000000E01C4000000000000022400000000000C01C4000000000000022400000000000A01C4000000000000022400000000000801C4000000000000022400000000000601C4000000000000022400000000000401C4000000000000022400000000000201C4000000000000022400000000000001C4000000000000022400000000000001C400000000000F021400000000000001C400000000000E021400000000000001C400000000000D021400000000000001C400000000000C021400000000000001C400000000000B021400000000000001C400000000000A021400000000000001C4000000000009021400000000000001C4000000000008021400000000000001C4000000000007021400000000000001C4000000000006021400000000000001C4000000000005021400000000000001C4000000000004021400000000000001C4000000000003021400000000000001C4000000000002021400000000000001C4000000000001021400000000000001C4000000000000021400000000000001C400000000000F020400000000000001C400000000000E020400000000000001C400000000000D020400000000000001C400000000000C020400000000000001C400000000000B020400000000000001C400000000000A020400000000000001C4000000000009020400000000000001C4000000000008020400000000000001C4000000000007020400000000000001C4000000000006020400000000000001C4000000000005020400000000000001C4000000000004020400000000000001C4000000000003020400000000000001C4000000000002020400000000000001C4000000000001020400000000000001C4000000000000020400000000000001C400000000000E01F400000000000001C400000000000C01F400000000000001C400000000000A01F400000000000001C400000000000801F400000000000001C400000000000601F400000000000001C400000000000401F400000000000001C400000000000201F400000000000001C400000000000001F400000000000001C400000000000E01E400000000000001C400000000000C01E400000000000001C400000000000A01E400000000000001C400000000000801E400000000000001C400000000000601E400000000000001C400000000000401E400000000000001C400000000000201E400000000000001C400000000000001E400000000000001C400000000000E01D400000000000001C400000000000C01D400000000000001C400000000000A01D400000000000001C400000000000801D400000000000001C400000000000601D400000000000001C400000000000401D400000000000001C400000000000201D400000000000001C400000000000001D400000000000001C400000000000E01C400000000000001C400000000000C01C400000000000001C400000000000A01C400000000000001C400000000000801C400000000000001C400000000000601C400000000000001C400000000000401C400000000000001C400000000000201C400000000000001C400000000000001C4001010000000000000000264000000000000026400000000000102640000000000000264000000000002026400000000000002640000000000030264000000000000026400000000000402640000000000000264000000000005026400000000000002640000000000060264000000000000026400000000000702640000000000000264000000000008026400000000000002640000000000090264000000000000026400000000000A0264000000000000026400000000000B0264000000000000026400000000000C0264000000000000026400000000000D0264000000000000026400000000000E0264000000000000026400000000000F026400000000000002640000000000000274000000000000026400000000000102740000000000000264000000000002027400000000000002640000000000030274000000000000026400000000000402740000000000000264000000000005027400000000000002640000000000060274000000000000026400000000000702740000000000000264000000000008027400000000000002640000000000090274000000000000026400000000000A0274000000000000026400000000000B0274000000000000026400000000000C0274000000000000026400000000000D0274000000000000026400000000000E0274000000000000026400000000000F027400000000000002640000000000000284000000000000026400000000000102840000000000000264000000000002028400000000000002640000000000030284000000000000026400000000000402840000000000000264000000000005028400000000000002640000000000060284000000000000026400000000000702840000000000000264000000000008028400000000000002640000000000090284000000000000026400000000000A0284000000000000026400000000000B0284000000000000026400000000000C0284000000000000026400000000000D0284000000000000026400000000000E0284000000000000026400000000000F028400000000000002640000000000000294000000000000026400000000000102940000000000000264000000000002029400000000000002640000000000030294000000000000026400000000000402940000000000000264000000000005029400000000000002640000000000060294000000000000026400000000000702940000000000000264000000000008029400000000000002640000000000090294000000000000026400000000000A0294000000000000026400000000000B0294000000000000026400000000000C0294000000000000026400000000000D0294000000000000026400000000000E0294000000000000026400000000000F0294000000000000026400000000000002A4000000000000026400000000000002A4000000000001026400000000000002A4000000000002026400000000000002A4000000000003026400000000000002A4000000000004026400000000000002A4000000000005026400000000000002A4000000000006026400000000000002A4000000000007026400000000000002A4000000000008026400000000000002A4000000000009026400000000000002A400000000000A026400000000000002A400000000000B026400000000000002A400000000000C026400000000000002A400000000000D026400000000000002A400000000000E026400000000000002A400000000000F026400000000000002A4000000000000027400000000000002A4000000000001027400000000000002A4000000000002027400000000000002A4000000000003027400000000000002A4000000000004027400000000000002A4000000000005027400000000000002A4000000000006027400000000000002A4000000000007027400000000000002A4000000000008027400000000000002A4000000000009027400000000000002A400000000000A027400000000000002A400000000000B027400000000000002A400000000000C027400000000000002A400000000000D027400000000000002A400000000000E027400000000000002A400000000000F027400000000000002A4000000000000028400000000000002A4000000000001028400000000000002A4000000000002028400000000000002A4000000000003028400000000000002A4000000000004028400000000000002A4000000000005028400000000000002A4000000000006028400000000000002A4000000000007028400000000000002A4000000000008028400000000000002A4000000000009028400000000000002A400000000000A028400000000000002A400000000000B028400000000000002A400000000000C028400000000000002A400000000000D028400000000000002A400000000000E028400000000000002A400000000000F028400000000000002A4000000000000029400000000000002A4000000000001029400000000000002A4000000000002029400000000000002A4000000000003029400000000000002A4000000000004029400000000000002A4000000000005029400000000000002A4000000000006029400000000000002A4000000000007029400000000000002A4000000000008029400000000000002A4000000000009029400000000000002A400000000000A029400000000000002A400000000000B029400000000000002A400000000000C029400000000000002A400000000000D029400000000000002A400000000000E029400000000000002A400000000000F029400000000000002A400000000000002A400000000000F029400000000000002A400000000000E029400000000000002A400000000000D029400000000000002A400000000000C029400000000000002A400000000000B029400000000000002A400000000000A029400000000000002A4000000000009029400000000000002A4000000000008029400000000000002A4000000000007029400000000000002A4000000000006029400000000000002A4000000000005029400000000000002A4000000000004029400000000000002A4000000000003029400000000000002A4000000000002029400000000000002A4000000000001029400000000000002A4000000000000029400000000000002A400000000000F028400000000000002A400000000000E028400000000000002A400000000000D028400000000000002A400000000000C028400000000000002A400000000000B028400000000000002A400000000000A028400000000000002A4000000000009028400000000000002A4000000000008028400000000000002A4000000000007028400000000000002A4000000000006028400000000000002A4000000000005028400000000000002A4000000000004028400000000000002A4000000000003028400000000000002A4000000000002028400000000000002A4000000000001028400000000000002A4000000000000028400000000000002A400000000000F027400000000000002A400000000000E027400000000000002A400000000000D027400000000000002A400000000000C027400000000000002A400000000000B027400000000000002A400000000000A027400000000000002A4000000000009027400000000000002A4000000000008027400000000000002A4000000000007027400000000000002A4000000000006027400000000000002A4000000000005027400000000000002A4000000000004027400000000000002A4000000000003027400000000000002A4000000000002027400000000000002A4000000000001027400000000000002A4000000000000027400000000000002A400000000000F026400000000000002A400000000000E026400000000000002A400000000000D026400000000000002A400000000000C026400000000000002A400000000000B026400000000000002A400000000000A026400000000000002A4000000000009026400000000000002A4000000000008026400000000000002A4000000000007026400000000000002A4000000000006026400000000000002A4000000000005026400000000000002A4000000000004026400000000000002A4000000000003026400000000000002A4000000000002026400000000000002A4000000000001026400000000000002A4000000000000026400000000000002A4000000000000026400000000000F0294000000000000026400000000000E0294000000000000026400000000000D0294000000000000026400000000000C0294000000000000026400000000000B0294000000000000026400000000000A029400000000000002640000000000090294000000000000026400000000000802940000000000000264000000000007029400000000000002640000000000060294000000000000026400000000000502940000000000000264000000000004029400000000000002640000000000030294000000000000026400000000000202940000000000000264000000000001029400000000000002640000000000000294000000000000026400000000000F0284000000000000026400000000000E0284000000000000026400000000000D0284000000000000026400000000000C0284000000000000026400000000000B0284000000000000026400000000000A028400000000000002640000000000090284000000000000026400000000000802840000000000000264000000000007028400000000000002640000000000060284000000000000026400000000000502840000000000000264000000000004028400000000000002640000000000030284000000000000026400000000000202840000000000000264000000000001028400000000000002640000000000000284000000000000026400000000000F0274000000000000026400000000000E0274000000000000026400000000000D0274000000000000026400000000000C0274000000000000026400000000000B0274000000000000026400000000000A027400000000000002640000000000090274000000000000026400000000000802740000000000000264000000000007027400000000000002640000000000060274000000000000026400000000000502740000000000000264000000000004027400000000000002640000000000030274000000000000026400000000000202740000000000000264000000000001027400000000000002640000000000000274000000000000026400000000000F0264000000000000026400000000000E0264000000000000026400000000000D0264000000000000026400000000000C0264000000000000026400000000000B0264000000000000026400000000000A0264000000000000026400000000000902640000000000000264000000000008026400000000000002640000000000070264000000000000026400000000000602640000000000000264000000000005026400000000000002640000000000040264000000000000026400000000000302640000000000000264000000000002026400000000000002640000000000010264000000000000026400000000000002640'::geometry)\n",
+      "correctness_diff_artifact": "correctness_diffs/spatial_holes_coveredby-1000000.json",
+      "setup_quiescence": {
+        "schema_version": 1,
+        "checkpoint_completed": true,
+        "checkpoint_completed_at": "2026-09-29 12:50:34.931393-07",
+        "checkpoint_wal_lsn": "535/3737D620",
+        "measurement_completed_at": "2026-09-29 12:50:36.639841-07",
+        "measurement_completed_wal_lsn": "535/3737D8F0",
+        "checkpointer_before": {
+          "num_timed": 10,
+          "num_requested": 49,
+          "num_done": 50,
+          "restartpoints_timed": 0,
+          "restartpoints_requested": 0,
+          "restartpoints_done": 0,
+          "write_time_ms": 323125.0,
+          "sync_time_ms": 630.0,
+          "buffers_written": 449824,
+          "slru_written": 68
+        },
+        "checkpointer_after": {
+          "num_timed": 10,
+          "num_requested": 49,
+          "num_done": 50,
+          "restartpoints_timed": 0,
+          "restartpoints_requested": 0,
+          "restartpoints_done": 0,
+          "write_time_ms": 323125.0,
+          "sync_time_ms": 630.0,
+          "buffers_written": 449824,
+          "slru_written": 68
+        },
+        "checkpointer_unchanged": true
+      },
+      "thermal": {
+        "cpu_scheduler_limit": null,
+        "cpu_speed_limit": null,
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded\n",
+        "pressure": false
+      },
+      "table_stats": [
+        {
+          "relname": "bench_spatial_resident_agg",
+          "relpages": 8317,
+          "reltuples": 1000000.0,
+          "max_n_distinct": -1.0
+        }
+      ],
+      "sanity_checks": [],
+      "resident_load_ms": 242.930167,
+      "resident_lane": true,
+      "warm_summary": {
+        "cache_state": "warm",
+        "n": 10,
+        "accel_mean_ms": 3.6268333000000004,
+        "accel_median_ms": 3.6152499999999996,
+        "accel_stddev_ms": 0.20042640138855622,
+        "accel_p95_ms": 3.9369473999999998,
+        "accel_cv_pct": 5.526209362546555,
+        "accel_ci_95": [
+          3.483466850667789,
+          3.7701997493322117
+        ],
+        "parallel_mean_ms": 57.108241799999995,
+        "parallel_median_ms": 55.728521,
+        "parallel_stddev_ms": 3.060090286871971,
+        "parallel_p95_ms": 61.7614747,
+        "parallel_cv_pct": 5.358403954351771,
+        "parallel_ci_95": [
+          54.919337164555735,
+          59.297146435444255
+        ],
+        "speedup_mean_vs_parallel": 15.7460343710862,
+        "speedup_median_vs_parallel": 15.414845722979049,
+        "p_value_vs_parallel": 1.0869624425381122e-12,
+        "cohens_d_vs_parallel": 24.663463160968647,
+        "effect_size_meaningful": true
+      },
+      "combined_warm_summary": {
+        "cache_state": "warm",
+        "n": 11,
+        "accel_mean_ms": 30.863155272727273,
+        "accel_median_ms": 3.628208,
+        "accel_stddev_ms": 90.33286076667154,
+        "accel_p95_ms": 153.6261455,
+        "accel_cv_pct": 292.68835272489343,
+        "accel_ci_95": [
+          -29.819504512426658,
+          91.5458150578812
+        ],
+        "parallel_mean_ms": 57.49082963636363,
+        "parallel_median_ms": 55.738375,
+        "parallel_stddev_ms": 3.168255874340779,
+        "parallel_p95_ms": 61.968354,
+        "parallel_cv_pct": 5.510889118108707,
+        "parallel_ci_95": [
+          55.362499018876186,
+          59.61916025385107
+        ],
+        "speedup_mean_vs_parallel": 1.8627657842607666,
+        "speedup_median_vs_parallel": 15.362508158297429,
+        "p_value_vs_parallel": 0.3450346425639358,
+        "cohens_d_vs_parallel": 0.41661558948545635,
+        "effect_size_meaningful": false
+      }
+    },
+    {
+      "name": "spatial_holes_coveredby",
+      "description": "Resident point/polygon COUNT with two holes, NULLs and exact boundary rechecks; synthetic full-scan fixture with independent integer oracle",
+      "category": "gpu_spatial",
+      "kernel_class": "point_in_ring",
+      "rows": 2000000,
+      "iterations": [
+        {
+          "accel_ms": 4.499917,
+          "parallel_ms": 89.618583,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 3.694542,
+          "parallel_ms": 91.225208,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 4.175,
+          "parallel_ms": 88.702292,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 3.974125,
+          "parallel_ms": 88.476334,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 4.149833,
+          "parallel_ms": 91.802334,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 3.869791,
+          "parallel_ms": 93.83425,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 4.180875,
+          "parallel_ms": 91.620667,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 4.301125,
+          "parallel_ms": 96.252375,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 4.044333,
+          "parallel_ms": 91.78125,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 4.169458,
+          "parallel_ms": 94.446041,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        }
+      ],
+      "artifact_lifecycle_probe": {
+        "phase": "lifecycle",
+        "iteration": {
+          "accel_ms": 574.975375,
+          "parallel_ms": 85.268,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        "artifact": {
+          "hits": 0,
+          "builds": 1,
+          "rebuilds": 0,
+          "artifact_bytes_observed": 2000000,
+          "construction_bytes": 2000000,
+          "construction_us": 165393,
+          "preparation_us": 165393,
+          "raw_load_us": 0
+        },
+        "artifact_policy": "cached_reusable",
+        "refresh_us": 405140,
+        "refreshed_relations": 1,
+        "refreshed_rows": 2000000,
+        "dependencies_before": [
+          {
+            "relid": 2212694,
+            "generation": 1,
+            "global_generation": 1,
+            "relfilenode": 2212694,
+            "row_count": 2000000,
+            "raw_bytes": 257010360,
+            "derived_bytes": 2000000
+          }
+        ],
+        "dependencies_after": [
+          {
+            "relid": 2212694,
+            "generation": 1,
+            "global_generation": 1,
+            "relfilenode": 2212694,
+            "row_count": 2000000,
+            "raw_bytes": 257010360,
+            "derived_bytes": 2000000
+          }
+        ],
+        "queries_accelerated": 1,
+        "rows_dispatched": 2000000,
+        "batches_executed": 1,
+        "stock_exec_count": 0,
+        "gpu_rows_processed": 2000000,
+        "gpu_kernel_executions": 80,
+        "output_rows_consumed": 1
+      },
+      "artifact_steady_state_captures": [
+        {
+          "phase": "steady_state",
+          "pair_index": 0,
+          "iteration": {
+            "accel_ms": 4.499917,
+            "parallel_ms": 89.618583,
+            "accel_first": false,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 2000000,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 88,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 2212694,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212694,
+              "row_count": 2000000,
+              "raw_bytes": 257010360,
+              "derived_bytes": 2000000
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 2212694,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212694,
+              "row_count": 2000000,
+              "raw_bytes": 257010360,
+              "derived_bytes": 2000000
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 2000000,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 2000000,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 1
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 1,
+          "iteration": {
+            "accel_ms": 3.694542,
+            "parallel_ms": 91.225208,
+            "accel_first": true,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 2000000,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 59,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 2212694,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212694,
+              "row_count": 2000000,
+              "raw_bytes": 257010360,
+              "derived_bytes": 2000000
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 2212694,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212694,
+              "row_count": 2000000,
+              "raw_bytes": 257010360,
+              "derived_bytes": 2000000
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 2000000,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 2000000,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 1
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 2,
+          "iteration": {
+            "accel_ms": 4.175,
+            "parallel_ms": 88.702292,
+            "accel_first": true,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 2000000,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 61,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 2212694,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212694,
+              "row_count": 2000000,
+              "raw_bytes": 257010360,
+              "derived_bytes": 2000000
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 2212694,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212694,
+              "row_count": 2000000,
+              "raw_bytes": 257010360,
+              "derived_bytes": 2000000
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 2000000,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 2000000,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 1
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 3,
+          "iteration": {
+            "accel_ms": 3.974125,
+            "parallel_ms": 88.476334,
+            "accel_first": true,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 2000000,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 49,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 2212694,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212694,
+              "row_count": 2000000,
+              "raw_bytes": 257010360,
+              "derived_bytes": 2000000
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 2212694,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212694,
+              "row_count": 2000000,
+              "raw_bytes": 257010360,
+              "derived_bytes": 2000000
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 2000000,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 2000000,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 1
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 4,
+          "iteration": {
+            "accel_ms": 4.149833,
+            "parallel_ms": 91.802334,
+            "accel_first": true,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 2000000,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 51,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 2212694,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212694,
+              "row_count": 2000000,
+              "raw_bytes": 257010360,
+              "derived_bytes": 2000000
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 2212694,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212694,
+              "row_count": 2000000,
+              "raw_bytes": 257010360,
+              "derived_bytes": 2000000
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 2000000,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 2000000,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 1
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 5,
+          "iteration": {
+            "accel_ms": 3.869791,
+            "parallel_ms": 93.83425,
+            "accel_first": false,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 2000000,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 51,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 2212694,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212694,
+              "row_count": 2000000,
+              "raw_bytes": 257010360,
+              "derived_bytes": 2000000
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 2212694,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212694,
+              "row_count": 2000000,
+              "raw_bytes": 257010360,
+              "derived_bytes": 2000000
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 2000000,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 2000000,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 1
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 6,
+          "iteration": {
+            "accel_ms": 4.180875,
+            "parallel_ms": 91.620667,
+            "accel_first": false,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 2000000,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 51,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 2212694,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212694,
+              "row_count": 2000000,
+              "raw_bytes": 257010360,
+              "derived_bytes": 2000000
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 2212694,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212694,
+              "row_count": 2000000,
+              "raw_bytes": 257010360,
+              "derived_bytes": 2000000
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 2000000,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 2000000,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 1
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 7,
+          "iteration": {
+            "accel_ms": 4.301125,
+            "parallel_ms": 96.252375,
+            "accel_first": false,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 2000000,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 52,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 2212694,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212694,
+              "row_count": 2000000,
+              "raw_bytes": 257010360,
+              "derived_bytes": 2000000
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 2212694,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212694,
+              "row_count": 2000000,
+              "raw_bytes": 257010360,
+              "derived_bytes": 2000000
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 2000000,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 2000000,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 1
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 8,
+          "iteration": {
+            "accel_ms": 4.044333,
+            "parallel_ms": 91.78125,
+            "accel_first": true,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 2000000,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 54,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 2212694,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212694,
+              "row_count": 2000000,
+              "raw_bytes": 257010360,
+              "derived_bytes": 2000000
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 2212694,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212694,
+              "row_count": 2000000,
+              "raw_bytes": 257010360,
+              "derived_bytes": 2000000
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 2000000,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 2000000,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 1
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 9,
+          "iteration": {
+            "accel_ms": 4.169458,
+            "parallel_ms": 94.446041,
+            "accel_first": false,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 2000000,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 49,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 2212694,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212694,
+              "row_count": 2000000,
+              "raw_bytes": 257010360,
+              "derived_bytes": 2000000
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 2212694,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 2212694,
+              "row_count": 2000000,
+              "raw_bytes": 257010360,
+              "derived_bytes": 2000000
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 2000000,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 2000000,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 1
+        }
+      ],
+      "plan_selected": true,
+      "gpu_kernel_dispatched": true,
+      "function_srf_kernel_dispatched": false,
+      "planner_declined": false,
+      "custom_scan_selected_not_dispatched": false,
+      "function_kernel_count": 0,
+      "rows_returned_to_cpu": 10,
+      "gpu_resident_pipeline": "reported",
+      "warmup_iterations": [
+        {
+          "accel_ms": 199.32875,
+          "parallel_ms": 98.282334,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 4.753583,
+          "parallel_ms": 85.503208,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 4.095625,
+          "parallel_ms": 85.296542,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 4.173375,
+          "parallel_ms": 85.345834,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 4.219958,
+          "parallel_ms": 84.72275,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        }
+      ],
+      "warmup_accel_first_ms": 199.32875,
+      "warmup_accel_max_ms": 199.32875,
+      "warmup_accel_post_first_max_ms": 4.753583,
+      "warmup_parallel_first_ms": 98.282334,
+      "warmup_parallel_max_ms": 98.282334,
+      "dispatch_counter_captured": true,
+      "gpu_kernel_execution_delta": 10,
+      "pg_accel_queries_accelerated_delta": 10,
+      "pg_accel_rows_dispatched_delta": 20000000,
+      "pg_accel_batches_executed_delta": 10,
+      "pg_accel_gpu_rows_processed_delta": 20000000,
+      "pg_accel_stock_exec_delta": 0,
+      "physical_kernel_mode_counts": {
+        "parallel_hash": 0,
+        "parallel_dense_count": 10,
+        "parallel_dense_integer": 0,
+        "parallel_dense_numeric": 0,
+        "serial_generic": 0
+      },
+      "physical_kernel_mode": "parallel_dense_count",
+      "physical_kernel_mode_verified": true,
+      "accel_output_rows_consumed": 10,
+      "accel_mean_ms": 4.1058999,
+      "accel_stddev_ms": 0.2250545601875489,
+      "accel_median_ms": 4.1596455,
+      "accel_p25_ms": 3.991677,
+      "accel_p75_ms": 4.17940625,
+      "accel_p95_ms": 4.4104605999999995,
+      "accel_cv_pct": 5.481248098316984,
+      "accel_ci_95": [
+        3.9449167511903758,
+        4.266883048809624
+      ],
+      "accel_outliers": [],
+      "accel_min_ms": 3.694542,
+      "accel_max_ms": 4.499917,
+      "parallel_mean_ms": 91.77593340000001,
+      "parallel_stddev_ms": 2.5104579264298112,
+      "parallel_median_ms": 91.7009585,
+      "parallel_p25_ms": 90.02023925,
+      "parallel_p75_ms": 93.32627099999999,
+      "parallel_p95_ms": 95.43952469999999,
+      "parallel_cv_pct": 2.7354207507627604,
+      "parallel_ci_95": [
+        89.98018475303209,
+        93.57168204696794
+      ],
+      "parallel_outliers": [],
+      "parallel_min_ms": 88.476334,
+      "parallel_max_ms": 96.252375,
+      "speedup_vs_parallel": 22.35220917100293,
+      "speedup_median_vs_parallel": 22.045378266008488,
+      "p_value_vs_parallel": 2.1053603405641325e-15,
+      "cohens_d_vs_parallel": 49.1898029749199,
+      "effect_size_meaningful": true,
+      "cv_ratio": 2.0038043861400703,
+      "plan_snippet": "Custom Scan (GpuAccelAgg)\n  Output: (count(*))\n  Strategy: GpuAgg\n  Plan Selected: true\n  Batch Size: 65536\n  Expected Threads: 1\n  GPU Resident Pipeline: true\n  GPU Resident Proof Version: 2\n  GPU Resident Operator Class: resident_groupagg\n  GPU Physical Kernel Mode: parallel_dense_count\n  GPU Descriptor Strategy: descriptor_ungrouped_aggregate\n  GPU Descriptor Specialization: dense_count_sql_mask\n  GPU Descriptor Specialization Cache: miss\n  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)\n  GPU Descriptor Group Keys: none\n  GPU Descriptor Aggregates: m0:count_star -> value.count\n  GPU Descriptor Filter: fact=spatial(predicate=coveredby, left=column(2212694.2:type=107033, kind=geometry, typmod=1107460, srid=4326), right=constant(kind=geometry, typmod=-1, srid=4326, bytes=16480), distance=false); measures=[m0=none]; dimensions=[none]\n  GPU Descriptor Star Dimensions: none\n  GPU Descriptor Output: slot0:aggregate[m0].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false\n  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)\n  GPU Descriptor Artifact: not initialized\n  GPU Descriptor Generations: not inspected\n  GPU Descriptor Bytes: not inspected\n  GPU Resident Stage Mask: 18441\n  GPU Resident Device Columns: 1\n  GPU Resident Boundary: none: no CPU boundary\npg_accel planner rejection reason: no_gpu_resident_pipeline\n",
+      "baseline_plan_snippet": "Finalize Aggregate\n  Output: count(*)\n  ->  Gather\n        Output: (PARTIAL count(*))\n        Workers Planned: 8\n        ->  Partial Aggregate\n              Output: PARTIAL count(*)\n              ->  Parallel Seq Scan on public.bench_spatial_resident_agg\n                    Output: id, geom\n                    Filter: st_coveredby(bench_spatial_resident_agg.geom, '0103000020E6100000030000000102000000000000000014400000000000001440000000000050144000000000000014400000000000A0144000000000000014400000000000F01440000000000000144000000000004015400000000000001440000000000090154000000000000014400000000000E01540000000000000144000000000003016400000000000001440000000000080164000000000000014400000000000D01640000000000000144000000000002017400000000000001440000000000070174000000000000014400000000000C01740000000000000144000000000001018400000000000001440000000000060184000000000000014400000000000B01840000000000000144000000000000019400000000000001440000000000050194000000000000014400000000000A0194000000000000014400000000000F0194000000000000014400000000000401A4000000000000014400000000000901A4000000000000014400000000000E01A4000000000000014400000000000301B4000000000000014400000000000801B4000000000000014400000000000D01B4000000000000014400000000000201C4000000000000014400000000000701C4000000000000014400000000000C01C4000000000000014400000000000101D4000000000000014400000000000601D4000000000000014400000000000B01D4000000000000014400000000000001E4000000000000014400000000000501E4000000000000014400000000000A01E4000000000000014400000000000F01E4000000000000014400000000000401F4000000000000014400000000000901F4000000000000014400000000000E01F400000000000001440000000000018204000000000000014400000000000402040000000000000144000000000006820400000000000001440000000000090204000000000000014400000000000B8204000000000000014400000000000E020400000000000001440000000000008214000000000000014400000000000302140000000000000144000000000005821400000000000001440000000000080214000000000000014400000000000A8214000000000000014400000000000D0214000000000000014400000000000F821400000000000001440000000000020224000000000000014400000000000482240000000000000144000000000007022400000000000001440000000000098224000000000000014400000000000C0224000000000000014400000000000E822400000000000001440000000000010234000000000000014400000000000382340000000000000144000000000006023400000000000001440000000000088234000000000000014400000000000B0234000000000000014400000000000D823400000000000001440000000000000244000000000000014400000000000282440000000000000144000000000005024400000000000001440000000000078244000000000000014400000000000A0244000000000000014400000000000C8244000000000000014400000000000F024400000000000001440000000000018254000000000000014400000000000402540000000000000144000000000006825400000000000001440000000000090254000000000000014400000000000B8254000000000000014400000000000E025400000000000001440000000000008264000000000000014400000000000302640000000000000144000000000005826400000000000001440000000000080264000000000000014400000000000A8264000000000000014400000000000D0264000000000000014400000000000F826400000000000001440000000000020274000000000000014400000000000482740000000000000144000000000007027400000000000001440000000000098274000000000000014400000000000C0274000000000000014400000000000E827400000000000001440000000000010284000000000000014400000000000382840000000000000144000000000006028400000000000001440000000000088284000000000000014400000000000B0284000000000000014400000000000D828400000000000001440000000000000294000000000000014400000000000282940000000000000144000000000005029400000000000001440000000000078294000000000000014400000000000A0294000000000000014400000000000C8294000000000000014400000000000F0294000000000000014400000000000182A4000000000000014400000000000402A4000000000000014400000000000682A4000000000000014400000000000902A4000000000000014400000000000B82A4000000000000014400000000000E02A4000000000000014400000000000082B4000000000000014400000000000302B4000000000000014400000000000582B4000000000000014400000000000802B4000000000000014400000000000A82B4000000000000014400000000000D02B4000000000000014400000000000F82B4000000000000014400000000000202C4000000000000014400000000000482C4000000000000014400000000000702C4000000000000014400000000000982C4000000000000014400000000000C02C4000000000000014400000000000E82C4000000000000014400000000000102D4000000000000014400000000000382D4000000000000014400000000000602D4000000000000014400000000000882D4000000000000014400000000000B02D4000000000000014400000000000D82D4000000000000014400000000000002E4000000000000014400000000000002E4000000000005014400000000000002E400000000000A014400000000000002E400000000000F014400000000000002E4000000000004015400000000000002E4000000000009015400000000000002E400000000000E015400000000000002E4000000000003016400000000000002E4000000000008016400000000000002E400000000000D016400000000000002E4000000000002017400000000000002E4000000000007017400000000000002E400000000000C017400000000000002E4000000000001018400000000000002E4000000000006018400000000000002E400000000000B018400000000000002E4000000000000019400000000000002E4000000000005019400000000000002E400000000000A019400000000000002E400000000000F019400000000000002E400000000000401A400000000000002E400000000000901A400000000000002E400000000000E01A400000000000002E400000000000301B400000000000002E400000000000801B400000000000002E400000000000D01B400000000000002E400000000000201C400000000000002E400000000000701C400000000000002E400000000000C01C400000000000002E400000000000101D400000000000002E400000000000601D400000000000002E400000000000B01D400000000000002E400000000000001E400000000000002E400000000000501E400000000000002E400000000000A01E400000000000002E400000000000F01E400000000000002E400000000000401F400000000000002E400000000000901F400000000000002E400000000000E01F400000000000002E4000000000001820400000000000002E4000000000004020400000000000002E4000000000006820400000000000002E4000000000009020400000000000002E400000000000B820400000000000002E400000000000E020400000000000002E4000000000000821400000000000002E4000000000003021400000000000002E4000000000005821400000000000002E4000000000008021400000000000002E400000000000A821400000000000002E400000000000D021400000000000002E400000000000F821400000000000002E4000000000002022400000000000002E4000000000004822400000000000002E4000000000007022400000000000002E4000000000009822400000000000002E400000000000C022400000000000002E400000000000E822400000000000002E4000000000001023400000000000002E4000000000003823400000000000002E4000000000006023400000000000002E4000000000008823400000000000002E400000000000B023400000000000002E400000000000D823400000000000002E4000000000000024400000000000002E4000000000002824400000000000002E4000000000005024400000000000002E4000000000007824400000000000002E400000000000A024400000000000002E400000000000C824400000000000002E400000000000F024400000000000002E4000000000001825400000000000002E4000000000004025400000000000002E4000000000006825400000000000002E4000000000009025400000000000002E400000000000B825400000000000002E400000000000E025400000000000002E4000000000000826400000000000002E4000000000003026400000000000002E4000000000005826400000000000002E4000000000008026400000000000002E400000000000A826400000000000002E400000000000D026400000000000002E400000000000F826400000000000002E4000000000002027400000000000002E4000000000004827400000000000002E4000000000007027400000000000002E4000000000009827400000000000002E400000000000C027400000000000002E400000000000E827400000000000002E4000000000001028400000000000002E4000000000003828400000000000002E4000000000006028400000000000002E4000000000008828400000000000002E400000000000B028400000000000002E400000000000D828400000000000002E4000000000000029400000000000002E4000000000002829400000000000002E4000000000005029400000000000002E4000000000007829400000000000002E400000000000A029400000000000002E400000000000C829400000000000002E400000000000F029400000000000002E400000000000182A400000000000002E400000000000402A400000000000002E400000000000682A400000000000002E400000000000902A400000000000002E400000000000B82A400000000000002E400000000000E02A400000000000002E400000000000082B400000000000002E400000000000302B400000000000002E400000000000582B400000000000002E400000000000802B400000000000002E400000000000A82B400000000000002E400000000000D02B400000000000002E400000000000F82B400000000000002E400000000000202C400000000000002E400000000000482C400000000000002E400000000000702C400000000000002E400000000000982C400000000000002E400000000000C02C400000000000002E400000000000E82C400000000000002E400000000000102D400000000000002E400000000000382D400000000000002E400000000000602D400000000000002E400000000000882D400000000000002E400000000000B02D400000000000002E400000000000D82D400000000000002E400000000000002E400000000000D82D400000000000002E400000000000B02D400000000000002E400000000000882D400000000000002E400000000000602D400000000000002E400000000000382D400000000000002E400000000000102D400000000000002E400000000000E82C400000000000002E400000000000C02C400000000000002E400000000000982C400000000000002E400000000000702C400000000000002E400000000000482C400000000000002E400000000000202C400000000000002E400000000000F82B400000000000002E400000000000D02B400000000000002E400000000000A82B400000000000002E400000000000802B400000000000002E400000000000582B400000000000002E400000000000302B400000000000002E400000000000082B400000000000002E400000000000E02A400000000000002E400000000000B82A400000000000002E400000000000902A400000000000002E400000000000682A400000000000002E400000000000402A400000000000002E400000000000182A400000000000002E400000000000F029400000000000002E400000000000C829400000000000002E400000000000A029400000000000002E4000000000007829400000000000002E4000000000005029400000000000002E4000000000002829400000000000002E4000000000000029400000000000002E400000000000D828400000000000002E400000000000B028400000000000002E4000000000008828400000000000002E4000000000006028400000000000002E4000000000003828400000000000002E4000000000001028400000000000002E400000000000E827400000000000002E400000000000C027400000000000002E4000000000009827400000000000002E4000000000007027400000000000002E4000000000004827400000000000002E4000000000002027400000000000002E400000000000F826400000000000002E400000000000D026400000000000002E400000000000A826400000000000002E4000000000008026400000000000002E4000000000005826400000000000002E4000000000003026400000000000002E4000000000000826400000000000002E400000000000E025400000000000002E400000000000B825400000000000002E4000000000009025400000000000002E4000000000006825400000000000002E4000000000004025400000000000002E4000000000001825400000000000002E400000000000F024400000000000002E400000000000C824400000000000002E400000000000A024400000000000002E4000000000007824400000000000002E4000000000005024400000000000002E4000000000002824400000000000002E4000000000000024400000000000002E400000000000D823400000000000002E400000000000B023400000000000002E4000000000008823400000000000002E4000000000006023400000000000002E4000000000003823400000000000002E4000000000001023400000000000002E400000000000E822400000000000002E400000000000C022400000000000002E4000000000009822400000000000002E4000000000007022400000000000002E4000000000004822400000000000002E4000000000002022400000000000002E400000000000F821400000000000002E400000000000D021400000000000002E400000000000A821400000000000002E4000000000008021400000000000002E4000000000005821400000000000002E4000000000003021400000000000002E4000000000000821400000000000002E400000000000E020400000000000002E400000000000B820400000000000002E4000000000009020400000000000002E4000000000006820400000000000002E4000000000004020400000000000002E4000000000001820400000000000002E400000000000E01F400000000000002E400000000000901F400000000000002E400000000000401F400000000000002E400000000000F01E400000000000002E400000000000A01E400000000000002E400000000000501E400000000000002E400000000000001E400000000000002E400000000000B01D400000000000002E400000000000601D400000000000002E400000000000101D400000000000002E400000000000C01C400000000000002E400000000000701C400000000000002E400000000000201C400000000000002E400000000000D01B400000000000002E400000000000801B400000000000002E400000000000301B400000000000002E400000000000E01A400000000000002E400000000000901A400000000000002E400000000000401A400000000000002E400000000000F019400000000000002E400000000000A019400000000000002E4000000000005019400000000000002E4000000000000019400000000000002E400000000000B018400000000000002E4000000000006018400000000000002E4000000000001018400000000000002E400000000000C017400000000000002E4000000000007017400000000000002E4000000000002017400000000000002E400000000000D016400000000000002E4000000000008016400000000000002E4000000000003016400000000000002E400000000000E015400000000000002E4000000000009015400000000000002E4000000000004015400000000000002E400000000000F014400000000000002E400000000000A014400000000000002E4000000000005014400000000000002E4000000000000014400000000000002E4000000000000014400000000000D82D4000000000000014400000000000B02D4000000000000014400000000000882D4000000000000014400000000000602D4000000000000014400000000000382D4000000000000014400000000000102D4000000000000014400000000000E82C4000000000000014400000000000C02C4000000000000014400000000000982C4000000000000014400000000000702C4000000000000014400000000000482C4000000000000014400000000000202C4000000000000014400000000000F82B4000000000000014400000000000D02B4000000000000014400000000000A82B4000000000000014400000000000802B4000000000000014400000000000582B4000000000000014400000000000302B4000000000000014400000000000082B4000000000000014400000000000E02A4000000000000014400000000000B82A4000000000000014400000000000902A4000000000000014400000000000682A4000000000000014400000000000402A4000000000000014400000000000182A4000000000000014400000000000F0294000000000000014400000000000C8294000000000000014400000000000A029400000000000001440000000000078294000000000000014400000000000502940000000000000144000000000002829400000000000001440000000000000294000000000000014400000000000D8284000000000000014400000000000B028400000000000001440000000000088284000000000000014400000000000602840000000000000144000000000003828400000000000001440000000000010284000000000000014400000000000E8274000000000000014400000000000C027400000000000001440000000000098274000000000000014400000000000702740000000000000144000000000004827400000000000001440000000000020274000000000000014400000000000F8264000000000000014400000000000D0264000000000000014400000000000A826400000000000001440000000000080264000000000000014400000000000582640000000000000144000000000003026400000000000001440000000000008264000000000000014400000000000E0254000000000000014400000000000B825400000000000001440000000000090254000000000000014400000000000682540000000000000144000000000004025400000000000001440000000000018254000000000000014400000000000F0244000000000000014400000000000C8244000000000000014400000000000A024400000000000001440000000000078244000000000000014400000000000502440000000000000144000000000002824400000000000001440000000000000244000000000000014400000000000D8234000000000000014400000000000B023400000000000001440000000000088234000000000000014400000000000602340000000000000144000000000003823400000000000001440000000000010234000000000000014400000000000E8224000000000000014400000000000C022400000000000001440000000000098224000000000000014400000000000702240000000000000144000000000004822400000000000001440000000000020224000000000000014400000000000F8214000000000000014400000000000D0214000000000000014400000000000A821400000000000001440000000000080214000000000000014400000000000582140000000000000144000000000003021400000000000001440000000000008214000000000000014400000000000E0204000000000000014400000000000B820400000000000001440000000000090204000000000000014400000000000682040000000000000144000000000004020400000000000001440000000000018204000000000000014400000000000E01F4000000000000014400000000000901F4000000000000014400000000000401F4000000000000014400000000000F01E4000000000000014400000000000A01E4000000000000014400000000000501E4000000000000014400000000000001E4000000000000014400000000000B01D4000000000000014400000000000601D4000000000000014400000000000101D4000000000000014400000000000C01C4000000000000014400000000000701C4000000000000014400000000000201C4000000000000014400000000000D01B4000000000000014400000000000801B4000000000000014400000000000301B4000000000000014400000000000E01A4000000000000014400000000000901A4000000000000014400000000000401A4000000000000014400000000000F0194000000000000014400000000000A01940000000000000144000000000005019400000000000001440000000000000194000000000000014400000000000B01840000000000000144000000000006018400000000000001440000000000010184000000000000014400000000000C01740000000000000144000000000007017400000000000001440000000000020174000000000000014400000000000D01640000000000000144000000000008016400000000000001440000000000030164000000000000014400000000000E01540000000000000144000000000009015400000000000001440000000000040154000000000000014400000000000F0144000000000000014400000000000A014400000000000001440000000000050144000000000000014400000000000001440010100000000000000001C400000000000001C400000000000201C400000000000001C400000000000401C400000000000001C400000000000601C400000000000001C400000000000801C400000000000001C400000000000A01C400000000000001C400000000000C01C400000000000001C400000000000E01C400000000000001C400000000000001D400000000000001C400000000000201D400000000000001C400000000000401D400000000000001C400000000000601D400000000000001C400000000000801D400000000000001C400000000000A01D400000000000001C400000000000C01D400000000000001C400000000000E01D400000000000001C400000000000001E400000000000001C400000000000201E400000000000001C400000000000401E400000000000001C400000000000601E400000000000001C400000000000801E400000000000001C400000000000A01E400000000000001C400000000000C01E400000000000001C400000000000E01E400000000000001C400000000000001F400000000000001C400000000000201F400000000000001C400000000000401F400000000000001C400000000000601F400000000000001C400000000000801F400000000000001C400000000000A01F400000000000001C400000000000C01F400000000000001C400000000000E01F400000000000001C4000000000000020400000000000001C4000000000001020400000000000001C4000000000002020400000000000001C4000000000003020400000000000001C4000000000004020400000000000001C4000000000005020400000000000001C4000000000006020400000000000001C4000000000007020400000000000001C4000000000008020400000000000001C4000000000009020400000000000001C400000000000A020400000000000001C400000000000B020400000000000001C400000000000C020400000000000001C400000000000D020400000000000001C400000000000E020400000000000001C400000000000F020400000000000001C4000000000000021400000000000001C4000000000001021400000000000001C4000000000002021400000000000001C4000000000003021400000000000001C4000000000004021400000000000001C4000000000005021400000000000001C4000000000006021400000000000001C4000000000007021400000000000001C4000000000008021400000000000001C4000000000009021400000000000001C400000000000A021400000000000001C400000000000B021400000000000001C400000000000C021400000000000001C400000000000D021400000000000001C400000000000E021400000000000001C400000000000F021400000000000001C4000000000000022400000000000001C4000000000000022400000000000201C4000000000000022400000000000401C4000000000000022400000000000601C4000000000000022400000000000801C4000000000000022400000000000A01C4000000000000022400000000000C01C4000000000000022400000000000E01C4000000000000022400000000000001D4000000000000022400000000000201D4000000000000022400000000000401D4000000000000022400000000000601D4000000000000022400000000000801D4000000000000022400000000000A01D4000000000000022400000000000C01D4000000000000022400000000000E01D4000000000000022400000000000001E4000000000000022400000000000201E4000000000000022400000000000401E4000000000000022400000000000601E4000000000000022400000000000801E4000000000000022400000000000A01E4000000000000022400000000000C01E4000000000000022400000000000E01E4000000000000022400000000000001F4000000000000022400000000000201F4000000000000022400000000000401F4000000000000022400000000000601F4000000000000022400000000000801F4000000000000022400000000000A01F4000000000000022400000000000C01F4000000000000022400000000000E01F400000000000002240000000000000204000000000000022400000000000102040000000000000224000000000002020400000000000002240000000000030204000000000000022400000000000402040000000000000224000000000005020400000000000002240000000000060204000000000000022400000000000702040000000000000224000000000008020400000000000002240000000000090204000000000000022400000000000A0204000000000000022400000000000B0204000000000000022400000000000C0204000000000000022400000000000D0204000000000000022400000000000E0204000000000000022400000000000F020400000000000002240000000000000214000000000000022400000000000102140000000000000224000000000002021400000000000002240000000000030214000000000000022400000000000402140000000000000224000000000005021400000000000002240000000000060214000000000000022400000000000702140000000000000224000000000008021400000000000002240000000000090214000000000000022400000000000A0214000000000000022400000000000B0214000000000000022400000000000C0214000000000000022400000000000D0214000000000000022400000000000E0214000000000000022400000000000F02140000000000000224000000000000022400000000000F0214000000000000022400000000000E0214000000000000022400000000000D0214000000000000022400000000000C0214000000000000022400000000000B0214000000000000022400000000000A021400000000000002240000000000090214000000000000022400000000000802140000000000000224000000000007021400000000000002240000000000060214000000000000022400000000000502140000000000000224000000000004021400000000000002240000000000030214000000000000022400000000000202140000000000000224000000000001021400000000000002240000000000000214000000000000022400000000000F0204000000000000022400000000000E0204000000000000022400000000000D0204000000000000022400000000000C0204000000000000022400000000000B0204000000000000022400000000000A020400000000000002240000000000090204000000000000022400000000000802040000000000000224000000000007020400000000000002240000000000060204000000000000022400000000000502040000000000000224000000000004020400000000000002240000000000030204000000000000022400000000000202040000000000000224000000000001020400000000000002240000000000000204000000000000022400000000000E01F4000000000000022400000000000C01F4000000000000022400000000000A01F4000000000000022400000000000801F4000000000000022400000000000601F4000000000000022400000000000401F4000000000000022400000000000201F4000000000000022400000000000001F4000000000000022400000000000E01E4000000000000022400000000000C01E4000000000000022400000000000A01E4000000000000022400000000000801E4000000000000022400000000000601E4000000000000022400000000000401E4000000000000022400000000000201E4000000000000022400000000000001E4000000000000022400000000000E01D4000000000000022400000000000C01D4000000000000022400000000000A01D4000000000000022400000000000801D4000000000000022400000000000601D4000000000000022400000000000401D4000000000000022400000000000201D4000000000000022400000000000001D4000000000000022400000000000E01C4000000000000022400000000000C01C4000000000000022400000000000A01C4000000000000022400000000000801C4000000000000022400000000000601C4000000000000022400000000000401C4000000000000022400000000000201C4000000000000022400000000000001C4000000000000022400000000000001C400000000000F021400000000000001C400000000000E021400000000000001C400000000000D021400000000000001C400000000000C021400000000000001C400000000000B021400000000000001C400000000000A021400000000000001C4000000000009021400000000000001C4000000000008021400000000000001C4000000000007021400000000000001C4000000000006021400000000000001C4000000000005021400000000000001C4000000000004021400000000000001C4000000000003021400000000000001C4000000000002021400000000000001C4000000000001021400000000000001C4000000000000021400000000000001C400000000000F020400000000000001C400000000000E020400000000000001C400000000000D020400000000000001C400000000000C020400000000000001C400000000000B020400000000000001C400000000000A020400000000000001C4000000000009020400000000000001C4000000000008020400000000000001C4000000000007020400000000000001C4000000000006020400000000000001C4000000000005020400000000000001C4000000000004020400000000000001C4000000000003020400000000000001C4000000000002020400000000000001C4000000000001020400000000000001C4000000000000020400000000000001C400000000000E01F400000000000001C400000000000C01F400000000000001C400000000000A01F400000000000001C400000000000801F400000000000001C400000000000601F400000000000001C400000000000401F400000000000001C400000000000201F400000000000001C400000000000001F400000000000001C400000000000E01E400000000000001C400000000000C01E400000000000001C400000000000A01E400000000000001C400000000000801E400000000000001C400000000000601E400000000000001C400000000000401E400000000000001C400000000000201E400000000000001C400000000000001E400000000000001C400000000000E01D400000000000001C400000000000C01D400000000000001C400000000000A01D400000000000001C400000000000801D400000000000001C400000000000601D400000000000001C400000000000401D400000000000001C400000000000201D400000000000001C400000000000001D400000000000001C400000000000E01C400000000000001C400000000000C01C400000000000001C400000000000A01C400000000000001C400000000000801C400000000000001C400000000000601C400000000000001C400000000000401C400000000000001C400000000000201C400000000000001C400000000000001C4001010000000000000000264000000000000026400000000000102640000000000000264000000000002026400000000000002640000000000030264000000000000026400000000000402640000000000000264000000000005026400000000000002640000000000060264000000000000026400000000000702640000000000000264000000000008026400000000000002640000000000090264000000000000026400000000000A0264000000000000026400000000000B0264000000000000026400000000000C0264000000000000026400000000000D0264000000000000026400000000000E0264000000000000026400000000000F026400000000000002640000000000000274000000000000026400000000000102740000000000000264000000000002027400000000000002640000000000030274000000000000026400000000000402740000000000000264000000000005027400000000000002640000000000060274000000000000026400000000000702740000000000000264000000000008027400000000000002640000000000090274000000000000026400000000000A0274000000000000026400000000000B0274000000000000026400000000000C0274000000000000026400000000000D0274000000000000026400000000000E0274000000000000026400000000000F027400000000000002640000000000000284000000000000026400000000000102840000000000000264000000000002028400000000000002640000000000030284000000000000026400000000000402840000000000000264000000000005028400000000000002640000000000060284000000000000026400000000000702840000000000000264000000000008028400000000000002640000000000090284000000000000026400000000000A0284000000000000026400000000000B0284000000000000026400000000000C0284000000000000026400000000000D0284000000000000026400000000000E0284000000000000026400000000000F028400000000000002640000000000000294000000000000026400000000000102940000000000000264000000000002029400000000000002640000000000030294000000000000026400000000000402940000000000000264000000000005029400000000000002640000000000060294000000000000026400000000000702940000000000000264000000000008029400000000000002640000000000090294000000000000026400000000000A0294000000000000026400000000000B0294000000000000026400000000000C0294000000000000026400000000000D0294000000000000026400000000000E0294000000000000026400000000000F0294000000000000026400000000000002A4000000000000026400000000000002A4000000000001026400000000000002A4000000000002026400000000000002A4000000000003026400000000000002A4000000000004026400000000000002A4000000000005026400000000000002A4000000000006026400000000000002A4000000000007026400000000000002A4000000000008026400000000000002A4000000000009026400000000000002A400000000000A026400000000000002A400000000000B026400000000000002A400000000000C026400000000000002A400000000000D026400000000000002A400000000000E026400000000000002A400000000000F026400000000000002A4000000000000027400000000000002A4000000000001027400000000000002A4000000000002027400000000000002A4000000000003027400000000000002A4000000000004027400000000000002A4000000000005027400000000000002A4000000000006027400000000000002A4000000000007027400000000000002A4000000000008027400000000000002A4000000000009027400000000000002A400000000000A027400000000000002A400000000000B027400000000000002A400000000000C027400000000000002A400000000000D027400000000000002A400000000000E027400000000000002A400000000000F027400000000000002A4000000000000028400000000000002A4000000000001028400000000000002A4000000000002028400000000000002A4000000000003028400000000000002A4000000000004028400000000000002A4000000000005028400000000000002A4000000000006028400000000000002A4000000000007028400000000000002A4000000000008028400000000000002A4000000000009028400000000000002A400000000000A028400000000000002A400000000000B028400000000000002A400000000000C028400000000000002A400000000000D028400000000000002A400000000000E028400000000000002A400000000000F028400000000000002A4000000000000029400000000000002A4000000000001029400000000000002A4000000000002029400000000000002A4000000000003029400000000000002A4000000000004029400000000000002A4000000000005029400000000000002A4000000000006029400000000000002A4000000000007029400000000000002A4000000000008029400000000000002A4000000000009029400000000000002A400000000000A029400000000000002A400000000000B029400000000000002A400000000000C029400000000000002A400000000000D029400000000000002A400000000000E029400000000000002A400000000000F029400000000000002A400000000000002A400000000000F029400000000000002A400000000000E029400000000000002A400000000000D029400000000000002A400000000000C029400000000000002A400000000000B029400000000000002A400000000000A029400000000000002A4000000000009029400000000000002A4000000000008029400000000000002A4000000000007029400000000000002A4000000000006029400000000000002A4000000000005029400000000000002A4000000000004029400000000000002A4000000000003029400000000000002A4000000000002029400000000000002A4000000000001029400000000000002A4000000000000029400000000000002A400000000000F028400000000000002A400000000000E028400000000000002A400000000000D028400000000000002A400000000000C028400000000000002A400000000000B028400000000000002A400000000000A028400000000000002A4000000000009028400000000000002A4000000000008028400000000000002A4000000000007028400000000000002A4000000000006028400000000000002A4000000000005028400000000000002A4000000000004028400000000000002A4000000000003028400000000000002A4000000000002028400000000000002A4000000000001028400000000000002A4000000000000028400000000000002A400000000000F027400000000000002A400000000000E027400000000000002A400000000000D027400000000000002A400000000000C027400000000000002A400000000000B027400000000000002A400000000000A027400000000000002A4000000000009027400000000000002A4000000000008027400000000000002A4000000000007027400000000000002A4000000000006027400000000000002A4000000000005027400000000000002A4000000000004027400000000000002A4000000000003027400000000000002A4000000000002027400000000000002A4000000000001027400000000000002A4000000000000027400000000000002A400000000000F026400000000000002A400000000000E026400000000000002A400000000000D026400000000000002A400000000000C026400000000000002A400000000000B026400000000000002A400000000000A026400000000000002A4000000000009026400000000000002A4000000000008026400000000000002A4000000000007026400000000000002A4000000000006026400000000000002A4000000000005026400000000000002A4000000000004026400000000000002A4000000000003026400000000000002A4000000000002026400000000000002A4000000000001026400000000000002A4000000000000026400000000000002A4000000000000026400000000000F0294000000000000026400000000000E0294000000000000026400000000000D0294000000000000026400000000000C0294000000000000026400000000000B0294000000000000026400000000000A029400000000000002640000000000090294000000000000026400000000000802940000000000000264000000000007029400000000000002640000000000060294000000000000026400000000000502940000000000000264000000000004029400000000000002640000000000030294000000000000026400000000000202940000000000000264000000000001029400000000000002640000000000000294000000000000026400000000000F0284000000000000026400000000000E0284000000000000026400000000000D0284000000000000026400000000000C0284000000000000026400000000000B0284000000000000026400000000000A028400000000000002640000000000090284000000000000026400000000000802840000000000000264000000000007028400000000000002640000000000060284000000000000026400000000000502840000000000000264000000000004028400000000000002640000000000030284000000000000026400000000000202840000000000000264000000000001028400000000000002640000000000000284000000000000026400000000000F0274000000000000026400000000000E0274000000000000026400000000000D0274000000000000026400000000000C0274000000000000026400000000000B0274000000000000026400000000000A027400000000000002640000000000090274000000000000026400000000000802740000000000000264000000000007027400000000000002640000000000060274000000000000026400000000000502740000000000000264000000000004027400000000000002640000000000030274000000000000026400000000000202740000000000000264000000000001027400000000000002640000000000000274000000000000026400000000000F0264000000000000026400000000000E0264000000000000026400000000000D0264000000000000026400000000000C0264000000000000026400000000000B0264000000000000026400000000000A0264000000000000026400000000000902640000000000000264000000000008026400000000000002640000000000070264000000000000026400000000000602640000000000000264000000000005026400000000000002640000000000040264000000000000026400000000000302640000000000000264000000000002026400000000000002640000000000010264000000000000026400000000000002640'::geometry)\n",
+      "correctness_diff_artifact": "correctness_diffs/spatial_holes_coveredby-2000000.json",
+      "setup_quiescence": {
+        "schema_version": 1,
+        "checkpoint_completed": true,
+        "checkpoint_completed_at": "2026-09-29 12:50:42.751947-07",
+        "checkpoint_wal_lsn": "535/4AA59200",
+        "measurement_completed_at": "2026-09-29 12:50:45.53064-07",
+        "measurement_completed_wal_lsn": "535/4AA594D0",
+        "checkpointer_before": {
+          "num_timed": 10,
+          "num_requested": 50,
+          "num_done": 51,
+          "restartpoints_timed": 0,
+          "restartpoints_requested": 0,
+          "restartpoints_done": 0,
+          "write_time_ms": 323225.0,
+          "sync_time_ms": 633.0,
+          "buffers_written": 472032,
+          "slru_written": 69
+        },
+        "checkpointer_after": {
+          "num_timed": 10,
+          "num_requested": 50,
+          "num_done": 51,
+          "restartpoints_timed": 0,
+          "restartpoints_requested": 0,
+          "restartpoints_done": 0,
+          "write_time_ms": 323225.0,
+          "sync_time_ms": 633.0,
+          "buffers_written": 472032,
+          "slru_written": 69
+        },
+        "checkpointer_unchanged": true
+      },
+      "thermal": {
+        "cpu_scheduler_limit": null,
+        "cpu_speed_limit": null,
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded\n",
+        "pressure": false
+      },
+      "table_stats": [
+        {
+          "relname": "bench_spatial_resident_agg",
+          "relpages": 16634,
+          "reltuples": 2000000.0,
+          "max_n_distinct": -1.0
+        }
+      ],
+      "sanity_checks": [],
+      "resident_load_ms": 444.534042,
+      "resident_lane": true,
+      "warm_summary": {
+        "cache_state": "warm",
+        "n": 10,
+        "accel_mean_ms": 4.1058999,
+        "accel_median_ms": 4.1596455,
+        "accel_stddev_ms": 0.2250545601875489,
+        "accel_p95_ms": 4.4104605999999995,
+        "accel_cv_pct": 5.481248098316984,
+        "accel_ci_95": [
+          3.9449167511903758,
+          4.266883048809624
+        ],
+        "parallel_mean_ms": 91.77593340000001,
+        "parallel_median_ms": 91.7009585,
+        "parallel_stddev_ms": 2.5104579264298112,
+        "parallel_p95_ms": 95.43952469999999,
+        "parallel_cv_pct": 2.7354207507627604,
+        "parallel_ci_95": [
+          89.98018475303209,
+          93.57168204696794
+        ],
+        "speedup_mean_vs_parallel": 22.35220917100293,
+        "speedup_median_vs_parallel": 22.045378266008488,
+        "p_value_vs_parallel": 2.1053603405641325e-15,
+        "cohens_d_vs_parallel": 49.1898029749199,
+        "effect_size_meaningful": true
+      },
+      "combined_warm_summary": {
+        "cache_state": "warm",
+        "n": 11,
+        "accel_mean_ms": 56.003124909090886,
+        "accel_median_ms": 4.169458,
+        "accel_stddev_ms": 172.12375543394896,
+        "accel_p95_ms": 289.737646,
+        "accel_cv_pct": 307.34669844469414,
+        "accel_ci_95": [
+          -59.62398136534074,
+          171.6302311835225
+        ],
+        "parallel_mean_ms": 91.1843030909091,
+        "parallel_median_ms": 91.620667,
+        "parallel_stddev_ms": 3.0858466827309954,
+        "parallel_p95_ms": 95.349208,
+        "parallel_cv_pct": 3.3841862887897074,
+        "parallel_ci_95": [
+          89.11133227156358,
+          93.25727391025461
+        ],
+        "speedup_mean_vs_parallel": 1.6282002698764997,
+        "speedup_median_vs_parallel": 21.97423909774364,
+        "p_value_vs_parallel": 0.5179091075270095,
+        "cohens_d_vs_parallel": 0.28901127166859086,
+        "effect_size_meaningful": false
+      }
+    }
+  ],
+  "headline_speedup_allowed": true,
+  "artifact_dir": "/Users/contra/Projects/pg_accel/benchmarks/evidence/covers-20260929/spatial_holes_coveredby",
+  "crashes": [],
+  "postmaster_start_time": null
+}

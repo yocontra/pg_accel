@@ -1,0 +1,5 @@
+PGACCEL_TEST_START name=test_bbox
+Running bbox overlap tests...
+
+Results: 66 passed, 0 failed
+PGACCEL_TEST_RESULT name=test_bbox exit_code=0 result=PASS raw_lines=3 body_sha256=ede86fe7375e98e167493afd9b7f3cf9edd2b754fb77dd2144892d8bbc49dad8 binding_sha256=1565717d2d69f0f6bdf3c90cbfc0b79f83f5ead48325c622e74fbc4f21c6a01a

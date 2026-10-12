@@ -1,0 +1,10 @@
+=== 131_scalar_date_expressions ===
+SET
+SET
+SELECT 250017
+ANALYZE
+psql:sql/tests/131_scalar_date_expressions.sql:64: NOTICE:  131 date arithmetic selected 24 of 24 shapes
+DO
+PGACCEL_ASSERT_OK:131_scalar_date_expressions.assert_001
+psql:sql/tests/131_scalar_date_expressions.sql:97: ERROR:  131 date result/filter mismatch: SELECT g,min(z-n) lo,max(z-n) hi,count(z-n) c FROM _scalar_date WHERE n>0 GROUP BY g HAVING count(*)>0 ORDER BY lo NULLS LAST LIMIT 3
+CONTEXT:  PL/pgSQL function inline_code_block line 20 at RAISE

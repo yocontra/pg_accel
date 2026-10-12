@@ -1,0 +1,95 @@
+[  2%] Building CXX object CMakeFiles/pgaccel_kernels.dir/src/grouped_agg.cpp.o
+[  2%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/grouped_agg.cpp.o
+[  3%] Linking CXX shared library libpgaccel_kernels_shared.dylib
+[  4%] Linking CXX static library libpgaccel_kernels.a
+[ 15%] Built target pgaccel_kernels
+[ 26%] Built target pgaccel_kernels_shared
+[ 27%] Linking CXX executable test_device
+[ 30%] Linking CXX executable test_spatial_dispatch
+[ 30%] Linking CXX executable test_spatial
+[ 30%] Linking CXX executable test_bbox
+[ 31%] Built target test_device
+[ 32%] Linking CXX executable test_spatial_pairwise_boundary
+[ 33%] Built target test_bbox
+[ 34%] Built target test_spatial
+[ 34%] Built target test_spatial_dispatch
+[ 37%] Linking CXX executable test_h3
+[ 37%] Linking CXX executable test_spatial_resident
+[ 37%] Linking CXX executable test_reduce_matrix
+[ 37%] Built target test_spatial_pairwise_boundary
+[ 38%] Linking CXX executable test_hash_agg_keys
+[ 39%] Built target test_h3
+[ 40%] Built target test_spatial_resident
+[ 40%] Built target test_reduce_matrix
+[ 43%] Linking CXX executable test_hashagg_spatial_matrix
+[ 43%] Linking CXX executable test_hash_domain_matrix
+[ 43%] Linking CXX executable test_hash_join
+[ 43%] Built target test_hash_agg_keys
+[ 44%] Linking CXX executable test_hash_agg_partial
+[ 45%] Built target test_hashagg_spatial_matrix
+[ 46%] Built target test_hash_join
+[ 46%] Built target test_hash_domain_matrix
+[ 47%] Built target test_hash_agg_partial
+[ 48%] Linking CXX executable test_expr_memory
+[ 49%] Linking CXX executable test_raster_resident
+[ 50%] Linking CXX executable test_expr_vm_matrix
+[ 51%] Linking CXX executable test_correctness
+[ 52%] Built target test_raster_resident
+[ 53%] Built target test_expr_vm_matrix
+[ 53%] Built target test_expr_memory
+[ 53%] Built target test_correctness
+[ 54%] Linking CXX executable test_fork_warmed
+[ 55%] Linking CXX executable test_fork
+[ 56%] Linking CXX executable test_fork_cold
+[ 57%] Linking CXX executable test_fork_archive_stress
+[ 60%] Built target test_fork
+[ 60%] Built target test_fork_cold
+[ 60%] Built target test_fork_warmed
+[ 60%] Built target test_fork_archive_stress
+[ 61%] Linking CXX executable test_reduce_minimal
+[ 61%] Linking CXX executable test_fork_cold_barrier
+[ 62%] Building CXX object CMakeFiles/test_grouped_agg.dir/test/test_grouped_agg.cpp.o
+[ 63%] Linking CXX executable test_grouped_agg_hash
+[ 64%] Built target test_reduce_minimal
+[ 65%] Built target test_fork_cold_barrier
+[ 66%] Linking CXX executable test_grouped_agg_workspace
+[ 66%] Built target test_grouped_agg_hash
+[ 67%] Linking CXX executable test_reduce_stats
+[ 68%] Linking CXX executable test_reduce_bool_bit
+[ 69%] Built target test_grouped_agg_workspace
+[ 70%] Built target test_reduce_stats
+[ 71%] Linking CXX executable test_exec_gpu
+[ 72%] Built target test_reduce_bool_bit
+[ 73%] Linking CXX executable test_ooo_overlap
+[ 74%] Linking CXX executable test_spatial_bench
+[ 75%] Built target test_exec_gpu
+[ 76%] Linking CXX executable test_sycl_basic
+[ 77%] Built target test_spatial_bench
+[ 78%] Linking CXX executable test_fp64_mul_probe
+[ 79%] Built target test_ooo_overlap
+[ 79%] Linking CXX executable test_fp64_probe_add
+[ 80%] Built target test_sycl_basic
+[ 81%] Built target test_fp64_mul_probe
+[ 82%] Linking CXX executable test_fp64_probe_mul
+[ 83%] Linking CXX executable test_fp64_probe_sqrt
+[ 84%] Built target test_fp64_probe_add
+[ 84%] Linking CXX executable test_fp64_probe_sin
+[ 85%] Built target test_fp64_probe_mul
+[ 86%] Built target test_fp64_probe_sqrt
+[ 86%] Linking CXX executable test_fp64_probe_cos
+[ 87%] Linking CXX executable test_fp64_probe_asin
+[ 88%] Built target test_fp64_probe_sin
+[ 89%] Linking CXX executable test_fp64_probe_atan2
+[ 90%] Built target test_fp64_probe_cos
+[ 91%] Built target test_fp64_probe_asin
+[ 92%] Linking CXX executable test_fp64_probe_haversine
+[ 93%] Linking CXX executable test_oom_invariant
+[ 94%] Built target test_oom_invariant
+[ 95%] Built target test_fp64_probe_atan2
+[ 96%] Linking CXX executable test_kernel_failure_status
+[ 97%] Linking CXX executable test_host_api_contract
+[ 98%] Built target test_fp64_probe_haversine
+[ 98%] Built target test_kernel_failure_status
+[ 99%] Built target test_host_api_contract
+[100%] Linking CXX executable test_grouped_agg
+[100%] Built target test_grouped_agg

@@ -1,0 +1,15 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error[E0599]: no method named `output_storage_bytes` found for struct `grouped_agg::ResolvedGroupedAggPlan<'input>` in the current scope
+     --> pg_accel/src/engine/executor/agg/descriptor.rs:10766:34
+      |
+10766 |                     assert!(plan.output_storage_bytes().is_ok());
+      |                                  ^^^^^^^^^^^^^^^^^^^^ method not found in `grouped_agg::ResolvedGroupedAggPlan<'_>`
+      |
+     ::: pg_accel/src/gpu/grouped_agg.rs:196:1
+      |
+  196 | pub struct ResolvedGroupedAggPlan<'input> {
+      | ----------------------------------------- method `output_storage_bytes` not found for this struct
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `pg_accel` (lib test) due to 1 previous error
+error: Recipe `test-standalone` failed with exit code 101

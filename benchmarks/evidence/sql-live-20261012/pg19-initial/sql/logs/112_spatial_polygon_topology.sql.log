@@ -1,0 +1,27 @@
+=== 112_spatial_polygon_topology ===
+SET
+SET
+CREATE TABLE
+INSERT 0 1000017
+INSERT 0 2
+ANALYZE
+SELECT 2
+DO
+PGACCEL_ASSERT_OK:112_spatial_polygon_topology.assert_001
+DO
+PGACCEL_ASSERT_OK:112_spatial_polygon_topology.assert_002
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ f
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:112_spatial_polygon_topology

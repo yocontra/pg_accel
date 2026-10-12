@@ -1,0 +1,90 @@
+SELECT 1000000
+ANALYZE
+ pg_accel_pin 
+--------------
+      1000000
+(1 row)
+
+SET
+                                                      QUERY PLAN                                                      
+----------------------------------------------------------------------------------------------------------------------
+ Finalize GroupAggregate  (cost=9624.26..9633.28 rows=32 width=60)
+   Group Key: region
+   ->  Gather Merge  (cost=9624.26..9629.04 rows=256 width=60)
+         Workers Planned: 8
+         ->  Sort  (cost=9624.12..9624.20 rows=32 width=60)
+               Sort Key: region
+               ->  Partial HashAggregate  (cost=9623.00..9623.32 rows=32 width=60)
+                     Group Key: region
+                     ->  Parallel Seq Scan on _pgaccel_computed_cost_probe  (cost=0.00..6498.00 rows=125000 width=12)
+(9 rows)
+
+ pg_accel_last_planner_rejection_reason 
+----------------------------------------
+ no_gpu_resident_pipeline
+(1 row)
+
+                                                      QUERY PLAN                                                      
+----------------------------------------------------------------------------------------------------------------------
+ Finalize GroupAggregate  (cost=9311.76..9320.14 rows=32 width=52)
+   Group Key: region
+   ->  Gather Merge  (cost=9311.76..9316.54 rows=256 width=52)
+         Workers Planned: 8
+         ->  Sort  (cost=9311.62..9311.70 rows=32 width=52)
+               Sort Key: region
+               ->  Partial HashAggregate  (cost=9310.50..9310.82 rows=32 width=52)
+                     Group Key: region
+                     ->  Parallel Seq Scan on _pgaccel_computed_cost_probe  (cost=0.00..6498.00 rows=125000 width=12)
+(9 rows)
+
+ pg_accel_last_planner_rejection_reason 
+----------------------------------------
+ no_gpu_resident_pipeline
+(1 row)
+
+SET
+                                                                                                                                                                                                                                                                                                     QUERY PLAN                                                                                                                                                                                                                                                                                                      
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuAccelAgg)  (cost=5.00..12005.96 rows=32 width=60)
+   Strategy: GpuAgg
+   Plan Selected: true
+   Batch Size: 65536
+   Expected Threads: 1
+   GPU Resident Pipeline: true
+   GPU Resident Proof Version: 2
+   GPU Resident Operator Class: resident_groupagg
+   GPU Physical Kernel Mode: parallel_dense_integer
+   GPU Descriptor Strategy: descriptor_grouped_aggregate
+   GPU Descriptor Specialization: dense_integer_expressions_plain
+   GPU Descriptor Specialization Cache: miss
+   GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+   GPU Descriptor Group Keys: k0:fact(2346147.1:type=23) type=23 collation=0 encoding=hash
+   GPU Descriptor Aggregates: m0:mul(2346147.2:type=23, 2346147.3:type=23) -> value.sum; m1:sub(2346147.2:type=23, 2346147.3:type=23) -> value.avg; m2:add(2346147.2:type=23, 2346147.3:type=23) -> value.min; value.max; m3:count_star -> value.count
+   GPU Descriptor Filter: fact=none; measures=[m0=none; m1=none; m2=none; m3=none]; dimensions=[none]
+   GPU Descriptor Star Dimensions: none
+   GPU Descriptor Output: slot0:group[k0] source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot2:aggregate[m1].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot3:aggregate[m2].value.min source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot4:aggregate[m2].value.max source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot5:aggregate[m3].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+   GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+   GPU Descriptor Artifact: not initialized
+   GPU Descriptor Generations: not inspected
+   GPU Descriptor Bytes: not inspected
+   GPU Resident Stage Mask: 16395
+   GPU Resident Device Columns: 3
+   GPU Resident Boundary: none: no CPU boundary
+(25 rows)
+
+ pg_accel_last_planner_rejection_reason 
+----------------------------------------
+ no_gpu_resident_pipeline
+(1 row)
+
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ t
+(1 row)
+
+DROP TABLE

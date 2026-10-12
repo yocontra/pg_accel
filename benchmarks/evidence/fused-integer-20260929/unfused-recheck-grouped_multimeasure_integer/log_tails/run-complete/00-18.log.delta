@@ -1,0 +1,16 @@
+source: /Users/contra/.pgrx/18.log
+run_start_offset_bytes: 2034400
+delta_start_offset_bytes: 2034400
+capture_end_offset_bytes: 2036265
+delta_max_bytes: 262144
+truncated_to_last_delta_bytes: false
+---
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4428054237479576326.9123048110748810553.metalar.70663.5511602017689555499.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12837168955037166422.17351542552453256952.metalar.70663.17962907983942307814.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/17360321540355181666.15838927696693884544.metalar.70663.8565833166139706808.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/3426335184896721158.555526314883010541.metalar.70663.12473868051275874252.tmp (kernels_added=1 skipped=0)
+2026-09-29 20:24:52.399 PDT [70266] LOG:  checkpoint starting: immediate force wait
+2026-09-29 20:24:52.437 PDT [70266] LOG:  checkpoint complete: wrote 1866 buffers (0.1%), wrote 3 SLRU buffers; 0 WAL file(s) added, 2 removed, 0 recycled; write=0.030 s, sync=0.003 s, total=0.038 s; sync files=32, longest=0.002 s, average=0.001 s; distance=21662 kB, estimate=21662 kB; lsn=546/973AAEE8, redo lsn=546/973AAE90
+2026-09-29 20:24:55.493 PDT [70266] LOG:  checkpoint starting: immediate force wait
+2026-09-29 20:24:55.544 PDT [70266] LOG:  checkpoint complete: wrote 7302 buffers (0.3%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 5 recycled; write=0.049 s, sync=0.002 s, total=0.052 s; sync files=30, longest=0.001 s, average=0.001 s; distance=85927 kB, estimate=85927 kB; lsn=546/9C794CA8, redo lsn=546/9C794C50

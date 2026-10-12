@@ -1,0 +1,22 @@
+=== 01_core_engine ===
+BEGIN
+DO
+PGACCEL_ASSERT_OK:01_core_engine.assert_001
+DO
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+DO
+DO
+SELECT 10000
+ANALYZE
+SET
+SELECT 1
+SET
+SELECT 1
+DO
+DROP TABLE
+COMMIT
+PGACCEL_FILE_OK:01_core_engine

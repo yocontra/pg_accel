@@ -36,6 +36,19 @@ fn resident_buffer_bytes<T>(buffer: &ExprDeviceBuffer<T>) -> GpuResult<usize> {
 /// Frozen ABI version for resident fp64 geometry descriptors.
 pub const PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION: u32 = 2;
 
+/// Additive one-row polygon view feature: edge-block boxes follow its row bbox.
+pub const PGACCEL_RESIDENT_GEOMETRY_EDGE_INDEX: u32 = 1;
+pub const PGACCEL_RESIDENT_GEOMETRY_EDGE_BLOCK_PAIRS: usize = 32;
+
+#[must_use]
+pub const fn resident_geometry_edge_index_boxes(coordinate_pairs: usize) -> usize {
+    if coordinate_pairs > PGACCEL_RESIDENT_GEOMETRY_EDGE_BLOCK_PAIRS {
+        coordinate_pairs.div_ceil(PGACCEL_RESIDENT_GEOMETRY_EDGE_BLOCK_PAIRS)
+    } else {
+        0
+    }
+}
+
 /// Frozen ABI version for caller-owned resident spatial control scratch.
 pub const PGACCEL_SPATIAL_WORKSPACE_ABI_VERSION: u32 = 1;
 
@@ -145,6 +158,7 @@ impl PgaccelResidentGeometryView {
         row_count: usize,
         coordinate_pair_count: usize,
         ring_count: usize,
+        edge_index: bool,
     ) -> GpuResult<Self> {
         let coordinate_scalar_count = coordinate_pair_count.checked_mul(2).ok_or_else(|| {
             resident_builder_error(
@@ -158,9 +172,21 @@ impl PgaccelResidentGeometryView {
                 "resident geometry offset count overflow",
             )
         })?;
+        let index_boxes = if edge_index {
+            resident_geometry_edge_index_boxes(coordinate_pair_count)
+        } else {
+            0
+        };
+        let bbox_count = row_count.checked_add(index_boxes).ok_or_else(|| {
+            resident_builder_error(
+                GpuStatusDetail::CapacityOverflow,
+                "indexed bbox count overflow",
+            )
+        })?;
         if row_count == 0
+            || (edge_index && (row_count != 1 || index_boxes == 0))
             || coordinates.map_or(0, ExprDeviceBuffer::len) != coordinate_scalar_count
-            || bboxes.map_or(0, ExprDeviceBuffer::len) != row_count
+            || bboxes.map_or(0, ExprDeviceBuffer::len) != bbox_count
             || geometry_offsets.len() != geometry_offset_count
             || ring_offsets.map_or(0, ExprDeviceBuffer::len) != ring_count
             || rows.map_or(0, ExprDeviceBuffer::len) != row_count
@@ -182,7 +208,7 @@ impl PgaccelResidentGeometryView {
 
         let bboxes = bboxes.expect("row_count > 0 requires a bbox buffer");
         let rows = rows.expect("row_count > 0 requires a row buffer");
-        Ok(Self::new(
+        let mut view = Self::new(
             coordinates.map_or(std::ptr::null(), ExprDeviceBuffer::as_ptr),
             bboxes.as_ptr().cast::<f64>(),
             geometry_offsets.as_ptr(),
@@ -198,7 +224,11 @@ impl PgaccelResidentGeometryView {
             row_count,
             coordinate_pair_count,
             ring_count,
-        ))
+        );
+        if edge_index {
+            view.flags = PGACCEL_RESIDENT_GEOMETRY_EDGE_INDEX;
+        }
+        Ok(view)
     }
 }
 
@@ -502,6 +532,7 @@ pub struct PgaccelSpatialRecheckCompactRequest {
 impl PgaccelSpatialRecheckCompactRequest {
     /// Bind exact full-capacity compaction buffers. Zero-row chunks are skipped
     /// by the executor and are intentionally rejected here.
+    #[allow(dead_code)] // reason: exact-buffer companion; aggregate publication uses subspans
     pub fn from_device_buffers(
         tri_state: &ExprDeviceBuffer<i8>,
         final_mask: &ExprDeviceBuffer<i8>,
@@ -509,33 +540,109 @@ impl PgaccelSpatialRecheckCompactRequest {
         uncertain_count: &ExprDeviceBuffer<u64>,
         row_count: usize,
     ) -> GpuResult<Self> {
-        if row_count == 0
-            || row_count > PGACCEL_SPATIAL_MAX_CHUNK_ROWS
-            || tri_state.len() != row_count
-            || final_mask.len() != row_count
-            || uncertain_indices.len() != row_count
-            || uncertain_count.len() != 1
-        {
+        if final_mask.len() != row_count {
+            return Err(resident_builder_error(
+                GpuStatusDetail::ShapeMismatch,
+                "resident spatial compaction mask does not match the exact chunk shape",
+            ));
+        }
+        Self::from_device_buffers_at(
+            tri_state,
+            final_mask,
+            uncertain_indices,
+            uncertain_count,
+            row_count,
+            0,
+        )
+    }
+
+    /// Bind a checked, contiguous output subspan of the eventual published
+    /// mask. The owner must keep all buffers alive until synchronous completion.
+    #[allow(dead_code)] // reason: exact-shape companion to reusable prefix binding
+    pub fn from_device_buffers_at(
+        tri_state: &ExprDeviceBuffer<i8>,
+        final_mask: &ExprDeviceBuffer<i8>,
+        uncertain_indices: &ExprDeviceBuffer<u64>,
+        uncertain_count: &ExprDeviceBuffer<u64>,
+        row_count: usize,
+        first_row: usize,
+    ) -> GpuResult<Self> {
+        if tri_state.len() != row_count || uncertain_indices.len() != row_count {
             return Err(resident_builder_error(
                 GpuStatusDetail::ShapeMismatch,
                 "resident spatial compaction buffers do not match the exact chunk shape",
             ));
         }
+        Self::from_device_buffer_prefixes_at(
+            tri_state,
+            final_mask,
+            uncertain_indices,
+            uncertain_count,
+            row_count,
+            first_row,
+        )
+    }
+
+    /// Bind exact active prefixes of reusable scratch and a checked mask span.
+    /// Unused scratch tails are neither declared to native code nor accessed.
+    pub fn from_device_buffer_prefixes_at(
+        tri_state: &ExprDeviceBuffer<i8>,
+        final_mask: &ExprDeviceBuffer<i8>,
+        uncertain_indices: &ExprDeviceBuffer<u64>,
+        uncertain_count: &ExprDeviceBuffer<u64>,
+        row_count: usize,
+        first_row: usize,
+    ) -> GpuResult<Self> {
+        let Some(indices_bytes) = compact_prefix_bytes(
+            tri_state.len(),
+            final_mask.len(),
+            uncertain_indices.len(),
+            uncertain_count.len(),
+            row_count,
+            first_row,
+        ) else {
+            return Err(resident_builder_error(
+                GpuStatusDetail::ShapeMismatch,
+                "resident spatial compaction prefix exceeds its buffer shape",
+            ));
+        };
         Ok(Self {
             abi_version: PGACCEL_SPATIAL_RECHECK_ABI_VERSION,
             flags: 0,
             tri_state: tri_state.as_ptr(),
-            tri_state_bytes: resident_buffer_bytes(tri_state)?,
-            final_mask: final_mask.as_mut_ptr(),
-            final_mask_bytes: resident_buffer_bytes(final_mask)?,
+            tri_state_bytes: row_count,
+            // SAFETY: the checked nonempty subspan is inside the live mask
+            // allocation. This constructs a device pointer without reading it.
+            final_mask: unsafe { final_mask.as_mut_ptr().add(first_row) },
+            final_mask_bytes: row_count,
             uncertain_indices: uncertain_indices.as_mut_ptr(),
-            uncertain_indices_bytes: resident_buffer_bytes(uncertain_indices)?,
+            uncertain_indices_bytes: indices_bytes,
             uncertain_count: uncertain_count.as_mut_ptr(),
             uncertain_count_bytes: resident_buffer_bytes(uncertain_count)?,
             row_count,
             uncertain_capacity: row_count,
         })
     }
+}
+
+fn compact_prefix_bytes(
+    tri_state_rows: usize,
+    mask_rows: usize,
+    index_rows: usize,
+    count_words: usize,
+    rows: usize,
+    first: usize,
+) -> Option<usize> {
+    if rows == 0
+        || rows > PGACCEL_SPATIAL_MAX_CHUNK_ROWS
+        || tri_state_rows < rows
+        || index_rows < rows
+        || count_words != 1
+        || first.checked_add(rows).is_none_or(|end| end > mask_rows)
+    {
+        return None;
+    }
+    rows.checked_mul(std::mem::size_of::<u64>())
 }
 
 /// Ordered exact-result patch into a previously compacted SQL filter mask.
@@ -1092,6 +1199,8 @@ mod resident_spatial_tests {
     #[test]
     fn resident_spatial_discriminants_match_c_header() {
         assert_eq!(PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION, 2);
+        assert_eq!(PGACCEL_RESIDENT_GEOMETRY_EDGE_INDEX, 1);
+        assert_eq!(PGACCEL_RESIDENT_GEOMETRY_EDGE_BLOCK_PAIRS, 32);
         assert_eq!(PGACCEL_RESIDENT_GEOMETRY_BBOX_VALID, 1);
         assert_eq!(ResidentSpatialPredicate::Intersects as i32, 0);
         assert_eq!(ResidentSpatialPredicate::Contains as i32, 1);
@@ -1111,6 +1220,49 @@ mod resident_spatial_tests {
         assert_eq!(PGACCEL_SPATIAL_RECHECK_ABI_VERSION, 1);
         assert_eq!(PGACCEL_SPATIAL_CONTROL_BYTES, 384);
         assert_eq!(PGACCEL_SPATIAL_MAX_CHUNK_ROWS, 65_536);
+    }
+
+    #[test]
+    fn reusable_compaction_prefixes_validate_every_active_span() {
+        for capacity in [1, 3, 29_999, PGACCEL_SPATIAL_MAX_CHUNK_ROWS] {
+            for rows in [1, capacity] {
+                for first in [0, 1, 3, capacity, 2 * capacity] {
+                    assert_eq!(
+                        compact_prefix_bytes(capacity, first + rows, capacity, 1, rows, first),
+                        Some(rows * 8)
+                    );
+                    assert_eq!(
+                        compact_prefix_bytes(rows - 1, first + rows, capacity, 1, rows, first),
+                        None
+                    );
+                    assert_eq!(
+                        compact_prefix_bytes(capacity, first + rows - 1, capacity, 1, rows, first),
+                        None
+                    );
+                    assert_eq!(
+                        compact_prefix_bytes(capacity, first + rows, rows - 1, 1, rows, first),
+                        None
+                    );
+                    assert_eq!(
+                        compact_prefix_bytes(capacity, first + rows, capacity, 0, rows, first),
+                        None
+                    );
+                    assert_eq!(
+                        compact_prefix_bytes(capacity, first + rows, capacity, 2, rows, first),
+                        None
+                    );
+                }
+            }
+        }
+        assert_eq!(compact_prefix_bytes(1, 1, 1, 1, 0, 0), None);
+        assert_eq!(
+            compact_prefix_bytes(usize::MAX, usize::MAX, usize::MAX, 1, 65_537, 0),
+            None
+        );
+        assert_eq!(
+            compact_prefix_bytes(1, usize::MAX, 1, 1, 1, usize::MAX),
+            None
+        );
     }
 
     #[test]

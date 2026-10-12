@@ -1,0 +1,26 @@
+Custom Scan (GpuAccelAgg)
+  Output: region, (sum(LEAST(GREATEST((price / NULLIF(adjustment, 0)), '-100'::integer), 100))), (avg(LEAST(GREATEST((price / NULLIF(adjustment, 0)), '-100'::integer), 100))), (count(LEAST(GREATEST((price / NULLIF(adjustment, 0)), '-100'::integer), 100))), (min(LEAST(GREATEST((price / NULLIF(adjustment, 0)), '-100'::integer), 100))), (max(LEAST(GREATEST((price / NULLIF(adjustment, 0)), '-100'::integer), 100))), (count(*))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_integer
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: dense_scalar_programs_plain
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: k0:fact(2545717.1:type=23) type=23 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:bytecode(inputs=2, words=23, result_type=23) -> value.sum; value.avg; value.count; value.min; value.max
+  GPU Descriptor Filter: fact=none; measures=[m0=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot2:aggregate[m0].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot3:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false; slot4:aggregate[m0].value.min source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot5:aggregate[m0].value.max source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot6:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 16395
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary

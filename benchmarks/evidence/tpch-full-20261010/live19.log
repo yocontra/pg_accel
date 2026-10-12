@@ -1,0 +1,21 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running unittests src/main.rs (target/debug/deps/pg_accel_bench-72c00a436489eb8e)
+
+running 1 test
+test workloads::tpch::tests::full_tpch_corpus_executes_with_nonempty_results_in_rollback_only_schema ... FAILED
+
+failures:
+
+---- workloads::tpch::tests::full_tpch_corpus_executes_with_nonempty_results_in_rollback_only_schema stdout ----
+
+thread 'workloads::tpch::tests::full_tpch_corpus_executes_with_nonempty_results_in_rollback_only_schema' (2359292) panicked at pg_accel_bench/src/workloads/tpch.rs:373:10:
+live PostgreSQL: Error { kind: Connect, cause: Some(Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    workloads::tpch::tests::full_tpch_corpus_executes_with_nonempty_results_in_rollback_only_schema
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 634 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p pg_accel_bench --bin pg_accel_bench`

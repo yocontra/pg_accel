@@ -1,0 +1,42 @@
+SET
+SELECT 250017
+ANALYZE
+ pg_accel_pin 
+--------------
+       250017
+(1 row)
+
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+                                                                   QUERY PLAN                                                                   
+------------------------------------------------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=9917.55..9917.61 rows=5 width=60)
+   Output: g, sum(a) FILTER (WHERE (p OR (a > b))), avg(b) FILTER (WHERE ((NOT p) OR (a < b))), count(p) FILTER (WHERE ((a + b) > 0)), count(*)
+   Group Key: _scalar_filter.g
+   ->  Seq Scan on pg_temp._scalar_filter  (cost=0.00..4292.17 rows=250017 width=13)
+         Output: id, g, h, k, a, b, p
+(5 rows)
+
+ pg_accel_last_planner_rejection_reason 
+----------------------------------------
+ generic_cost_not_competitive
+(1 row)
+
+ queries_accelerated | rows_dispatched | batches_executed | total_dispatch_us | stock_exec_count | gpu_rows_processed | gpu_uncertain_count | thread_budget_exhausted_count | planner_hook_calls | command_type_skips | window_gpu_failures | gpu_kernel_executions | planner_considered_count | planner_rejected_count | degenerate_guard_trigger_count | gpu_cache_hit_count | gpu_cache_miss_count | planner_hook_total_us | planner_fast_decline_count 
+---------------------+-----------------+------------------+-------------------+------------------+--------------------+---------------------+-------------------------------+--------------------+--------------------+---------------------+-----------------------+--------------------------+------------------------+--------------------------------+---------------------+----------------------+-----------------------+----------------------------
+                   0 |               0 |                0 |                 0 |                0 |                  0 |                   0 |                             0 |                  6 |                  0 |                   0 |                     0 |                        0 |                      2 |                              0 |                   0 |                    0 |                     0 |                          5
+(1 row)
+
+ pg_accel_planner_rejection_count 
+----------------------------------
+                                1
+(1 row)
+
+ pg_accel_planner_rejection_count 
+----------------------------------
+                                0
+(1 row)
+

@@ -31,6 +31,7 @@ const MANAGED_ARTIFACT_DIRS: &[&str] = &[
     "crash_contexts",
     "correctness_diffs",
     "pre_risk_contexts",
+    "fixture_manifests",
 ];
 const MANAGED_ARTIFACT_FILES: &[&str] = &[
     ARTIFACT_INDEX_JSON,
@@ -656,6 +657,9 @@ impl ArtifactWriter {
             "- `provenance-warnings.txt`: provenance gaps or hard-fail reasons, when present.\n",
         );
         readme.push_str("- `plan_snippets/`: EXPLAIN snippets captured before timed execution.\n");
+        readme.push_str(
+            "- `fixture_manifests/`: pinned external-corpus provenance, copied before setup.\n",
+        );
         readme.push_str(
             "- `pre_risk_contexts/`: same-backend `pg_backend_pid()`, workload SQL, \
              config basics, and `EXPLAIN` without `ANALYZE` captured before risky execution.\n",
@@ -1417,6 +1421,10 @@ mod tests {
             .expect("correctness dir should be created");
         fs::create_dir_all(artifacts.path().join("plan_snippets"))
             .expect("plan dir should be created");
+        fs::create_dir_all(artifacts.path().join("fixture_manifests"))
+            .expect("fixture dir should be created");
+        fs::write(artifacts.path().join("fixture_manifests/stale.json"), "{}")
+            .expect("stale fixture should be written");
         fs::write(
             artifacts
                 .path()
@@ -1459,6 +1467,7 @@ mod tests {
                 .exists()
         );
         assert!(!artifacts.path().join("failure-stale.txt").exists());
+        assert!(!artifacts.path().join("fixture_manifests").exists());
         assert!(!artifacts.path().join("report.json").exists());
         assert!(artifacts.path().join("resume_source.json").is_file());
         assert!(artifacts.path().join("notes.txt").is_file());

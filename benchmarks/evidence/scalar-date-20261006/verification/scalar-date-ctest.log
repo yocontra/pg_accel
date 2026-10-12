@@ -1,0 +1,171 @@
+Test project /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+      Start  1: test_host_api_contract
+ 1/33 Test  #1: test_host_api_contract ...........   Passed    0.86 sec
+      Start  2: test_device
+ 2/33 Test  #2: test_device ......................   Passed    0.34 sec
+      Start  3: test_bbox
+ 3/33 Test  #3: test_bbox ........................   Passed    0.48 sec
+      Start  4: test_spatial
+ 4/33 Test  #4: test_spatial .....................   Passed    0.57 sec
+      Start  5: test_spatial_dispatch
+ 5/33 Test  #5: test_spatial_dispatch ............   Passed    0.40 sec
+      Start  6: test_spatial_pairwise_boundary
+ 6/33 Test  #6: test_spatial_pairwise_boundary ...   Passed    1.21 sec
+      Start  7: test_spatial_resident
+ 7/33 Test  #7: test_spatial_resident ............   Passed    1.51 sec
+      Start  8: test_h3
+ 8/33 Test  #8: test_h3 ..........................   Passed    1.82 sec
+      Start  9: test_raster_resident
+ 9/33 Test  #9: test_raster_resident .............   Passed    0.65 sec
+      Start 10: test_correctness
+10/33 Test #10: test_correctness .................   Passed    0.60 sec
+      Start 11: test_exec_gpu
+11/33 Test #11: test_exec_gpu ....................   Passed    0.46 sec
+      Start 12: test_fork
+12/33 Test #12: test_fork ........................   Passed    0.75 sec
+      Start 13: test_fork_warmed
+13/33 Test #13: test_fork_warmed .................   Passed    0.88 sec
+      Start 14: test_fork_cold
+14/33 Test #14: test_fork_cold ...................   Passed    0.44 sec
+      Start 15: test_fork_cold_barrier
+15/33 Test #15: test_fork_cold_barrier ...........   Passed    0.40 sec
+      Start 16: test_sycl_basic
+16/33 Test #16: test_sycl_basic ..................   Passed    3.15 sec
+      Start 17: test_scalar
+17/33 Test #17: test_scalar ......................   Passed    0.83 sec
+      Start 18: test_reduce_stats
+18/33 Test #18: test_reduce_stats ................   Passed    0.56 sec
+      Start 19: test_reduce_bool_bit
+19/33 Test #19: test_reduce_bool_bit .............   Passed    0.43 sec
+      Start 20: test_grouped_agg
+20/33 Test #20: test_grouped_agg .................***Failed   35.41 sec
+--- workspace and descriptor validation ---
+--- dense chunk lifecycle equivalence ---
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:5785: execute_in_workspace(desc, req, workspace, bounded ? nullptr : &output.out, &detail) returned -1, expected 0
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:5789: status == PGACCEL_UNSUPPORTED
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:5789: status == PGACCEL_UNSUPPORTED
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:5785: execute_in_workspace(desc, req, workspace, bounded ? nullptr : &output.out, &detail) returned -1, expected 0
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:5789: status == PGACCEL_UNSUPPORTED
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:5789: status == PGACCEL_UNSUPPORTED
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:5785: execute_in_workspace(desc, req, workspace, bounded ? nullptr : &output.out, &detail) returned -1, expected 0
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:5789: status == PGACCEL_UNSUPPORTED
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:5789: status == PGACCEL_UNSUPPORTED
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:5785: execute_in_workspace(desc, req, workspace, bounded ? nullptr : &output.out, &detail) returned -1, expected 0
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:5789: status == PGACCEL_UNSUPPORTED
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:5789: status == PGACCEL_UNSUPPORTED
+pgaccel: pgaccel_grouped_agg_execute_ex: GPU kernel failure: injected grouped aggregate lifecycle failure
+pgaccel: pgaccel_grouped_agg_execute_ex: GPU kernel failure: injected grouped aggregate lifecycle failure
+pgaccel: pgaccel_grouped_agg_execute_ex: GPU kernel failure: injected grouped aggregate lifecycle failure
+pgaccel: pgaccel_grouped_agg_execute_ex: GPU kernel failure: injected grouped aggregate lifecycle failure
+--- dense chunk lifecycle fail closed ---
+--- empty ungrouped active semantics ---
+--- parallel dense COUNT(*) lifecycle ---
+parallel dense COUNT(*) 262144 rows/17 groups: 0.821 ms
+--- parallel dense nullable INT2 column COUNT ---
+--- parallel dense nullable INT8 column COUNT ---
+--- parallel dense nullable DATE column COUNT ---
+--- parallel dense nullable TIMESTAMP column COUNT ---
+--- parallel dense nullable FLOAT column COUNT ---
+--- parallel dense Phase2 integer lanes ---
+parallel dense SUM/MIN/MAX+COUNT(*) 262144 rows/17 groups: 1.760 ms
+--- parallel dense integer SUM/non-NULL state without COUNT(*) ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- parallel dense multiple independent integer SUM/AVG states ---
+--- parallel dense multiple independent integer SUM/AVG states ---
+--- parallel independent aggregate ranges and predicate NULLs ---
+--- parallel independent count-only states without SUM allocation ---
+--- checked computed INT4 measures ---
+--- fused integer row ownership and independent measures ---
+--- fused scalar CASE/COALESCE and aggregate lifecycle ---
+--- bounded atomic batches retain ordered overflow fallback ---
+--- parallel dense int4 product SUM+COUNT(*) ---
+parallel dense int4 MUL/SUM+COUNT(*) 263157 rows/128 groups: 1.286 ms
+--- parallel dense aggregate-local INT4 range FILTER ---
+--- parallel dense SUM+COUNT(*) mask/two unique dimensions ---
+row-parallel dense SUM+COUNT(*) 262144 rows/35 groups: 1.227 ms
+--- parallel dense COUNT(*) unique dimension ---
+--- parallel dense weighted global COUNT(*) ---
+--- row-parallel dense SUM low-word carry ---
+--- row-parallel dense negative nullable SUM publication ---
+--- dense I64 four-measure lanes ---
+--- dense F64 stats pair and NaN ordering ---
+--- I64 stats pair and F64 binary measures ---
+--- global and per-measure filters ---
+--- predicate-only physical COUNT lanes ---
+--- ordered physical MIN/MAX/COUNT lanes ---
+--- four dimensions and multiplicity ---
+--- mixed radix compact and keyed empty ---
+--- device publication variable-width/no-write contract ---
+--- grouped allocation/copy/wait/materialization failure lifecycle ---
+--- group activity ignores measure validity ---
+--- generic device error and rejection matrix ---
+--- specialized dense branch matrix ---
+--- weighted overflow branch matrix ---
+--- compact full-lane state copy ---
+--- grouped output descriptor validation ---
+--- grouped pointer span validation ---
+--- integer expression overflow semantics ---
+--- error and unsupported statuses ---
+--- fixed-seed mixed-radix fuzz ---
+--- dense full-lane reference ---
+--- filtered product reference ---
+--- two-key dimension reference ---
+--- three-key dimension reference ---
+--- dimension subtraction reference ---
+test_grouped_agg: 51654 passed, 12 failed
+gpu-noise[test_grouped_agg]: suppressed archive-write=76, kernel-cache=1; raw log: /Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs/test_grouped_agg-20261006-015853-27450.log
+gpu-test[test_grouped_agg]: failed with exit code 1
+--- failure summary from /Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs/test_grouped_agg-20261006-015853-27450.log ---
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:5785: execute_in_workspace(desc, req, workspace, bounded ? nullptr : &output.out, &detail) returned -1, expected 0 (repeated 4x)
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:5789: status == PGACCEL_UNSUPPORTED (repeated 8x)
+PGACCEL_TEST_RESULT name=test_grouped_agg exit_code=1 result=FAIL raw_lines=163 body_sha256=28709b32c70a3c29a0033194614d2305b3a6e8c915af597f750f76c3ae4d388c binding_sha256=d59e807a0cfc5bb3b62bde1659d3cb4df9622439aff3ede2b4d629abbc7fb472
+
+      Start 21: test_grouped_agg_hash
+21/33 Test #21: test_grouped_agg_hash ............   Passed    4.51 sec
+      Start 22: test_grouped_agg_workspace
+22/33 Test #22: test_grouped_agg_workspace .......   Passed    0.32 sec
+      Start 23: test_hash_agg_partial
+23/33 Test #23: test_hash_agg_partial ............   Passed    0.38 sec
+      Start 24: test_hash_agg_keys
+24/33 Test #24: test_hash_agg_keys ...............   Passed    0.37 sec
+      Start 25: test_hash_join
+25/33 Test #25: test_hash_join ...................   Passed    0.46 sec
+      Start 26: test_hash_domain_matrix
+26/33 Test #26: test_hash_domain_matrix ..........   Passed    0.40 sec
+      Start 27: test_hashagg_spatial_matrix
+27/33 Test #27: test_hashagg_spatial_matrix ......   Passed    0.44 sec
+      Start 28: test_reduce_matrix
+28/33 Test #28: test_reduce_matrix ...............   Passed    1.57 sec
+      Start 29: test_expr_memory
+29/33 Test #29: test_expr_memory .................   Passed    0.41 sec
+      Start 30: test_expr_vm_matrix
+30/33 Test #30: test_expr_vm_matrix ..............   Passed    0.81 sec
+      Start 31: test_oom_invariant
+31/33 Test #31: test_oom_invariant ...............   Passed   69.51 sec
+      Start 32: test_fp64_mul_probe
+32/33 Test #32: test_fp64_mul_probe ..............   Passed    0.50 sec
+      Start 33: test_kernel_failure_status
+33/33 Test #33: test_kernel_failure_status .......   Passed    0.37 sec
+
+97% tests passed, 1 tests failed out of 33
+
+Label Time Summary:
+host    =   0.86 sec*proc (1 test)
+
+Total Test time (real) = 131.82 sec
+
+The following tests FAILED:
+	 20 - test_grouped_agg (Failed)
+Errors while running CTest

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "workload": "and_range_predicate_expression_grouped_agg_int4",
+  "rows": 250000,
+  "status": "pass",
+  "order_sensitive": false,
+  "accel_rows": 256,
+  "baseline_rows": 256,
+  "accel_minus_baseline_count": 0,
+  "baseline_minus_accel_count": 0,
+  "sample_limit": 20,
+  "accel_minus_baseline_samples": [],
+  "baseline_minus_accel_samples": [],
+  "accel_query_sql": "SELECT product_id, SUM(price * quantity) AS sum, COUNT(*) AS count FROM bench_and_range_predicate_expression_sales_int4 WHERE price >= 200 AND price <= 800 GROUP BY product_id",
+  "baseline_query_sql": "SELECT product_id, SUM(price * quantity) AS sum, COUNT(*) AS count FROM bench_and_range_predicate_expression_sales_int4 WHERE price >= 200 AND price <= 800 GROUP BY product_id",
+  "error": null
+}

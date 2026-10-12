@@ -1,0 +1,10 @@
+=== 136_scalar_nullif_extrema ===
+SET
+SET
+SELECT 1000017
+ANALYZE
+SELECT 1
+CREATE TABLE
+INSERT 0 14
+psql:sql/tests/136_scalar_nullif_extrema.sql:84: ERROR:  136 NULLIF/extrema not selected/dispatched: SELECT sum(v) s,avg(v) av,count(v) c,min(v) lo,max(v) hi,count(*) n FROM (SELECT g,h,NULLIF(a,b) v FROM _row_bounds) src / shape_unsupported_rte / Aggregate (actual rows=1.00 loops=1)  Buffers: local read=11776 written=1  ->  Seq Scan on _row_bounds (actual rows=1000017.00 loops=1)        Buffers: local read=11776 written=1Planning Time: 0.070 msExecution Time: 97.498 ms
+CONTEXT:  PL/pgSQL function inline_code_block line 40 at RAISE

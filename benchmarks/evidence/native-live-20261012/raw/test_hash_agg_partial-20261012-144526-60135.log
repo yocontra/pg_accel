@@ -1,0 +1,18 @@
+PGACCEL_TEST_START name=test_hash_agg_partial
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+=== resident grouped COUNT stress tests ===
+--- resident count collision chain ---
+--- resident count result ownership ---
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/17636384747961054794.6409575121718945068.metalar.60136.13669358198964011904.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/17582401438188803958.10924208193287224512.metalar.60136.3620101158588807185.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/5895956363676158642.4341822453912003826.metalar.60136.17494077929922237904.tmp (kernels_added=1 skipped=0)
+--- resident count permutation invariance ---
+--- resident count single-group capacity ---
+resident grouped COUNT stress: 16 checks, 0 failures
+PGACCEL_TEST_RESULT name=test_hash_agg_partial exit_code=0 result=PASS raw_lines=16 body_sha256=37a843d6d2d69fdf6827e0bf6725b82440873d31d28e01c97691015dc2b58c4a binding_sha256=de7666f75f48f5fcf12d367d11674817deba567e2b327bb40b4874c201e12551

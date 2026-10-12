@@ -1,0 +1,3 @@
+af9854fa671d33cbfcaa8e6ff7375efecadbee45df0595c17f9573e5222bfc5a  benchmarks/evidence/scalar-contract-20260929/source-snapshot.tar.gz
+f465fa68fb74b02b3a456c38d7f99898a2214209b8fcc4dc5fb1f4a0b665dea9  benchmarks/evidence/catalog-compatibility-20260929/catalog-fullsql18.tar.gz
+276cd993f91d5dc59cd76299c3b9b71e5d76a2d6d96c8ee0268c23b50bd24b8b  benchmarks/evidence/catalog-compatibility-20260929/catalog-fullsql19.tar.gz

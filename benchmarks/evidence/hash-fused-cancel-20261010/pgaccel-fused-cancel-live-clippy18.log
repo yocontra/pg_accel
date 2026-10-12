@@ -1,0 +1,287 @@
+    Checking pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error[E0277]: the type `std::cell::UnsafeCell<engine::executor::agg::descriptor::DescriptorArtifactPolicy>` may contain interior mutability and a reference may not be safely transferable across a catch_unwind boundary
+    --> pg_accel/src/engine/executor/agg/h3_count_test.rs:382:69
+     |
+ 382 |                   .catch_when(PgSqlErrorCode::ERRCODE_QUERY_CANCELED, |caught| {
+     |  __________________----------_________________________________________^
+     | |                  |
+     | |                  required by a bound introduced by this call
+ 383 | |                     let message = match caught {
+ 384 | |                         pg_sys::panic::CaughtError::PostgresError(report)
+ 385 | |                         | pg_sys::panic::CaughtError::ErrorReport(report) => {
+...    |
+ 402 | |                     true
+ 403 | |                 })
+     | |_________________^ `std::cell::UnsafeCell<engine::executor::agg::descriptor::DescriptorArtifactPolicy>` may contain interior mutability and a reference may not be safely transferable across a catch_unwind boundary
+     |
+     = help: within `engine::executor::agg::descriptor::DescriptorAggPlan`, the trait `std::panic::RefUnwindSafe` is not implemented for `std::cell::UnsafeCell<engine::executor::agg::descriptor::DescriptorArtifactPolicy>`
+note: required because it appears within the type `std::cell::Cell<engine::executor::agg::descriptor::DescriptorArtifactPolicy>`
+    --> /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/cell.rs:312:11
+note: required because it appears within the type `engine::executor::agg::descriptor::DescriptorAggPlan`
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:2436:19
+     |
+2436 | pub(super) struct DescriptorAggPlan {
+     |                   ^^^^^^^^^^^^^^^^^
+     = note: required for `&engine::executor::agg::descriptor::DescriptorAggPlan` to implement `std::panic::UnwindSafe`
+note: required because it's used within this closure
+    --> pg_accel/src/engine/executor/agg/h3_count_test.rs:382:69
+     |
+ 382 |                 .catch_when(PgSqlErrorCode::ERRCODE_QUERY_CANCELED, |caught| {
+     |                                                                     ^^^^^^^^
+note: required by a bound in `pgrx::PgTryBuilder::<'a, R, F>::catch_when`
+    --> /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-pg-sys-0.19.1/src/submodules/pg_try.rs:80:48
+     |
+  77 |     pub fn catch_when(
+     |            ---------- required by a bound in this associated function
+...
+  80 |         f: impl FnMut(CaughtError) -> R + 'a + UnwindSafe + RefUnwindSafe,
+     |                                                ^^^^^^^^^^ required by this bound in `PgTryBuilder::<'a, R, F>::catch_when`
+
+error[E0277]: the type `UnsafeCell<Option<ArtifactPolicyEvidence>>` may contain interior mutability and a reference may not be safely transferable across a catch_unwind boundary
+    --> pg_accel/src/engine/executor/agg/h3_count_test.rs:382:69
+     |
+ 382 |                   .catch_when(PgSqlErrorCode::ERRCODE_QUERY_CANCELED, |caught| {
+     |  __________________----------_________________________________________^
+     | |                  |
+     | |                  required by a bound introduced by this call
+ 383 | |                     let message = match caught {
+ 384 | |                         pg_sys::panic::CaughtError::PostgresError(report)
+ 385 | |                         | pg_sys::panic::CaughtError::ErrorReport(report) => {
+...    |
+ 402 | |                     true
+ 403 | |                 })
+     | |_________________^ `UnsafeCell<Option<ArtifactPolicyEvidence>>` may contain interior mutability and a reference may not be safely transferable across a catch_unwind boundary
+     |
+     = help: within `engine::executor::agg::descriptor::DescriptorAggPlan`, the trait `std::panic::RefUnwindSafe` is not implemented for `UnsafeCell<Option<ArtifactPolicyEvidence>>`
+note: required because it appears within the type `Cell<Option<ArtifactPolicyEvidence>>`
+    --> /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/cell.rs:312:11
+note: required because it appears within the type `engine::executor::agg::descriptor::DescriptorAggPlan`
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:2436:19
+     |
+2436 | pub(super) struct DescriptorAggPlan {
+     |                   ^^^^^^^^^^^^^^^^^
+     = note: required for `&engine::executor::agg::descriptor::DescriptorAggPlan` to implement `std::panic::UnwindSafe`
+note: required because it's used within this closure
+    --> pg_accel/src/engine/executor/agg/h3_count_test.rs:382:69
+     |
+ 382 |                 .catch_when(PgSqlErrorCode::ERRCODE_QUERY_CANCELED, |caught| {
+     |                                                                     ^^^^^^^^
+note: required by a bound in `pgrx::PgTryBuilder::<'a, R, F>::catch_when`
+    --> /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-pg-sys-0.19.1/src/submodules/pg_try.rs:80:48
+     |
+  77 |     pub fn catch_when(
+     |            ---------- required by a bound in this associated function
+...
+  80 |         f: impl FnMut(CaughtError) -> R + 'a + UnwindSafe + RefUnwindSafe,
+     |                                                ^^^^^^^^^^ required by this bound in `PgTryBuilder::<'a, R, F>::catch_when`
+     = note: the full name for the type has been written to '/Users/contra/Projects/pg_accel/target/debug/deps/pg_accel-2dcc795a44424075.long-type-11301479835708245533.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+
+error[E0277]: the type `UnsafeCell<Option<EphemeralDescriptorArtifact>>` may contain interior mutability and a reference may not be safely transferable across a catch_unwind boundary
+    --> pg_accel/src/engine/executor/agg/h3_count_test.rs:382:69
+     |
+ 382 |                   .catch_when(PgSqlErrorCode::ERRCODE_QUERY_CANCELED, |caught| {
+     |  __________________----------_________________________________________^
+     | |                  |
+     | |                  required by a bound introduced by this call
+ 383 | |                     let message = match caught {
+ 384 | |                         pg_sys::panic::CaughtError::PostgresError(report)
+ 385 | |                         | pg_sys::panic::CaughtError::ErrorReport(report) => {
+...    |
+ 402 | |                     true
+ 403 | |                 })
+     | |_________________^ `UnsafeCell<Option<EphemeralDescriptorArtifact>>` may contain interior mutability and a reference may not be safely transferable across a catch_unwind boundary
+     |
+     = help: within `engine::executor::agg::descriptor::DescriptorAggPlan`, the trait `std::panic::RefUnwindSafe` is not implemented for `UnsafeCell<Option<EphemeralDescriptorArtifact>>`
+note: required because it appears within the type `RefCell<Option<EphemeralDescriptorArtifact>>`
+    --> /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/cell.rs:849:11
+note: required because it appears within the type `engine::executor::agg::descriptor::DescriptorAggPlan`
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:2436:19
+     |
+2436 | pub(super) struct DescriptorAggPlan {
+     |                   ^^^^^^^^^^^^^^^^^
+     = note: required for `&engine::executor::agg::descriptor::DescriptorAggPlan` to implement `std::panic::UnwindSafe`
+note: required because it's used within this closure
+    --> pg_accel/src/engine/executor/agg/h3_count_test.rs:382:69
+     |
+ 382 |                 .catch_when(PgSqlErrorCode::ERRCODE_QUERY_CANCELED, |caught| {
+     |                                                                     ^^^^^^^^
+note: required by a bound in `pgrx::PgTryBuilder::<'a, R, F>::catch_when`
+    --> /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-pg-sys-0.19.1/src/submodules/pg_try.rs:80:48
+     |
+  77 |     pub fn catch_when(
+     |            ---------- required by a bound in this associated function
+...
+  80 |         f: impl FnMut(CaughtError) -> R + 'a + UnwindSafe + RefUnwindSafe,
+     |                                                ^^^^^^^^^^ required by this bound in `PgTryBuilder::<'a, R, F>::catch_when`
+     = note: the full name for the type has been written to '/Users/contra/Projects/pg_accel/target/debug/deps/pg_accel-2dcc795a44424075.long-type-14072751736689823901.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+
+error[E0277]: the type `std::cell::UnsafeCell<isize>` may contain interior mutability and a reference may not be safely transferable across a catch_unwind boundary
+    --> pg_accel/src/engine/executor/agg/h3_count_test.rs:382:69
+     |
+ 382 |                   .catch_when(PgSqlErrorCode::ERRCODE_QUERY_CANCELED, |caught| {
+     |  __________________----------_________________________________________^
+     | |                  |
+     | |                  required by a bound introduced by this call
+ 383 | |                     let message = match caught {
+ 384 | |                         pg_sys::panic::CaughtError::PostgresError(report)
+ 385 | |                         | pg_sys::panic::CaughtError::ErrorReport(report) => {
+...    |
+ 402 | |                     true
+ 403 | |                 })
+     | |_________________^ `std::cell::UnsafeCell<isize>` may contain interior mutability and a reference may not be safely transferable across a catch_unwind boundary
+     |
+     = help: within `engine::executor::agg::descriptor::DescriptorAggPlan`, the trait `std::panic::RefUnwindSafe` is not implemented for `std::cell::UnsafeCell<isize>`
+note: required because it appears within the type `std::cell::Cell<isize>`
+    --> /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/cell.rs:312:11
+note: required because it appears within the type `RefCell<Option<EphemeralDescriptorArtifact>>`
+    --> /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/cell.rs:849:11
+note: required because it appears within the type `engine::executor::agg::descriptor::DescriptorAggPlan`
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:2436:19
+     |
+2436 | pub(super) struct DescriptorAggPlan {
+     |                   ^^^^^^^^^^^^^^^^^
+     = note: required for `&engine::executor::agg::descriptor::DescriptorAggPlan` to implement `std::panic::UnwindSafe`
+note: required because it's used within this closure
+    --> pg_accel/src/engine/executor/agg/h3_count_test.rs:382:69
+     |
+ 382 |                 .catch_when(PgSqlErrorCode::ERRCODE_QUERY_CANCELED, |caught| {
+     |                                                                     ^^^^^^^^
+note: required by a bound in `pgrx::PgTryBuilder::<'a, R, F>::catch_when`
+    --> /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-pg-sys-0.19.1/src/submodules/pg_try.rs:80:48
+     |
+  77 |     pub fn catch_when(
+     |            ---------- required by a bound in this associated function
+...
+  80 |         f: impl FnMut(CaughtError) -> R + 'a + UnwindSafe + RefUnwindSafe,
+     |                                                ^^^^^^^^^^ required by this bound in `PgTryBuilder::<'a, R, F>::catch_when`
+     = note: the full name for the type has been written to '/Users/contra/Projects/pg_accel/target/debug/deps/pg_accel-2dcc795a44424075.long-type-14908144683252531593.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+
+error[E0277]: the type `UnsafeCell<Option<ArtifactPolicyEvidence>>` may contain interior mutability and a reference may not be safely transferable across a catch_unwind boundary
+    --> pg_accel/src/engine/executor/agg/h3_count_test.rs:382:69
+     |
+ 382 |                   .catch_when(PgSqlErrorCode::ERRCODE_QUERY_CANCELED, |caught| {
+     |  __________________----------_________________________________________^
+     | |                  |
+     | |                  required by a bound introduced by this call
+ 383 | |                     let message = match caught {
+ 384 | |                         pg_sys::panic::CaughtError::PostgresError(report)
+ 385 | |                         | pg_sys::panic::CaughtError::ErrorReport(report) => {
+...    |
+ 402 | |                     true
+ 403 | |                 })
+     | |_________________^ `UnsafeCell<Option<ArtifactPolicyEvidence>>` may contain interior mutability and a reference may not be safely transferable across a catch_unwind boundary
+     |
+     = help: within `engine::executor::agg::descriptor::DescriptorAggPlan`, the trait `std::panic::RefUnwindSafe` is not implemented for `UnsafeCell<Option<ArtifactPolicyEvidence>>`
+note: required because it appears within the type `Cell<Option<ArtifactPolicyEvidence>>`
+    --> /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/cell.rs:312:11
+note: required because it appears within the type `engine::executor::agg::descriptor::DescriptorAggPlan`
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:2436:19
+     |
+2436 | pub(super) struct DescriptorAggPlan {
+     |                   ^^^^^^^^^^^^^^^^^
+     = note: required for `&engine::executor::agg::descriptor::DescriptorAggPlan` to implement `std::panic::UnwindSafe`
+note: required because it's used within this closure
+    --> pg_accel/src/engine/executor/agg/h3_count_test.rs:382:69
+     |
+ 382 |                 .catch_when(PgSqlErrorCode::ERRCODE_QUERY_CANCELED, |caught| {
+     |                                                                     ^^^^^^^^
+note: required by a bound in `pgrx::PgTryBuilder::<'a, R, F>::catch_when`
+    --> /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-pg-sys-0.19.1/src/submodules/pg_try.rs:80:48
+     |
+  77 |     pub fn catch_when(
+     |            ---------- required by a bound in this associated function
+...
+  80 |         f: impl FnMut(CaughtError) -> R + 'a + UnwindSafe + RefUnwindSafe,
+     |                                                ^^^^^^^^^^ required by this bound in `PgTryBuilder::<'a, R, F>::catch_when`
+     = note: the full name for the type has been written to '/Users/contra/Projects/pg_accel/target/debug/deps/pg_accel-9dad0fb1757d33a0.long-type-10211745479938837707.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+
+error[E0277]: the type `UnsafeCell<Option<EphemeralDescriptorArtifact>>` may contain interior mutability and a reference may not be safely transferable across a catch_unwind boundary
+    --> pg_accel/src/engine/executor/agg/h3_count_test.rs:382:69
+     |
+ 382 |                   .catch_when(PgSqlErrorCode::ERRCODE_QUERY_CANCELED, |caught| {
+     |  __________________----------_________________________________________^
+     | |                  |
+     | |                  required by a bound introduced by this call
+ 383 | |                     let message = match caught {
+ 384 | |                         pg_sys::panic::CaughtError::PostgresError(report)
+ 385 | |                         | pg_sys::panic::CaughtError::ErrorReport(report) => {
+...    |
+ 402 | |                     true
+ 403 | |                 })
+     | |_________________^ `UnsafeCell<Option<EphemeralDescriptorArtifact>>` may contain interior mutability and a reference may not be safely transferable across a catch_unwind boundary
+     |
+     = help: within `engine::executor::agg::descriptor::DescriptorAggPlan`, the trait `std::panic::RefUnwindSafe` is not implemented for `UnsafeCell<Option<EphemeralDescriptorArtifact>>`
+note: required because it appears within the type `RefCell<Option<EphemeralDescriptorArtifact>>`
+    --> /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/cell.rs:849:11
+note: required because it appears within the type `engine::executor::agg::descriptor::DescriptorAggPlan`
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:2436:19
+     |
+2436 | pub(super) struct DescriptorAggPlan {
+     |                   ^^^^^^^^^^^^^^^^^
+     = note: required for `&engine::executor::agg::descriptor::DescriptorAggPlan` to implement `std::panic::UnwindSafe`
+note: required because it's used within this closure
+    --> pg_accel/src/engine/executor/agg/h3_count_test.rs:382:69
+     |
+ 382 |                 .catch_when(PgSqlErrorCode::ERRCODE_QUERY_CANCELED, |caught| {
+     |                                                                     ^^^^^^^^
+note: required by a bound in `pgrx::PgTryBuilder::<'a, R, F>::catch_when`
+    --> /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-pg-sys-0.19.1/src/submodules/pg_try.rs:80:48
+     |
+  77 |     pub fn catch_when(
+     |            ---------- required by a bound in this associated function
+...
+  80 |         f: impl FnMut(CaughtError) -> R + 'a + UnwindSafe + RefUnwindSafe,
+     |                                                ^^^^^^^^^^ required by this bound in `PgTryBuilder::<'a, R, F>::catch_when`
+     = note: the full name for the type has been written to '/Users/contra/Projects/pg_accel/target/debug/deps/pg_accel-9dad0fb1757d33a0.long-type-17451827877037818330.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+
+error[E0277]: the type `std::cell::UnsafeCell<isize>` may contain interior mutability and a reference may not be safely transferable across a catch_unwind boundary
+    --> pg_accel/src/engine/executor/agg/h3_count_test.rs:382:69
+     |
+ 382 |                   .catch_when(PgSqlErrorCode::ERRCODE_QUERY_CANCELED, |caught| {
+     |  __________________----------_________________________________________^
+     | |                  |
+     | |                  required by a bound introduced by this call
+ 383 | |                     let message = match caught {
+ 384 | |                         pg_sys::panic::CaughtError::PostgresError(report)
+ 385 | |                         | pg_sys::panic::CaughtError::ErrorReport(report) => {
+...    |
+ 402 | |                     true
+ 403 | |                 })
+     | |_________________^ `std::cell::UnsafeCell<isize>` may contain interior mutability and a reference may not be safely transferable across a catch_unwind boundary
+     |
+     = help: within `engine::executor::agg::descriptor::DescriptorAggPlan`, the trait `std::panic::RefUnwindSafe` is not implemented for `std::cell::UnsafeCell<isize>`
+note: required because it appears within the type `std::cell::Cell<isize>`
+    --> /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/cell.rs:312:11
+note: required because it appears within the type `RefCell<Option<EphemeralDescriptorArtifact>>`
+    --> /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/cell.rs:849:11
+note: required because it appears within the type `engine::executor::agg::descriptor::DescriptorAggPlan`
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:2436:19
+     |
+2436 | pub(super) struct DescriptorAggPlan {
+     |                   ^^^^^^^^^^^^^^^^^
+     = note: required for `&engine::executor::agg::descriptor::DescriptorAggPlan` to implement `std::panic::UnwindSafe`
+note: required because it's used within this closure
+    --> pg_accel/src/engine/executor/agg/h3_count_test.rs:382:69
+     |
+ 382 |                 .catch_when(PgSqlErrorCode::ERRCODE_QUERY_CANCELED, |caught| {
+     |                                                                     ^^^^^^^^
+note: required by a bound in `pgrx::PgTryBuilder::<'a, R, F>::catch_when`
+    --> /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-pg-sys-0.19.1/src/submodules/pg_try.rs:80:48
+     |
+  77 |     pub fn catch_when(
+     |            ---------- required by a bound in this associated function
+...
+  80 |         f: impl FnMut(CaughtError) -> R + 'a + UnwindSafe + RefUnwindSafe,
+     |                                                ^^^^^^^^^^ required by this bound in `PgTryBuilder::<'a, R, F>::catch_when`
+     = note: the full name for the type has been written to '/Users/contra/Projects/pg_accel/target/debug/deps/pg_accel-9dad0fb1757d33a0.long-type-732186770992594891.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `pg_accel` (lib) due to 4 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `pg_accel` (lib test) due to 4 previous errors

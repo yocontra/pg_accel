@@ -1,0 +1,25 @@
+=== 99_grouped_count_int2_contract ===
+SET
+SET
+CREATE TABLE
+INSERT 0 500000
+ANALYZE
+SET
+SELECT 3
+DO
+PGACCEL_ASSERT_OK:99_grouped_count_int2_contract.assert_001
+CREATE TABLE
+DO
+PGACCEL_ASSERT_OK:99_grouped_count_int2_contract.assert_002
+DO
+PGACCEL_ASSERT_OK:99_grouped_count_int2_contract.assert_003
+DO
+PGACCEL_ASSERT_OK:99_grouped_count_int2_contract.assert_004
+TRUNCATE TABLE
+DO
+PGACCEL_ASSERT_OK:99_grouped_count_int2_contract.assert_005
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+PGACCEL_FILE_OK:99_grouped_count_int2_contract

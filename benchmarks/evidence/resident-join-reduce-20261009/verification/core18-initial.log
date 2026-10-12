@@ -1,0 +1,32 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error: field `0` is never read
+  --> pg_accel/src/engine/executor/join_reduce.rs:39:14
+   |
+39 |     Complete(JoinReductionOutput),
+   |     -------- ^^^^^^^^^^^^^^^^^^^
+   |     |
+   |     field in this variant
+   |
+   = note: `JoinReducedOutcome` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+   = note: `-D dead-code` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+   |
+39 -     Complete(JoinReductionOutput),
+39 +     Complete(()),
+   |
+
+error: fields `required_rows` and `kernel_launches` are never read
+  --> pg_accel/src/engine/executor/join_reduce.rs:41:9
+   |
+40 |     NeedsCapacity {
+   |     ------------- fields in this variant
+41 |         required_rows: u64,
+   |         ^^^^^^^^^^^^^
+42 |         kernel_launches: u64,
+   |         ^^^^^^^^^^^^^^^
+   |
+   = note: `JoinReducedOutcome` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+error: could not compile `pg_accel` (lib test) due to 2 previous errors
+error: Recipe `test-standalone` failed with exit code 101

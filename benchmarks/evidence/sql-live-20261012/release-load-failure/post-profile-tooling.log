@@ -1,0 +1,29 @@
+test_release_disables_rust_postlink_stripping (scripts.tests.test_release_profile.ReleaseProfileTests.test_release_disables_rust_postlink_stripping) ... ok
+test_release_preserves_inherited_optimization_settings (scripts.tests.test_release_profile.ReleaseProfileTests.test_release_preserves_inherited_optimization_settings) ... ok
+test_beta_version_major_is_parsed (scripts.tests.test_pg_source.PgSourceInstallTests.test_beta_version_major_is_parsed) ... ok
+test_existing_macos_sysroot_is_usable (scripts.tests.test_pg_source.PgSourceInstallTests.test_existing_macos_sysroot_is_usable) ... ok
+test_invalid_version_is_rejected (scripts.tests.test_pg_source.PgSourceInstallTests.test_invalid_version_is_rejected) ... ok
+test_missing_macos_sysroot_is_stale (scripts.tests.test_pg_source.PgSourceInstallTests.test_missing_macos_sysroot_is_stale) ... ok
+test_missing_pg_config_is_not_usable (scripts.tests.test_pg_source.PgSourceInstallTests.test_missing_pg_config_is_not_usable) ... ok
+test_non_macos_install_does_not_require_an_apple_sdk (scripts.tests.test_pg_source.PgSourceInstallTests.test_non_macos_install_does_not_require_an_apple_sdk) ... ok
+test_release_candidate_major_is_parsed (scripts.tests.test_pg_source.PgSourceInstallTests.test_release_candidate_major_is_parsed) ... ok
+test_release_version_major_is_parsed (scripts.tests.test_pg_source.PgSourceInstallTests.test_release_version_major_is_parsed) ... ok
+test_install_prepares_inherited_limit_before_server_mutation (scripts.tests.test_setup_pg_extensions.SetupPgExtensionsTests.test_install_prepares_inherited_limit_before_server_mutation) ... ok
+test_postgis_source_fallback_avoids_generated_sql_race (scripts.tests.test_setup_pg_extensions.SetupPgExtensionsTests.test_postgis_source_fallback_avoids_generated_sql_race) ... ok
+test_server_soft_file_limit_is_raised_without_lowering_or_hard_limit_changes (scripts.tests.test_setup_pg_extensions.SetupPgExtensionsTests.test_server_soft_file_limit_is_raised_without_lowering_or_hard_limit_changes) ... ok
+test_shell_is_syntactically_valid (scripts.tests.test_setup_pg_extensions.SetupPgExtensionsTests.test_shell_is_syntactically_valid) ... ok
+test_auxiliary_test_and_hook_paths_keep_exact_postgres_selection (scripts.tests.test_pg_stub_build_wiring.PgStubBuildWiringTests.test_auxiliary_test_and_hook_paths_keep_exact_postgres_selection) ... ok
+test_build_script_always_defines_compile_time_include (scripts.tests.test_pg_stub_build_wiring.PgStubBuildWiringTests.test_build_script_always_defines_compile_time_include) ... ok
+test_compile_recipes_pass_the_selected_pgrx_pg_config (scripts.tests.test_pg_stub_build_wiring.PgStubBuildWiringTests.test_compile_recipes_pass_the_selected_pgrx_pg_config) ... ok
+test_extension_smoke_uses_selected_postgres_clients (scripts.tests.test_pg_stub_build_wiring.PgStubBuildWiringTests.test_extension_smoke_uses_selected_postgres_clients) ... ok
+test_linux_ci_executes_standalone_tests_with_selected_pg_config (scripts.tests.test_pg_stub_build_wiring.PgStubBuildWiringTests.test_linux_ci_executes_standalone_tests_with_selected_pg_config) ... ok
+test_no_gpu_runner_skips_only_an_explicit_no_device_prerequisite (scripts.tests.test_pg_stub_build_wiring.PgStubBuildWiringTests.test_no_gpu_runner_skips_only_an_explicit_no_device_prerequisite) ... ok
+test_release_gates_use_the_selected_postgres_client (scripts.tests.test_pg_stub_build_wiring.PgStubBuildWiringTests.test_release_gates_use_the_selected_postgres_client) ... ok
+test_stubs_cover_macos_and_linux_symbol_rules (scripts.tests.test_pg_stub_build_wiring.PgStubBuildWiringTests.test_stubs_cover_macos_and_linux_symbol_rules) ... ok
+test_postgres_relkind_comparisons_are_char_signedness_neutral (scripts.tests.test_target_specific_rust.TargetSpecificRustTests.test_postgres_relkind_comparisons_are_char_signedness_neutral) ... ok
+test_rust_2024_ffi_blocks_are_explicitly_unsafe (scripts.tests.test_target_specific_rust.TargetSpecificRustTests.test_rust_2024_ffi_blocks_are_explicitly_unsafe) ... ok
+
+----------------------------------------------------------------------
+Ran 24 tests in 0.698s
+
+OK

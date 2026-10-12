@@ -1,0 +1,169 @@
+{
+  "schema_version": 1,
+  "generated_unix_seconds": 1790737114,
+  "root": "benchmarks/evidence/fused-integer-20260929/baseline-and_range_predicate_expression_grouped_agg_int4",
+  "entry_count": 32,
+  "total_size_bytes": 188766,
+  "entries": [
+    {
+      "path": "README.md",
+      "size_bytes": 2167,
+      "modified_unix_seconds": 1790737109
+    },
+    {
+      "path": "benchmark_failure_ledger.json",
+      "size_bytes": 409,
+      "modified_unix_seconds": 1790737114
+    },
+    {
+      "path": "benchmark_failure_ledger.md",
+      "size_bytes": 748,
+      "modified_unix_seconds": 1790737114
+    },
+    {
+      "path": "correctness_diffs/and_range_predicate_expression_grouped_agg_int4-1000000.json",
+      "size_bytes": 790,
+      "modified_unix_seconds": 1790737113
+    },
+    {
+      "path": "correctness_diffs/and_range_predicate_expression_grouped_agg_int4-250000.json",
+      "size_bytes": 789,
+      "modified_unix_seconds": 1790737110
+    },
+    {
+      "path": "crashes.json",
+      "size_bytes": 2,
+      "modified_unix_seconds": 1790737114
+    },
+    {
+      "path": "crashes.md",
+      "size_bytes": 45,
+      "modified_unix_seconds": 1790737114
+    },
+    {
+      "path": "guc_snapshot.json",
+      "size_bytes": 702,
+      "modified_unix_seconds": 1790737110
+    },
+    {
+      "path": "log_tails/run-complete/00-18.log.delta",
+      "size_bytes": 1024,
+      "modified_unix_seconds": 1790737114
+    },
+    {
+      "path": "log_tails/run-complete/00-18.log.tail",
+      "size_bytes": 65519,
+      "modified_unix_seconds": 1790737114
+    },
+    {
+      "path": "log_tails/run-complete/01-pg_accel_panic.log.delta",
+      "size_bytes": 203,
+      "modified_unix_seconds": 1790737114
+    },
+    {
+      "path": "log_tails/run-complete/01-pg_accel_panic.log.tail",
+      "size_bytes": 78,
+      "modified_unix_seconds": 1790737114
+    },
+    {
+      "path": "log_tails/run-complete/02-pg_accel_traces.jsonl.delta",
+      "size_bytes": 215,
+      "modified_unix_seconds": 1790737114
+    },
+    {
+      "path": "log_tails/run-complete/02-pg_accel_traces.jsonl.tail",
+      "size_bytes": 9832,
+      "modified_unix_seconds": 1790737114
+    },
+    {
+      "path": "log_tails/run-complete/03-pg_accel_otel.jsonl.delta",
+      "size_bytes": 204,
+      "modified_unix_seconds": 1790737114
+    },
+    {
+      "path": "log_tails/run-complete/03-pg_accel_otel.jsonl.tail",
+      "size_bytes": 79,
+      "modified_unix_seconds": 1790737114
+    },
+    {
+      "path": "manifest.json",
+      "size_bytes": 1288,
+      "modified_unix_seconds": 1790737109
+    },
+    {
+      "path": "no_dispatch_audit.json",
+      "size_bytes": 324,
+      "modified_unix_seconds": 1790737114
+    },
+    {
+      "path": "no_dispatch_audit.md",
+      "size_bytes": 650,
+      "modified_unix_seconds": 1790737114
+    },
+    {
+      "path": "plan_snippets/and_range_predicate_expression_grouped_agg_int4-1000000.txt",
+      "size_bytes": 1593,
+      "modified_unix_seconds": 1790737113
+    },
+    {
+      "path": "plan_snippets/and_range_predicate_expression_grouped_agg_int4-250000.txt",
+      "size_bytes": 1593,
+      "modified_unix_seconds": 1790737110
+    },
+    {
+      "path": "plans.txt",
+      "size_bytes": 5328,
+      "modified_unix_seconds": 1790737113
+    },
+    {
+      "path": "pre_risk_contexts/and_range_predicate_expression_grouped_agg_int4-1000000.json",
+      "size_bytes": 3203,
+      "modified_unix_seconds": 1790737113
+    },
+    {
+      "path": "pre_risk_contexts/and_range_predicate_expression_grouped_agg_int4-250000.json",
+      "size_bytes": 3201,
+      "modified_unix_seconds": 1790737110
+    },
+    {
+      "path": "provenance.json",
+      "size_bytes": 3585,
+      "modified_unix_seconds": 1790737110
+    },
+    {
+      "path": "report.csv",
+      "size_bytes": 2096,
+      "modified_unix_seconds": 1790737114
+    },
+    {
+      "path": "report.json",
+      "size_bytes": 62153,
+      "modified_unix_seconds": 1790737114
+    },
+    {
+      "path": "report.md",
+      "size_bytes": 15676,
+      "modified_unix_seconds": 1790737114
+    },
+    {
+      "path": "resident_boundary_audit.json",
+      "size_bytes": 757,
+      "modified_unix_seconds": 1790737114
+    },
+    {
+      "path": "resident_boundary_audit.md",
+      "size_bytes": 1010,
+      "modified_unix_seconds": 1790737114
+    },
+    {
+      "path": "resume_audit_manifest.json",
+      "size_bytes": 3312,
+      "modified_unix_seconds": 1790737114
+    },
+    {
+      "path": "rust_backtrace.txt",
+      "size_bytes": 191,
+      "modified_unix_seconds": 1790737109
+    }
+  ]
+}

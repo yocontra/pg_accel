@@ -54,6 +54,20 @@ fn record_residency_lifecycle(report: &DescriptorResidencyReport) {
 
 fn raise_descriptor_execution_error(error: DescriptorAggExecutionError) -> ! {
     match error {
+        DescriptorAggExecutionError::DateOutOfRange => {
+            pgrx::ereport!(
+                ERROR,
+                pgrx::PgSqlErrorCode::ERRCODE_DATETIME_FIELD_OVERFLOW,
+                "pg_accel: aggregate date expression out of range; refusing CPU fallback"
+            );
+        }
+        DescriptorAggExecutionError::DivisionByZero => {
+            pgrx::ereport!(
+                ERROR,
+                pgrx::PgSqlErrorCode::ERRCODE_DIVISION_BY_ZERO,
+                "pg_accel: aggregate expression division by zero; refusing CPU fallback"
+            );
+        }
         DescriptorAggExecutionError::NumericOverflow => {
             pgrx::ereport!(
                 ERROR,

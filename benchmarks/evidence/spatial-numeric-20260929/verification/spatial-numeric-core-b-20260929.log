@@ -1,0 +1,18 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error: unused variable: `left`
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:7558:13
+     |
+7558 |             left,
+     |             ^^^^ help: try ignoring the field: `left: _`
+     |
+     = note: `-D unused-variables` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(unused_variables)]`
+
+error: unused variable: `right`
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:7559:13
+     |
+7559 |             right,
+     |             ^^^^^ help: try ignoring the field: `right: _`
+
+error: could not compile `pg_accel` (lib test) due to 2 previous errors
+error: Recipe `test-standalone` failed with exit code 101

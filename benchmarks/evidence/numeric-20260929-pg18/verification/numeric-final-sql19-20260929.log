@@ -1,0 +1,114 @@
+========================================
+ pg_accel integration tests
+========================================
+
+PASS: 00_smoke.sql
+PASS: 01_core_engine.sql
+PASS: 02_aggregates.sql
+FAIL: 03_large_table.sql (warning/skip/caught exception evidence)
+  | SELECT 1
+  | SET
+  | SELECT 100000
+  | SELECT 1
+  | psql:/Users/contra/Projects/pg_accel/sql/tests/03_large_table.sql:109: WARNING:  pg_accel: grouped aggregate one-shot dispatch returned after 11263875us (warning threshold 5000ms); cancellation and statement_timeout are observed only between synchronous calls
+  | DO
+  | PGACCEL_ASSERT_OK:03_large_table.assert_001
+  | DROP TABLE
+  | COMMIT
+  | PGACCEL_FILE_OK:03_large_table
+
+PASS: 04_null_handling.sql
+PASS: 05_quals_correctness.sql
+PASS: 06_mixed_queries.sql
+PASS: 07_regression_small.sql
+PASS: 08_extension_toggle.sql
+PASS: 09_explain_plans.sql
+PASS: 10_result_correctness.sql
+PASS: 100_grouped_count_int8_contract.sql
+PASS: 101_grouped_count_date_contract.sql
+PASS: 102_grouped_count_timestamp_contract.sql
+PASS: 103_grouped_count_float_contract.sql
+FAIL: 104_grouped_integer_sum_avg_contract.sql (warning/skip/caught exception evidence)
+  | DROP TABLE
+  | DROP TABLE
+  | DROP TABLE
+  | DROP TABLE
+  | DROP TABLE
+  | DROP TABLE
+  | DROP TABLE
+  | DROP TABLE
+  | DROP TABLE
+  | PGACCEL_FILE_OK:104_grouped_integer_sum_avg_contract
+
+PASS: 105_native_having_contract.sql
+PASS: 106_h3_resolution_contract.sql
+PASS: 107_optional_integer_aggregates.sql
+PASS: 108_multikey_integer_aggregates.sql
+PASS: 109_text_residency_interning.sql
+PASS: 11_geometry_extractor.sql
+PASS: 110_multimeasure_integer_aggregates.sql
+PASS: 111_independent_aggregate_filters.sql
+PASS: 112_spatial_polygon_topology.sql
+PASS: 113_h3_large_hash_contract.sql
+PASS: 114_spatial_multipolygon_contract.sql
+PASS: 115_filtered_integer_counts.sql
+PASS: 116_numeric_residency.sql
+PASS: 117_numeric_aggregates.sql
+PASS: 12_h3_operations.sql
+PASS: 13_sort_orderby.sql
+PASS: 14_complex_predicates.sql
+PASS: 15_distinct_having.sql
+PASS: 16_limit_offset.sql
+PASS: 17_multitable_agg.sql
+PASS: 18_window_functions.sql
+PASS: 19_spatial_predicates.sql
+PASS: 20_spatial_advanced.sql
+PASS: 21_join_types.sql
+PASS: 22_regression_oltp.sql
+PASS: 23_null_edge_cases.sql
+PASS: 24_basic_scan.sql
+PASS: 25_spatial_sort.sql
+PASS: 30_expr_arithmetic.sql
+PASS: 31_expr_comparison.sql
+PASS: 32_expr_boolean.sql
+PASS: 33_expr_null.sql
+PASS: 34_expr_case.sql
+PASS: 40_gpu_expr_where.sql
+PASS: 41_gpu_expr_projection.sql
+PASS: 42_gpu_expr_edge_cases.sql
+PASS: 43_sort_topk.sql
+PASS: 50_hash_agg_groupby.sql
+PASS: 51_hash_agg_edge_cases.sql
+PASS: 55_hash_join.sql
+PASS: 56_hash_join_edge_cases.sql
+PASS: 60_window_functions.sql
+PASS: 61_window_edge_cases.sql
+PASS: 70_zero_overhead_oltp.sql
+PASS: 80_null_exhaustive.sql
+PASS: 81_degenerate_geometry.sql
+PASS: 82_srid_mismatch.sql
+PASS: 83_plan_patterns.sql
+PASS: 84_transaction_semantics.sql
+PASS: 85_function_matrix.sql
+PASS: 86_batch_boundary.sql
+PASS: 87_type_coercion.sql
+PASS: 88_concurrent_features.sql
+PASS: 89_regression_guards.sql
+PASS: 90_selected_path_contract.sql
+PASS: 91_selected_family_contracts.sql
+PASS: 92_spatial_resident_agg_contract.sql
+PASS: 93_raster_resident_reclass_contract.sql
+PASS: 94_grouped_count_bool_contract.sql
+PASS: 95_selected_lifecycle_contract.sql
+PASS: 96_declined_lifecycle_contract.sql
+PASS: 97_range_intersection_contract.sql
+PASS: 98_aggregate_filter_contract.sql
+PASS: 99_grouped_count_int2_contract.sql
+
+========================================
+ Results: 78 passed, 2 failed, 80 total
+========================================
+
+Failed tests:
+  - 03_large_table.sql (warning/skip/caught exception evidence)
+  - 104_grouped_integer_sum_avg_contract.sql (warning/skip/caught exception evidence)

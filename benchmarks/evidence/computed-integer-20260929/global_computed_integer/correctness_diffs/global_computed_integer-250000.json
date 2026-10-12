@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "workload": "global_computed_integer",
+  "rows": 250000,
+  "status": "pass",
+  "order_sensitive": false,
+  "accel_rows": 1,
+  "baseline_rows": 1,
+  "accel_minus_baseline_count": 0,
+  "baseline_minus_accel_count": 0,
+  "sample_limit": 20,
+  "accel_minus_baseline_samples": [],
+  "baseline_minus_accel_samples": [],
+  "accel_query_sql": "SELECT sum(price*adjustment) revenue,avg(price-adjustment) net, min(price+adjustment) lo,max(price+adjustment) hi,count(*) n FROM bench_computed_sales",
+  "baseline_query_sql": "SELECT sum(price*adjustment) revenue,avg(price-adjustment) net, min(price+adjustment) lo,max(price+adjustment) hi,count(*) n FROM bench_computed_sales",
+  "error": null
+}

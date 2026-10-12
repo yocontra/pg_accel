@@ -1,0 +1,27 @@
+Custom Scan (GpuAccelAgg)
+  Output: (count(*)), (sum(v)), (avg(w)), (avg(qty))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_numeric
+  GPU Descriptor Strategy: descriptor_ungrouped_aggregate
+  GPU Descriptor Specialization: dense_numeric_sum_avg_sql_mask
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: none
+  GPU Descriptor Aggregates: m0:column(2217442.4:type=1700) -> value.sum; m1:column(2217442.5:type=1700) -> value.avg; m2:column(2217442.6:type=21) -> value.avg; m3:count_star -> value.count
+  GPU Descriptor Filter: fact=sql_mask(input=2217442.7:type=16); measures=[m0=none; m1=none; m2=none; m3=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:aggregate[m0].value.sum source_type=1700 result_type=1700 typmod=-1 collation=0 nullable=true; slot1:aggregate[m1].value.avg source_type=1700 result_type=1700 typmod=-1 collation=0 nullable=true; slot2:aggregate[m2].value.avg source_type=21 result_type=1700 typmod=-1 collation=0 nullable=true; slot3:aggregate[m3].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 16395
+  GPU Resident Device Columns: 4
+  GPU Resident Boundary: none: no CPU boundary
+pg_accel planner rejection reason: no_gpu_resident_pipeline

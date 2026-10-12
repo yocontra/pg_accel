@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "workload": "bigint_filtered_mixed",
+  "rows": 1000000,
+  "status": "pass",
+  "order_sensitive": false,
+  "accel_rows": 6,
+  "baseline_rows": 6,
+  "accel_minus_baseline_count": 0,
+  "baseline_minus_accel_count": 0,
+  "sample_limit": 20,
+  "accel_minus_baseline_samples": [],
+  "baseline_minus_accel_samples": [],
+  "accel_query_sql": "SELECT g,sum(v) FILTER (WHERE h IN (1,3,5)) s,avg(w) FILTER (WHERE k=1) a,sum(qty) q,count(*) n FROM bench_bigint_rollup GROUP BY g",
+  "baseline_query_sql": "SELECT g,sum(v) FILTER (WHERE h IN (1,3,5)) s,avg(w) FILTER (WHERE k=1) a,sum(qty) q,count(*) n FROM bench_bigint_rollup GROUP BY g",
+  "error": null
+}

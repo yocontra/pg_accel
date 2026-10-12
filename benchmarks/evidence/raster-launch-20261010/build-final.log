@@ -1,0 +1,8 @@
+[100%] Built target test_raster_lookup
+[  7%] Built target pgaccel_metadata
+[100%] Built target pgaccel_kernels_shared
+[  6%] Built target pgaccel_metadata
+[ 87%] Built target pgaccel_kernels_shared
+[ 93%] Building CXX object CMakeFiles/test_raster_resident.dir/test/test_raster_resident.cpp.o
+[100%] Linking CXX executable test_raster_resident
+[100%] Built target test_raster_resident

@@ -14,11 +14,14 @@ mod phase2_bridge;
 mod phase2_cache;
 // NOTE: phase2_dispatch.rs is mounted from adapters/mod.rs via #[path] —
 // do not also declare it here (duplicate pg_finfo symbols).
+mod join_rows;
+mod numeric_residency;
 #[cfg(any(test, feature = "pg_test"))]
 mod phase2_engine;
 mod phase2_kernels;
 mod phase2_window;
 mod phase6_spatial;
+mod scalar_lowering;
 
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
@@ -2935,15 +2938,8 @@ mod tests {
 
         let mismatch_plan = explain_text(mismatch_query);
         assert!(
-            !mismatch_plan.contains("Custom Scan (GpuAccelAgg)"),
-            "a nonzero H3 parent resolution lacks 1.0 winning evidence and must stay native:\n{mismatch_plan}"
-        );
-        assert_eq!(
-            Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
-                .expect("H3 release-envelope rejection should be readable")
-                .as_deref(),
-            Some("h3_parent_resolution_unqualified"),
-            "the nonzero H3 parent lane must expose its precise release-envelope decline"
+            mismatch_plan.contains("Custom Scan (GpuAccelAgg)"),
+            "valid constant resolution 3 must be admitted; source-resolution errors are runtime checks:\n{mismatch_plan}"
         );
         crate::gpu::reset_gpu_exec_count();
         Spi::run(&format!(
@@ -2960,10 +2956,9 @@ mod tests {
              $h3_error$"
         ))
         .expect("capture accelerated H3 resolution-mismatch SQLSTATE");
-        assert_eq!(
-            crate::gpu::gpu_exec_count(),
-            0,
-            "the nonzero H3 parent release-envelope decline must not dispatch a GPU kernel"
+        assert!(
+            crate::gpu::gpu_exec_count() > 0,
+            "the selected H3 transform must attempt device validation before reporting the source-resolution error"
         );
         let native_sqlstate = Spi::get_one::<String>(
             "SELECT sqlstate FROM _h3_parent_error_state WHERE mode = 'native'",
@@ -2985,7 +2980,7 @@ mod tests {
         );
         assert_eq!(
             accelerated_sqlstate, native_sqlstate,
-            "the release-envelope decline must preserve native H3 SQLSTATE"
+            "the selected H3 transform must preserve native H3 SQLSTATE"
         );
 
         Spi::run(

@@ -1,0 +1,18 @@
+PGACCEL_TEST_START name=test_bbox
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+Running bbox overlap tests...
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14595077223061335012.7305523549986223106.metalar.50630.14891057633025008095.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/5033181122024743860.15895748258466104831.metalar.50630.13374214574654375072.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/18108459933538686738.16787746110658590840.metalar.50630.3639691405853605546.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/681487508721767322.676492163848440256.metalar.50630.14036698169990703486.tmp (kernels_added=1 skipped=0)
+
+Results: 66 passed, 0 failed
+PGACCEL_TEST_RESULT name=test_bbox exit_code=0 result=PASS raw_lines=16 body_sha256=9dae00c65f8f9161240700d9a74ce49acce3f70662311d342fe8f75868b50ad2 binding_sha256=ead74278e97b9c0d2a9e69b601d402da39dca4e4ba46451ba59513616384d111

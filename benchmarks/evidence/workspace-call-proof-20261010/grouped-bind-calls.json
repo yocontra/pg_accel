@@ -1,0 +1,522 @@
+{
+  "calls": [
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x98798e0d0",
+      "conditional": false,
+      "destination_id": "0x987983398",
+      "destination_name": "params",
+      "destination_path": [
+        "measures",
+        "[*]",
+        "value",
+        "values"
+      ],
+      "end": 5799037,
+      "local_reads": [
+        "0x98798d6f8"
+      ],
+      "nullable": true,
+      "start": 5798968
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x9879915c0",
+      "conditional": false,
+      "destination_id": "0x987983398",
+      "destination_name": "params",
+      "destination_path": [
+        "active"
+      ],
+      "end": 5799966,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5799924
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x987991d40",
+      "conditional": false,
+      "destination_id": "0x987983398",
+      "destination_name": "params",
+      "destination_path": [
+        "staged_group_codes"
+      ],
+      "end": 5800052,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5799999
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x9879924c0",
+      "conditional": false,
+      "destination_id": "0x987983398",
+      "destination_name": "params",
+      "destination_path": [
+        "hash_owners"
+      ],
+      "end": 5800126,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5800078
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x9879924c0",
+      "conditional": false,
+      "destination_id": "0x987983398",
+      "destination_name": "params",
+      "destination_path": [
+        "hash_counts"
+      ],
+      "end": 5800200,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5800152
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x9879924c0",
+      "conditional": false,
+      "destination_id": "0x987983398",
+      "destination_name": "params",
+      "destination_path": [
+        "hash_group_count"
+      ],
+      "end": 5800284,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5800231
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x9879933d0",
+      "conditional": false,
+      "destination_id": "0x987983398",
+      "destination_name": "params",
+      "destination_path": [
+        "hash_sort_keys"
+      ],
+      "end": 5800364,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5800313
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x9879933d0",
+      "conditional": false,
+      "destination_id": "0x987983398",
+      "destination_name": "params",
+      "destination_path": [
+        "hash_sort_counts"
+      ],
+      "end": 5800448,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5800395
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x9879924c0",
+      "conditional": false,
+      "destination_id": "0x987983398",
+      "destination_name": "params",
+      "destination_path": [
+        "dense_chunk_counts"
+      ],
+      "end": 5800536,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5800481
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x9879924c0",
+      "conditional": false,
+      "destination_id": "0x987983398",
+      "destination_name": "params",
+      "destination_path": [
+        "dense_selected_counts"
+      ],
+      "end": 5800630,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5800572
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x9879933d0",
+      "conditional": false,
+      "destination_id": "0x987983398",
+      "destination_name": "params",
+      "destination_path": [
+        "dense_weighted_chunk_counts"
+      ],
+      "end": 5800742,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5800678
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x987994dd0",
+      "conditional": false,
+      "destination_id": "0x987983398",
+      "destination_name": "params",
+      "destination_path": [
+        "dense_integer_atomic_sum"
+      ],
+      "end": 5801071,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5801004
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x987995550",
+      "conditional": false,
+      "destination_id": "0x987983398",
+      "destination_name": "params",
+      "destination_path": [
+        "dense_integer_atomic_min"
+      ],
+      "end": 5801170,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5801110
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x987995550",
+      "conditional": false,
+      "destination_id": "0x987983398",
+      "destination_name": "params",
+      "destination_path": [
+        "dense_integer_atomic_max"
+      ],
+      "end": 5801269,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5801209
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x987994dd0",
+      "conditional": false,
+      "destination_id": "0x987983398",
+      "destination_name": "params",
+      "destination_path": [
+        "dense_integer_atomic_nonnull"
+      ],
+      "end": 5801389,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5801318
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x987994dd0",
+      "conditional": false,
+      "destination_id": "0x987983398",
+      "destination_name": "params",
+      "destination_path": [
+        "dense_integer_atomic_count"
+      ],
+      "end": 5801505,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5801436
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x987996830",
+      "conditional": false,
+      "destination_id": "0x987983398",
+      "destination_name": "params",
+      "destination_path": [
+        "dense_integer_partials"
+      ],
+      "end": 5801618,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5801548
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x987994dd0",
+      "conditional": false,
+      "destination_id": "0x987983398",
+      "destination_name": "params",
+      "destination_path": [
+        "numeric_rows"
+      ],
+      "end": 5801772,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5801717
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x987994dd0",
+      "conditional": false,
+      "destination_id": "0x987983398",
+      "destination_name": "params",
+      "destination_path": [
+        "numeric_buckets",
+        "[*]"
+      ],
+      "end": 5802183,
+      "local_reads": [
+        "0x987996f58"
+      ],
+      "nullable": true,
+      "start": 5802119
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x987998bb0",
+      "conditional": false,
+      "destination_id": "0x987983398",
+      "destination_name": "params",
+      "destination_path": [
+        "numeric_groups",
+        "[*]"
+      ],
+      "end": 5802298,
+      "local_reads": [
+        "0x987996f58"
+      ],
+      "nullable": true,
+      "start": 5802232
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x9879995e0",
+      "conditional": false,
+      "destination_id": "0x987983398",
+      "destination_name": "params",
+      "destination_path": [
+        "meta"
+      ],
+      "end": 5802436,
+      "local_reads": [],
+      "nullable": true,
+      "start": 5802393
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x9879915c0",
+      "conditional": false,
+      "destination_id": "0x987983398",
+      "destination_name": "params",
+      "destination_path": [
+        "staged_key_values",
+        "[*]"
+      ],
+      "end": 5802577,
+      "local_reads": [
+        "0x987999850"
+      ],
+      "nullable": true,
+      "start": 5802521
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x9879915c0",
+      "conditional": false,
+      "destination_id": "0x987983398",
+      "destination_name": "params",
+      "destination_path": [
+        "staged_key_nulls",
+        "[*]"
+      ],
+      "end": 5802668,
+      "local_reads": [
+        "0x987999850"
+      ],
+      "nullable": true,
+      "start": 5802613
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x9879933d0",
+      "conditional": false,
+      "destination_id": "0x98799a880",
+      "destination_name": "buffers",
+      "destination_path": [
+        "sum"
+      ],
+      "end": 5802886,
+      "local_reads": [
+        "0x98799a408"
+      ],
+      "nullable": true,
+      "start": 5802850
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x9879933d0",
+      "conditional": false,
+      "destination_id": "0x98799a880",
+      "destination_name": "buffers",
+      "destination_path": [
+        "min"
+      ],
+      "end": 5802942,
+      "local_reads": [
+        "0x98799a408"
+      ],
+      "nullable": true,
+      "start": 5802906
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x9879933d0",
+      "conditional": false,
+      "destination_id": "0x98799a880",
+      "destination_name": "buffers",
+      "destination_path": [
+        "max"
+      ],
+      "end": 5802998,
+      "local_reads": [
+        "0x98799a408"
+      ],
+      "nullable": true,
+      "start": 5802962
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x9879933d0",
+      "conditional": false,
+      "destination_id": "0x98799a880",
+      "destination_name": "buffers",
+      "destination_path": [
+        "sumsq"
+      ],
+      "end": 5803058,
+      "local_reads": [
+        "0x98799a408"
+      ],
+      "nullable": true,
+      "start": 5803020
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x9879933d0",
+      "conditional": false,
+      "destination_id": "0x98799a880",
+      "destination_name": "buffers",
+      "destination_path": [
+        "count"
+      ],
+      "end": 5803118,
+      "local_reads": [
+        "0x98799a408"
+      ],
+      "nullable": true,
+      "start": 5803080
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x9879933d0",
+      "conditional": false,
+      "destination_id": "0x98799a880",
+      "destination_name": "buffers",
+      "destination_path": [
+        "nonnull"
+      ],
+      "end": 5803182,
+      "local_reads": [
+        "0x98799a408"
+      ],
+      "nullable": true,
+      "start": 5803142
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x9879933d0",
+      "conditional": false,
+      "destination_id": "0x98799a880",
+      "destination_name": "buffers",
+      "destination_path": [
+        "rhs_sum"
+      ],
+      "end": 5803246,
+      "local_reads": [
+        "0x98799a408"
+      ],
+      "nullable": true,
+      "start": 5803206
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x9879933d0",
+      "conditional": false,
+      "destination_id": "0x98799a880",
+      "destination_name": "buffers",
+      "destination_path": [
+        "rhs_count"
+      ],
+      "end": 5803314,
+      "local_reads": [
+        "0x98799a408"
+      ],
+      "nullable": true,
+      "start": 5803272
+    },
+    {
+      "base_declaration": "0x987983318",
+      "base_parameter": 2,
+      "callee_id": "0x9879933d0",
+      "conditional": false,
+      "destination_id": "0x98799a880",
+      "destination_name": "buffers",
+      "destination_path": [
+        "rhs_nonnull"
+      ],
+      "end": 5803386,
+      "local_reads": [
+        "0x98799a408"
+      ],
+      "nullable": true,
+      "start": 5803342
+    }
+  ],
+  "detail": "typed call arguments and returned-alias facts; caller not approved",
+  "ok": true,
+  "source_sha256": "ea7fcd2f03eab126fb4738dea20963b083692837bcbd4b05f60f7191c6e15b2a"
+}

@@ -1,0 +1,14 @@
+...................................................................................F....................
+======================================================================
+FAIL: test_checked_in_manifest_matches_baseline_and_raster_guards (scripts.tests.test_coverage_tools.SqlSemanticCoverageTests.test_checked_in_manifest_matches_baseline_and_raster_guards)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 853, in test_checked_in_manifest_matches_baseline_and_raster_guards
+    self.assertEqual(generated["declared_assertions"], 418)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 423 != 418
+
+----------------------------------------------------------------------
+Ran 104 tests in 149.960s
+
+FAILED (failures=1)

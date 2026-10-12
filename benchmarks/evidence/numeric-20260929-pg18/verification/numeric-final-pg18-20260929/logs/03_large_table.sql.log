@@ -1,0 +1,17 @@
+=== 03_large_table ===
+BEGIN
+CREATE TABLE
+INSERT 0 100000
+ANALYZE
+SET
+SELECT 100000
+SELECT 1
+SET
+SELECT 100000
+SELECT 1
+psql:/Users/contra/Projects/pg_accel/sql/tests/03_large_table.sql:109: WARNING:  pg_accel: grouped aggregate one-shot dispatch returned after 9751352us (warning threshold 5000ms); cancellation and statement_timeout are observed only between synchronous calls
+DO
+PGACCEL_ASSERT_OK:03_large_table.assert_001
+DROP TABLE
+COMMIT
+PGACCEL_FILE_OK:03_large_table

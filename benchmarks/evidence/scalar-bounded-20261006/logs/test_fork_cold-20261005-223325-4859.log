@@ -1,0 +1,11 @@
+PGACCEL_TEST_START name=test_fork_cold
+=== Cold Fork GPU Test ===
+Parent PID: 4860
+Parent does NOT call pgaccel_init() — no Metal state to inherit.
+
+Parent: forking WITHOUT any GPU initialization...
+
+=== Final Result ===
+PASS: Cold Metal init after fork WORKS.
+→ Direct Metal dispatch in forked backends confirmed.
+PGACCEL_TEST_RESULT name=test_fork_cold exit_code=0 result=PASS raw_lines=9 body_sha256=97b09cb65297f9e2f9c3952d8c1b972aedad9d74601af5c2111374df65db6f70 binding_sha256=efb0963511e53b15b78cb8b756d5c739b3af65f8ea8af9920d46031b2796c067

@@ -1,0 +1,56 @@
+=== 137_pulled_up_reports ===
+SET
+SET
+SELECT 1000017
+ANALYZE
+CREATE VIEW
+CREATE VIEW
+CREATE VIEW
+CREATE FUNCTION
+psql:/Users/contra/Projects/pg_accel/sql/tests/137_pulled_up_reports.sql:85: NOTICE:  137 pulled-up reports selected 28 of 28 shapes
+DO
+PGACCEL_ASSERT_OK:137_pulled_up_reports.assert_001
+DO
+PGACCEL_ASSERT_OK:137_pulled_up_reports.assert_002
+SET
+PREPARE
+DO
+DEALLOCATE
+RESET
+PGACCEL_ASSERT_OK:137_pulled_up_reports.assert_003
+INSERT 0 1000017
+ANALYZE
+ pg_accel_refresh 
+------------------
+          1000017
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:137_pulled_up_reports.assert_004
+DO
+PGACCEL_ASSERT_OK:137_pulled_up_reports.assert_005
+BEGIN
+SELECT 500017
+ANALYZE
+CREATE VIEW
+CREATE VIEW
+DO
+ROLLBACK
+PGACCEL_ASSERT_OK:137_pulled_up_reports.assert_006
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ t
+(1 row)
+
+DROP VIEW
+DROP TABLE
+DROP FUNCTION
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:137_pulled_up_reports

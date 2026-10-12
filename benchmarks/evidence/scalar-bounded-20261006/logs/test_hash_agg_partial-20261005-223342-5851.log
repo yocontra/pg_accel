@@ -1,0 +1,8 @@
+PGACCEL_TEST_START name=test_hash_agg_partial
+=== resident grouped COUNT stress tests ===
+--- resident count collision chain ---
+--- resident count result ownership ---
+--- resident count permutation invariance ---
+--- resident count single-group capacity ---
+resident grouped COUNT stress: 16 checks, 0 failures
+PGACCEL_TEST_RESULT name=test_hash_agg_partial exit_code=0 result=PASS raw_lines=6 body_sha256=1cbf90d6656573f2d9c9b1b6b303aa521d99a7f97ad7a245a4a1ec1c4e4cf7af binding_sha256=9c7afa626794b3776429bd9564c0b446aadce0967a72fe5852740b66a550be2f

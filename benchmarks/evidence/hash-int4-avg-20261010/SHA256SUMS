@@ -1,0 +1,12 @@
+094cefd84b8f908db0fa7fb24d3bdc74574ee5c990997be7d23dda33a118e6ab  benchmarks/evidence/hash-int4-avg-20261010/pgaccel-hash-avg-core18-initial.log
+cbf5c554faeb7b7eddc573550a99581df4e8a17cc1a9629ab3b8d7bea3e3e6a5  benchmarks/evidence/hash-int4-avg-20261010/pgaccel-hash-avg-core18.log
+b70ccb168d1f99a81be1dbf016ee6fb5e3f955be95a9dce5265ed72256c9ea69  benchmarks/evidence/hash-int4-avg-20261010/pgaccel-hash-avg-core19.log
+4da4fca10b8349c094c3d2189fc450531acd685682e6a7980f09c656806af6c4  benchmarks/evidence/hash-int4-avg-20261010/pgaccel-hash-avg-docs.log
+a3d389c6deea66bac8b44eb8e77e72eed96f2276ff7ee22daa16f4ff9a4df6b1  benchmarks/evidence/hash-int4-avg-20261010/pgaccel-hash-avg-lint18.log
+d7136adcc9afa8dcfb84733dd6ae744407a3942128913b916cd26fbeea636fe9  benchmarks/evidence/hash-int4-avg-20261010/pgaccel-hash-avg-lint19.log
+9c5030ae69215b3010c2cc531e03a41ac5f02240c2a286e4d6cffa9412252974  benchmarks/evidence/hash-int4-avg-20261010/pgaccel-hash-avg-live18.log
+ea2fd19d959464daee77ef75593cc9fc5fafdb7b368d319eab9370907b097708  benchmarks/evidence/hash-int4-avg-20261010/pgaccel-hash-avg-live19.log
+c76d8424f9ea0bafb64e5d826a2ca1f3c8e872d4ef2a31d38476ef0c651b3675  benchmarks/evidence/hash-int4-avg-20261010/pgaccel-hash-avg-safety.log
+a9dca926bebbe86c11ee483e8d33c65f95fb6bd7c90e64e2abaf1a72261add72  benchmarks/evidence/hash-int4-avg-20261010/pgaccel-hash-avg-scope.log
+a55dd5b3fbac08b1937534f836b753d807bf3afd407e04d5156e0388bc008736  benchmarks/evidence/hash-int4-avg-20261010/README.md
+dc7314fe301d6609e4850075983bbbac82b2fe09d42b2d7213d38d8724f57a10  benchmarks/evidence/hash-int4-avg-20261010/source-snapshot.tar.gz

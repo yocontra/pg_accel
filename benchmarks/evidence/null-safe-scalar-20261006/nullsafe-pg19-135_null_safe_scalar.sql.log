@@ -1,0 +1,31 @@
+=== 135_null_safe_scalar ===
+SET
+SET
+SELECT 1000017
+ANALYZE
+SELECT 1
+CREATE TABLE
+INSERT 0 3
+INSERT 0 3
+INSERT 0 6
+psql:sql/tests/135_null_safe_scalar.sql:73: NOTICE:  135 NULL-safe WHERE selected 48 of 48 shapes
+DO
+PGACCEL_ASSERT_OK:135_null_safe_scalar.assert_001
+psql:sql/tests/135_null_safe_scalar.sql:110: NOTICE:  135 NULL-safe FILTER/CASE/count selected 24 of 24 shapes
+DO
+PGACCEL_ASSERT_OK:135_null_safe_scalar.assert_002
+SET
+PREPARE
+DO
+DEALLOCATE
+RESET
+PGACCEL_ASSERT_OK:135_null_safe_scalar.assert_003
+INSERT 0 1000017
+ANALYZE
+ pg_accel_refresh 
+------------------
+          1000017
+(1 row)
+
+psql:sql/tests/135_null_safe_scalar.sql:184: ERROR:  135 NULL-safe SQLSTATE mismatch enabled=off expected=22012 actual=<NULL> query=SELECT g,count(a IS DISTINCT FROM 1/b),count(*) FROM _null_safe GROUP BY g
+CONTEXT:  PL/pgSQL function inline_code_block line 26 at RAISE

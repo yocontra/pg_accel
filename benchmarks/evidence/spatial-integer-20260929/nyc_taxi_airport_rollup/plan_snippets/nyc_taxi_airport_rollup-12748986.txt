@@ -1,0 +1,27 @@
+Custom Scan (GpuAccelAgg)
+  Output: vendor_id, (count(*)), (sum(fare_amount)), (avg(trip_distance)), (avg(passenger_count))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_numeric
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: dense_numeric_sum_avg_sql_mask
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: k0:fact(2222115.2:type=23) type=23 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(2222115.4:type=1700) -> value.sum; m1:column(2222115.5:type=1700) -> value.avg; m2:column(2222115.3:type=23) -> value.avg; m3:count_star -> value.count
+  GPU Descriptor Filter: fact=spatial(predicate=intersects, left=column(2222115.6:type=107033, kind=geometry, typmod=1107460, srid=4326), right=constant(kind=geometry, typmod=-1, srid=4326, bytes=35888), distance=false); measures=[m0=none; m1=none; m2=none; m3=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.sum source_type=1700 result_type=1700 typmod=-1 collation=0 nullable=true; slot2:aggregate[m1].value.avg source_type=1700 result_type=1700 typmod=-1 collation=0 nullable=true; slot3:aggregate[m2].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot4:aggregate[m3].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 18441
+  GPU Resident Device Columns: 5
+  GPU Resident Boundary: none: no CPU boundary
+pg_accel planner rejection reason: postgis_intersects_unsupported_shape

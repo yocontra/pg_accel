@@ -1,0 +1,15 @@
+=== 90_selected_path_contract ===
+SET
+SET
+SELECT 500000
+ANALYZE
+SET
+SELECT 64
+CREATE TABLE
+DO
+PGACCEL_ASSERT_OK:90_selected_path_contract.assert_001
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+PGACCEL_FILE_OK:90_selected_path_contract

@@ -1,0 +1,7 @@
+Test project /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+    Start 23: test_grouped_agg_hash
+1/1 Test #23: test_grouped_agg_hash ............   Passed    7.65 sec
+
+100% tests passed out of 1
+
+Total Test time (real) =   7.66 sec

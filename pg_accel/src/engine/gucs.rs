@@ -82,6 +82,10 @@ static OTEL_LOG_MAX_ROTATIONS: GucSetting<i32> = GucSetting::<i32>::new(4);
 #[cfg(any(test, feature = "pg_test"))]
 static TEST_FORCE_SPATIAL_GROUPAGG: GucSetting<bool> = GucSetting::<bool>::new(false);
 
+/// Test-only seam for full-planner exact NUMERIC qualification.
+#[cfg(any(test, feature = "pg_test"))]
+static TEST_FORCE_NUMERIC_GROUPAGG: GucSetting<bool> = GucSetting::<bool>::new(false);
+
 /// Test-only typed failure injection at the resident spatial kernel boundary.
 #[cfg(any(test, feature = "pg_test"))]
 static TEST_INJECT_SPATIAL_KERNEL_FAILURE: GucSetting<bool> = GucSetting::<bool>::new(false);
@@ -281,6 +285,16 @@ pub fn init_gucs() {
 
     #[cfg(any(test, feature = "pg_test"))]
     GucRegistry::define_bool_guc(
+        c"pg_accel.test_force_numeric_groupagg",
+        c"Force supported NUMERIC aggregates through the descriptor CustomScan.",
+        c"Test-only qualification seam; exact residency, budget and capacity gates remain enforced.",
+        &TEST_FORCE_NUMERIC_GROUPAGG,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    #[cfg(any(test, feature = "pg_test"))]
+    GucRegistry::define_bool_guc(
         c"pg_accel.test_inject_spatial_kernel_failure",
         c"Inject a resident spatial kernel failure.",
         c"Test-only failure seam for proving selected CustomScans fail hard without CPU fallback.",
@@ -325,6 +339,12 @@ pub fn auto_load() -> bool {
 /// Effective cluster-wide resident-memory budget in bytes.
 #[must_use]
 pub fn resident_memory_budget_bytes() -> u64 {
+    // Standalone Rust tests model independent backends on separate threads;
+    // pgrx GUC reads require a real PostgreSQL main thread. Live pg_test builds
+    // still read the actual GUC and exercise configurable budget rejection.
+    #[cfg(test)]
+    let configured = -1;
+    #[cfg(not(test))]
     let configured = RESIDENT_MEMORY_BUDGET_MB.get();
     if configured >= 0 {
         return u64::try_from(configured)
@@ -441,6 +461,13 @@ pub fn otel_log_max_rotations() -> i32 {
 #[must_use]
 pub fn test_force_spatial_groupagg() -> bool {
     TEST_FORCE_SPATIAL_GROUPAGG.get()
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+#[inline]
+#[must_use]
+pub fn test_force_numeric_groupagg() -> bool {
+    TEST_FORCE_NUMERIC_GROUPAGG.get()
 }
 
 #[cfg(any(test, feature = "pg_test"))]

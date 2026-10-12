@@ -1,0 +1,3 @@
+PGACCEL_TEST_START name=test_spatial_resident
+test_spatial_resident: 2094 passed, 0 failed
+PGACCEL_TEST_RESULT name=test_spatial_resident exit_code=0 result=PASS raw_lines=1 body_sha256=830f6e0fa9bf102721fb287f8c0fd824ab9ed07cb22dd21a4dc8c074ac6516f7 binding_sha256=21c849e21bc29eeee21f91e3c82d6f4e9608522aeccf4164e96e3847e9ba949e

@@ -1,0 +1,113 @@
+-- pgaccel_kernels: SYCL (AdaptiveCpp) is the only supported backend; build fails without AdaptiveCpp
+-- Configuring done (0.2s)
+-- Generating done (0.1s)
+-- Build files have been written to: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+[  2%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/join_rows.cpp.o
+[  2%] Building CXX object CMakeFiles/pgaccel_kernels.dir/src/join_rows.cpp.o
+[  4%] Linking CXX shared library libpgaccel_kernels_shared.dylib
+[  4%] Linking CXX static library libpgaccel_kernels.a
+[ 15%] Built target pgaccel_kernels
+[ 26%] Built target pgaccel_kernels_shared
+[ 27%] Linking CXX executable test_device
+[ 28%] Linking CXX executable test_expr_memory
+[ 30%] Linking CXX executable test_h3
+[ 30%] Linking CXX executable test_spatial_dispatch
+[ 31%] Linking CXX executable test_fork_warmed
+[ 31%] Building CXX object CMakeFiles/test_join_rows.dir/test/test_join_rows.cpp.o
+[ 32%] Linking CXX executable test_bbox
+[ 32%] Linking CXX executable test_hash_join
+[ 32%] Linking CXX executable test_reduce_matrix
+[ 33%] Linking CXX executable test_hash_agg_partial
+[ 34%] Linking CXX executable test_spatial
+[ 34%] Linking CXX executable test_spatial_pairwise_boundary
+[ 36%] Linking CXX executable test_spatial_resident
+[ 36%] Linking CXX executable test_hash_domain_matrix
+[ 36%] Linking CXX executable test_fork
+[ 36%] Linking CXX executable test_grouped_agg_workspace
+[ 37%] Linking CXX executable test_hashagg_spatial_matrix
+[ 37%] Linking CXX executable test_fork_cold
+[ 38%] Linking CXX executable test_raster_resident
+[ 39%] Linking CXX executable test_reduce_minimal
+[ 40%] Linking CXX executable test_host_api_contract
+[ 41%] Linking CXX executable test_exec_gpu
+[ 42%] Linking CXX executable test_expr_vm_matrix
+[ 43%] Linking CXX executable test_kernel_failure_status
+[ 44%] Linking CXX executable test_hash_agg_keys
+[ 44%] Linking CXX executable test_correctness
+[ 45%] Linking CXX executable test_grouped_agg_hash
+[ 46%] Linking CXX executable test_fork_cold_barrier
+[ 46%] Linking CXX executable test_fp64_probe_cos
+[ 47%] Linking CXX executable test_fp64_probe_sin
+[ 48%] Linking CXX executable test_spatial_bench
+[ 49%] Linking CXX executable test_fork_archive_stress
+[ 49%] Linking CXX executable test_fp64_probe_asin
+[ 50%] Linking CXX executable test_ooo_overlap
+[ 52%] Linking CXX executable test_fp64_probe_mul
+[ 52%] Linking CXX executable test_fp64_probe_add
+[ 53%] Linking CXX executable test_oom_invariant
+[ 54%] Linking CXX executable test_scalar
+[ 55%] Linking CXX executable test_sycl_basic
+[ 56%] Linking CXX executable test_fp64_probe_sqrt
+[ 57%] Linking CXX executable test_fp64_mul_probe
+[ 58%] Linking CXX executable test_reduce_bool_bit
+[ 59%] Built target test_bbox
+[ 60%] Linking CXX executable test_fp64_probe_haversine
+[ 61%] Linking CXX executable test_fp64_probe_atan2
+[ 62%] Built target test_spatial_dispatch
+[ 62%] Linking CXX executable test_grouped_agg
+[ 62%] Linking CXX executable test_reduce_stats
+[ 63%] Built target test_spatial_resident
+[ 64%] Built target test_fork_cold
+[ 65%] Built target test_hashagg_spatial_matrix
+[ 66%] Built target test_spatial
+[ 67%] Built target test_hash_join
+[ 67%] Built target test_hash_agg_partial
+[ 68%] Built target test_reduce_matrix
+[ 69%] Built target test_host_api_contract
+[ 71%] Built target test_expr_vm_matrix
+[ 71%] Built target test_spatial_pairwise_boundary
+[ 72%] Built target test_hash_domain_matrix
+[ 73%] Built target test_grouped_agg_workspace
+[ 74%] Built target test_reduce_minimal
+[ 74%] Built target test_expr_memory
+[ 76%] Built target test_fork_warmed
+[ 76%] Built target test_h3
+[ 77%] Built target test_fork
+[ 78%] Built target test_fork_cold_barrier
+[ 79%] Built target test_exec_gpu
+[ 79%] Built target test_raster_resident
+[ 80%] Built target test_fork_archive_stress
+[ 80%] Built target test_spatial_bench
+[ 81%] Built target test_correctness
+[ 82%] Built target test_kernel_failure_status
+[ 83%] Built target test_grouped_agg_hash
+[ 84%] Built target test_hash_agg_keys
+[ 85%] Built target test_reduce_stats
+[ 85%] Built target test_oom_invariant
+[ 86%] Built target test_grouped_agg
+[ 87%] Built target test_reduce_bool_bit
+/Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_join_rows.cpp:139:18: error: no member named 'upload' in 'std::array<(anonymous namespace)::Buffer, 3>'
+  139 |     check(values.upload(std::vector<uint8_t>(rows * width, 0xcd)), "projection output poison");
+      |           ~~~~~~ ^
+/Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_join_rows.cpp:140:17: error: no member named 'upload' in 'std::array<(anonymous namespace)::Buffer, 3>'
+  140 |     check(nulls.upload(std::vector<uint8_t>(rows, 0xcd)), "projection null poison");
+      |           ~~~~~ ^
+2 errors generated.
+make[2]: *** [CMakeFiles/test_join_rows.dir/test/test_join_rows.cpp.o] Error 1
+make[1]: *** [CMakeFiles/test_join_rows.dir/all] Error 2
+make[1]: *** Waiting for unfinished jobs....
+[ 88%] Built target test_device
+[ 88%] Built target test_fp64_probe_sin
+[ 89%] Built target test_fp64_probe_haversine
+[ 90%] Built target test_fp64_probe_add
+[ 91%] Built target test_fp64_probe_mul
+[ 94%] Built target test_fp64_probe_cos
+[ 94%] Built target test_ooo_overlap
+[ 95%] Built target test_sycl_basic
+[ 99%] Built target test_fp64_probe_asin
+[ 99%] Built target test_fp64_mul_probe
+[ 99%] Built target test_fp64_probe_atan2
+[ 99%] Built target test_scalar
+[ 99%] Built target test_fp64_probe_sqrt
+make: *** [all] Error 2
+error: Recipe `gpu-build` failed with exit code 2

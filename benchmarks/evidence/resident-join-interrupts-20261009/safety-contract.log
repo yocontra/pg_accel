@@ -1,0 +1,40 @@
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_risk_coverage_audit.py scripts/tests/test_fuzz_contract_audit.py scripts/tests/test_crash_band_audit.py -v
+test_candidate_worktree_paths_normalize_to_repository_paths (scripts.tests.test_risk_coverage_audit.RiskCoverageAuditTests.test_candidate_worktree_paths_normalize_to_repository_paths) ... ok
+test_declaration_only_registry_rejects_unsafe_method_bodies (scripts.tests.test_risk_coverage_audit.RiskCoverageAuditTests.test_declaration_only_registry_rejects_unsafe_method_bodies) ... ok
+test_live_registry_maps_every_production_unsafe_site (scripts.tests.test_risk_coverage_audit.RiskCoverageAuditTests.test_live_registry_maps_every_production_unsafe_site) ... ERROR
+test_malformed_lcov_record_is_rejected (scripts.tests.test_risk_coverage_audit.RiskCoverageAuditTests.test_malformed_lcov_record_is_rejected) ... ok
+test_missing_executable_unsafe_file_still_fails_closed (scripts.tests.test_risk_coverage_audit.RiskCoverageAuditTests.test_missing_executable_unsafe_file_still_fails_closed) ... ok
+test_registered_declaration_only_site_may_be_absent_from_lcov (scripts.tests.test_risk_coverage_audit.RiskCoverageAuditTests.test_registered_declaration_only_site_may_be_absent_from_lcov) ... ok
+test_repository_globs_have_portable_recursive_semantics (scripts.tests.test_risk_coverage_audit.RiskCoverageAuditTests.test_repository_globs_have_portable_recursive_semantics) ... ok
+test_unmapped_unsafe_site_fails_closed (scripts.tests.test_risk_coverage_audit.RiskCoverageAuditTests.test_unmapped_unsafe_site_fails_closed) ... ok
+test_unsafe_coverage_below_threshold_fails_closed (scripts.tests.test_risk_coverage_audit.RiskCoverageAuditTests.test_unsafe_coverage_below_threshold_fails_closed) ... ok
+test_live_manifest_registers_every_required_target (scripts.tests.test_fuzz_contract_audit.FuzzContractAuditTests.test_live_manifest_registers_every_required_target) ... ok
+test_missing_target_fails_closed (scripts.tests.test_fuzz_contract_audit.FuzzContractAuditTests.test_missing_target_fails_closed) ... ok
+test_post_allocation_rejection_contract_fails_closed (scripts.tests.test_fuzz_contract_audit.FuzzContractAuditTests.test_post_allocation_rejection_contract_fails_closed) ... ok
+test_renamed_test_symbol_fails_closed (scripts.tests.test_fuzz_contract_audit.FuzzContractAuditTests.test_renamed_test_symbol_fails_closed) ... ok
+test_seed_must_be_fixed_lowercase_u64 (scripts.tests.test_fuzz_contract_audit.FuzzContractAuditTests.test_seed_must_be_fixed_lowercase_u64) ... ok
+test_live_contract_passes (scripts.tests.test_crash_band_audit.CrashBandAuditTests.test_live_contract_passes) ... ok
+test_missing_evidence_symbol_fails_closed (scripts.tests.test_crash_band_audit.CrashBandAuditTests.test_missing_evidence_symbol_fails_closed) ... ok
+test_missing_lane_fails_closed (scripts.tests.test_crash_band_audit.CrashBandAuditTests.test_missing_lane_fails_closed) ... ok
+test_raised_threshold_fails_closed (scripts.tests.test_crash_band_audit.CrashBandAuditTests.test_raised_threshold_fails_closed) ... ok
+
+======================================================================
+ERROR: test_live_registry_maps_every_production_unsafe_site (scripts.tests.test_risk_coverage_audit.RiskCoverageAuditTests.test_live_registry_maps_every_production_unsafe_site)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_risk_coverage_audit.py", line 45, in test_live_registry_maps_every_production_unsafe_site
+    result = risk.audit(args)
+  File "/Users/contra/Projects/pg_accel/scripts/risk_coverage_audit.py", line 408, in audit
+    by_id, rules = _validate_registry(repo, registry)
+                   ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "/Users/contra/Projects/pg_accel/scripts/risk_coverage_audit.py", line 183, in _validate_registry
+    raise AuditError(
+        f"risk domain {domain_id} source marker is absent: {contains!r}"
+    )
+risk_coverage_audit.AuditError: risk domain cancellation source marker is absent: 'fn capture_postgres_interrupt'
+
+----------------------------------------------------------------------
+Ran 18 tests in 0.077s
+
+FAILED (errors=1)
+error: Recipe `safety-contract-audit` failed on line 469 with exit code 1

@@ -1,0 +1,23 @@
+    Blocking waiting for file lock on build directory
+    Checking pg_accel_bench v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel_bench)
+error: manual implementation of `.is_multiple_of()`
+  --> pg_accel_bench/src/workloads/grouped_computed_integer.rs:74:21
+   |
+74 |         let price = (row % 11 != 0).then_some(row % 1001);
+   |                     ^^^^^^^^^^^^^^^ help: replace with: `!row.is_multiple_of(11)`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#manual_is_multiple_of
+   = note: `-D clippy::manual-is-multiple-of` implied by `-D clippy::all`
+   = help: to override `-D clippy::all` add `#[allow(clippy::manual_is_multiple_of)]`
+
+error: manual implementation of `.is_multiple_of()`
+  --> pg_accel_bench/src/workloads/grouped_computed_integer.rs:75:26
+   |
+75 |         let adjustment = (row % 13 != 0).then_some(row % 101 + 450);
+   |                          ^^^^^^^^^^^^^^^ help: replace with: `!row.is_multiple_of(13)`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#manual_is_multiple_of
+
+error: could not compile `pg_accel_bench` (bin "pg_accel_bench") due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `pg_accel_bench` (bin "pg_accel_bench" test) due to 2 previous errors

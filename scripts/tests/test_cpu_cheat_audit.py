@@ -1011,6 +1011,162 @@ class CallGraphTests(unittest.TestCase):
         self.assertFalse(entry.ok, entry.detail)
         self.assertNotIn("output_identity_shadowing", entry.classifications)
 
+    def test_member_named_like_output_is_not_a_local_declaration(self) -> None:
+        for expression in ("layout.bytes", "metadata->bytes", "metadata::bytes"):
+            with self.subTest(expression=expression):
+                result = audit_compiling_fixture(
+                    "using pgaccel_status = int;\n"
+                    "constexpr int PGACCEL_OK = 0;\n"
+                    "struct Layout { unsigned long bytes; };\n"
+                    "namespace metadata { constexpr unsigned long bytes = 17; }\n"
+                    "extern \"C\" pgaccel_status pgaccel_size_query(unsigned long* bytes) {\n"
+                    "  Layout layout{17}; const Layout* metadata = &layout;\n"
+                    f"  *bytes = {expression};\n"
+                    "  return PGACCEL_OK;\n}"
+                )
+                entry = result.entrypoint_audits[0]
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("host_output_write", entry.classifications)
+                self.assertIn("undominated_success", entry.classifications)
+                self.assertNotIn("output_identity_shadowing", entry.classifications)
+
+    def test_same_named_member_does_not_hide_real_pointer_shadow(self) -> None:
+        result = audit_compiling_fixture(
+            r"""
+            using pgaccel_status = int;
+            constexpr int PGACCEL_OK = 0;
+            struct Layout { unsigned long bytes; };
+            extern "C" pgaccel_status pgaccel_shadowed_size(unsigned long* bytes) {
+              Layout layout{17};
+              {
+                unsigned long* bytes = &layout.bytes;
+                *bytes = layout.bytes;
+              }
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("output_identity_shadowing", entry.classifications)
+
+    def test_member_lookup_cannot_replace_typed_queue_binding(self) -> None:
+        for spelling in ("holder.q", "holder_pointer->q", "queues::q"):
+            with self.subTest(spelling=spelling):
+                result = audit_compiling_fixture(
+                    CompilerValidAdversarialTests.CPP_PRELUDE
+                    + r"""
+                    namespace queues { sycl::queue q; }
+                    struct Holder { sycl::queue q; };
+                    extern "C" pgaccel_status pgaccel_queue_member_assignment(int* out) {
+                      sycl::queue q;
+                      Holder holder;
+                      Holder* holder_pointer = &holder;
+                    """
+                    + f"q = {spelling};\n"
+                    + r"""
+                      q.parallel_for(sycl::range<1>(1),
+                          [=](sycl::id<1> i) { out[i] = 1; });
+                      return PGACCEL_OK;
+                    }
+                    """
+                )
+                self.assertFalse(result.findings)
+
+    def test_same_named_member_cannot_promote_fake_queue_or_host_finalization(self) -> None:
+        for finalize in (False, True):
+            with self.subTest(finalize=finalize):
+                result = audit_compiling_fixture(
+                    CompilerValidAdversarialTests.CPP_PRELUDE
+                    + r"""
+                    struct FakeQueue {
+                      template <class Function>
+                      void parallel_for(sycl::range<1>, Function fn) {
+                        fn(sycl::id<1>{});
+                      }
+                    };
+                    struct Holder { FakeQueue q; };
+                    extern "C" pgaccel_status pgaccel_queue_member_decoy(int* out) {
+                    """
+                    + ("sycl::queue q;" if finalize else "FakeQueue q;")
+                    + r"""
+                      Holder holder;
+                      auto copied = holder.q;
+                      q.parallel_for(sycl::range<1>(1),
+                          [=](sycl::id<1> i) { out[i] = 1; });
+                    """
+                    + ("*out = 42;" if finalize else "")
+                    + "return PGACCEL_OK; }"
+                )
+                entry = result.entrypoint_audits[0]
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("undominated_success", entry.classifications)
+                if finalize:
+                    self.assertIn("host_output_write", entry.classifications)
+
+    def test_qualified_member_using_cannot_inherit_outer_queue_proof(self) -> None:
+        for declaration in (
+            "using fake::q;",
+            "using fake::q, fake::other;",
+            "using fake::other, fake::q;",
+            "using ::fake::q;",
+        ):
+            with self.subTest(declaration=declaration):
+                result = audit_compiling_fixture(
+                    CompilerValidAdversarialTests.CPP_PRELUDE
+                    + r"""
+                    struct FakeQueue {
+                      template <class Function>
+                      void parallel_for(sycl::range<1>, Function fn) {
+                        fn(sycl::id<1>{});
+                      }
+                    };
+                    namespace fake { FakeQueue q; int other; }
+                    extern "C" pgaccel_status pgaccel_using_queue(int* out) {
+                      sycl::queue q;
+                      {
+                    """
+                    + declaration
+                    + r"""
+                        q.parallel_for(sycl::range<1>(1),
+                            [=](sycl::id<1> i) { out[i] = 1; });
+                      }
+                      return PGACCEL_OK;
+                    }
+                    """
+                )
+                entry = result.entrypoint_audits[0]
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("undominated_success", entry.classifications)
+
+    def test_qualified_member_using_still_shadows_output(self) -> None:
+        for declaration in (
+            "using fake::out;",
+            "using fake::out, fake::other;",
+            "using fake::other, fake::out;",
+        ):
+            with self.subTest(declaration=declaration):
+                result = audit_compiling_fixture(
+                    CompilerValidAdversarialTests.CPP_PRELUDE
+                    + r"""
+                    namespace fake { int value; int* out = &value; int other; }
+                    extern "C" pgaccel_status pgaccel_using_output(int* out) {
+                      {
+                    """
+                    + declaration
+                    + r"""
+                        sycl::queue q;
+                        q.parallel_for(sycl::range<1>(1),
+                            [=](sycl::id<1> i) { out[i] = 1; });
+                      }
+                      return PGACCEL_OK;
+                    }
+                    """
+                )
+                entry = result.entrypoint_audits[0]
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("output_identity_shadowing", entry.classifications)
+
     def test_symbolic_validation_detail_can_accompany_device_output(self) -> None:
         result = audit_fixture(
             r"""
@@ -6780,11 +6936,11 @@ class AbiInventoryTests(unittest.TestCase):
 
     def test_checked_in_manifest_has_literal_integrity_anchor(self) -> None:
         manifest = audit.load_abi_manifest(audit.DEFAULT_ABI_MANIFEST)
-        self.assertEqual(manifest.count, 123)
-        self.assertEqual(audit.EXPECTED_ABI_MANIFEST_COUNT, 123)
+        self.assertEqual(manifest.count, 131)
+        self.assertEqual(audit.EXPECTED_ABI_MANIFEST_COUNT, 131)
         self.assertEqual(
             manifest.sha256,
-            "6a6871c0f01391606ca77714f03324da4de893766a99d1bf036091b41308b667",
+            "d4dc7e0e01e18f9e642a5ac69ae4e4c0f361df6ef88d570dce361ea240b5402c",
         )
         self.assertEqual(manifest.sha256, audit.EXPECTED_ABI_MANIFEST_SHA256)
 
@@ -7010,15 +7166,15 @@ class ProductionWitnessTests(unittest.TestCase):
         )
 
     def test_complete_real_abi_baseline_and_violation_floor(self) -> None:
-        self.assertEqual(len(self.abi.definitions), 123)
-        self.assertEqual(len({item.name for item in self.abi.definitions}), 123)
-        self.assertEqual(len({item.name for item in self.abi.declarations}), 123)
+        self.assertEqual(len(self.abi.definitions), 131)
+        self.assertEqual(len({item.name for item in self.abi.definitions}), 131)
+        self.assertEqual(len({item.name for item in self.abi.declarations}), 131)
         self.assertFalse(self.abi.findings)
         self.assertEqual(self.abi.definition_hash, self.abi.declaration_hash)
         self.assertEqual(self.abi.source_definition_hash, self.abi.definition_hash)
         self.assertEqual(self.abi.manifest["status"], "verified")
         self.assertEqual(self.abi.compiler["status"], "verified")
-        self.assertEqual(self.abi.compiler["inventory_count"], 123)
+        self.assertEqual(self.abi.compiler["inventory_count"], 131)
         status_names = sorted(
             entry.entrypoint for entry in self.by_name.values() if entry.is_status
         )[:82]
@@ -7040,6 +7196,15 @@ class ProductionWitnessTests(unittest.TestCase):
         )
         self.assertEqual(len(status_names), 82)
         self.assertGreaterEqual(status_failed, 82)
+
+    def test_join_workspace_member_is_not_an_output_shadow(self) -> None:
+        for name in (
+            "pgaccel_join_rows_workspace_bytes",
+            "pgaccel_join_rows_controlled_workspace_bytes",
+        ):
+            with self.subTest(name=name):
+                entry = self.by_name[name]
+                self.assertNotIn("output_identity_shadowing", entry.classifications)
 
     def test_inventory_hashes_are_deterministic(self) -> None:
         second = audit.audit_abi(

@@ -33,6 +33,26 @@ fn profile_with_gpu() -> PlatformProfile {
     }
 }
 
+#[test]
+fn h3_capacity_is_memory_bounded_and_independent_of_generic_hash() {
+    for bytes in [256_usize << 20, 1 << 30, 16 << 30, 64 << 30] {
+        let mut profile = profile_with_gpu();
+        profile.gpu_max_alloc_bytes = bytes;
+        let limits = DeviceLimits::from_profile(&profile);
+        assert!(limits.gpu_h3_max_groups <= 16 * 1024 * 1024);
+        let charged = limits.gpu_h3_max_groups * 128 + 65_536;
+        assert!(charged <= bytes / 8);
+        assert!(charged <= limits.resident_memory_budget_bytes / 4);
+        assert!(limits.gpu_hash_agg_max_groups <= 100_000);
+    }
+    let mut profile = profile_with_gpu();
+    profile.gpu_max_alloc_bytes = 16 << 30;
+    assert_eq!(
+        DeviceLimits::from_profile(&profile).gpu_h3_max_groups,
+        (1 << 30) / 128 - 512
+    );
+}
+
 // -- should_batch ---------------------------------------------------------
 
 #[test]

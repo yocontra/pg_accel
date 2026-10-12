@@ -27,6 +27,7 @@
 
 #include "pgaccel_olap.h"
 #include "pgaccel_queue.h"
+#include "pgaccel_scalar.hpp"
 
 #include "h3_exact_device.hpp"
 
@@ -37,6 +38,16 @@ constexpr size_t kNoOffset = std::numeric_limits<size_t>::max();
 constexpr uint32_t kHashEmptyOwner = UINT32_MAX;
 constexpr size_t kHashMaxRows = UINT32_MAX;
 constexpr size_t kHashMaxGroupCapacity = size_t{1} << 30;
+constexpr size_t kHashSerialFinalizeGroups = 16'384;
+constexpr size_t kHashRowLaunchRows = 1'000'000;
+// WHERE selection is independent of measure FILTER/non-NULL counts. Shard
+// its row counter to avoid routing every accepted row through one atomic.
+constexpr size_t kHashSelectedShards = 256;
+static_assert((kHashSelectedShards & (kHashSelectedShards - 1)) == 0);
+// Hash COUNT is bounded by UINT32_MAX rows, leaving the high bit available
+// for private sort NULL metadata. No packed byte is written by competing
+// work items on backends that lower byte stores to word read/modify/write.
+constexpr uint64_t kHashSortNull = UINT64_C(1) << 63;
 constexpr size_t kDenseIntegerChunkRows = 1024;
 constexpr size_t kDenseIntegerAtomicMaxRows = 1'000'000;
 constexpr size_t kDenseReductionWorkgroupSize = 32;
@@ -51,6 +62,8 @@ constexpr size_t kDenseIntegerMaxPartialBytes = 32 * 1024 * 1024;
 constexpr uint32_t kFailureInvalid = 1u << 0;
 constexpr uint32_t kFailureNumericOverflow = 1u << 1;
 constexpr uint32_t kFailureCapacity = 1u << 2;
+constexpr uint32_t kFailureDivisionByZero = 1u << 3;
+constexpr uint32_t kFailureDateOutOfRange = 1u << 4;
 constexpr uint64_t kLifecycleCookie = UINT64_C(0x7067616363656c32);
 constexpr uint32_t kLifecycleActive = 1;
 constexpr uint32_t kLifecycleFinalized = 2;
@@ -123,6 +136,19 @@ bool bytewise_zero(const T& value) {
 
 bool canonical_null(const pgaccel_val& value) {
   return bytewise_zero(value);
+}
+
+inline bool accepts_null(const pgaccel_grouped_agg_filter& filter) {
+  return (filter.flags & PGACCEL_GROUPED_AGG_FILTER_ACCEPT_NULL) != 0;
+}
+
+inline bool active_ranges(const pgaccel_grouped_agg_filter& filter) {
+  return filter.predicate_range_count != 0 || accepts_null(filter);
+}
+
+inline bool integer_binary_op(int32_t op) {
+  return op == PGACCEL_GROUPED_AGG_MEASURE_MUL || op == PGACCEL_GROUPED_AGG_MEASURE_SUB ||
+         op == PGACCEL_GROUPED_AGG_MEASURE_ADD;
 }
 
 bool canonical_disabled_filter(const pgaccel_grouped_agg_filter& filter) {
@@ -224,7 +250,8 @@ struct FixedList {
   }
 };
 
-using SpanList = FixedList<Span, 64>;
+using SpanList =
+    FixedList<Span, 64 + PGACCEL_GROUPED_AGG_MAX_MEASURES * (3 + 2 * PGACCEL_SCALAR_MAX_INPUTS)>;
 using PointerList = FixedList<const void*, 64>;
 
 bool add_span(SpanList* spans, const void* ptr, size_t count, size_t width) {
@@ -257,6 +284,18 @@ struct alignas(8) AtomicU64Words {
   uint32_t low;
   uint32_t high;
 };
+struct NumericGroupState {
+  AtomicU64Words nonnull;
+  uint32_t special;
+  uint32_t dscale;
+};
+constexpr uint64_t kNumericMaxRows = uint64_t{INT64_MAX} / 10000;
+// Bound every prefix of an INT32 SUM, including INT32_MIN, not only its
+// final value. This keeps PostgreSQL's checked int8 transition semantics.
+constexpr uint64_t kNumericIntegerMaxRows = uint64_t{INT64_MAX} / (uint64_t{1} << 31);
+constexpr uint32_t kNumericNaN = 1;
+constexpr uint32_t kNumericPInf = 2;
+constexpr uint32_t kNumericNInf = 4;
 static_assert(sizeof(AtomicU64Words) == sizeof(uint64_t));
 static_assert(alignof(AtomicU64Words) == alignof(uint64_t));
 static_assert(offsetof(AtomicU64Words, low) == 0);
@@ -352,6 +391,20 @@ static_assert(kFailureNumericOverflow == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERI
 static_assert(PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE == 0);
 constexpr int32_t PGACCEL_GROUPED_AGG_DETAIL_INVALID = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
 
+struct ScalarKernelProgram {
+  uint32_t word_count;
+  uint32_t input_count;
+  bool uses_predicate_mask;
+  int32_t words[PGACCEL_SCALAR_MAX_WORDS];
+  pgaccel_scalar_input inputs[PGACCEL_SCALAR_MAX_INPUTS];
+};
+static_assert(PGACCEL_SCALAR_MAX_WORDS == pgaccel_scalar::MAX_WORDS);
+static_assert(PGACCEL_SCALAR_MAX_INPUTS == pgaccel_scalar::MAX_INPUTS);
+
+const pgaccel_scalar_view& scalar_view(const pgaccel_grouped_agg_measure& measure) {
+  return *static_cast<const pgaccel_scalar_view*>(measure.value.values);
+}
+
 struct KernelParams {
   size_t row_count;
   size_t group_capacity;
@@ -375,16 +428,33 @@ struct KernelParams {
   uint8_t* staged_key_nulls[PGACCEL_GROUPED_AGG_MAX_KEYS];
   uint32_t* hash_owners;
   uint32_t* hash_counts;
+  AtomicU64Words* hash_sums;
+  int32_t* hash_mins;
+  int32_t* hash_maxs;
   uint32_t* hash_group_count;
+  uint64_t* hash_sort_keys;
+  uint64_t* hash_sort_counts;
+  uint64_t* hash_sort_sums;
+  uint64_t* hash_sort_mins;
+  uint64_t* hash_sort_maxs;
   uint32_t* dense_chunk_counts;
   uint32_t* dense_selected_counts;
   uint64_t* dense_weighted_chunk_counts;
   size_t dense_count_chunk_count;
   AtomicU64Words* dense_integer_atomic_sum;
+  int32_t* dense_integer_atomic_min;
+  int32_t* dense_integer_atomic_max;
   AtomicU64Words* dense_integer_atomic_nonnull;
   AtomicU64Words* dense_integer_atomic_count;
   DenseIntegerPartial* dense_integer_partials;
   size_t dense_integer_chunk_count;
+  pgaccel_numeric_view numeric_views[PGACCEL_GROUPED_AGG_MAX_MEASURES];
+  AtomicU64Words* numeric_buckets[PGACCEL_GROUPED_AGG_MAX_MEASURES];
+  NumericGroupState* numeric_groups[PGACCEL_GROUPED_AGG_MAX_MEASURES];
+  uint32_t numeric_shards[PGACCEL_GROUPED_AGG_MAX_MEASURES];
+  uint32_t numeric_predicate_singletons[PGACCEL_GROUPED_AGG_MAX_MEASURES];
+  uint32_t numeric_where_singletons;
+  AtomicU64Words* numeric_rows;
   DeviceMeta* meta;
 };
 
@@ -401,6 +471,15 @@ struct MeasureLayout {
 };
 
 struct WorkspaceLayout {
+  size_t scalar_programs[PGACCEL_GROUPED_AGG_MAX_MEASURES] = {kNoOffset, kNoOffset, kNoOffset,
+                                                              kNoOffset};
+  bool dense_numeric = false;
+  size_t numeric_buckets[PGACCEL_GROUPED_AGG_MAX_MEASURES] = {kNoOffset, kNoOffset, kNoOffset,
+                                                              kNoOffset};
+  size_t numeric_groups[PGACCEL_GROUPED_AGG_MAX_MEASURES] = {kNoOffset, kNoOffset, kNoOffset,
+                                                             kNoOffset};
+  uint32_t numeric_shards[PGACCEL_GROUPED_AGG_MAX_MEASURES] = {};
+  size_t numeric_rows = kNoOffset;
   size_t bytes = 0;
   size_t params = kNoOffset;
   size_t active = kNoOffset;
@@ -411,7 +490,15 @@ struct WorkspaceLayout {
   size_t hash_slot_count = 0;
   size_t hash_owners = kNoOffset;
   size_t hash_counts = kNoOffset;
+  size_t hash_sums = kNoOffset;
+  size_t hash_mins = kNoOffset;
+  size_t hash_maxs = kNoOffset;
   size_t hash_group_count = kNoOffset;
+  size_t hash_sort_keys = kNoOffset;
+  size_t hash_sort_counts = kNoOffset;
+  size_t hash_sort_sums = kNoOffset;
+  size_t hash_sort_mins = kNoOffset;
+  size_t hash_sort_maxs = kNoOffset;
   size_t dense_chunk_counts = kNoOffset;
   size_t dense_selected_counts = kNoOffset;
   size_t dense_weighted_chunk_counts = kNoOffset;
@@ -419,6 +506,8 @@ struct WorkspaceLayout {
   size_t dense_count_partial_count = 0;
   bool dense_count_hierarchical = false;
   size_t dense_integer_atomic_sum = kNoOffset;
+  size_t dense_integer_atomic_min = kNoOffset;
+  size_t dense_integer_atomic_max = kNoOffset;
   size_t dense_integer_atomic_nonnull = kNoOffset;
   size_t dense_integer_atomic_count = kNoOffset;
   size_t dense_integer_partials = kNoOffset;
@@ -427,6 +516,7 @@ struct WorkspaceLayout {
   bool dense_integer_parallel = false;
   bool dense_integer_hierarchical = false;
   bool dense_integer_atomic_one_shot = false;
+  bool dense_integer_atomic_bounded = false;
   size_t meta = kNoOffset;
   size_t publish_params = kNoOffset;
   size_t completion = kNoOffset;
@@ -523,13 +613,162 @@ bool parallel_dense_weighted_count_shape(const pgaccel_grouped_agg_desc& desc) {
   return false;
 }
 
+// Qualified integer descriptors contain value lanes followed by an optional
+// COUNT(*). Keep selected-row bookkeeping independent of the value-lane count.
+template <typename Descriptor>
+inline size_t dense_integer_value_count(const Descriptor& desc) {
+  return desc.measure_count -
+         (desc.measures[desc.measure_count - 1].op == PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR ? 1
+                                                                                             : 0);
+}
+
+// A validated Boolean WHERE carrier is unfiltered COUNT-only. After WHERE,
+// its non-NULL count equals the selected-row count. Keep one worker when it
+// is the sole value, otherwise derive that lane from another worker's rows.
+template <typename Descriptor>
+inline bool dense_integer_elides_where_carrier(const Descriptor& desc) {
+  return desc.where_filter.predicate_source == PGACCEL_GROUPED_AGG_PRED_SOURCE_SCALAR &&
+         dense_integer_value_count(desc) > 1;
+}
+
+template <typename Descriptor>
+inline size_t dense_integer_worker_count(const Descriptor& desc) {
+  return dense_integer_value_count(desc) - (dense_integer_elides_where_carrier(desc) ? 1 : 0);
+}
+
+template <typename Descriptor>
+inline size_t dense_integer_worker_slot(const Descriptor& desc, size_t worker) {
+  return worker + (dense_integer_elides_where_carrier(desc) &&
+                           worker >= static_cast<size_t>(desc.where_filter.predicate_measure_slot)
+                       ? 1
+                       : 0);
+}
+
+bool exact_dense_integer_measure_filter(const pgaccel_grouped_agg_desc& desc,
+                                        const pgaccel_grouped_agg_filter& filter,
+                                        bool rhs_input = false) {
+  if (canonical_disabled_filter(filter))
+    return true;
+  if (filter.kind != PGACCEL_GROUPED_AGG_FILTER_NONE || filter.mask != nullptr ||
+      filter.predicate_source != (rhs_input ? PGACCEL_GROUPED_AGG_PRED_SOURCE_RHS
+                                            : PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE) ||
+      filter.predicate_measure_slot < 0 ||
+      static_cast<uint32_t>(filter.predicate_measure_slot) >= desc.measure_count ||
+      filter.predicate_range_count < 0 ||
+      (filter.predicate_range_count < 1 && !accepts_null(filter)) ||
+      filter.predicate_range_count > PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES ||
+      filter.value_cmp_opcode != kOpAlways || filter._pad0 != 0 ||
+      (filter.flags & ~PGACCEL_GROUPED_AGG_FILTER_ACCEPT_NULL) != 0 ||
+      !canonical_null(filter.value_cmp_const))
+    return false;
+  const auto& input = desc.measures[filter.predicate_measure_slot];
+  const auto& column = rhs_input ? input.rhs : input.value;
+  if ((input.op != PGACCEL_GROUPED_AGG_MEASURE_COLUMN &&
+       !(rhs_input && input.op == PGACCEL_GROUPED_AGG_MEASURE_SCALAR) &&
+       (rhs_input || !integer_binary_op(input.op))) ||
+      column.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_INT32 ||
+      column.element_bytes != sizeof(int32_t))
+    return false;
+  for (size_t range = 0; range < PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES; ++range) {
+    if (range < static_cast<size_t>(filter.predicate_range_count)) {
+      if (filter.predicate_lo[range].tag != PGACCEL_VAL_INT32 ||
+          filter.predicate_hi[range].tag != PGACCEL_VAL_INT32 ||
+          filter.predicate_lo[range].data.i32 > filter.predicate_hi[range].data.i32)
+        return false;
+    } else if (!canonical_null(filter.predicate_lo[range]) ||
+               !canonical_null(filter.predicate_hi[range])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool exact_dense_where_ranges(const pgaccel_grouped_agg_desc& desc) {
+  auto range = desc.where_filter;
+  if (range.kind == PGACCEL_GROUPED_AGG_FILTER_SQL && range.mask != nullptr) {
+    range.kind = PGACCEL_GROUPED_AGG_FILTER_NONE;
+    range.mask = nullptr;
+  }
+  return exact_dense_integer_measure_filter(desc, range);
+}
+
+bool exact_dense_scalar_where(const pgaccel_grouped_agg_desc& desc) {
+  auto filter = desc.where_filter;
+  if (filter.predicate_source != PGACCEL_GROUPED_AGG_PRED_SOURCE_SCALAR ||
+      filter.predicate_measure_slot < 0 ||
+      static_cast<uint32_t>(filter.predicate_measure_slot) >= desc.measure_count)
+    return false;
+  const auto& measure = desc.measures[filter.predicate_measure_slot];
+  if (measure.op != PGACCEL_GROUPED_AGG_MEASURE_SCALAR ||
+      measure.value.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_BOOL ||
+      !canonical_disabled_filter(desc.measure_filters[filter.predicate_measure_slot]))
+    return false;
+  filter.predicate_source = PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE;
+  filter.predicate_measure_slot = 0;
+  return parallel_dense_where_filter(filter);
+}
+
+bool parallel_dense_multi_integer_structure(const pgaccel_grouped_agg_desc& desc) {
+  // A single unfiltered count keeps its smaller existing count workspace.
+  if (parallel_dense_count_shape(desc))
+    return false;
+  if (desc.grouping_mode != PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX ||
+      desc.output_mode != PGACCEL_GROUPED_AGG_OUTPUT_DENSE || desc.group_capacity == 0 ||
+      desc.measure_count < 1 || desc.measure_count > PGACCEL_GROUPED_AGG_MAX_MEASURES ||
+      desc.dim_count != 0 ||
+      !(parallel_dense_where_filter(desc.where_filter) || exact_dense_where_ranges(desc) ||
+        exact_dense_scalar_where(desc)))
+    return false;
+  const size_t values = dense_integer_value_count(desc);
+  if (values == 0)
+    return false;
+  for (size_t slot = 0; slot < desc.measure_count; ++slot) {
+    const auto& measure = desc.measures[slot];
+    const bool predicate_input = measure.flags == PGACCEL_GROUPED_AGG_MEASURE_FLAG_FILTER_INPUT;
+    if (predicate_input) {
+      if (slot >= values ||
+          desc.measure_filters[slot].predicate_measure_slot != static_cast<int32_t>(slot) ||
+          !active_ranges(desc.measure_filters[slot]))
+        return false;
+    } else if (measure.flags != 0) {
+      return false;
+    }
+    if (measure.accumulator_kind != PGACCEL_GROUPED_AGG_ACCUM_I64 ||
+        measure.state_bytes != sizeof(int64_t))
+      return false;
+    if (slot < values) {
+      if (!exact_dense_integer_measure_filter(desc, desc.measure_filters[slot], predicate_input) ||
+          (measure.op != PGACCEL_GROUPED_AGG_MEASURE_COLUMN &&
+           measure.op != PGACCEL_GROUPED_AGG_MEASURE_SCALAR && !integer_binary_op(measure.op)) ||
+          measure.agg_mask == 0 ||
+          (measure.agg_mask & ~(PGACCEL_GROUPED_AGG_LANE_SUM | PGACCEL_GROUPED_AGG_LANE_COUNT |
+                                PGACCEL_GROUPED_AGG_LANE_MIN | PGACCEL_GROUPED_AGG_LANE_MAX)) !=
+              0 ||
+          (measure.op != PGACCEL_GROUPED_AGG_MEASURE_SCALAR &&
+           (measure.value.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_INT32 ||
+            measure.value.element_bytes != sizeof(int32_t))) ||
+          (integer_binary_op(measure.op) &&
+           (measure.rhs.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_INT32 ||
+            measure.rhs.element_bytes != sizeof(int32_t))))
+        return false;
+    } else if (!canonical_disabled_filter(desc.measure_filters[slot]) ||
+               measure.agg_mask != PGACCEL_GROUPED_AGG_LANE_COUNT) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool parallel_dense_integer_structure(const pgaccel_grouped_agg_desc& desc) {
+  if (parallel_dense_multi_integer_structure(desc))
+    return true;
   const bool measure_range = exact_dense_integer_range_filter(desc.measure_filters[0]);
   if (desc.grouping_mode != PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX ||
       desc.output_mode != PGACCEL_GROUPED_AGG_OUTPUT_DENSE || desc.group_capacity == 0 ||
-      desc.measure_count != 2 || !parallel_dense_integer_where_filter(desc.where_filter) ||
+      (desc.measure_count != 1 && desc.measure_count != 2) ||
+      !parallel_dense_integer_where_filter(desc.where_filter) ||
       (!canonical_disabled_filter(desc.measure_filters[0]) && !measure_range) ||
-      !canonical_disabled_filter(desc.measure_filters[1]))
+      (desc.measure_count == 2 && !canonical_disabled_filter(desc.measure_filters[1])))
     return false;
   const pgaccel_grouped_agg_measure& value = desc.measures[0];
   const pgaccel_grouped_agg_measure& count = desc.measures[1];
@@ -552,10 +791,10 @@ bool parallel_dense_integer_structure(const pgaccel_grouped_agg_desc& desc) {
       value.state_bytes != sizeof(int64_t) ||
       value.value.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_INT32 ||
       value.value.element_bytes != sizeof(int32_t) ||
-      count.op != PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR ||
-      count.agg_mask != PGACCEL_GROUPED_AGG_LANE_COUNT ||
-      count.accumulator_kind != PGACCEL_GROUPED_AGG_ACCUM_I64 ||
-      count.state_bytes != sizeof(int64_t))
+      (desc.measure_count == 2 && (count.op != PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR ||
+                                   count.agg_mask != PGACCEL_GROUPED_AGG_LANE_COUNT ||
+                                   count.accumulator_kind != PGACCEL_GROUPED_AGG_ACCUM_I64 ||
+                                   count.state_bytes != sizeof(int64_t))))
     return false;
   for (size_t dim = 0; dim < desc.dim_count; ++dim) {
     if (desc.dims[dim].multiplicity_by_key != nullptr)
@@ -570,17 +809,20 @@ bool dense_integer_partial_shape(const pgaccel_grouped_agg_desc& desc, size_t* c
                         (desc.row_count % kDenseIntegerChunkRows != 0 ? 1 : 0);
   if (desc.group_capacity == 0)
     return false;
+  size_t value_groups = 0;
+  if (!checked_mul_size(desc.group_capacity, dense_integer_value_count(desc), &value_groups))
+    return false;
   const size_t max_partials = kDenseIntegerMaxPartialBytes / sizeof(DenseIntegerPartial);
-  const size_t max_chunks = max_partials / desc.group_capacity;
+  const size_t max_chunks = max_partials / value_groups;
   const size_t allocation_chunks = std::min(chunks, max_chunks);
-  if (!checked_mul_size(desc.group_capacity, allocation_chunks, allocation_count))
+  if (!checked_mul_size(value_groups, allocation_chunks, allocation_count))
     return false;
   *chunk_count = chunks;
   if (chunks > max_chunks) {
     *partial_count = 0;
     return false;
   }
-  return checked_mul_size(desc.group_capacity, chunks, partial_count);
+  return checked_mul_size(value_groups, chunks, partial_count);
 }
 
 bool known_val_tag(int32_t tag) {
@@ -608,7 +850,7 @@ int32_t materialized_key_type(const pgaccel_grouped_agg_desc& desc,
                               const pgaccel_grouped_agg_key& key) {
   if (desc.grouping_mode == PGACCEL_GROUPED_AGG_GROUPING_HASH &&
       key.source == PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT)
-    return key.values.type;
+    return key.values.type == PGACCEL_VAL_INT32 ? PGACCEL_VAL_INT64 : key.values.type;
   return PGACCEL_VAL_INT32;
 }
 
@@ -626,6 +868,109 @@ bool hash_slot_capacity(size_t group_capacity, size_t* slot_count) {
   return true;
 }
 
+bool packed_numeric(const pgaccel_grouped_agg_measure_col& col) {
+  return col.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_NUMERIC &&
+         col.flags == PGACCEL_GROUPED_AGG_NUMERIC_PACKED_VIEW;
+}
+
+const pgaccel_numeric_view& numeric_view(const pgaccel_grouped_agg_measure_col& col) {
+  // Host-readable ABI metadata only; rows and digits are never dereferenced
+  // here. Shape validation proves this typed header before layout/binding.
+  return *static_cast<const pgaccel_numeric_view*>(col.values);
+}
+
+bool wide_integer_numeric(const pgaccel_grouped_agg_measure& measure) {
+  return measure.accumulator_kind == PGACCEL_GROUPED_AGG_ACCUM_NUMERIC &&
+         measure.value.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_INT64 &&
+         measure.op == PGACCEL_GROUPED_AGG_MEASURE_COLUMN;
+}
+
+pgaccel_numeric_view decimal_measure_view(const pgaccel_grouped_agg_measure& measure) {
+  if (packed_numeric(measure.value))
+    return numeric_view(measure.value);
+  // Every int64 magnitude occupies at most five base-10000 digits, including
+  // INT64_MIN. Four additional carry limbs bound the full numeric lifecycle.
+  pgaccel_numeric_view view{};
+  view.min_weight = 0;
+  view.max_weight = 4;
+  view.max_ndigits = 5;
+  return view;
+}
+
+size_t numeric_limb_count(const pgaccel_numeric_view& view) {
+  return static_cast<size_t>(view.max_weight - view.min_weight + 5);
+}
+
+size_t numeric_state_bytes(const pgaccel_numeric_view& view) {
+  return sizeof(pgaccel_numeric_sum) +
+         ((numeric_limb_count(view) * sizeof(uint16_t) + 7) & ~size_t{7});
+}
+
+bool numeric_view_valid(const pgaccel_grouped_agg_measure_col& col, size_t rows) {
+  if (col.values == nullptr ||
+      reinterpret_cast<uintptr_t>(col.values) % alignof(pgaccel_numeric_view) != 0 ||
+      col.element_bytes != sizeof(pgaccel_numeric_view) || col.scale != 0)
+    return false;
+  const auto& view = numeric_view(col);
+  return view.reserved == 0 && view.row_count == rows && (rows == 0 || view.rows != nullptr) &&
+         (view.digit_count == 0 || view.digits != nullptr) && view.min_weight >= -4096 &&
+         view.max_weight <= 32767 && view.min_weight <= view.max_weight &&
+         view.max_ndigits <= UINT16_MAX &&
+         (view.rows == nullptr ||
+          reinterpret_cast<uintptr_t>(view.rows) % alignof(pgaccel_numeric_row) == 0) &&
+         (view.digits == nullptr ||
+          reinterpret_cast<uintptr_t>(view.digits) % alignof(uint16_t) == 0);
+}
+
+template <typename Descriptor>
+uint64_t numeric_max_rows(const Descriptor& desc) {
+  for (size_t slot = 0; slot < desc.measure_count; ++slot) {
+    if (desc.measures[slot].accumulator_kind == PGACCEL_GROUPED_AGG_ACCUM_I64 &&
+        (desc.measures[slot].agg_mask & PGACCEL_GROUPED_AGG_LANE_SUM) != 0)
+      return kNumericIntegerMaxRows;
+  }
+  return kNumericMaxRows;
+}
+
+bool parallel_dense_numeric_shape(const pgaccel_grouped_agg_desc& desc) {
+  if (desc.grouping_mode != PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX ||
+      desc.output_mode != PGACCEL_GROUPED_AGG_OUTPUT_DENSE || desc.dim_count != 0 ||
+      !(parallel_dense_where_filter(desc.where_filter) || exact_dense_where_ranges(desc)) ||
+      desc.row_count > numeric_max_rows(desc))
+    return false;
+  const size_t values = dense_integer_value_count(desc);
+  if (values == 0)
+    return false;
+  bool has_numeric = false;
+  for (size_t slot = 0; slot < desc.measure_count; ++slot) {
+    const auto& measure = desc.measures[slot];
+    const bool predicate_input = measure.flags == PGACCEL_GROUPED_AGG_MEASURE_FLAG_FILTER_INPUT;
+    if (predicate_input) {
+      if (slot >= values ||
+          desc.measure_filters[slot].predicate_measure_slot != static_cast<int32_t>(slot) ||
+          !active_ranges(desc.measure_filters[slot]) ||
+          !exact_dense_integer_measure_filter(desc, desc.measure_filters[slot], true))
+        return false;
+    } else if (measure.flags != 0 || !canonical_disabled_filter(desc.measure_filters[slot])) {
+      return false;
+    }
+    if (slot < values) {
+      const bool decimal = (packed_numeric(measure.value) || wide_integer_numeric(measure)) &&
+                           measure.accumulator_kind == PGACCEL_GROUPED_AGG_ACCUM_NUMERIC;
+      const bool integer = measure.value.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_INT32 &&
+                           measure.accumulator_kind == PGACCEL_GROUPED_AGG_ACCUM_I64 &&
+                           measure.state_bytes == sizeof(int64_t);
+      has_numeric |= decimal;
+      if ((!decimal && !integer) || measure.op != PGACCEL_GROUPED_AGG_MEASURE_COLUMN ||
+          (measure.agg_mask != PGACCEL_GROUPED_AGG_LANE_SUM &&
+           measure.agg_mask != PGACCEL_GROUPED_AGG_LANE_COUNT &&
+           measure.agg_mask != (PGACCEL_GROUPED_AGG_LANE_SUM | PGACCEL_GROUPED_AGG_LANE_COUNT)))
+        return false;
+    }
+  }
+  return has_numeric;
+}
+
 bool make_layout(const pgaccel_grouped_agg_desc& desc, WorkspaceLayout* layout) {
   ArenaSizer arena;
   // Completion stays at the exact typed workspace base. Besides making its
@@ -639,9 +984,15 @@ bool make_layout(const pgaccel_grouped_agg_desc& desc, WorkspaceLayout* layout) 
 
   for (size_t i = 0; i < desc.measure_count; ++i) {
     const uint32_t mask = desc.measures[i].agg_mask;
+    if (desc.measures[i].op == PGACCEL_GROUPED_AGG_MEASURE_SCALAR &&
+        !arena.add<ScalarKernelProgram>(1, &layout->scalar_programs[i]))
+      return false;
     MeasureLayout& ml = layout->measures[i];
-    if ((mask & PGACCEL_GROUPED_AGG_LANE_SUM) != 0 &&
-        !arena.add<uint64_t>(desc.group_capacity, &ml.sum))
+    size_t sum_words = desc.group_capacity;
+    if (desc.measures[i].accumulator_kind == PGACCEL_GROUPED_AGG_ACCUM_NUMERIC &&
+        !checked_mul_size(sum_words, desc.measures[i].state_bytes / sizeof(uint64_t), &sum_words))
+      return false;
+    if ((mask & PGACCEL_GROUPED_AGG_LANE_SUM) != 0 && !arena.add<uint64_t>(sum_words, &ml.sum))
       return false;
     if ((mask & PGACCEL_GROUPED_AGG_LANE_MIN) != 0 &&
         !arena.add<uint64_t>(desc.group_capacity, &ml.min))
@@ -655,7 +1006,13 @@ bool make_layout(const pgaccel_grouped_agg_desc& desc, WorkspaceLayout* layout) 
     if ((mask & PGACCEL_GROUPED_AGG_LANE_COUNT) != 0 &&
         !arena.add<uint64_t>(desc.group_capacity, &ml.count))
       return false;
-    if (desc.measures[i].op != PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR &&
+    // Hash integer value states share COUNT for their non-NULL validity.
+    if (desc.grouping_mode == PGACCEL_GROUPED_AGG_GROUPING_HASH &&
+        (mask & (PGACCEL_GROUPED_AGG_LANE_SUM | PGACCEL_GROUPED_AGG_LANE_MIN |
+                 PGACCEL_GROUPED_AGG_LANE_MAX)) != 0)
+      ml.nonnull = ml.count;
+    if (desc.grouping_mode != PGACCEL_GROUPED_AGG_GROUPING_HASH &&
+        desc.measures[i].op != PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR &&
         (mask & (PGACCEL_GROUPED_AGG_LANE_SUM | PGACCEL_GROUPED_AGG_LANE_MIN |
                  PGACCEL_GROUPED_AGG_LANE_MAX | PGACCEL_GROUPED_AGG_LANE_SUMSQ |
                  PGACCEL_GROUPED_AGG_LANE_COUNT)) != 0 &&
@@ -678,8 +1035,7 @@ bool make_layout(const pgaccel_grouped_agg_desc& desc, WorkspaceLayout* layout) 
   if (parallel_dense_weighted_count_shape(desc)) {
     layout->dense_count_chunk_count = desc.row_count / kDenseIntegerChunkRows +
                                       (desc.row_count % kDenseIntegerChunkRows != 0 ? 1 : 0);
-    if (!arena.add<uint64_t>(layout->dense_count_chunk_count,
-                             &layout->dense_weighted_chunk_counts))
+    if (!arena.add<uint64_t>(layout->dense_count_chunk_count, &layout->dense_weighted_chunk_counts))
       return false;
   } else if (parallel_dense_count_shape(desc)) {
     layout->dense_count_chunk_count = desc.row_count / kDenseIntegerChunkRows +
@@ -715,7 +1071,32 @@ bool make_layout(const pgaccel_grouped_agg_desc& desc, WorkspaceLayout* layout) 
     if (!hash_slot_capacity(desc.group_capacity, &layout->hash_slot_count) ||
         !arena.add<uint32_t>(layout->hash_slot_count, &layout->hash_owners) ||
         !arena.add<uint32_t>(layout->hash_slot_count, &layout->hash_counts) ||
-        !arena.add<uint32_t>(1, &layout->hash_group_count))
+        !arena.add<uint32_t>(desc.where_filter.kind == PGACCEL_GROUPED_AGG_FILTER_SQL
+                                ? 1 + kHashSelectedShards
+                                : 1,
+                            &layout->hash_group_count))
+      return false;
+    if ((desc.measures[0].agg_mask & PGACCEL_GROUPED_AGG_LANE_SUM) != 0 &&
+        !arena.add<AtomicU64Words>(layout->hash_slot_count, &layout->hash_sums))
+      return false;
+    if ((desc.measures[0].agg_mask & PGACCEL_GROUPED_AGG_LANE_MIN) != 0 &&
+        !arena.add<int32_t>(layout->hash_slot_count, &layout->hash_mins))
+      return false;
+    if ((desc.measures[0].agg_mask & PGACCEL_GROUPED_AGG_LANE_MAX) != 0 &&
+        !arena.add<int32_t>(layout->hash_slot_count, &layout->hash_maxs))
+      return false;
+    if (desc.group_capacity > kHashSerialFinalizeGroups &&
+        (!arena.add<uint64_t>(desc.group_capacity, &layout->hash_sort_keys) ||
+         !arena.add<uint64_t>(desc.group_capacity, &layout->hash_sort_counts)))
+      return false;
+    if (desc.group_capacity > kHashSerialFinalizeGroups && layout->hash_sums != kNoOffset &&
+        !arena.add<uint64_t>(desc.group_capacity, &layout->hash_sort_sums))
+      return false;
+    if (desc.group_capacity > kHashSerialFinalizeGroups && layout->hash_mins != kNoOffset &&
+        !arena.add<uint64_t>(desc.group_capacity, &layout->hash_sort_mins))
+      return false;
+    if (desc.group_capacity > kHashSerialFinalizeGroups && layout->hash_maxs != kNoOffset &&
+        !arena.add<uint64_t>(desc.group_capacity, &layout->hash_sort_maxs))
       return false;
   }
   if (parallel_dense_integer_structure(desc)) {
@@ -723,32 +1104,75 @@ bool make_layout(const pgaccel_grouped_agg_desc& desc, WorkspaceLayout* layout) 
     layout->dense_integer_atomic_one_shot =
         desc.execution_flags == PGACCEL_GROUPED_AGG_EXEC_ALL_KNOWN &&
         desc.row_count <= kDenseIntegerAtomicMaxRows &&
-        desc.measures[0].agg_mask == PGACCEL_GROUPED_AGG_LANE_SUM &&
         desc.group_capacity > kDenseHierarchicalMaxGroups;
     layout->dense_integer_parallel =
         dense_integer_partial_shape(desc, &layout->dense_integer_chunk_count,
                                     &layout->dense_integer_partial_count, &allocation_count);
     layout->dense_integer_hierarchical =
         layout->dense_integer_parallel && desc.group_capacity <= kDenseHierarchicalMaxGroups;
-    if (layout->dense_integer_atomic_one_shot) {
+    layout->dense_integer_atomic_bounded =
+        !layout->dense_integer_atomic_one_shot && desc.group_capacity > kDenseHierarchicalMaxGroups;
+    // Reserve atomic batch scratch even when this descriptor's row count
+    // cannot use it: a shorter lifecycle chunk may. Persistent offsets and
+    // the maximum-chunk workspace contract must remain valid in either lane.
+    if (layout->dense_integer_atomic_one_shot || layout->dense_integer_atomic_bounded) {
+      const size_t values = dense_integer_value_count(desc);
+      size_t value_groups = 0;
+      if (!checked_mul_size(desc.group_capacity, values, &value_groups))
+        return false;
       const pgaccel_grouped_agg_measure& measure = desc.measures[0];
+      uint32_t lanes = 0;
+      for (size_t slot = 0; slot < values; ++slot)
+        lanes |= desc.measures[slot].agg_mask;
       const bool statically_nonnull =
+          values == 1 && measure.op != PGACCEL_GROUPED_AGG_MEASURE_SCALAR &&
           measure.value.nulls == nullptr &&
-          (measure.op != PGACCEL_GROUPED_AGG_MEASURE_MUL || measure.rhs.nulls == nullptr) &&
-          !exact_dense_integer_range_filter(desc.measure_filters[0]);
-      if (!arena.add<AtomicU64Words>(desc.group_capacity, &layout->dense_integer_atomic_sum) ||
+          (!integer_binary_op(measure.op) || measure.rhs.nulls == nullptr) &&
+          canonical_disabled_filter(desc.measure_filters[0]);
+      if (!arena.add<AtomicU64Words>(value_groups, &layout->dense_integer_atomic_sum) ||
+          ((lanes & PGACCEL_GROUPED_AGG_LANE_MIN) &&
+           !arena.add<int32_t>(value_groups, &layout->dense_integer_atomic_min)) ||
+          ((lanes & PGACCEL_GROUPED_AGG_LANE_MAX) &&
+           !arena.add<int32_t>(value_groups, &layout->dense_integer_atomic_max)) ||
           (!statically_nonnull &&
-           !arena.add<AtomicU64Words>(desc.group_capacity,
-                                      &layout->dense_integer_atomic_nonnull)) ||
+           !arena.add<AtomicU64Words>(value_groups, &layout->dense_integer_atomic_nonnull)) ||
           !arena.add<AtomicU64Words>(desc.group_capacity, &layout->dense_integer_atomic_count))
         return false;
-    } else {
+    }
+    if (!layout->dense_integer_atomic_one_shot) {
       // Reserve the largest partial layout reachable by any shorter
       // lifecycle chunk. Parallel eligibility becomes false after the
       // bounded partial budget, so sizing only from the current row count
       // would undersize a shared session.
       if (allocation_count != 0 &&
           !arena.add<DenseIntegerPartial>(allocation_count, &layout->dense_integer_partials))
+        return false;
+    }
+  }
+  if (parallel_dense_numeric_shape(desc)) {
+    layout->dense_numeric = true;
+    size_t row_slots = 0;
+    if (!checked_add_size(desc.group_capacity, 2, &row_slots) ||
+        !arena.add<AtomicU64Words>(row_slots, &layout->numeric_rows))
+      return false;
+    for (size_t slot = 0; slot < dense_integer_value_count(desc); ++slot) {
+      if (!arena.add<NumericGroupState>(desc.group_capacity, &layout->numeric_groups[slot]))
+        return false;
+      // COUNT(value) consumes only its NULL sidecar, never decimal limbs.
+      if ((desc.measures[slot].agg_mask & PGACCEL_GROUPED_AGG_LANE_SUM) == 0)
+        continue;
+      size_t buckets = 0;
+      const size_t limbs = desc.measures[slot].accumulator_kind == PGACCEL_GROUPED_AGG_ACCUM_NUMERIC
+                               ? numeric_limb_count(decimal_measure_view(desc.measures[slot]))
+                               : 1;
+      if (!checked_mul_size(desc.group_capacity, limbs, &buckets))
+        return false;
+      uint32_t shards = 16;
+      while (shards > 1 && buckets > (32 * 1024 * 1024 / sizeof(AtomicU64Words)) / shards)
+        shards /= 2;
+      layout->numeric_shards[slot] = shards;
+      if (!checked_mul_size(buckets, shards, &buckets) ||
+          !arena.add<AtomicU64Words>(buckets, &layout->numeric_buckets[slot]))
         return false;
     }
   }
@@ -761,7 +1185,7 @@ bool known_physical(int32_t type) {
 }
 
 bool physical_shape_valid(const pgaccel_grouped_agg_measure_col& col) {
-  if (!known_physical(col.physical_type) || col.flags != 0)
+  if (!known_physical(col.physical_type) || (col.flags != 0 && !packed_numeric(col)))
     return false;
   switch (col.physical_type) {
     case PGACCEL_GROUPED_AGG_PHYSICAL_BOOL:
@@ -846,17 +1270,82 @@ bool validate_measure_col(const pgaccel_grouped_agg_measure_col& col, size_t row
                           bool required) {
   if (!required)
     return bytewise_zero(col);
+  if (packed_numeric(col))
+    return numeric_view_valid(col, row_count);
   return physical_shape_valid(col) && (row_count == 0 || col.values != nullptr);
+}
+
+bool validate_scalar_view(const pgaccel_grouped_agg_measure& measure, size_t row_count) {
+  const auto& column = measure.value;
+  if (column.flags != PGACCEL_GROUPED_AGG_SCALAR_VIEW_V1 || column.nulls != nullptr ||
+      column.element_bytes != sizeof(pgaccel_scalar_view) || column.scale != 0 ||
+      column.values == nullptr ||
+      reinterpret_cast<uintptr_t>(column.values) % alignof(pgaccel_scalar_view) != 0)
+    return false;
+  const auto& view = scalar_view(measure);
+  if (view.version != PGACCEL_SCALAR_VIEW_VERSION || view.reserved != 0 ||
+      view.row_count < row_count || view.word_count > PGACCEL_SCALAR_MAX_WORDS ||
+      view.input_count > PGACCEL_SCALAR_MAX_INPUTS || view.words == nullptr ||
+      reinterpret_cast<uintptr_t>(view.words) % alignof(int32_t) != 0 ||
+      (view.input_count == 0) != (view.inputs == nullptr) ||
+      reinterpret_cast<uintptr_t>(view.inputs) % alignof(pgaccel_scalar_input) != 0)
+    return false;
+  pgaccel_scalar::Proof proof;
+  if (!pgaccel_scalar::validate_program(view.words, view.word_count, &proof) ||
+      proof.input_count != view.input_count || proof.result_type != column.physical_type)
+    return false;
+  static_assert(PGACCEL_GROUPED_AGG_PHYSICAL_INT32 == pgaccel_scalar::INT4);
+  static_assert(PGACCEL_GROUPED_AGG_PHYSICAL_BOOL == pgaccel_scalar::BOOL);
+  static_assert(PGACCEL_GROUPED_AGG_PHYSICAL_DATE == pgaccel_scalar::DATE);
+  if (column.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_BOOL &&
+      measure.agg_mask != PGACCEL_GROUPED_AGG_LANE_COUNT)
+    return false;
+  if (column.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_DATE &&
+      (measure.agg_mask & PGACCEL_GROUPED_AGG_LANE_SUM) != 0)
+    return false;
+  for (size_t index = 0; index < view.input_count; ++index) {
+    const auto& input = view.inputs[index];
+    if (input.reserved != 0 || input.physical_type != view.words[3 + index] ||
+        (row_count != 0 && input.values == nullptr) ||
+        (input.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_BOOL &&
+         reinterpret_cast<uintptr_t>(input.values) % alignof(int32_t) != 0))
+      return false;
+  }
+  return true;
 }
 
 bool validate_measure(const pgaccel_grouped_agg_measure& measure, size_t row_count,
                       Validation* validation) {
-  if (measure.flags != 0 || measure._pad0 != 0 || measure.agg_mask == 0 ||
+  const bool predicate_input = measure.flags == PGACCEL_GROUPED_AGG_MEASURE_FLAG_FILTER_INPUT;
+  if ((measure.flags != 0 && !predicate_input) ||
+      (predicate_input && ((measure.op != PGACCEL_GROUPED_AGG_MEASURE_COLUMN &&
+                            measure.op != PGACCEL_GROUPED_AGG_MEASURE_SCALAR) ||
+                           (measure.accumulator_kind != PGACCEL_GROUPED_AGG_ACCUM_NUMERIC &&
+                            !(measure.accumulator_kind == PGACCEL_GROUPED_AGG_ACCUM_I64 &&
+                              (measure.value.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_INT32 ||
+                               measure.op == PGACCEL_GROUPED_AGG_MEASURE_SCALAR))) ||
+                           measure.rhs.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_INT32)) ||
+      measure._pad0 != 0 || measure.agg_mask == 0 ||
       (measure.agg_mask & ~PGACCEL_GROUPED_AGG_LANE_ALL_KNOWN) != 0 ||
       ((measure.agg_mask & PGACCEL_GROUPED_AGG_LANE_SUMSQ) != 0 &&
        (measure.agg_mask & PGACCEL_GROUPED_AGG_LANE_SUM) == 0) ||
       measure.op < PGACCEL_GROUPED_AGG_MEASURE_COLUMN ||
-      measure.op > PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR)
+      measure.op > PGACCEL_GROUPED_AGG_MEASURE_SCALAR)
+    return false;
+  if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_SCALAR) {
+    return measure.accumulator_kind == PGACCEL_GROUPED_AGG_ACCUM_I64 &&
+           measure.state_bytes == sizeof(int64_t) &&
+           (measure.agg_mask & ~(PGACCEL_GROUPED_AGG_LANE_SUM | PGACCEL_GROUPED_AGG_LANE_MIN |
+                                 PGACCEL_GROUPED_AGG_LANE_MAX | PGACCEL_GROUPED_AGG_LANE_COUNT)) ==
+               0 &&
+           validate_scalar_view(measure, row_count) &&
+           validate_measure_col(measure.rhs, row_count, predicate_input);
+  }
+  // ADD is initially an exact INT32 expression, never floating/decimal arithmetic.
+  if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_ADD &&
+      (measure.accumulator_kind != PGACCEL_GROUPED_AGG_ACCUM_I64 ||
+       measure.value.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_INT32 ||
+       measure.rhs.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_INT32))
     return false;
   if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR) {
     return measure.agg_mask == PGACCEL_GROUPED_AGG_LANE_COUNT &&
@@ -867,11 +1356,12 @@ bool validate_measure(const pgaccel_grouped_agg_measure& measure, size_t row_cou
 
   const bool rhs_required = measure.op == PGACCEL_GROUPED_AGG_MEASURE_MUL ||
                             measure.op == PGACCEL_GROUPED_AGG_MEASURE_SUB ||
+                            measure.op == PGACCEL_GROUPED_AGG_MEASURE_ADD ||
                             measure.op == PGACCEL_GROUPED_AGG_MEASURE_STATS_PAIR;
   const bool count_only_column = measure.op == PGACCEL_GROUPED_AGG_MEASURE_COLUMN &&
                                  measure.agg_mask == PGACCEL_GROUPED_AGG_LANE_COUNT;
   if (!validate_measure_col(measure.value, row_count, true) ||
-      !validate_measure_col(measure.rhs, row_count, rhs_required))
+      !validate_measure_col(measure.rhs, row_count, rhs_required || predicate_input))
     return false;
   if ((measure.agg_mask &
        (PGACCEL_GROUPED_AGG_LANE_RHS_SUM | PGACCEL_GROUPED_AGG_LANE_RHS_COUNT)) != 0 &&
@@ -938,10 +1428,19 @@ bool validate_measure(const pgaccel_grouped_agg_measure& measure, size_t row_cou
       break;
     case PGACCEL_GROUPED_AGG_ACCUM_NUMERIC:
       if (measure.state_bytes == 0 ||
-          measure.value.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_NUMERIC ||
+          (measure.value.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_NUMERIC &&
+           !wide_integer_numeric(measure)) ||
           (rhs_required && measure.rhs.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_NUMERIC))
         return false;
-      validation->supported = false;
+      if (packed_numeric(measure.value) || wide_integer_numeric(measure)) {
+        const size_t expected_state_bytes =
+            count_only_column ? sizeof(uint64_t)
+                              : numeric_state_bytes(decimal_measure_view(measure));
+        if (measure.state_bytes != expected_state_bytes)
+          return false;
+      } else {
+        validation->supported = false;
+      }
       break;
     case PGACCEL_GROUPED_AGG_ACCUM_INTERVAL:
       if (measure.state_bytes == 0 ||
@@ -958,8 +1457,11 @@ bool validate_measure(const pgaccel_grouped_agg_measure& measure, size_t row_cou
 
 bool validate_filter(const pgaccel_grouped_agg_filter& filter,
                      const pgaccel_grouped_agg_desc& desc) {
+  if (filter.predicate_source == PGACCEL_GROUPED_AGG_PRED_SOURCE_SCALAR)
+    return &filter == &desc.where_filter && exact_dense_scalar_where(desc);
   if (filter.kind < PGACCEL_GROUPED_AGG_FILTER_NONE ||
-      filter.kind > PGACCEL_GROUPED_AGG_FILTER_RECHECK || filter._pad0 != 0 || filter.flags != 0 ||
+      filter.kind > PGACCEL_GROUPED_AGG_FILTER_RECHECK || filter._pad0 != 0 ||
+      (filter.flags & ~PGACCEL_GROUPED_AGG_FILTER_ACCEPT_NULL) != 0 ||
       filter.predicate_range_count < 0 ||
       filter.predicate_range_count > static_cast<int32_t>(PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES))
     return false;
@@ -971,7 +1473,7 @@ bool validate_filter(const pgaccel_grouped_agg_filter& filter,
         filter.value_cmp_opcode == kOpAlways))
     return false;
 
-  const bool scalar = filter.predicate_range_count != 0 || filter.value_cmp_opcode != kOpAlways;
+  const bool scalar = active_ranges(filter) || filter.value_cmp_opcode != kOpAlways;
   if (!scalar) {
     if (filter.predicate_source != 0 || filter.predicate_measure_slot != 0 ||
         !canonical_null(filter.value_cmp_const))
@@ -990,14 +1492,23 @@ bool validate_filter(const pgaccel_grouped_agg_filter& filter,
     return false;
   const pgaccel_grouped_agg_measure& measure = desc.measures[filter.predicate_measure_slot];
   if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR ||
+      (measure.op == PGACCEL_GROUPED_AGG_MEASURE_SCALAR &&
+       filter.predicate_source == PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE) ||
       (filter.predicate_source == PGACCEL_GROUPED_AGG_PRED_SOURCE_RHS &&
-       measure.op != PGACCEL_GROUPED_AGG_MEASURE_STATS_PAIR))
+       measure.op != PGACCEL_GROUPED_AGG_MEASURE_STATS_PAIR &&
+       measure.flags != PGACCEL_GROUPED_AGG_MEASURE_FLAG_FILTER_INPUT))
     return false;
   const pgaccel_grouped_agg_measure_col& col =
       filter.predicate_source == PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE ? measure.value
                                                                        : measure.rhs;
   const int32_t tag = physical_val_tag(col.physical_type);
   if (tag < 0)
+    return false;
+  if (accepts_null(filter) &&
+      (tag != PGACCEL_VAL_INT32 ||
+       (measure.op != PGACCEL_GROUPED_AGG_MEASURE_COLUMN &&
+        measure.op != PGACCEL_GROUPED_AGG_MEASURE_SCALAR && !integer_binary_op(measure.op)) ||
+       filter.value_cmp_opcode != kOpAlways))
     return false;
   for (int32_t i = 0; i < filter.predicate_range_count; ++i) {
     const pgaccel_val& lo = filter.predicate_lo[i];
@@ -1111,6 +1622,18 @@ uint64_t descriptor_shape_fingerprint(const pgaccel_grouped_agg_desc& desc) {
     fingerprint_mix(&fingerprint, measure.agg_mask);
     fingerprint_mix(&fingerprint, static_cast<uint64_t>(measure.accumulator_kind));
     fingerprint_mix(&fingerprint, measure.state_bytes);
+    if (packed_numeric(measure.value)) {
+      const auto& view = numeric_view(measure.value);
+      fingerprint_mix(&fingerprint, static_cast<uint32_t>(view.min_weight));
+      fingerprint_mix(&fingerprint, static_cast<uint32_t>(view.max_weight));
+      fingerprint_mix(&fingerprint, view.max_ndigits);
+    }
+    if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_SCALAR) {
+      const auto& view = scalar_view(measure);
+      fingerprint_mix(&fingerprint, view.word_count);
+      for (size_t word = 0; word < view.word_count; ++word)
+        fingerprint_mix(&fingerprint, static_cast<uint32_t>(view.words[word]));
+    }
     fingerprint_mix(&fingerprint, measure.flags);
     fingerprint_filter(&fingerprint, desc.measure_filters[i]);
   }
@@ -1204,6 +1727,18 @@ pgaccel_status validate_desc(const pgaccel_grouped_agg_desc* desc, Validation* v
   for (size_t i = 0; i < desc->measure_count; ++i) {
     if (!validate_measure(desc->measures[i], desc->row_count, validation))
       return PGACCEL_ERROR;
+    if (desc->measures[i].op == PGACCEL_GROUPED_AGG_MEASURE_SCALAR) {
+      const auto& view = scalar_view(desc->measures[i]);
+      pgaccel_scalar::Proof proof;
+      if (!pgaccel_scalar::validate_program(view.words, view.word_count, &proof))
+        return PGACCEL_ERROR;
+      if (proof.uses_predicate_mask &&
+          (desc->where_filter.predicate_source != PGACCEL_GROUPED_AGG_PRED_SOURCE_SCALAR ||
+           desc->where_filter.predicate_measure_slot != static_cast<int32_t>(i) ||
+           (desc->row_count != 0 && (desc->where_filter.kind != PGACCEL_GROUPED_AGG_FILTER_SQL ||
+                                     desc->where_filter.mask == nullptr))))
+        return PGACCEL_ERROR;
+    }
   }
   for (size_t i = desc->measure_count; i < PGACCEL_GROUPED_AGG_MAX_MEASURES; ++i) {
     if (!bytewise_zero(desc->measures[i]))
@@ -1235,13 +1770,30 @@ pgaccel_status validate_desc(const pgaccel_grouped_agg_desc* desc, Validation* v
   }
 
   if (desc->grouping_mode == PGACCEL_GROUPED_AGG_GROUPING_HASH) {
+    const auto& measure = desc->measures[0];
+    const bool count_column = measure.op == PGACCEL_GROUPED_AGG_MEASURE_COLUMN &&
+                              measure.agg_mask == PGACCEL_GROUPED_AGG_LANE_COUNT &&
+                              measure.accumulator_kind == PGACCEL_GROUPED_AGG_ACCUM_I64 &&
+                              measure.flags == 0;
+    constexpr uint32_t integer_mask = PGACCEL_GROUPED_AGG_LANE_SUM | PGACCEL_GROUPED_AGG_LANE_MIN |
+                                      PGACCEL_GROUPED_AGG_LANE_MAX | PGACCEL_GROUPED_AGG_LANE_COUNT;
+    const bool integer_column = measure.op == PGACCEL_GROUPED_AGG_MEASURE_COLUMN &&
+                                (measure.agg_mask & PGACCEL_GROUPED_AGG_LANE_COUNT) != 0 &&
+                                (measure.agg_mask & ~integer_mask) == 0 &&
+                                measure.value.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_INT32 &&
+                                measure.accumulator_kind == PGACCEL_GROUPED_AGG_ACCUM_I64 &&
+                                measure.flags == 0;
     const bool minimal_hash_slice =
         desc->key_count == 1 && desc->keys[0].source == PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT &&
-        desc->keys[0].values.type == PGACCEL_VAL_INT64 && desc->measure_count == 1 &&
-        desc->measures[0].op == PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR && desc->dim_count == 0 &&
-        desc->row_count <= kHashMaxRows && desc->group_capacity <= kHashMaxGroupCapacity &&
-        canonical_disabled_filter(desc->where_filter) &&
-        canonical_disabled_filter(desc->measure_filters[0]);
+        (desc->keys[0].values.type == PGACCEL_VAL_INT64 ||
+         desc->keys[0].values.type == PGACCEL_VAL_INT32) &&
+        desc->measure_count == 1 &&
+        (measure.op == PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR || count_column || integer_column) &&
+        desc->dim_count == 0 && desc->row_count <= kHashMaxRows &&
+        desc->group_capacity <= kHashMaxGroupCapacity &&
+        (canonical_disabled_filter(desc->where_filter) || exact_sql_mask_filter(desc->where_filter)) &&
+        (canonical_disabled_filter(desc->measure_filters[0]) ||
+         exact_sql_mask_filter(desc->measure_filters[0]));
     // Hash owners identify rows in the current input pointer range. Reusing
     // them across chunks would dereference owners against a different range,
     // so hash/H3 remains deliberately one-shot until that state is redesigned.
@@ -1249,9 +1801,26 @@ pgaccel_status validate_desc(const pgaccel_grouped_agg_desc* desc, Validation* v
       validation->supported = false;
   }
 
+  for (size_t slot = 0; slot < desc->measure_count; ++slot) {
+    if (desc->measures[slot].op == PGACCEL_GROUPED_AGG_MEASURE_SCALAR &&
+        !parallel_dense_multi_integer_structure(*desc))
+      validation->supported = false;
+    if (desc->measures[slot].accumulator_kind == PGACCEL_GROUPED_AGG_ACCUM_NUMERIC &&
+        !parallel_dense_numeric_shape(*desc))
+      validation->supported = false;
+    if (desc->measures[slot].flags == PGACCEL_GROUPED_AGG_MEASURE_FLAG_FILTER_INPUT &&
+        !parallel_dense_numeric_shape(*desc) && !parallel_dense_multi_integer_structure(*desc))
+      validation->supported = false;
+  }
   if (!validation->supported)
     return PGACCEL_UNSUPPORTED;
-  return make_layout(*desc, layout) ? PGACCEL_OK : PGACCEL_ERROR;
+  if (!make_layout(*desc, layout))
+    return PGACCEL_ERROR;
+  for (size_t slot = 0; slot < desc->measure_count; ++slot)
+    if (desc->measures[slot].op == PGACCEL_GROUPED_AGG_MEASURE_SCALAR &&
+        !layout->dense_integer_atomic_one_shot && !layout->dense_integer_parallel)
+      return PGACCEL_UNSUPPORTED;
+  return PGACCEL_OK;
 }
 
 inline bool add_u64(uint64_t lhs, uint64_t rhs, uint64_t* out) {
@@ -1446,7 +2015,7 @@ inline FilterResult evaluate_filter(const pgaccel_grouped_agg_filter& filter,
       mask_uncertain = true;
     }
   }
-  const bool scalar = filter.predicate_range_count != 0 || filter.value_cmp_opcode != kOpAlways;
+  const bool scalar = active_ranges(filter) || filter.value_cmp_opcode != kOpAlways;
   if (!scalar)
     return mask_uncertain ? FilterResult::Uncertain : FilterResult::Accept;
   const pgaccel_grouped_agg_measure& measure = params.measures[filter.predicate_measure_slot];
@@ -1458,8 +2027,9 @@ inline FilterResult evaluate_filter(const pgaccel_grouped_agg_filter& filter,
   if (!load_predicate_value(col, row, &value, &is_null))
     return FilterResult::Error;
   if (is_null)
-    return FilterResult::Reject;
-  if (filter.predicate_range_count != 0) {
+    return accepts_null(filter) ? (mask_uncertain ? FilterResult::Uncertain : FilterResult::Accept)
+                                : FilterResult::Reject;
+  if (active_ranges(filter)) {
     bool in_range = false;
     for (int32_t i = 0; i < filter.predicate_range_count; ++i) {
       if (compare_val(value, kOpGe, filter.predicate_lo[i]) &&
@@ -1533,7 +2103,8 @@ inline pgaccel_grouped_agg_device_error accumulate_i64(const pgaccel_grouped_agg
   if (!null_at(measure.value.nulls, row, &lhs_null))
     return PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
   if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_MUL ||
-      measure.op == PGACCEL_GROUPED_AGG_MEASURE_SUB) {
+      measure.op == PGACCEL_GROUPED_AGG_MEASURE_SUB ||
+      measure.op == PGACCEL_GROUPED_AGG_MEASURE_ADD) {
     if (!null_at(measure.rhs.nulls, row, &rhs_null))
       return PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
   }
@@ -1555,14 +2126,15 @@ inline pgaccel_grouped_agg_device_error accumulate_i64(const pgaccel_grouped_agg
       return PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
     value = static_cast<int64_t>(static_cast<int32_t>(value)) *
             static_cast<int64_t>(static_cast<int32_t>(rhs));
-  } else if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_SUB) {
+  } else if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_SUB ||
+             measure.op == PGACCEL_GROUPED_AGG_MEASURE_ADD) {
     if (!load_i64(measure.rhs, row, &rhs))
       return PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
-    if (!sub_i64(value, rhs, &value))
+    if (!(measure.op == PGACCEL_GROUPED_AGG_MEASURE_ADD ? add_i64(value, rhs, &value)
+                                                        : sub_i64(value, rhs, &value)))
       return PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW;
   }
-  if ((measure.op == PGACCEL_GROUPED_AGG_MEASURE_MUL ||
-       measure.op == PGACCEL_GROUPED_AGG_MEASURE_SUB) &&
+  if (integer_binary_op(measure.op) &&
       measure.value.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_INT32 &&
       measure.rhs.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_INT32 &&
       (value < std::numeric_limits<int32_t>::min() || value > std::numeric_limits<int32_t>::max()))
@@ -1838,8 +2410,8 @@ enum class DenseWeightedRowResult : int32_t {
   Overflow = 3,
 };
 
-inline DenseWeightedRowResult weighted_global_count_for_row(const KernelParams& params,
-                                                            size_t row, uint64_t* weight_out) {
+inline DenseWeightedRowResult weighted_global_count_for_row(const KernelParams& params, size_t row,
+                                                            uint64_t* weight_out) {
   uint64_t weight = 1;
   for (size_t dim_index = 0; dim_index < params.dim_count; ++dim_index) {
     const pgaccel_grouped_agg_dim& dim = params.dims[dim_index];
@@ -1873,20 +2445,27 @@ inline DenseWeightedRowResult weighted_global_count_for_row(const KernelParams& 
 template <bool HasSqlMask, bool HasScalarRange>
 inline FilterResult specialized_dense_integer_where_filter(const KernelParams& params, size_t row,
                                                            int32_t* range_value) {
-  static_assert(!(HasSqlMask && HasScalarRange));
   if constexpr (HasScalarRange) {
-    const pgaccel_grouped_agg_measure_col& col = params.measures[0].value;
+    if constexpr (HasSqlMask) {
+      const auto accepted = specialized_dense_where_filter<true>(params, row);
+      if (accepted != FilterResult::Accept)
+        return accepted;
+    }
+    const auto& filter = params.where_filter;
+    const auto& col = params.measures[filter.predicate_measure_slot].value;
     bool is_null = false;
     if (!null_at(col.nulls, row, &is_null))
       return FilterResult::Error;
     if (is_null)
-      return FilterResult::Reject;
+      return accepts_null(filter) ? FilterResult::Accept : FilterResult::Reject;
     const int32_t value = static_cast<const int32_t*>(col.values)[row];
     *range_value = value;
-    const pgaccel_grouped_agg_filter& filter = params.where_filter;
-    return value >= filter.predicate_lo[0].data.i32 && value <= filter.predicate_hi[0].data.i32
-               ? FilterResult::Accept
-               : FilterResult::Reject;
+    for (int32_t range = 0; range < filter.predicate_range_count; ++range) {
+      if (value >= filter.predicate_lo[range].data.i32 &&
+          value <= filter.predicate_hi[range].data.i32)
+        return FilterResult::Accept;
+    }
+    return FilterResult::Reject;
   } else {
     return specialized_dense_where_filter<HasSqlMask>(params, row);
   }
@@ -1894,22 +2473,79 @@ inline FilterResult specialized_dense_integer_where_filter(const KernelParams& p
 
 template <bool HasMeasureRange>
 inline FilterResult specialized_dense_integer_measure_filter(const KernelParams& params, size_t row,
-                                                             int32_t* range_value) {
+                                                             size_t measure_slot) {
   if constexpr (!HasMeasureRange) {
     return FilterResult::Accept;
   } else {
-    const pgaccel_grouped_agg_measure_col& col = params.measures[0].value;
+    const auto& filter = params.measure_filters[measure_slot];
+    if (!active_ranges(filter))
+      return FilterResult::Accept;
+    const auto& input = params.measures[filter.predicate_measure_slot];
+    const auto& col =
+        filter.predicate_source == PGACCEL_GROUPED_AGG_PRED_SOURCE_RHS ? input.rhs : input.value;
     bool is_null = false;
     if (!null_at(col.nulls, row, &is_null))
       return FilterResult::Error;
     if (is_null)
-      return FilterResult::Reject;
+      return accepts_null(filter) ? FilterResult::Accept : FilterResult::Reject;
     const int32_t value = static_cast<const int32_t*>(col.values)[row];
-    *range_value = value;
-    const pgaccel_grouped_agg_filter& filter = params.measure_filters[0];
-    return value >= filter.predicate_lo[0].data.i32 && value <= filter.predicate_hi[0].data.i32
-               ? FilterResult::Accept
-               : FilterResult::Reject;
+    for (int32_t range = 0; range < filter.predicate_range_count; ++range) {
+      if (value >= filter.predicate_lo[range].data.i32 &&
+          value <= filter.predicate_hi[range].data.i32)
+        return FilterResult::Accept;
+    }
+    return FilterResult::Reject;
+  }
+}
+
+template <bool ReuseWhereValue, bool HasScalarProgram>
+inline uint32_t dense_integer_measure_value(const pgaccel_grouped_agg_measure& measure, size_t row,
+                                            int32_t range_value, int64_t* value, bool* is_null,
+                                            const int8_t* predicate_mask = nullptr);
+
+template <bool HasSqlMask, bool HasScalarRange, bool HasScalarProgram>
+inline FilterResult dense_integer_where_filter(const KernelParams& params, size_t row,
+                                               int32_t* range_value) {
+  if constexpr (HasScalarProgram) {
+    // One dedicated interpreter variant covers the qualified WHERE grammar;
+    // legacy specializations retain their compile-time-only branches.
+    const bool scalar_where =
+        params.where_filter.predicate_source == PGACCEL_GROUPED_AGG_PRED_SOURCE_SCALAR;
+    const bool inline_mask =
+        scalar_where &&
+        static_cast<const ScalarKernelProgram*>(
+            params.measures[params.where_filter.predicate_measure_slot].value.values)
+            ->uses_predicate_mask;
+    if (params.where_filter.kind == PGACCEL_GROUPED_AGG_FILTER_SQL && !inline_mask) {
+      const auto result = specialized_dense_where_filter<true>(params, row);
+      if (result != FilterResult::Accept)
+        return result;
+    }
+    if (scalar_where) {
+      int64_t value = 0;
+      bool is_null = false;
+      const auto failure = dense_integer_measure_value<false, true>(
+          params.measures[params.where_filter.predicate_measure_slot], row, 0, &value, &is_null,
+          inline_mask ? params.where_filter.mask : nullptr);
+      if (failure != 0) {
+        // Preserve the expression's SQLSTATE; returning Error would additionally
+        // mark the batch Invalid and hide arithmetic/date failures.
+        record_failure(*params.meta, failure);
+        return FilterResult::Reject;
+      }
+      if (is_null || value != 1)
+        return FilterResult::Reject;
+      // SpatialAnd remains a conjunction even for a caller-supplied program.
+      // The producer places the mask in its native qualifier order; this final
+      // gate cannot suppress an earlier scalar error or admit a masked-out row.
+      return inline_mask ? specialized_dense_where_filter<true>(params, row) : FilterResult::Accept;
+    }
+    if (active_ranges(params.where_filter))
+      return specialized_dense_integer_where_filter<false, true>(params, row, range_value);
+    return FilterResult::Accept;
+  } else {
+    return specialized_dense_integer_where_filter<HasSqlMask, HasScalarRange>(params, row,
+                                                                              range_value);
   }
 }
 
@@ -1920,6 +2556,97 @@ inline bool atomic_increment_u32(uint32_t* value) {
   // A CAS retry loop turns hot groups into severe device-wide contention and
   // can trip Metal's command-buffer watchdog at the one-million-row H3 scale.
   return count.fetch_add(1) != UINT32_MAX;
+}
+
+// Evaluate strict INT4 arithmetic before any aggregate lane, including COUNT.
+// An aggregate FILTER was already tested by the caller, so rejected rows cannot
+// raise expression overflow. COLUMN COUNT still avoids loading value bytes.
+template <bool ReuseWhereValue, bool HasScalarProgram = false>
+inline uint32_t dense_integer_measure_value(const pgaccel_grouped_agg_measure& measure, size_t row,
+                                            int32_t range_value, int64_t* value, bool* is_null,
+                                            const int8_t* predicate_mask) {
+  if constexpr (HasScalarProgram) {
+    if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_SCALAR) {
+      const auto& program = *static_cast<const ScalarKernelProgram*>(measure.value.values);
+      pgaccel_scalar::Value mask_value{0, 0, 0};
+      if (predicate_mask != nullptr) {
+        const int8_t mask = predicate_mask[row];
+        if (mask >= -1 && mask <= 1)
+          mask_value = {pgaccel_scalar::BOOL, mask == 1 ? 1 : 0, mask == -1 ? 1 : 0};
+      }
+      const auto result = pgaccel_scalar::evaluate(
+          program.words, program.word_count, program.input_count,
+          [&](size_t index) {
+            const auto& input = program.inputs[index];
+            bool missing = false;
+            if (!null_at(input.nulls, row, &missing))
+              return pgaccel_scalar::Value{0, 0, 0};
+            if (missing)
+              return pgaccel_scalar::Value{input.physical_type, 0, 1};
+            const int32_t payload = input.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_BOOL
+                                        ? static_cast<const uint8_t*>(input.values)[row]
+                                        : static_cast<const int32_t*>(input.values)[row];
+            return pgaccel_scalar::Value{input.physical_type, payload, 0};
+          },
+          mask_value);
+      switch (result.status) {
+        case pgaccel_scalar::Status::Invalid:
+          return kFailureInvalid;
+        case pgaccel_scalar::Status::Overflow:
+          return kFailureNumericOverflow;
+        case pgaccel_scalar::Status::DivisionByZero:
+          return kFailureDivisionByZero;
+        case pgaccel_scalar::Status::DateOutOfRange:
+          return kFailureDateOutOfRange;
+        case pgaccel_scalar::Status::Ok:
+          break;
+      }
+      *value = result.value.payload;
+      *is_null = result.value.is_null != 0;
+      return 0;
+    }
+  }
+  bool lhs_null = false;
+  bool rhs_null = false;
+  if (!null_at(measure.value.nulls, row, &lhs_null) ||
+      (integer_binary_op(measure.op) && !null_at(measure.rhs.nulls, row, &rhs_null)))
+    return kFailureInvalid;
+  *is_null = lhs_null || rhs_null;
+  if (*is_null || (measure.op == PGACCEL_GROUPED_AGG_MEASURE_COLUMN &&
+                   measure.agg_mask == PGACCEL_GROUPED_AGG_LANE_COUNT))
+    return 0;
+  *value = ReuseWhereValue ? range_value : static_cast<const int32_t*>(measure.value.values)[row];
+  if (integer_binary_op(measure.op)) {
+    const int64_t rhs = static_cast<const int32_t*>(measure.rhs.values)[row];
+    if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_MUL)
+      *value *= rhs;
+    else if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_SUB)
+      *value -= rhs;
+    else
+      *value += rhs;
+    if (*value < std::numeric_limits<int32_t>::min() ||
+        *value > std::numeric_limits<int32_t>::max())
+      return kFailureNumericOverflow;
+  }
+  return 0;
+}
+
+template <bool ReuseWhereValue, bool HasScalarProgram>
+inline uint32_t dense_integer_value_after_where(const KernelParams& params, size_t slot, size_t row,
+                                                int32_t range_value, int64_t* value,
+                                                bool* is_null) {
+  if constexpr (HasScalarProgram) {
+    if (params.where_filter.predicate_source == PGACCEL_GROUPED_AGG_PRED_SOURCE_SCALAR &&
+        slot == static_cast<size_t>(params.where_filter.predicate_measure_slot)) {
+      // This exact program already returned SQL TRUE for this row. Its
+      // unfiltered Boolean COUNT carrier does not execute the program twice.
+      *value = 1;
+      *is_null = false;
+      return 0;
+    }
+  }
+  return dense_integer_measure_value<ReuseWhereValue, HasScalarProgram>(
+      params.measures[slot], row, range_value, value, is_null);
 }
 
 inline uint64_t hash_u64_key(uint64_t value, bool is_null) {
@@ -1938,7 +2665,12 @@ inline bool load_hash_key(const pgaccel_grouped_agg_key& key, size_t row, bool* 
     *value = 0;
     return true;
   }
-  const uint64_t raw = static_cast<const uint64_t*>(key.values.values)[row];
+  // Canonical sign extension preserves SQL integer equality without a widened
+  // input lane. Compact sorting/output use the same 64-bit representation.
+  const uint64_t raw = key.values.type == PGACCEL_VAL_INT32
+                           ? static_cast<uint64_t>(static_cast<int64_t>(
+                                 static_cast<const int32_t*>(key.values.values)[row]))
+                           : static_cast<const uint64_t*>(key.values.values)[row];
   if ((key.flags & PGACCEL_GROUPED_AGG_KEY_FLAG_H3_PARENT) == 0) {
     *value = raw;
     return true;
@@ -1949,15 +2681,67 @@ inline bool load_hash_key(const pgaccel_grouped_agg_key& key, size_t row, bool* 
   return *value != 0;
 }
 
+inline void atomic_add_u64(AtomicU64Words& target, uint64_t increment);
+inline uint64_t atomic_u64_value(const AtomicU64Words& value);
+
+template <bool CountColumn, bool Filtered = false, bool ValueColumn = false, bool Where = false>
 inline void run_hash_row(KernelParams* params_ptr, size_t row) {
+  static_assert(!ValueColumn || CountColumn);
+  // Any subset/permutation of at most UINT32_MAX INT32 values fits in I64.
+  // Two-word modular addition therefore represents the exact signed sum.
+  static_assert(kHashMaxRows <= UINT32_MAX);
+  static_assert(uint64_t{UINT32_MAX} * uint64_t{INT32_MAX} <= uint64_t{INT64_MAX});
+  static_assert(uint64_t{UINT32_MAX} * (uint64_t{INT32_MAX} + 1) <= (uint64_t{1} << 63));
   KernelParams& params = *params_ptr;
   DeviceMeta& meta = *params.meta;
+  if constexpr (Where) {
+    const int8_t mask = params.where_filter.mask[row];
+    if (mask != PGACCEL_EXPR_TRUE && mask != PGACCEL_EXPR_FALSE && mask != PGACCEL_EXPR_UNCERTAIN) {
+      record_failure(meta, kFailureInvalid);
+      return;
+    }
+    // SQL WHERE rejects before grouping expressions and aggregate arguments.
+    // In particular, rejected rows must not create zero-count groups, consume
+    // group capacity, inspect malformed key/measure NULLs or evaluate fused H3.
+    if (mask != PGACCEL_EXPR_TRUE)
+      return;
+    const size_t shard = 1 + (row & (kHashSelectedShards - 1));
+    if (!atomic_increment_u32(&params.hash_group_count[shard])) {
+      record_failure(meta, kFailureNumericOverflow);
+      return;
+    }
+  }
   const pgaccel_grouped_agg_key& key = params.keys[0];
   bool row_null = false;
   uint64_t row_key = 0;
   if (!load_hash_key(key, row, &row_null, &row_key)) {
     record_failure(meta, kFailureInvalid);
     return;
+  }
+  // FILTER changes this measure's contribution, not group existence. Validate
+  // the key even for rejected rows and retain their occupied hash slots.
+  bool contributes = true;
+  if constexpr (Filtered) {
+    const int8_t mask = params.measure_filters[0].mask[row];
+    if (mask != PGACCEL_EXPR_TRUE && mask != PGACCEL_EXPR_FALSE && mask != PGACCEL_EXPR_UNCERTAIN) {
+      record_failure(meta, kFailureInvalid);
+      return;
+    }
+    contributes = mask == PGACCEL_EXPR_TRUE;  // SQL UNKNOWN, like FALSE, rejects.
+  }
+  if constexpr (CountColumn) {
+    // COUNT-only variants inspect only the canonical NULL sidecar, never
+    // payload values. SUM reads INT32 only after NULL/FILTER acceptance.
+    // A NULL value still establishes its group.
+    // As with PostgreSQL FILTER, rejected rows do not evaluate the measure.
+    if (contributes) {
+      bool value_null = false;
+      if (!null_at(params.measures[0].value.nulls, row, &value_null)) {
+        record_failure(meta, kFailureInvalid);
+        return;
+      }
+      contributes = !value_null;
+    }
   }
   const size_t mask = params.hash_slot_count - 1;
   const size_t start = static_cast<size_t>(hash_u64_key(row_key, row_null)) & mask;
@@ -1972,6 +2756,11 @@ inline void run_hash_row(KernelParams* params_ptr, size_t row) {
       const uint32_t ordinal = emitted.fetch_add(1);
       if (ordinal >= params.group_capacity)
         record_failure(meta, kFailureCapacity);
+      else
+        // Each successful owner CAS has one unique ordinal. Reuse the
+        // otherwise-unused compact HASH group-code lane as an occupied-slot
+        // directory; the following kernel sees it only after all rows finish.
+        params.staged_group_codes[ordinal] = slot;
       count_slot = slot;
       break;
     }
@@ -1999,8 +2788,19 @@ inline void run_hash_row(KernelParams* params_ptr, size_t row) {
     record_failure(meta, kFailureCapacity);
     return;
   }
-  if (!atomic_increment_u32(&params.hash_counts[count_slot]))
+  if (contributes && !atomic_increment_u32(&params.hash_counts[count_slot]))
     record_failure(meta, kFailureNumericOverflow);
+  if constexpr (ValueColumn) {
+    if (contributes) {
+      const int64_t value = static_cast<const int32_t*>(params.measures[0].value.values)[row];
+      if (params.hash_sums != nullptr)
+        atomic_add_u64(params.hash_sums[count_slot], sycl::bit_cast<uint64_t>(value));
+      if (params.hash_mins != nullptr)
+        DeviceAtomic<int32_t>(params.hash_mins[count_slot]).fetch_min(static_cast<int32_t>(value));
+      if (params.hash_maxs != nullptr)
+        DeviceAtomic<int32_t>(params.hash_maxs[count_slot]).fetch_max(static_cast<int32_t>(value));
+    }
+  }
 }
 
 inline bool hash_tuple_less(const uint64_t* keys, const uint8_t* nulls, size_t lhs, size_t rhs) {
@@ -2011,8 +2811,16 @@ inline bool hash_tuple_less(const uint64_t* keys, const uint8_t* nulls, size_t l
   return keys[lhs] < keys[rhs];
 }
 
-inline void swap_hash_tuple(uint64_t* keys, uint8_t* nulls, uint64_t* counts, size_t lhs,
-                            size_t rhs) {
+inline void swap_hash_value(uint64_t* values, size_t lhs, size_t rhs) {
+  if (values != nullptr) {
+    const uint64_t value = values[lhs];
+    values[lhs] = values[rhs];
+    values[rhs] = value;
+  }
+}
+
+inline void swap_hash_tuple(uint64_t* keys, uint8_t* nulls, uint64_t* counts,
+                            const DeviceMeasureBuffers& values, size_t lhs, size_t rhs) {
   const uint64_t key = keys[lhs];
   keys[lhs] = keys[rhs];
   keys[rhs] = key;
@@ -2024,10 +2832,13 @@ inline void swap_hash_tuple(uint64_t* keys, uint8_t* nulls, uint64_t* counts, si
   const uint64_t count = counts[lhs];
   counts[lhs] = counts[rhs];
   counts[rhs] = count;
+  swap_hash_value(values.sum, lhs, rhs);
+  swap_hash_value(values.min, lhs, rhs);
+  swap_hash_value(values.max, lhs, rhs);
 }
 
-inline void sift_hash_heap(uint64_t* keys, uint8_t* nulls, uint64_t* counts, size_t root,
-                           size_t heap_size) {
+inline void sift_hash_heap(uint64_t* keys, uint8_t* nulls, uint64_t* counts,
+                           const DeviceMeasureBuffers& values, size_t root, size_t heap_size) {
   for (;;) {
     if (root >= heap_size / 2)
       return;
@@ -2036,65 +2847,172 @@ inline void sift_hash_heap(uint64_t* keys, uint8_t* nulls, uint64_t* counts, siz
       ++child;
     if (!hash_tuple_less(keys, nulls, root, child))
       return;
-    swap_hash_tuple(keys, nulls, counts, root, child);
+    swap_hash_tuple(keys, nulls, counts, values, root, child);
     root = child;
   }
 }
 
-inline void sort_hash_output(uint64_t* keys, uint8_t* nulls, uint64_t* counts, size_t count) {
+inline void sort_hash_output(uint64_t* keys, uint8_t* nulls, uint64_t* counts,
+                             const DeviceMeasureBuffers& values, size_t count) {
   if (count < 2)
     return;
   for (size_t root = count / 2; root != 0; --root)
-    sift_hash_heap(keys, nulls, counts, root - 1, count);
+    sift_hash_heap(keys, nulls, counts, values, root - 1, count);
   for (size_t heap_size = count; heap_size > 1; --heap_size) {
-    swap_hash_tuple(keys, nulls, counts, 0, heap_size - 1);
-    sift_hash_heap(keys, nulls, counts, 0, heap_size - 1);
+    swap_hash_tuple(keys, nulls, counts, values, 0, heap_size - 1);
+    sift_hash_heap(keys, nulls, counts, values, 0, heap_size - 1);
   }
 }
 
-inline void run_hash_compact_kernel(KernelParams* params_ptr) {
+inline void run_hash_compact_row(KernelParams* params_ptr, size_t output, bool packed_null) {
   KernelParams& params = *params_ptr;
   DeviceMeta& meta = *params.meta;
-  meta.selected = params.row_count;
-  if (meta.failure_flags != 0)
-    return;
   uint64_t* staged_keys = reinterpret_cast<uint64_t*>(params.staged_key_values[0]);
   uint8_t* staged_nulls = params.staged_key_nulls[0];
   uint64_t* staged_counts = params.buffers[0].count;
   const pgaccel_grouped_agg_key& key = params.keys[0];
-  const size_t emitted = *params.hash_group_count;
-  meta.emitted = emitted;
-  size_t output = 0;
-
-  for (size_t slot = 0; slot < params.hash_slot_count; ++slot) {
-    const uint32_t owner = params.hash_owners[slot];
-    if (owner == kHashEmptyOwner)
-      continue;
-    if (owner >= params.row_count || output >= params.group_capacity) {
-      meta.failure_flags |= kFailureInvalid;
-      return;
-    }
-    bool is_null = false;
-    uint64_t output_key = 0;
-    if (!load_hash_key(key, static_cast<size_t>(owner), &is_null, &output_key)) {
-      meta.failure_flags |= kFailureInvalid;
-      return;
-    }
-    if (is_null && staged_nulls == nullptr) {
-      meta.failure_flags |= kFailureInvalid;
-      return;
-    }
-    staged_keys[output] = is_null ? 0 : output_key;
-    if (staged_nulls != nullptr)
-      staged_nulls[output] = is_null ? 1 : 0;
-    staged_counts[output] = static_cast<uint64_t>(params.hash_counts[slot]);
-    ++output;
-  }
-  if (output != emitted) {
-    meta.failure_flags |= kFailureInvalid;
+  const size_t slot = params.staged_group_codes[output];
+  if (slot >= params.hash_slot_count) {
+    record_failure(meta, kFailureInvalid);
     return;
   }
-  sort_hash_output(staged_keys, staged_nulls, staged_counts, output);
+  const uint32_t owner = params.hash_owners[slot];
+  if (owner == kHashEmptyOwner || owner >= params.row_count) {
+    record_failure(meta, kFailureInvalid);
+    return;
+  }
+  bool is_null = false;
+  uint64_t output_key = 0;
+  if (!load_hash_key(key, static_cast<size_t>(owner), &is_null, &output_key) ||
+      (is_null && staged_nulls == nullptr)) {
+    record_failure(meta, kFailureInvalid);
+    return;
+  }
+  staged_keys[output] = is_null ? 0 : output_key;
+  if (staged_nulls != nullptr && !packed_null)
+    staged_nulls[output] = is_null ? 1 : 0;
+  staged_counts[output] = static_cast<uint64_t>(params.hash_counts[slot]) |
+                          (packed_null && is_null ? kHashSortNull : 0);
+  if (params.hash_sums != nullptr)
+    params.buffers[0].sum[output] = atomic_u64_value(params.hash_sums[slot]);
+  if (params.hash_mins != nullptr)
+    params.buffers[0].min[output] =
+        params.hash_counts[slot] == 0
+            ? 0
+            : sycl::bit_cast<uint64_t>(static_cast<int64_t>(params.hash_mins[slot]));
+  if (params.hash_maxs != nullptr)
+    params.buffers[0].max[output] =
+        params.hash_counts[slot] == 0
+            ? 0
+            : sycl::bit_cast<uint64_t>(static_cast<int64_t>(params.hash_maxs[slot]));
+}
+
+inline void run_hash_compact_prepare(KernelParams* params_ptr) {
+  params_ptr->meta->selected = params_ptr->row_count;
+  if (params_ptr->where_filter.kind == PGACCEL_GROUPED_AGG_FILTER_SQL) {
+    uint64_t selected = 0;
+    for (size_t shard = 0; shard < kHashSelectedShards; ++shard)
+      selected += params_ptr->hash_group_count[1 + shard];
+    params_ptr->meta->selected = selected;
+  }
+  params_ptr->meta->emitted = *params_ptr->hash_group_count;
+  if (params_ptr->meta->emitted > params_ptr->group_capacity)
+    params_ptr->meta->failure_flags |= kFailureCapacity;
+}
+
+inline void run_hash_compact_kernel(KernelParams* params_ptr) {
+  run_hash_compact_prepare(params_ptr);
+  if (params_ptr->meta->failure_flags != 0)
+    return;
+  const size_t emitted = *params_ptr->hash_group_count;
+  for (size_t output = 0; output < emitted; ++output)
+    run_hash_compact_row(params_ptr, output, false);
+  if (params_ptr->meta->failure_flags == 0)
+    sort_hash_output(reinterpret_cast<uint64_t*>(params_ptr->staged_key_values[0]),
+                     params_ptr->staged_key_nulls[0], params_ptr->buffers[0].count,
+                     params_ptr->buffers[0], emitted);
+}
+
+// Each work item ranks one tuple against the other sorted half of its merge
+// block. Stable lower/upper bounds give disjoint destinations, including NULL
+// and unsigned high-bit keys. Only private device lanes are written; the usual
+// completion barrier still gates publication of the whole result.
+inline bool hash_sort_tuple_less(const uint64_t* keys, const uint64_t* counts, size_t lhs,
+                                 size_t rhs) {
+  const bool lhs_null = (counts[lhs] & kHashSortNull) != 0;
+  const bool rhs_null = (counts[rhs] & kHashSortNull) != 0;
+  return lhs_null != rhs_null ? lhs_null : keys[lhs] < keys[rhs];
+}
+
+inline void run_hash_merge_row(KernelParams* params, size_t index, size_t count, size_t width,
+                               bool from_staged) {
+  if (params->meta->failure_flags != 0)
+    return;
+  uint64_t* staged_keys = reinterpret_cast<uint64_t*>(params->staged_key_values[0]);
+  uint64_t* src_keys = from_staged ? staged_keys : params->hash_sort_keys;
+  uint64_t* src_counts = from_staged ? params->buffers[0].count : params->hash_sort_counts;
+  uint64_t* dst_keys = from_staged ? params->hash_sort_keys : staged_keys;
+  uint64_t* dst_counts = from_staged ? params->hash_sort_counts : params->buffers[0].count;
+  const size_t base = index / (width * 2) * (width * 2);
+  const size_t middle = sycl::min(base + width, count);
+  const size_t end = sycl::min(base + width * 2, count);
+  const bool left = index < middle;
+  const size_t other_begin = left ? middle : base;
+  size_t low = other_begin;
+  size_t high = left ? end : middle;
+  while (low < high) {
+    const size_t probe = low + (high - low) / 2;
+    const bool precedes = left ? hash_sort_tuple_less(src_keys, src_counts, probe, index)
+                               : !hash_sort_tuple_less(src_keys, src_counts, index, probe);
+    if (precedes)
+      low = probe + 1;
+    else
+      high = probe;
+  }
+  const size_t output = base + index - (left ? base : middle) + low - other_begin;
+  dst_keys[output] = src_keys[index];
+  dst_counts[output] = src_counts[index];
+  if (params->hash_sums != nullptr) {
+    const uint64_t* src_sums = from_staged ? params->buffers[0].sum : params->hash_sort_sums;
+    uint64_t* dst_sums = from_staged ? params->hash_sort_sums : params->buffers[0].sum;
+    dst_sums[output] = src_sums[index];
+  }
+  if (params->hash_mins != nullptr) {
+    const uint64_t* src = from_staged ? params->buffers[0].min : params->hash_sort_mins;
+    uint64_t* dst = from_staged ? params->hash_sort_mins : params->buffers[0].min;
+    dst[output] = src[index];
+  }
+  if (params->hash_maxs != nullptr) {
+    const uint64_t* src = from_staged ? params->buffers[0].max : params->hash_sort_maxs;
+    uint64_t* dst = from_staged ? params->hash_sort_maxs : params->buffers[0].max;
+    dst[output] = src[index];
+  }
+}
+
+inline void run_hash_sort_finish_block(KernelParams* params, size_t block, size_t count,
+                                       bool from_staged) {
+  if (params->meta->failure_flags != 0)
+    return;
+  uint64_t* staged_keys = reinterpret_cast<uint64_t*>(params->staged_key_values[0]);
+  const uint64_t* keys = from_staged ? staged_keys : params->hash_sort_keys;
+  const uint64_t* counts = from_staged ? params->buffers[0].count : params->hash_sort_counts;
+  uint32_t null_word = 0;
+  for (size_t index = block * 4; index < sycl::min(block * 4 + 4, count); ++index) {
+    const uint64_t tagged_count = counts[index];
+    staged_keys[index] = keys[index];
+    params->buffers[0].count[index] = tagged_count & ~kHashSortNull;
+    if (params->hash_sums != nullptr && !from_staged)
+      params->buffers[0].sum[index] = params->hash_sort_sums[index];
+    if (params->hash_mins != nullptr && !from_staged)
+      params->buffers[0].min[index] = params->hash_sort_mins[index];
+    if (params->hash_maxs != nullptr && !from_staged)
+      params->buffers[0].max[index] = params->hash_sort_maxs[index];
+    null_word |= ((tagged_count & kHashSortNull) != 0 ? 1u : 0u) << ((index % 4) * 8);
+  }
+  // Arena lanes are eight-byte aligned and followed by alignment padding.
+  // One aligned word store per work item avoids packed-byte store races.
+  if (params->staged_key_nulls[0] != nullptr)
+    reinterpret_cast<uint32_t*>(params->staged_key_nulls[0])[block] = null_word;
 }
 
 inline void run_hash_init_kernel(KernelParams* params_ptr) {
@@ -2348,6 +3266,39 @@ inline void run_dense_count_commit_kernel(KernelParams* params_ptr) {
   meta.lifecycle_state = kLifecycleFinalized;
 }
 
+constexpr bool dense_integer_atomic_prefix_safe(uint64_t selected, size_t rows) {
+  // Every accepted term fits INT32, so this bound protects every SUM prefix,
+  // not just the final value. Earlier WHERE-rejected rows need not count.
+  return rows <= kDenseIntegerAtomicMaxRows && selected <= kNumericIntegerMaxRows - rows;
+}
+static_assert(dense_integer_atomic_prefix_safe(kNumericIntegerMaxRows - 2, 2));
+static_assert(!dense_integer_atomic_prefix_safe(kNumericIntegerMaxRows - 1, 2));
+static_assert(!dense_integer_atomic_prefix_safe(UINT64_MAX, 1));
+static_assert(!dense_integer_atomic_prefix_safe(0, kDenseIntegerAtomicMaxRows + 1));
+
+inline bool dense_integer_atomic_batch(const KernelParams& params) {
+  return params.dense_integer_atomic_sum != nullptr &&
+         dense_integer_atomic_prefix_safe(params.meta->selected, params.row_count);
+}
+
+inline void reset_dense_integer_atomics(KernelParams& params) {
+  if (params.dense_integer_atomic_sum == nullptr)
+    return;
+  for (size_t group = 0; group < params.group_capacity; ++group) {
+    params.dense_integer_atomic_count[group] = {};
+    for (size_t measure = 0; measure < dense_integer_value_count(params); ++measure) {
+      const size_t index = measure * params.group_capacity + group;
+      params.dense_integer_atomic_sum[index] = {};
+      if (params.dense_integer_atomic_min != nullptr)
+        params.dense_integer_atomic_min[index] = INT32_MAX;
+      if (params.dense_integer_atomic_max != nullptr)
+        params.dense_integer_atomic_max[index] = INT32_MIN;
+      if (params.dense_integer_atomic_nonnull != nullptr)
+        params.dense_integer_atomic_nonnull[index] = {};
+    }
+  }
+}
+
 inline void run_dense_integer_prepare_kernel(KernelParams* params_ptr) {
   KernelParams& params = *params_ptr;
   DeviceMeta& meta = *params.meta;
@@ -2373,15 +3324,10 @@ inline void run_dense_integer_prepare_kernel(KernelParams* params_ptr) {
         if (buffers.nonnull != nullptr)
           buffers.nonnull[group] = 0;
       }
-      if (params.dense_integer_atomic_sum != nullptr) {
-        params.dense_integer_atomic_sum[group] = {};
-        params.dense_integer_atomic_count[group] = {};
-        if (params.dense_integer_atomic_nonnull != nullptr)
-          params.dense_integer_atomic_nonnull[group] = {};
-      }
     }
     if (params.key_count == 0)
       params.active[0] = 1;
+    reset_dense_integer_atomics(params);
     return;
   }
 
@@ -2391,6 +3337,8 @@ inline void run_dense_integer_prepare_kernel(KernelParams* params_ptr) {
     meta.failure_flags |= kFailureInvalid;
     meta.lifecycle_state = kLifecycleFailed;
   }
+  if ((params.execution_flags & PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE) != 0)
+    reset_dense_integer_atomics(params);
 }
 
 inline void atomic_add_u64(AtomicU64Words& target, uint64_t increment) {
@@ -2409,10 +3357,81 @@ inline uint64_t atomic_u64_value(const AtomicU64Words& value) {
   return static_cast<uint64_t>(value.low) | (static_cast<uint64_t>(value.high) << 32);
 }
 
+inline void atomic_increment_dense_integer_count(AtomicU64Words& target) {
+  // One-shot execution and bounded batches use these per-batch counters.
+  // Each row contributes at most one unit to a group or measure; preparation
+  // zeroes both words, and the admission cap prevents a low-word carry.
+  // Keep the existing scratch/commit representation but avoid a redundant
+  // contended high-word atomic for every accepted row.
+  static_assert(kDenseIntegerAtomicMaxRows <= UINT32_MAX);
+  DeviceAtomic<uint32_t>(target.low).fetch_add(1);
+}
+
+template <bool HasScalarRange, bool Multiply, bool HasMeasureRange, bool HasScalarProgram = false>
+inline void accumulate_dense_integer_atomic_measure(KernelParams& params, size_t row, size_t group,
+                                                    size_t measure_slot, int32_t range_value) {
+  const FilterResult measure_filter =
+      specialized_dense_integer_measure_filter<HasMeasureRange>(params, row, measure_slot);
+  if (measure_filter == FilterResult::Error || measure_filter == FilterResult::Uncertain) {
+    record_failure(*params.meta, kFailureInvalid);
+    return;
+  }
+  if (measure_filter == FilterResult::Reject)
+    return;
+
+  const pgaccel_grouped_agg_measure& measure = params.measures[measure_slot];
+  int64_t value = 0;
+  bool is_null = false;
+  const uint32_t expression_failure = dense_integer_value_after_where < HasScalarRange && Multiply,
+                 HasScalarProgram > (params, measure_slot, row, range_value, &value, &is_null);
+  if (expression_failure != 0) {
+    record_failure(*params.meta, expression_failure);
+    return;
+  }
+  if (is_null)
+    return;
+
+  if (measure.agg_mask == PGACCEL_GROUPED_AGG_LANE_COUNT) {
+    const bool statically_nonnull =
+        measure.op != PGACCEL_GROUPED_AGG_MEASURE_SCALAR &&
+        !active_ranges(params.measure_filters[measure_slot]) && measure.value.nulls == nullptr &&
+        (!integer_binary_op(measure.op) || measure.rhs.nulls == nullptr);
+    if (!statically_nonnull)
+      atomic_increment_dense_integer_count(
+          params.dense_integer_atomic_nonnull[measure_slot * params.group_capacity + group]);
+    return;
+  }
+
+  // This path is capped at one million rows. Every accepted term is int4, so
+  // its absolute SUM is below INT64_MAX and modular atomic addition is exact.
+  const size_t value_group = measure_slot * params.group_capacity + group;
+  if (measure.agg_mask & PGACCEL_GROUPED_AGG_LANE_SUM)
+    atomic_add_u64(params.dense_integer_atomic_sum[value_group], sycl::bit_cast<uint64_t>(value));
+  // Every accepted value, including a checked int4 product, fits signed int32.
+  // Separate non-NULL counts distinguish an empty state from either endpoint.
+  if (measure.agg_mask & PGACCEL_GROUPED_AGG_LANE_MIN)
+    DeviceAtomic<int32_t>(params.dense_integer_atomic_min[value_group])
+        .fetch_min(static_cast<int32_t>(value));
+  if (measure.agg_mask & PGACCEL_GROUPED_AGG_LANE_MAX)
+    DeviceAtomic<int32_t>(params.dense_integer_atomic_max[value_group])
+        .fetch_max(static_cast<int32_t>(value));
+  const bool statically_nonnull = measure.op != PGACCEL_GROUPED_AGG_MEASURE_SCALAR &&
+                                  !active_ranges(params.measure_filters[measure_slot]) &&
+                                  measure.value.nulls == nullptr &&
+                                  (!integer_binary_op(measure.op) || measure.rhs.nulls == nullptr);
+  if (!statically_nonnull)
+    atomic_increment_dense_integer_count(params.dense_integer_atomic_nonnull[value_group]);
+}
+
 template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply,
-          bool HasMeasureRange>
-inline void run_dense_integer_atomic_row(KernelParams* params_ptr, size_t row) {
+          bool HasMeasureRange, bool HasScalarProgram = false>
+inline void run_dense_integer_atomic_row(KernelParams* params_ptr, size_t index) {
   KernelParams& params = *params_ptr;
+  if (!dense_integer_atomic_batch(params))
+    return;
+  const size_t worker = index / params.row_count;
+  const size_t measure_slot = HasScalarProgram ? dense_integer_worker_slot(params, worker) : worker;
+  const size_t row = index % params.row_count;
   size_t group = 0;
   switch (specialized_dense_group_for_row<HasMembership>(params, row, &group)) {
     case DenseRowResult::Reject:
@@ -2425,7 +3444,8 @@ inline void run_dense_integer_atomic_row(KernelParams* params_ptr, size_t row) {
   }
   int32_t range_value = 0;
   const FilterResult filter =
-      specialized_dense_integer_where_filter<HasSqlMask, HasScalarRange>(params, row, &range_value);
+      dense_integer_where_filter<HasSqlMask, HasScalarRange, HasScalarProgram>(params, row,
+                                                                               &range_value);
   if (filter == FilterResult::Error || filter == FilterResult::Uncertain) {
     record_failure(*params.meta, kFailureInvalid);
     return;
@@ -2433,56 +3453,11 @@ inline void run_dense_integer_atomic_row(KernelParams* params_ptr, size_t row) {
   if (filter == FilterResult::Reject)
     return;
 
-  atomic_add_u64(params.dense_integer_atomic_count[group], 1);
-
-  int32_t measure_range_value = 0;
-  const FilterResult measure_filter =
-      specialized_dense_integer_measure_filter<HasMeasureRange>(params, row, &measure_range_value);
-  if (measure_filter == FilterResult::Error || measure_filter == FilterResult::Uncertain) {
-    record_failure(*params.meta, kFailureInvalid);
-    return;
-  }
-  if (measure_filter == FilterResult::Reject)
-    return;
-
-  const pgaccel_grouped_agg_measure& measure = params.measures[0];
-  bool lhs_null = false;
-  if constexpr (!HasScalarRange && !HasMeasureRange) {
-    if (!null_at(measure.value.nulls, row, &lhs_null)) {
-      record_failure(*params.meta, kFailureInvalid);
-      return;
-    }
-  }
-  bool rhs_null = false;
-  if constexpr (Multiply) {
-    if (!null_at(measure.rhs.nulls, row, &rhs_null)) {
-      record_failure(*params.meta, kFailureInvalid);
-      return;
-    }
-  }
-  if (lhs_null || rhs_null)
-    return;
-
-  int64_t value = HasScalarRange    ? range_value
-                  : HasMeasureRange ? measure_range_value
-                                    : static_cast<const int32_t*>(measure.value.values)[row];
-  if constexpr (Multiply) {
-    const int64_t rhs = static_cast<const int32_t*>(measure.rhs.values)[row];
-    value *= rhs;
-    if (value < std::numeric_limits<int32_t>::min() ||
-        value > std::numeric_limits<int32_t>::max()) {
-      record_failure(*params.meta, kFailureNumericOverflow);
-      return;
-    }
-  }
-
-  // This path is capped at one million rows. Every accepted term is int4, so
-  // its absolute SUM is below INT64_MAX and modular atomic addition is exact.
-  atomic_add_u64(params.dense_integer_atomic_sum[group], sycl::bit_cast<uint64_t>(value));
-  const bool statically_nonnull = !HasMeasureRange && measure.value.nulls == nullptr &&
-                                  (!Multiply || measure.rhs.nulls == nullptr);
-  if (!statically_nonnull)
-    atomic_add_u64(params.dense_integer_atomic_nonnull[group], 1);
+  if (worker == 0)
+    atomic_increment_dense_integer_count(params.dense_integer_atomic_count[group]);
+  accumulate_dense_integer_atomic_measure<HasScalarRange, Multiply, HasMeasureRange,
+                                          HasScalarProgram>(params, row, group, measure_slot,
+                                                            range_value);
 }
 
 inline void run_dense_integer_atomic_commit_kernel(KernelParams* params_ptr) {
@@ -2493,18 +3468,62 @@ inline void run_dense_integer_atomic_commit_kernel(KernelParams* params_ptr) {
     return;
   }
 
-  const pgaccel_grouped_agg_measure& measure = params.measures[0];
-  const bool statically_nonnull =
-      measure.value.nulls == nullptr &&
-      (measure.op != PGACCEL_GROUPED_AGG_MEASURE_MUL || measure.rhs.nulls == nullptr) &&
-      params.measure_filters[0].predicate_range_count == 0;
+  const size_t values = dense_integer_value_count(params);
   uint64_t selected = 0;
-  for (size_t group = 0; group < params.group_capacity; ++group) {
+  const bool accumulate = (params.execution_flags & PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE) != 0;
+  for (size_t group = 0; accumulate && group < params.group_capacity; ++group) {
     const uint64_t count = atomic_u64_value(params.dense_integer_atomic_count[group]);
-    params.buffers[0].sum[group] = atomic_u64_value(params.dense_integer_atomic_sum[group]);
-    params.buffers[0].nonnull[group] =
-        statically_nonnull ? count : atomic_u64_value(params.dense_integer_atomic_nonnull[group]);
-    params.buffers[1].count[group] = count;
+    for (size_t slot = 0; slot < values; ++slot) {
+      const auto& measure = params.measures[slot];
+      const bool statically_nonnull =
+          measure.op != PGACCEL_GROUPED_AGG_MEASURE_SCALAR && measure.value.nulls == nullptr &&
+          (!integer_binary_op(measure.op) || measure.rhs.nulls == nullptr) &&
+          !active_ranges(params.measure_filters[slot]);
+      const size_t index = slot * params.group_capacity + group;
+      auto& buffers = params.buffers[slot];
+      if (buffers.sum != nullptr) {
+        int64_t sum = 0;
+        if (!add_i64(
+                sycl::bit_cast<int64_t>(buffers.sum[group]),
+                sycl::bit_cast<int64_t>(atomic_u64_value(params.dense_integer_atomic_sum[index])),
+                &sum)) {
+          meta.failure_flags = kFailureNumericOverflow;
+          meta.lifecycle_state = kLifecycleFailed;
+          return;
+        }
+        buffers.sum[group] = sycl::bit_cast<uint64_t>(sum);
+      }
+      const bool where_carrier =
+          dense_integer_elides_where_carrier(params) &&
+          slot == static_cast<size_t>(params.where_filter.predicate_measure_slot);
+      const uint64_t nonnull = (statically_nonnull || where_carrier)
+                                   ? count
+                                   : atomic_u64_value(params.dense_integer_atomic_nonnull[index]);
+      const uint64_t previous = buffers.nonnull[group];
+      if (nonnull != 0 && buffers.min != nullptr) {
+        const int64_t value = params.dense_integer_atomic_min[index];
+        if (previous == 0 || value < sycl::bit_cast<int64_t>(buffers.min[group]))
+          buffers.min[group] = sycl::bit_cast<uint64_t>(value);
+      }
+      if (nonnull != 0 && buffers.max != nullptr) {
+        const int64_t value = params.dense_integer_atomic_max[index];
+        if (previous == 0 || value > sycl::bit_cast<int64_t>(buffers.max[group]))
+          buffers.max[group] = sycl::bit_cast<uint64_t>(value);
+      }
+      if (!add_u64(previous, nonnull, &buffers.nonnull[group])) {
+        meta.failure_flags = kFailureNumericOverflow;
+        meta.lifecycle_state = kLifecycleFailed;
+        return;
+      }
+      if (buffers.count != nullptr)
+        buffers.count[group] = buffers.nonnull[group];
+    }
+    if (values != params.measure_count && !add_u64(params.buffers[values].count[group], count,
+                                                   &params.buffers[values].count[group])) {
+      meta.failure_flags = kFailureNumericOverflow;
+      meta.lifecycle_state = kLifecycleFailed;
+      return;
+    }
     if (!add_u64(selected, count, &selected)) {
       meta.failure_flags = kFailureNumericOverflow;
       meta.lifecycle_state = kLifecycleFailed;
@@ -2519,6 +3538,9 @@ inline void run_dense_integer_atomic_commit_kernel(KernelParams* params_ptr) {
     return;
   }
 
+  if ((params.execution_flags & PGACCEL_GROUPED_AGG_EXEC_FINALIZE) == 0)
+    return;
+
   meta.emitted = 0;
   for (size_t group = 0; group < params.group_capacity; ++group) {
     stage_keys(params, group, group);
@@ -2529,10 +3551,15 @@ inline void run_dense_integer_atomic_commit_kernel(KernelParams* params_ptr) {
 }
 
 template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply,
-          bool HasMeasureRange>
-inline void run_dense_integer_chunk(KernelParams* params_ptr, size_t chunk) {
+          bool HasMeasureRange, bool HasScalarProgram = false>
+inline void run_dense_integer_chunk(KernelParams* params_ptr, size_t index) {
   KernelParams& params = *params_ptr;
+  if (dense_integer_atomic_batch(params))
+    return;
   const size_t chunk_count = params.dense_integer_chunk_count;
+  const size_t worker = index / chunk_count;
+  const size_t measure_slot = HasScalarProgram ? dense_integer_worker_slot(params, worker) : worker;
+  const size_t chunk = index % chunk_count;
   const size_t first_row = chunk * kDenseIntegerChunkRows;
   const size_t remaining = params.row_count - first_row;
   const size_t chunk_rows = remaining < kDenseIntegerChunkRows ? remaining : kDenseIntegerChunkRows;
@@ -2550,20 +3577,23 @@ inline void run_dense_integer_chunk(KernelParams* params_ptr, size_t chunk) {
         break;
     }
     int32_t range_value = 0;
-    const FilterResult filter = specialized_dense_integer_where_filter<HasSqlMask, HasScalarRange>(
-        params, row, &range_value);
+    const FilterResult filter =
+        dense_integer_where_filter<HasSqlMask, HasScalarRange, HasScalarProgram>(params, row,
+                                                                                 &range_value);
     if (filter == FilterResult::Error || filter == FilterResult::Uncertain) {
       record_failure(*params.meta, kFailureInvalid);
       return;
     }
     if (filter == FilterResult::Reject)
       continue;
-    DenseIntegerPartial& partial = params.dense_integer_partials[row_group * chunk_count + chunk];
+    DenseIntegerPartial& partial =
+        params.dense_integer_partials[(measure_slot * params.group_capacity + row_group) *
+                                          chunk_count +
+                                      chunk];
     ++partial.rows;
 
-    int32_t measure_range_value = 0;
-    const FilterResult measure_filter = specialized_dense_integer_measure_filter<HasMeasureRange>(
-        params, row, &measure_range_value);
+    const FilterResult measure_filter =
+        specialized_dense_integer_measure_filter<HasMeasureRange>(params, row, measure_slot);
     if (measure_filter == FilterResult::Error || measure_filter == FilterResult::Uncertain) {
       record_failure(*params.meta, kFailureInvalid);
       return;
@@ -2571,38 +3601,25 @@ inline void run_dense_integer_chunk(KernelParams* params_ptr, size_t chunk) {
     if (measure_filter == FilterResult::Reject)
       continue;
 
-    const pgaccel_grouped_agg_measure& measure = params.measures[0];
-    bool lhs_null = false;
-    if constexpr (!HasScalarRange && !HasMeasureRange) {
-      if (!null_at(measure.value.nulls, row, &lhs_null)) {
-        record_failure(*params.meta, kFailureInvalid);
-        return;
-      }
+    const pgaccel_grouped_agg_measure& measure = params.measures[measure_slot];
+    int64_t value = 0;
+    bool is_null = false;
+    const uint32_t expression_failure =
+                       dense_integer_value_after_where < HasScalarRange && Multiply,
+                   HasScalarProgram > (params, measure_slot, row, range_value, &value, &is_null);
+    if (expression_failure != 0) {
+      record_failure(*params.meta, expression_failure);
+      return;
     }
-    bool rhs_null = false;
-    if constexpr (Multiply) {
-      if (!null_at(measure.rhs.nulls, row, &rhs_null)) {
-        record_failure(*params.meta, kFailureInvalid);
-        return;
-      }
-    }
-    if (lhs_null || rhs_null)
+    if (is_null)
       continue;
-    int64_t value = HasScalarRange    ? range_value
-                    : HasMeasureRange ? measure_range_value
-                                      : static_cast<const int32_t*>(measure.value.values)[row];
-    if constexpr (Multiply) {
-      const int64_t rhs = static_cast<const int32_t*>(measure.rhs.values)[row];
-      value *= rhs;
-      // PostgreSQL evaluates int4 * int4 before widening the SUM transition.
-      if (value < std::numeric_limits<int32_t>::min() ||
-          value > std::numeric_limits<int32_t>::max()) {
-        record_failure(*params.meta, kFailureNumericOverflow);
-        return;
-      }
+    if (measure.agg_mask == PGACCEL_GROUPED_AGG_LANE_COUNT) {
+      ++partial.nonnull;
+      continue;
     }
     int64_t next_sum = 0;
-    if (!add_i64(partial.sum, value, &next_sum)) {
+    if ((measure.agg_mask & PGACCEL_GROUPED_AGG_LANE_SUM) &&
+        !add_i64(partial.sum, value, &next_sum)) {
       record_failure(*params.meta, kFailureNumericOverflow);
       return;
     }
@@ -2651,13 +3668,15 @@ inline void merge_ordered_dense_integer_partial(DenseIntegerPartial* left,
 }
 
 template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply,
-          bool HasMeasureRange>
+          bool HasMeasureRange, bool HasScalarProgram = false>
 inline void
 run_dense_integer_workgroup(KernelParams* params_ptr, sycl::nd_item<1> item,
                             const sycl::local_accessor<DenseIntegerPartial, 1>& local_partials) {
   KernelParams& params = *params_ptr;
   const size_t local_id = item.get_local_linear_id();
-  const size_t workgroup = item.get_group_linear_id();
+  const size_t worker = item.get_group_linear_id() / params.dense_integer_chunk_count;
+  const size_t measure_slot = HasScalarProgram ? dense_integer_worker_slot(params, worker) : worker;
+  const size_t workgroup = item.get_group_linear_id() % params.dense_integer_chunk_count;
   const size_t local_base = local_id * params.group_capacity;
   for (size_t group = 0; group < params.group_capacity; ++group)
     local_partials[local_base + group] = {};
@@ -2676,8 +3695,9 @@ run_dense_integer_workgroup(KernelParams* params_ptr, sycl::nd_item<1> item,
     if (grouped == DenseRowResult::Reject)
       continue;
     int32_t range_value = 0;
-    const FilterResult filter = specialized_dense_integer_where_filter<HasSqlMask, HasScalarRange>(
-        params, row, &range_value);
+    const FilterResult filter =
+        dense_integer_where_filter<HasSqlMask, HasScalarRange, HasScalarProgram>(params, row,
+                                                                                 &range_value);
     if (filter == FilterResult::Error || filter == FilterResult::Uncertain) {
       record_failure(*params.meta, kFailureInvalid);
       continue;
@@ -2687,47 +3707,34 @@ run_dense_integer_workgroup(KernelParams* params_ptr, sycl::nd_item<1> item,
 
     DenseIntegerPartial& partial = local_partials[local_base + group];
     ++partial.rows;
-    int32_t measure_range_value = 0;
-    const FilterResult measure_filter = specialized_dense_integer_measure_filter<HasMeasureRange>(
-        params, row, &measure_range_value);
+    const FilterResult measure_filter =
+        specialized_dense_integer_measure_filter<HasMeasureRange>(params, row, measure_slot);
     if (measure_filter == FilterResult::Error || measure_filter == FilterResult::Uncertain) {
       partial.failure_flags |= kFailureInvalid;
       continue;
     }
     if (measure_filter == FilterResult::Reject)
       continue;
-    const pgaccel_grouped_agg_measure& measure = params.measures[0];
-    bool lhs_null = false;
-    if constexpr (!HasScalarRange && !HasMeasureRange) {
-      if (!null_at(measure.value.nulls, row, &lhs_null)) {
-        partial.failure_flags |= kFailureInvalid;
-        continue;
-      }
+    const pgaccel_grouped_agg_measure& measure = params.measures[measure_slot];
+    int64_t value = 0;
+    bool is_null = false;
+    const uint32_t expression_failure =
+                       dense_integer_value_after_where < HasScalarRange && Multiply,
+                   HasScalarProgram > (params, measure_slot, row, range_value, &value, &is_null);
+    if (expression_failure != 0) {
+      partial.failure_flags |= expression_failure;
+      continue;
     }
-    bool rhs_null = false;
-    if constexpr (Multiply) {
-      if (!null_at(measure.rhs.nulls, row, &rhs_null)) {
-        partial.failure_flags |= kFailureInvalid;
-        continue;
-      }
-    }
-    if (lhs_null || rhs_null)
+    if (is_null)
       continue;
 
-    int64_t value = HasScalarRange    ? range_value
-                    : HasMeasureRange ? measure_range_value
-                                      : static_cast<const int32_t*>(measure.value.values)[row];
-    if constexpr (Multiply) {
-      const int64_t rhs = static_cast<const int32_t*>(measure.rhs.values)[row];
-      value *= rhs;
-      if (value < std::numeric_limits<int32_t>::min() ||
-          value > std::numeric_limits<int32_t>::max()) {
-        partial.failure_flags |= kFailureNumericOverflow;
-        continue;
-      }
+    if (measure.agg_mask == PGACCEL_GROUPED_AGG_LANE_COUNT) {
+      ++partial.nonnull;
+      continue;
     }
     int64_t next_sum = 0;
-    if (!add_i64(partial.sum, value, &next_sum)) {
+    if ((measure.agg_mask & PGACCEL_GROUPED_AGG_LANE_SUM) &&
+        !add_i64(partial.sum, value, &next_sum)) {
       partial.failure_flags |= kFailureNumericOverflow;
       continue;
     }
@@ -2754,25 +3761,37 @@ run_dense_integer_workgroup(KernelParams* params_ptr, sycl::nd_item<1> item,
   }
   if (local_id == 0) {
     for (size_t group = 0; group < params.group_capacity; ++group) {
-      params.dense_integer_partials[group * params.dense_integer_chunk_count + workgroup] =
-          local_partials[group];
+      params.dense_integer_partials[(measure_slot * params.group_capacity + group) *
+                                        params.dense_integer_chunk_count +
+                                    workgroup] = local_partials[group];
     }
   }
 }
 
-inline void run_dense_integer_reduce(KernelParams* params_ptr, size_t group) {
+inline void run_dense_integer_reduce(KernelParams* params_ptr, size_t index) {
   KernelParams& params = *params_ptr;
-  DeviceMeasureBuffers& value_buffers = params.buffers[0];
-  DeviceMeasureBuffers& count_buffers = params.buffers[1];
-  int64_t sum = sycl::bit_cast<int64_t>(value_buffers.sum[group]);
+  if (dense_integer_atomic_batch(params))
+    return;
+  const size_t worker = index / params.group_capacity;
+  const size_t measure_slot = dense_integer_worker_slot(params, worker);
+  const size_t group = index % params.group_capacity;
+  const size_t values = dense_integer_value_count(params);
+  DeviceMeasureBuffers& value_buffers = params.buffers[measure_slot];
+  int64_t sum =
+      value_buffers.sum != nullptr ? sycl::bit_cast<int64_t>(value_buffers.sum[group]) : 0;
   const bool tracks_min = value_buffers.min != nullptr;
   const bool tracks_max = value_buffers.max != nullptr;
   int64_t min = tracks_min ? sycl::bit_cast<int64_t>(value_buffers.min[group]) : 0;
   int64_t max = tracks_max ? sycl::bit_cast<int64_t>(value_buffers.max[group]) : 0;
   uint64_t nonnull = value_buffers.nonnull[group];
-  uint64_t count = count_buffers.count[group];
-  bool active = params.active[group] != 0;
-  const size_t first_partial = group * params.dense_integer_chunk_count;
+  // Selected-row partials still activate all-NULL groups and feed meta.selected,
+  // but a query need not request or allocate a separate COUNT(*) output lane.
+  const bool tracks_count = worker == 0 && values != params.measure_count;
+  uint64_t count = tracks_count ? params.buffers[values].count[group] : 0;
+  const uint64_t previous_count = count;
+  bool active = worker == 0 && params.active[group] != 0;
+  const size_t first_partial =
+      (measure_slot * params.group_capacity + group) * params.dense_integer_chunk_count;
 
   for (size_t chunk = 0; chunk < params.dense_integer_chunk_count; ++chunk) {
     const DenseIntegerPartial& partial = params.dense_integer_partials[first_partial + chunk];
@@ -2807,14 +3826,35 @@ inline void run_dense_integer_reduce(KernelParams* params_ptr, size_t group) {
     nonnull = next_nonnull;
   }
 
-  value_buffers.sum[group] = sycl::bit_cast<uint64_t>(sum);
+  if (value_buffers.sum != nullptr)
+    value_buffers.sum[group] = sycl::bit_cast<uint64_t>(sum);
   if (tracks_min)
     value_buffers.min[group] = sycl::bit_cast<uint64_t>(min);
   if (tracks_max)
     value_buffers.max[group] = sycl::bit_cast<uint64_t>(max);
   value_buffers.nonnull[group] = nonnull;
-  count_buffers.count[group] = count;
-  params.active[group] = active ? 1 : 0;
+  if (value_buffers.count != nullptr)
+    value_buffers.count[group] = nonnull;
+  if (tracks_count)
+    params.buffers[values].count[group] = count;
+  if (worker == 0) {
+    if (dense_integer_elides_where_carrier(params)) {
+      auto& carrier = params.buffers[params.where_filter.predicate_measure_slot];
+      if (!add_u64(carrier.nonnull[group], count - previous_count, &carrier.nonnull[group])) {
+        record_failure(*params.meta, kFailureNumericOverflow);
+        return;
+      }
+      if (carrier.count != nullptr)
+        carrier.count[group] = carrier.nonnull[group];
+    }
+    params.active[group] = active ? 1 : 0;
+    // This work item has consumed every partial for its group. Reuse its
+    // first row-count word for the checked batch delta, not the accumulated
+    // COUNT(*) total. No other work item reads this group's partial span.
+    // Commit then visits groups only, avoiding a long serial scan over the
+    // complete (up to 32 MiB) partial arena on display-attached GPUs.
+    params.dense_integer_partials[first_partial].rows = count - previous_count;
+  }
 }
 
 inline void run_dense_integer_commit_kernel(KernelParams* params_ptr) {
@@ -2829,9 +3869,12 @@ inline void run_dense_integer_commit_kernel(KernelParams* params_ptr) {
   }
   if (accumulate) {
     uint64_t selected = 0;
-    const size_t partial_count = params.group_capacity * params.dense_integer_chunk_count;
-    for (size_t partial = 0; partial < partial_count; ++partial) {
-      if (!add_u64(selected, params.dense_integer_partials[partial].rows, &selected)) {
+    for (size_t group = 0; params.dense_integer_chunk_count != 0 && group < params.group_capacity;
+         ++group) {
+      const size_t first_partial =
+          (dense_integer_worker_slot(params, 0) * params.group_capacity + group) *
+          params.dense_integer_chunk_count;
+      if (!add_u64(selected, params.dense_integer_partials[first_partial].rows, &selected)) {
         meta.failure_flags = kFailureNumericOverflow;
         meta.lifecycle_state = kLifecycleFailed;
         return;
@@ -2853,6 +3896,314 @@ inline void run_dense_integer_commit_kernel(KernelParams* params_ptr) {
       ++meta.emitted;
   }
   meta.lifecycle_state = kLifecycleFinalized;
+}
+
+inline void run_numeric_prepare(KernelParams* ptr) {
+  KernelParams& params = *ptr;
+  DeviceMeta& meta = *params.meta;
+  if ((params.execution_flags & PGACCEL_GROUPED_AGG_EXEC_RESET) != 0) {
+    meta = {};
+    meta.lifecycle_cookie = kLifecycleCookie;
+    meta.shape_fingerprint = params.shape_fingerprint;
+    meta.lifecycle_state = kLifecycleActive;
+  } else if (meta.lifecycle_cookie != kLifecycleCookie ||
+             meta.shape_fingerprint != params.shape_fingerprint ||
+             meta.lifecycle_state != kLifecycleActive || meta.failure_flags != 0) {
+    meta.failure_flags |= kFailureInvalid;
+    meta.lifecycle_state = kLifecycleFailed;
+    return;
+  }
+  if ((params.execution_flags & PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE) != 0) {
+    // Until FINALIZE, selected tracks all input rows, conservatively including
+    // WHERE rejects. This bounds the entire lifecycle before launching work.
+    // FINALIZE replaces it with the accepted group-row total for publication.
+    const uint64_t maximum = numeric_max_rows(params);
+    if (meta.selected > maximum || params.row_count > maximum - meta.selected) {
+      meta.failure_flags |= kFailureInvalid;
+      meta.lifecycle_state = kLifecycleFailed;
+      return;
+    }
+    meta.selected += params.row_count;
+  }
+}
+
+// Admission guarantees an INT32 input and exact, mask-free ranges: VALUE for
+// WHERE or same-slot RHS for an aggregate predicate.
+// Specialize singleton ranges once on the host so IN/equality predicates do
+// one comparison, without per-row tag dispatch or endpoint equality checks.
+inline FilterResult evaluate_numeric_range(const pgaccel_grouped_agg_measure_col& col,
+                                           const pgaccel_grouped_agg_filter& filter,
+                                           uint32_t singletons, size_t row) {
+  bool is_null = false;
+  if (!null_at(col.nulls, row, &is_null))
+    return FilterResult::Error;
+  if (is_null)
+    return accepts_null(filter) ? FilterResult::Accept : FilterResult::Reject;
+  const int32_t value = static_cast<const int32_t*>(col.values)[row];
+  for (int32_t i = 0; i < filter.predicate_range_count; ++i) {
+    const int32_t lo = filter.predicate_lo[i].data.i32;
+    if ((singletons & (uint32_t{1} << i)) != 0) {
+      if (value == lo)
+        return FilterResult::Accept;
+    } else if (value >= lo && value <= filter.predicate_hi[i].data.i32) {
+      return FilterResult::Accept;
+    }
+  }
+  return FilterResult::Reject;
+}
+
+inline void run_numeric_row(KernelParams* ptr, size_t row) {
+  KernelParams& params = *ptr;
+  DeviceAtomic<uint32_t> failure(params.meta->failure_flags);
+  if (failure.load() != 0)
+    return;
+  const auto& where = params.where_filter;
+  FilterResult accepted = where.kind == PGACCEL_GROUPED_AGG_FILTER_SQL
+                              ? specialized_dense_where_filter<true>(params, row)
+                              : FilterResult::Accept;
+  if (accepted == FilterResult::Accept && active_ranges(where))
+    accepted = evaluate_numeric_range(params.measures[where.predicate_measure_slot].value, where,
+                                      params.numeric_where_singletons, row);
+  if (accepted == FilterResult::Reject)
+    return;
+  if (accepted != FilterResult::Accept) {
+    record_failure(*params.meta, kFailureInvalid);
+    return;
+  }
+  size_t group = 0;
+  if (dense_group_for_row(params, row, &group) != DenseRowResult::Accept) {
+    record_failure(*params.meta, kFailureInvalid);
+    return;
+  }
+  atomic_add_u64(params.numeric_rows[group], 1);
+  for (size_t slot = 0; slot < dense_integer_value_count(params); ++slot) {
+    if (params.measures[slot].flags == PGACCEL_GROUPED_AGG_MEASURE_FLAG_FILTER_INPUT) {
+      const FilterResult filter =
+          evaluate_numeric_range(params.measures[slot].rhs, params.measure_filters[slot],
+                                 params.numeric_predicate_singletons[slot], row);
+      if (filter == FilterResult::Reject)
+        continue;
+      if (filter != FilterResult::Accept) {
+        record_failure(*params.meta, kFailureInvalid);
+        return;
+      }
+    }
+    bool is_null = false;
+    if (!null_at(params.measures[slot].value.nulls, row, &is_null)) {
+      record_failure(*params.meta, kFailureInvalid);
+      return;
+    }
+    if (is_null)
+      continue;
+    NumericGroupState& state = params.numeric_groups[slot][group];
+    atomic_add_u64(state.nonnull, 1);
+    // A hidden SUM would introduce errors that SQL COUNT must not raise.
+    if ((params.measures[slot].agg_mask & PGACCEL_GROUPED_AGG_LANE_SUM) == 0)
+      continue;
+    if (params.measures[slot].accumulator_kind == PGACCEL_GROUPED_AGG_ACCUM_I64) {
+      const int64_t value = static_cast<const int32_t*>(params.measures[slot].value.values)[row];
+      const size_t offset = group * params.numeric_shards[slot] + row % params.numeric_shards[slot];
+      atomic_add_u64(params.numeric_buckets[slot][offset], static_cast<uint64_t>(value));
+      continue;
+    }
+    const auto& view = params.numeric_views[slot];
+    if (params.measures[slot].value.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_INT64) {
+      const int64_t value = static_cast<const int64_t*>(params.measures[slot].value.values)[row];
+      const bool negative = value < 0;
+      // Unsigned subtraction is defined even for the INT64_MIN magnitude.
+      uint64_t magnitude =
+          negative ? uint64_t{0} - static_cast<uint64_t>(value) : static_cast<uint64_t>(value);
+      const size_t limbs = numeric_limb_count(view);
+      const size_t base =
+          (group * params.numeric_shards[slot] + row % params.numeric_shards[slot]) * limbs;
+      for (size_t limb = 0; magnitude != 0; ++limb) {
+        const int64_t digit = static_cast<int64_t>(magnitude % 10000);
+        atomic_add_u64(params.numeric_buckets[slot][base + limb],
+                       static_cast<uint64_t>(negative ? -digit : digit));
+        magnitude /= 10000;
+      }
+      continue;
+    }
+    const pgaccel_numeric_row value = view.rows[row];
+    if (value.dscale > 16383 || value.ndigits > view.max_ndigits ||
+        value.digit_offset > view.digit_count ||
+        value.ndigits > view.digit_count - value.digit_offset) {
+      record_failure(*params.meta, kFailureInvalid);
+      return;
+    }
+    uint32_t special = 0;
+    if (value.sign == 0xc000)
+      special = kNumericNaN;
+    else if (value.sign == 0xd000)
+      special = kNumericPInf;
+    else if (value.sign == 0xf000)
+      special = kNumericNInf;
+    else if (value.sign != 0 && value.sign != 0x4000) {
+      record_failure(*params.meta, kFailureInvalid);
+      return;
+    }
+    if (special != 0) {
+      if (value.ndigits != 0 || value.weight != 0) {
+        record_failure(*params.meta, kFailureInvalid);
+        return;
+      }
+      DeviceAtomic<uint32_t>(state.special).fetch_or(special);
+      continue;
+    }
+    DeviceAtomic<uint32_t>(state.dscale).fetch_max(value.dscale);
+    if (value.ndigits != 0 &&
+        (value.weight > view.max_weight ||
+         int32_t{value.weight} - int32_t{value.ndigits} + 1 < view.min_weight)) {
+      record_failure(*params.meta, kFailureInvalid);
+      return;
+    }
+    const size_t limbs = numeric_limb_count(view);
+    const size_t shard = row % params.numeric_shards[slot];
+    const size_t base = (group * params.numeric_shards[slot] + shard) * limbs;
+    for (size_t digit = 0; digit < value.ndigits; ++digit) {
+      const uint16_t magnitude = view.digits[value.digit_offset + digit];
+      if (magnitude >= 10000) {
+        record_failure(*params.meta, kFailureInvalid);
+        return;
+      }
+      const int64_t signed_digit = value.sign == 0x4000 ? -int64_t{magnitude} : int64_t{magnitude};
+      const size_t limb = static_cast<size_t>(int32_t{value.weight} - view.min_weight) - digit;
+      atomic_add_u64(params.numeric_buckets[slot][base + limb],
+                     static_cast<uint64_t>(signed_digit));
+    }
+  }
+}
+
+inline void run_numeric_normalize(KernelParams* ptr, size_t index) {
+  KernelParams& params = *ptr;
+  if (DeviceAtomic<uint32_t>(params.meta->failure_flags).load() != 0)
+    return;
+  const size_t slot = index / params.group_capacity;
+  const size_t group = index % params.group_capacity;
+  const auto& state = params.numeric_groups[slot][group];
+  const uint64_t nonnull = atomic_u64_value(state.nonnull);
+  if (params.buffers[slot].nonnull != nullptr)
+    params.buffers[slot].nonnull[group] = nonnull;
+  if (params.buffers[slot].count != nullptr)
+    params.buffers[slot].count[group] = nonnull;
+  if ((params.measures[slot].agg_mask & PGACCEL_GROUPED_AGG_LANE_SUM) == 0)
+    return;
+  if (params.measures[slot].accumulator_kind == PGACCEL_GROUPED_AGG_ACCUM_I64) {
+    uint64_t sum = 0;
+    for (size_t shard = 0; shard < params.numeric_shards[slot]; ++shard)
+      sum += atomic_u64_value(
+          params.numeric_buckets[slot][group * params.numeric_shards[slot] + shard]);
+    params.buffers[slot].sum[group] = sum;
+    return;
+  }
+  const auto& view = params.numeric_views[slot];
+  const size_t limbs = numeric_limb_count(view);
+  const size_t stride_words = params.measures[slot].state_bytes / sizeof(uint64_t);
+  uint64_t* words = params.buffers[slot].sum + group * stride_words;
+  for (size_t word = 0; word < stride_words; ++word)
+    words[word] = 0;
+  auto* header = reinterpret_cast<pgaccel_numeric_sum*>(words);
+  auto* digits = reinterpret_cast<uint16_t*>(header + 1);
+  if (nonnull == 0)
+    return;
+  if ((state.special & kNumericNaN) != 0 ||
+      (state.special & (kNumericPInf | kNumericNInf)) == (kNumericPInf | kNumericNInf)) {
+    header->sign = 0xc000;
+    return;
+  }
+  if (state.special != 0) {
+    header->sign = (state.special & kNumericPInf) != 0 ? 0xd000 : 0xf000;
+    header->dscale = 32;  // Match numeric_send's special-value header bits.
+    return;
+  }
+  header->dscale = state.dscale;
+  int64_t carry = 0;
+  for (size_t limb = 0; limb < limbs; ++limb) {
+    int64_t value = carry;
+    for (size_t shard = 0; shard < params.numeric_shards[slot]; ++shard) {
+      const size_t offset = (group * params.numeric_shards[slot] + shard) * limbs + limb;
+      value += sycl::bit_cast<int64_t>(atomic_u64_value(params.numeric_buckets[slot][offset]));
+    }
+    carry = value / 10000;
+    int64_t remainder = value % 10000;
+    if (remainder < 0) {
+      remainder += 10000;
+      --carry;
+    }
+    digits[limb] = static_cast<uint16_t>(remainder);
+  }
+  if (carry != 0 && carry != -1) {
+    record_failure(*params.meta, kFailureInvalid);
+    return;
+  }
+  if (carry == -1) {
+    // Negate the base-10000 complement without another bucket reduction.
+    header->sign = 0x4000;
+    uint32_t complement_carry = 1;
+    for (size_t limb = 0; limb < limbs; ++limb) {
+      const uint32_t value = 9999 - digits[limb] + complement_carry;
+      digits[limb] = static_cast<uint16_t>(value % 10000);
+      complement_carry = value / 10000;
+    }
+  }
+  size_t lo = 0;
+  while (lo < limbs && digits[lo] == 0)
+    ++lo;
+  if (lo == limbs) {
+    header->sign = 0;
+    return;
+  }
+  size_t hi = limbs - 1;
+  while (digits[hi] == 0)
+    --hi;
+  const int32_t weight = view.min_weight + static_cast<int32_t>(hi);
+  if (weight > 32767) {
+    record_failure(*params.meta, kFailureNumericOverflow);
+    return;
+  }
+  header->weight = weight;
+  header->ndigits = static_cast<uint32_t>(hi - lo + 1);
+  for (size_t left = lo, right = hi; left < right; ++left, --right) {
+    const uint16_t digit = digits[left];
+    digits[left] = digits[right];
+    digits[right] = digit;
+  }
+  for (size_t digit = 0; digit < header->ndigits; ++digit)
+    digits[digit] = digits[lo + digit];
+  for (size_t digit = header->ndigits; digit < limbs; ++digit)
+    digits[digit] = 0;
+}
+
+inline void run_numeric_finalize_block(KernelParams* ptr, size_t block) {
+  KernelParams& params = *ptr;
+  if (DeviceAtomic<uint32_t>(params.meta->failure_flags).load() != 0)
+    return;
+  size_t emitted = 0;
+  uint64_t selected = 0;
+  const size_t values = dense_integer_value_count(params);
+  for (size_t group = block * 4; group < params.group_capacity && group < block * 4 + 4; ++group) {
+    const uint64_t rows = atomic_u64_value(params.numeric_rows[group]);
+    selected += rows;
+    const bool active = rows != 0 || params.key_count == 0;
+    params.active[group] = active ? 1 : 0;
+    emitted += active ? 1 : 0;
+    stage_keys(params, group, group);
+    if (values != params.measure_count)
+      params.buffers[values].count[group] = rows;
+  }
+  atomic_add_u64(params.numeric_rows[params.group_capacity], emitted);
+  atomic_add_u64(params.numeric_rows[params.group_capacity + 1], selected);
+}
+
+inline void run_numeric_commit(KernelParams* ptr) {
+  KernelParams& params = *ptr;
+  if (params.meta->failure_flags != 0) {
+    params.meta->lifecycle_state = kLifecycleFailed;
+  } else if ((params.execution_flags & PGACCEL_GROUPED_AGG_EXEC_FINALIZE) != 0) {
+    params.meta->emitted = atomic_u64_value(params.numeric_rows[params.group_capacity]);
+    params.meta->selected = atomic_u64_value(params.numeric_rows[params.group_capacity + 1]);
+    params.meta->lifecycle_state = kLifecycleFinalized;
+  }
 }
 
 inline void run_dense_kernel(KernelParams* params_ptr) {
@@ -3078,10 +4429,17 @@ inline DeviceCompletion build_completion(DevicePublishParams* params_ptr) {
   DeviceMeta& meta = *params.meta;
   DeviceCompletion completion{};
 
-  const uint32_t known_failures = kFailureInvalid | kFailureNumericOverflow | kFailureCapacity;
+  const uint32_t known_failures = kFailureInvalid | kFailureNumericOverflow | kFailureCapacity |
+                                  kFailureDivisionByZero | kFailureDateOutOfRange;
   if ((meta.failure_flags & ~known_failures) != 0 || (meta.failure_flags & kFailureInvalid) != 0) {
     completion.status = PGACCEL_ERROR;
     completion.detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+  } else if ((meta.failure_flags & kFailureDateOutOfRange) != 0) {
+    completion.status = PGACCEL_ERROR;
+    completion.detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_DATE_OUT_OF_RANGE;
+  } else if ((meta.failure_flags & kFailureDivisionByZero) != 0) {
+    completion.status = PGACCEL_ERROR;
+    completion.detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_DIVISION_BY_ZERO;
   } else if ((meta.failure_flags & kFailureNumericOverflow) != 0) {
     completion.status = PGACCEL_ERROR;
     completion.detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW;
@@ -3170,25 +4528,51 @@ void bind_params(const pgaccel_grouped_agg_desc& desc, const WorkspaceLayout& la
   params->hash_slot_count = layout.hash_slot_count;
   std::memcpy(params->keys, desc.keys, sizeof(params->keys));
   std::memcpy(params->measures, desc.measures, sizeof(params->measures));
+  for (size_t slot = 0; slot < desc.measure_count; ++slot)
+    if (desc.measures[slot].op == PGACCEL_GROUPED_AGG_MEASURE_SCALAR)
+      params->measures[slot].value.values =
+          arena_ptr<ScalarKernelProgram>(scratch, layout.scalar_programs[slot]);
   params->where_filter = desc.where_filter;
+  for (int32_t i = 0; layout.dense_numeric && i < desc.where_filter.predicate_range_count; ++i) {
+    if (desc.where_filter.predicate_lo[i].data.i32 == desc.where_filter.predicate_hi[i].data.i32)
+      params->numeric_where_singletons |= uint32_t{1} << i;
+  }
   std::memcpy(params->measure_filters, desc.measure_filters, sizeof(params->measure_filters));
+  for (size_t slot = 0; slot < desc.measure_count; ++slot) {
+    if (desc.measures[slot].flags == PGACCEL_GROUPED_AGG_MEASURE_FLAG_FILTER_INPUT) {
+      const auto& filter = desc.measure_filters[slot];
+      for (int32_t i = 0; i < filter.predicate_range_count; ++i) {
+        if (filter.predicate_lo[i].data.i32 == filter.predicate_hi[i].data.i32)
+          params->numeric_predicate_singletons[slot] |= uint32_t{1} << i;
+      }
+    }
+  }
   std::memcpy(params->dims, desc.dims, sizeof(params->dims));
   params->active = arena_ptr<uint8_t>(scratch, layout.active);
   params->staged_group_codes = arena_ptr<size_t>(scratch, layout.staged_group_codes);
   params->hash_owners = arena_ptr<uint32_t>(scratch, layout.hash_owners);
   params->hash_counts = arena_ptr<uint32_t>(scratch, layout.hash_counts);
+  params->hash_sums = arena_ptr<AtomicU64Words>(scratch, layout.hash_sums);
+  params->hash_mins = arena_ptr<int32_t>(scratch, layout.hash_mins);
+  params->hash_maxs = arena_ptr<int32_t>(scratch, layout.hash_maxs);
   params->hash_group_count = arena_ptr<uint32_t>(scratch, layout.hash_group_count);
+  params->hash_sort_keys = arena_ptr<uint64_t>(scratch, layout.hash_sort_keys);
+  params->hash_sort_counts = arena_ptr<uint64_t>(scratch, layout.hash_sort_counts);
+  params->hash_sort_sums = arena_ptr<uint64_t>(scratch, layout.hash_sort_sums);
+  params->hash_sort_mins = arena_ptr<uint64_t>(scratch, layout.hash_sort_mins);
+  params->hash_sort_maxs = arena_ptr<uint64_t>(scratch, layout.hash_sort_maxs);
   params->dense_chunk_counts = arena_ptr<uint32_t>(scratch, layout.dense_chunk_counts);
   params->dense_selected_counts = arena_ptr<uint32_t>(scratch, layout.dense_selected_counts);
   params->dense_weighted_chunk_counts =
       arena_ptr<uint64_t>(scratch, layout.dense_weighted_chunk_counts);
-  params->dense_count_chunk_count = layout.dense_weighted_chunk_counts != kNoOffset
-                                        ? layout.dense_count_chunk_count
-                                        : (layout.dense_count_hierarchical
-                                               ? layout.dense_count_chunk_count
-                                               : 0);
+  params->dense_count_chunk_count =
+      layout.dense_weighted_chunk_counts != kNoOffset
+          ? layout.dense_count_chunk_count
+          : (layout.dense_count_hierarchical ? layout.dense_count_chunk_count : 0);
   params->dense_integer_atomic_sum =
       arena_ptr<AtomicU64Words>(scratch, layout.dense_integer_atomic_sum);
+  params->dense_integer_atomic_min = arena_ptr<int32_t>(scratch, layout.dense_integer_atomic_min);
+  params->dense_integer_atomic_max = arena_ptr<int32_t>(scratch, layout.dense_integer_atomic_max);
   params->dense_integer_atomic_nonnull =
       arena_ptr<AtomicU64Words>(scratch, layout.dense_integer_atomic_nonnull);
   params->dense_integer_atomic_count =
@@ -3196,6 +4580,18 @@ void bind_params(const pgaccel_grouped_agg_desc& desc, const WorkspaceLayout& la
   params->dense_integer_partials =
       arena_ptr<DenseIntegerPartial>(scratch, layout.dense_integer_partials);
   params->dense_integer_chunk_count = layout.dense_integer_chunk_count;
+  params->numeric_rows = arena_ptr<AtomicU64Words>(scratch, layout.numeric_rows);
+  for (size_t slot = 0; slot < desc.measure_count; ++slot) {
+    if (desc.measures[slot].accumulator_kind == PGACCEL_GROUPED_AGG_ACCUM_NUMERIC)
+      params->numeric_views[slot] = decimal_measure_view(desc.measures[slot]);
+    if (layout.dense_numeric && slot < dense_integer_value_count(desc)) {
+      params->numeric_buckets[slot] =
+          arena_ptr<AtomicU64Words>(scratch, layout.numeric_buckets[slot]);
+      params->numeric_groups[slot] =
+          arena_ptr<NumericGroupState>(scratch, layout.numeric_groups[slot]);
+      params->numeric_shards[slot] = layout.numeric_shards[slot];
+    }
+  }
   params->meta = arena_ptr<DeviceMeta>(scratch, layout.meta);
   for (size_t k = 0; k < desc.key_count; ++k) {
     params->staged_key_values[k] = arena_ptr<uint8_t>(scratch, layout.staged_key_values[k]);
@@ -3353,13 +4749,37 @@ bool collect_input_spans(const pgaccel_grouped_agg_desc& desc, SpanList* spans) 
   }
   for (size_t i = 0; i < desc.measure_count; ++i) {
     const pgaccel_grouped_agg_measure& measure = desc.measures[i];
-    if (measure.op != PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR &&
-        (!add_span(spans, measure.value.values, desc.row_count, measure.value.element_bytes) ||
-         !add_span(spans, measure.value.nulls, desc.row_count, sizeof(uint8_t))))
+    if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_SCALAR) {
+      const auto& view = scalar_view(measure);
+      if (!add_span(spans, measure.value.values, 1, sizeof(pgaccel_scalar_view)) ||
+          !add_span(spans, view.words, view.word_count, sizeof(int32_t)) ||
+          !add_span(spans, view.inputs, view.input_count, sizeof(pgaccel_scalar_input)))
+        return false;
+      for (size_t input = 0; input < view.input_count; ++input) {
+        const auto& col = view.inputs[input];
+        const size_t width =
+            col.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_BOOL ? 1 : sizeof(int32_t);
+        if (!add_span(spans, col.values, desc.row_count, width) ||
+            !add_span(spans, col.nulls, desc.row_count, sizeof(uint8_t)))
+          return false;
+      }
+    } else if (packed_numeric(measure.value)) {
+      const auto& view = numeric_view(measure.value);
+      if (!add_span(spans, measure.value.values, 1, sizeof(pgaccel_numeric_view)) ||
+          !add_span(spans, view.rows, desc.row_count, sizeof(pgaccel_numeric_row)) ||
+          !add_span(spans, view.digits, view.digit_count, sizeof(uint16_t)) ||
+          !add_span(spans, measure.value.nulls, desc.row_count, sizeof(uint8_t)))
+        return false;
+    } else if (measure.op != PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR &&
+               (!add_span(spans, measure.value.values, desc.row_count,
+                          measure.value.element_bytes) ||
+                !add_span(spans, measure.value.nulls, desc.row_count, sizeof(uint8_t))))
       return false;
     if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_MUL ||
         measure.op == PGACCEL_GROUPED_AGG_MEASURE_SUB ||
-        measure.op == PGACCEL_GROUPED_AGG_MEASURE_STATS_PAIR) {
+        measure.op == PGACCEL_GROUPED_AGG_MEASURE_ADD ||
+        measure.op == PGACCEL_GROUPED_AGG_MEASURE_STATS_PAIR ||
+        measure.flags == PGACCEL_GROUPED_AGG_MEASURE_FLAG_FILTER_INPUT) {
       if (!add_span(spans, measure.rhs.values, desc.row_count, measure.rhs.element_bytes) ||
           !add_span(spans, measure.rhs.nulls, desc.row_count, sizeof(uint8_t)))
         return false;
@@ -3505,13 +4925,26 @@ bool validate_input_usm(sycl::queue& queue, const pgaccel_grouped_agg_desc& desc
   }
   for (size_t i = 0; i < desc.measure_count; ++i) {
     const pgaccel_grouped_agg_measure& measure = desc.measures[i];
-    if (measure.op != PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR) {
+    if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_SCALAR) {
+      const auto& view = scalar_view(measure);
+      for (size_t input = 0; input < view.input_count; ++input)
+        if (!device_accessible(queue, view.inputs[input].values) ||
+            !device_accessible(queue, view.inputs[input].nulls))
+          return false;
+    } else if (packed_numeric(measure.value)) {
+      const auto& view = numeric_view(measure.value);
+      if (!pointers.push(view.rows) || !pointers.push(view.digits) ||
+          !pointers.push(measure.value.nulls))
+        return false;
+    } else if (measure.op != PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR) {
       if (!pointers.push(measure.value.values) || !pointers.push(measure.value.nulls))
         return false;
     }
     if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_MUL ||
         measure.op == PGACCEL_GROUPED_AGG_MEASURE_SUB ||
-        measure.op == PGACCEL_GROUPED_AGG_MEASURE_STATS_PAIR) {
+        measure.op == PGACCEL_GROUPED_AGG_MEASURE_ADD ||
+        measure.op == PGACCEL_GROUPED_AGG_MEASURE_STATS_PAIR ||
+        measure.flags == PGACCEL_GROUPED_AGG_MEASURE_FLAG_FILTER_INPUT) {
       if (!pointers.push(measure.rhs.values) || !pointers.push(measure.rhs.nulls))
         return false;
     }
@@ -3599,20 +5032,35 @@ class GroupedAggDenseCountWorkgroupKernel;
 class GroupedAggDenseCountCommitKernel;
 class GroupedAggDenseIntegerPrepareKernel;
 template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply,
-          bool HasMeasureRange>
+          bool HasMeasureRange, bool HasScalarProgram = false>
 class GroupedAggDenseIntegerAtomicRowsKernel;
 class GroupedAggDenseIntegerAtomicCommitKernel;
 template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply,
-          bool HasMeasureRange>
+          bool HasMeasureRange, bool HasScalarProgram = false>
 class GroupedAggDenseIntegerChunksKernel;
 template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply,
-          bool HasMeasureRange>
+          bool HasMeasureRange, bool HasScalarProgram = false>
 class GroupedAggDenseIntegerWorkgroupKernel;
 class GroupedAggDenseIntegerReduceKernel;
 class GroupedAggDenseIntegerCommitKernel;
 class GroupedAggHashKernel;
+class GroupedAggHashColumnCountKernel;
+class GroupedAggHashFilteredCountKernel;
+class GroupedAggHashFilteredColumnCountKernel;
+class GroupedAggHashColumnSumKernel;
+class GroupedAggHashFilteredColumnSumKernel;
+class GroupedAggHashWhereKernel;
+class GroupedAggHashWhereColumnCountKernel;
+class GroupedAggHashWhereFilteredCountKernel;
+class GroupedAggHashWhereFilteredColumnCountKernel;
+class GroupedAggHashWhereColumnSumKernel;
+class GroupedAggHashWhereFilteredColumnSumKernel;
 class GroupedAggHashInitKernel;
 class GroupedAggHashCompactKernel;
+class GroupedAggHashCompactPrepareKernel;
+class GroupedAggHashCompactRowsKernel;
+class GroupedAggHashMergeKernel;
+class GroupedAggHashSortFinishKernel;
 class GroupedAggCompletionKernel;
 
 #if defined(PGACCEL_TEST_HOOKS)
@@ -3757,43 +5205,44 @@ void submit_dense_weighted_count_chunks(sycl::queue& queue, size_t chunk_count,
 }
 
 template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply,
-          bool HasMeasureRange>
+          bool HasMeasureRange, bool HasScalarProgram = false>
 void submit_dense_integer_atomic_rows(sycl::queue& queue, size_t row_count,
                                       KernelParams* const device_params) {
   queue.parallel_for<GroupedAggDenseIntegerAtomicRowsKernel<
-      HasMembership, HasSqlMask, HasScalarRange, Multiply, HasMeasureRange>>(
+      HasMembership, HasSqlMask, HasScalarRange, Multiply, HasMeasureRange, HasScalarProgram>>(
       sycl::range<1>(row_count), [=](sycl::id<1> id) {
         run_dense_integer_atomic_row<HasMembership, HasSqlMask, HasScalarRange, Multiply,
-                                     HasMeasureRange>(device_params, id[0]);
+                                     HasMeasureRange, HasScalarProgram>(device_params, id[0]);
       });
 }
 
 template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply,
-          bool HasMeasureRange>
+          bool HasMeasureRange, bool HasScalarProgram = false>
 void submit_dense_integer_chunks(sycl::queue& queue, size_t chunk_count,
                                  KernelParams* const device_params) {
-  queue.parallel_for<GroupedAggDenseIntegerChunksKernel<HasMembership, HasSqlMask, HasScalarRange,
-                                                        Multiply, HasMeasureRange>>(
+  queue.parallel_for<GroupedAggDenseIntegerChunksKernel<
+      HasMembership, HasSqlMask, HasScalarRange, Multiply, HasMeasureRange, HasScalarProgram>>(
       sycl::range<1>(chunk_count), [=](sycl::id<1> id) {
         run_dense_integer_chunk<HasMembership, HasSqlMask, HasScalarRange, Multiply,
-                                HasMeasureRange>(device_params, id[0]);
+                                HasMeasureRange, HasScalarProgram>(device_params, id[0]);
       });
 }
 
 template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply,
-          bool HasMeasureRange>
+          bool HasMeasureRange, bool HasScalarProgram = false>
 void submit_dense_integer_workgroups(sycl::queue& queue, size_t group_capacity,
                                      size_t workgroup_count, KernelParams* const device_params) {
   queue.submit([&](sycl::handler& handler) {
     sycl::local_accessor<DenseIntegerPartial, 1> local_partials(
         sycl::range<1>(kDenseReductionWorkgroupSize * group_capacity), handler);
     handler.parallel_for<GroupedAggDenseIntegerWorkgroupKernel<
-        HasMembership, HasSqlMask, HasScalarRange, Multiply, HasMeasureRange>>(
+        HasMembership, HasSqlMask, HasScalarRange, Multiply, HasMeasureRange, HasScalarProgram>>(
         sycl::nd_range<1>(sycl::range<1>(workgroup_count * kDenseReductionWorkgroupSize),
                           sycl::range<1>(kDenseReductionWorkgroupSize)),
         [=](sycl::nd_item<1> item) {
           run_dense_integer_workgroup<HasMembership, HasSqlMask, HasScalarRange, Multiply,
-                                      HasMeasureRange>(device_params, item, local_partials);
+                                      HasMeasureRange, HasScalarProgram>(device_params, item,
+                                                                         local_partials);
         });
   });
 }
@@ -3802,11 +5251,31 @@ template <bool Atomic>
 void submit_dense_integer_specialization(sycl::queue& queue, const pgaccel_grouped_agg_desc& desc,
                                          size_t launch_count, bool hierarchical,
                                          KernelParams* const device_params) {
+  // Each work-item or partial reducer owns one measure state.
+  launch_count *= dense_integer_worker_count(desc);
+  bool scalar_program = false;
+  for (size_t slot = 0; slot < desc.measure_count; ++slot)
+    scalar_program |= desc.measures[slot].op == PGACCEL_GROUPED_AGG_MEASURE_SCALAR;
+  if (scalar_program) {
+    if constexpr (Atomic)
+      submit_dense_integer_atomic_rows<false, false, false, false, true, true>(queue, launch_count,
+                                                                               device_params);
+    else if (hierarchical)
+      submit_dense_integer_workgroups<false, false, false, false, true, true>(
+          queue, desc.group_capacity, launch_count, device_params);
+    else
+      submit_dense_integer_chunks<false, false, false, false, true, true>(queue, launch_count,
+                                                                          device_params);
+    return;
+  }
   const bool membership = desc.dim_count != 0;
   const bool sql_mask = desc.where_filter.kind == PGACCEL_GROUPED_AGG_FILTER_SQL;
-  const bool scalar_range = exact_dense_integer_range_filter(desc.where_filter);
-  const bool measure_range = exact_dense_integer_range_filter(desc.measure_filters[0]);
-  const bool multiply = desc.measures[0].op == PGACCEL_GROUPED_AGG_MEASURE_MUL;
+  const bool scalar_range = active_ranges(desc.where_filter);
+  bool measure_range = false;
+  for (size_t slot = 0; slot < desc.measure_count; ++slot)
+    measure_range |= active_ranges(desc.measure_filters[slot]);
+  const bool multiply = desc.measures[0].op == PGACCEL_GROUPED_AGG_MEASURE_MUL &&
+                        !parallel_dense_multi_integer_structure(desc);
 #define PGACCEL_SUBMIT_DENSE_INTEGER(MEMBERSHIP, MASK, RANGE, MULTIPLY, MEASURE_RANGE)    \
   do {                                                                                    \
     if constexpr (Atomic) {                                                               \
@@ -3820,7 +5289,17 @@ void submit_dense_integer_specialization(sycl::queue& queue, const pgaccel_group
           queue, launch_count, device_params);                                            \
     }                                                                                     \
   } while (false)
-  if (measure_range)
+  if (sql_mask && scalar_range && measure_range)
+    PGACCEL_SUBMIT_DENSE_INTEGER(false, true, true, false, true);
+  else if (sql_mask && scalar_range)
+    PGACCEL_SUBMIT_DENSE_INTEGER(false, true, true, false, false);
+  else if (measure_range && scalar_range)
+    PGACCEL_SUBMIT_DENSE_INTEGER(false, false, true, false, true);
+  else if (scalar_range && !multiply)
+    PGACCEL_SUBMIT_DENSE_INTEGER(false, false, true, false, false);
+  else if (measure_range && sql_mask)
+    PGACCEL_SUBMIT_DENSE_INTEGER(false, true, false, false, true);
+  else if (measure_range)
     PGACCEL_SUBMIT_DENSE_INTEGER(false, false, false, false, true);
   else if (scalar_range)
     PGACCEL_SUBMIT_DENSE_INTEGER(false, false, true, true, false);
@@ -3850,18 +5329,170 @@ void submit_grouped_agg_mode(sycl::queue& queue, const pgaccel_grouped_agg_desc&
       parallel_dense_count_shape(desc) && desc.row_count <= UINT32_MAX;
   const bool parallel_dense_integer = layout.dense_integer_parallel;
   const bool atomic_dense_integer_one_shot = layout.dense_integer_atomic_one_shot;
-  if (desc.grouping_mode == PGACCEL_GROUPED_AGG_GROUPING_HASH) {
+  if (layout.dense_numeric) {
+    queue.single_task([=]() { run_numeric_prepare(device_params); });
+    if ((desc.execution_flags & PGACCEL_GROUPED_AGG_EXEC_RESET) != 0) {
+      queue.fill(host_params.numeric_rows, AtomicU64Words{}, desc.group_capacity + 2);
+      for (size_t slot = 0; slot < dense_integer_value_count(desc); ++slot) {
+        queue.fill(host_params.numeric_groups[slot], NumericGroupState{}, desc.group_capacity);
+        if ((desc.measures[slot].agg_mask & PGACCEL_GROUPED_AGG_LANE_SUM) != 0)
+          queue.fill(host_params.numeric_buckets[slot], AtomicU64Words{},
+                     desc.group_capacity * layout.numeric_shards[slot] *
+                         (desc.measures[slot].accumulator_kind == PGACCEL_GROUPED_AGG_ACCUM_NUMERIC
+                              ? numeric_limb_count(host_params.numeric_views[slot])
+                              : 1));
+      }
+    }
+    if ((desc.execution_flags & PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE) != 0) {
+      size_t digits_per_row = 1;
+      for (size_t slot = 0; slot < dense_integer_value_count(desc); ++slot)
+        if ((desc.measures[slot].agg_mask & PGACCEL_GROUPED_AGG_LANE_SUM) != 0)
+          digits_per_row += host_params.numeric_views[slot].max_ndigits;
+      const size_t launch_rows = std::max(size_t{1}, size_t{1'048'576} / digits_per_row);
+      for (size_t offset = 0; offset < desc.row_count; offset += launch_rows) {
+        const size_t rows = std::min(launch_rows, desc.row_count - offset);
+        queue.parallel_for(sycl::range<1>(rows),
+                           [=](sycl::id<1> id) { run_numeric_row(device_params, offset + id[0]); });
+      }
+    }
+    if ((desc.execution_flags & PGACCEL_GROUPED_AGG_EXEC_FINALIZE) != 0) {
+      queue.parallel_for(sycl::range<1>(desc.group_capacity * dense_integer_value_count(desc)),
+                         [=](sycl::id<1> id) { run_numeric_normalize(device_params, id[0]); });
+      queue.parallel_for(sycl::range<1>(desc.group_capacity / 4 + (desc.group_capacity % 4 != 0)),
+                         [=](sycl::id<1> id) { run_numeric_finalize_block(device_params, id[0]); });
+    }
+    queue.single_task([=]() { run_numeric_commit(device_params); });
+  } else if (desc.grouping_mode == PGACCEL_GROUPED_AGG_GROUPING_HASH) {
     queue.single_task<GroupedAggHashInitKernel>([=]() { run_hash_init_kernel(device_params); });
     queue.fill(host_params.hash_owners, kHashEmptyOwner, layout.hash_slot_count);
     queue.fill(host_params.hash_counts, uint32_t{0}, layout.hash_slot_count);
-    queue.fill(host_params.hash_group_count, uint32_t{0}, size_t{1});
-    if (desc.row_count != 0) {
-      queue.parallel_for<GroupedAggHashKernel>(sycl::range<1>(desc.row_count), [=](sycl::id<1> id) {
-        run_hash_row(device_params, id[0]);
+    if (host_params.hash_sums != nullptr)
+      queue.fill(host_params.hash_sums, AtomicU64Words{}, layout.hash_slot_count);
+    if (host_params.hash_mins != nullptr)
+      queue.fill(host_params.hash_mins, INT32_MAX, layout.hash_slot_count);
+    if (host_params.hash_maxs != nullptr)
+      queue.fill(host_params.hash_maxs, INT32_MIN, layout.hash_slot_count);
+    queue.fill(host_params.hash_group_count, uint32_t{0},
+               desc.where_filter.kind == PGACCEL_GROUPED_AGG_FILTER_SQL
+                   ? 1 + kHashSelectedShards
+                   : size_t{1});
+    for (size_t offset = 0; offset < desc.row_count; offset += kHashRowLaunchRows) {
+      const size_t rows = std::min(kHashRowLaunchRows, desc.row_count - offset);
+      if (desc.where_filter.kind == PGACCEL_GROUPED_AGG_FILTER_SQL) {
+        if (host_params.hash_sums != nullptr || host_params.hash_mins != nullptr ||
+            host_params.hash_maxs != nullptr) {
+          if (desc.measure_filters[0].kind == PGACCEL_GROUPED_AGG_FILTER_SQL) {
+            queue.parallel_for<GroupedAggHashWhereFilteredColumnSumKernel>(
+                sycl::range<1>(rows), [=](sycl::id<1> id) {
+                  run_hash_row<true, true, true, true>(device_params, offset + id[0]);
+                });
+          } else {
+            queue.parallel_for<GroupedAggHashWhereColumnSumKernel>(
+                sycl::range<1>(rows), [=](sycl::id<1> id) {
+                  run_hash_row<true, false, true, true>(device_params, offset + id[0]);
+                });
+          }
+        } else if (desc.measure_filters[0].kind == PGACCEL_GROUPED_AGG_FILTER_SQL) {
+          if (desc.measures[0].op == PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR) {
+            queue.parallel_for<GroupedAggHashWhereFilteredCountKernel>(
+                sycl::range<1>(rows), [=](sycl::id<1> id) {
+                  run_hash_row<false, true, false, true>(device_params, offset + id[0]);
+                });
+          } else {
+            queue.parallel_for<GroupedAggHashWhereFilteredColumnCountKernel>(
+                sycl::range<1>(rows), [=](sycl::id<1> id) {
+                  run_hash_row<true, true, false, true>(device_params, offset + id[0]);
+                });
+          }
+        } else if (desc.measures[0].op == PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR) {
+          queue.parallel_for<GroupedAggHashWhereKernel>(
+              sycl::range<1>(rows), [=](sycl::id<1> id) {
+                run_hash_row<false, false, false, true>(device_params, offset + id[0]);
+              });
+        } else {
+          queue.parallel_for<GroupedAggHashWhereColumnCountKernel>(
+              sycl::range<1>(rows), [=](sycl::id<1> id) {
+                run_hash_row<true, false, false, true>(device_params, offset + id[0]);
+              });
+        }
+      } else if (host_params.hash_sums != nullptr || host_params.hash_mins != nullptr ||
+          host_params.hash_maxs != nullptr) {
+        if (desc.measure_filters[0].kind == PGACCEL_GROUPED_AGG_FILTER_SQL) {
+          queue.parallel_for<GroupedAggHashFilteredColumnSumKernel>(
+              sycl::range<1>(rows), [=](sycl::id<1> id) {
+                run_hash_row<true, true, true>(device_params, offset + id[0]);
+              });
+        } else {
+          queue.parallel_for<GroupedAggHashColumnSumKernel>(
+              sycl::range<1>(rows), [=](sycl::id<1> id) {
+                run_hash_row<true, false, true>(device_params, offset + id[0]);
+              });
+        }
+      } else if (desc.measure_filters[0].kind == PGACCEL_GROUPED_AGG_FILTER_SQL) {
+        if (desc.measures[0].op == PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR) {
+          queue.parallel_for<GroupedAggHashFilteredCountKernel>(
+              sycl::range<1>(rows),
+              [=](sycl::id<1> id) { run_hash_row<false, true>(device_params, offset + id[0]); });
+        } else {
+          queue.parallel_for<GroupedAggHashFilteredColumnCountKernel>(
+              sycl::range<1>(rows),
+              [=](sycl::id<1> id) { run_hash_row<true, true>(device_params, offset + id[0]); });
+        }
+      } else if (desc.measures[0].op == PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR) {
+        queue.parallel_for<GroupedAggHashKernel>(sycl::range<1>(rows), [=](sycl::id<1> id) {
+          run_hash_row<false>(device_params, offset + id[0]);
+        });
+      } else {
+        queue.parallel_for<GroupedAggHashColumnCountKernel>(
+            sycl::range<1>(rows),
+            [=](sycl::id<1> id) { run_hash_row<true>(device_params, offset + id[0]); });
+      }
+    }
+    if (desc.group_capacity <= kHashSerialFinalizeGroups) {
+      queue.single_task<GroupedAggHashCompactKernel>(
+          [=]() { run_hash_compact_kernel(device_params); });
+    } else {
+      // Keep cardinality and every intermediate on-device. A fixed-size grid
+      // strides over actual groups, so sparse large-capacity inputs do not
+      // launch capacity-sized no-op grids or synchronize mid-pipeline.
+      const size_t grid = std::min(desc.group_capacity, size_t{65'536});
+      queue.single_task<GroupedAggHashCompactPrepareKernel>([=]() {
+        if (*device_params->hash_group_count <= kHashSerialFinalizeGroups)
+          run_hash_compact_kernel(device_params);
+        else
+          run_hash_compact_prepare(device_params);
+      });
+      queue.parallel_for<GroupedAggHashCompactRowsKernel>(
+          sycl::range<1>(grid), [=](sycl::id<1> id) {
+            const size_t emitted = *device_params->hash_group_count;
+            if (emitted <= kHashSerialFinalizeGroups || emitted > device_params->group_capacity)
+              return;
+            for (size_t index = id[0]; index < emitted; index += grid)
+              run_hash_compact_row(device_params, index, true);
+          });
+      bool from_staged = true;
+      for (size_t width = 1; width < desc.group_capacity; width *= 2) {
+        queue.parallel_for<GroupedAggHashMergeKernel>(sycl::range<1>(grid), [=](sycl::id<1> id) {
+          const size_t emitted = *device_params->hash_group_count;
+          if (emitted <= kHashSerialFinalizeGroups || emitted > device_params->group_capacity ||
+              width >= emitted)
+            return;
+          for (size_t index = id[0]; index < emitted; index += grid)
+            run_hash_merge_row(device_params, index, emitted, width, from_staged);
+        });
+        from_staged = !from_staged;
+      }
+      queue.parallel_for<GroupedAggHashSortFinishKernel>(sycl::range<1>(grid), [=](sycl::id<1> id) {
+        const size_t emitted = *device_params->hash_group_count;
+        if (emitted <= kHashSerialFinalizeGroups || emitted > device_params->group_capacity)
+          return;
+        bool final_staged = true;
+        for (size_t width = 1; width < emitted; width *= 2)
+          final_staged = !final_staged;
+        for (size_t block = id[0]; block < (emitted + 3) / 4; block += grid)
+          run_hash_sort_finish_block(device_params, block, emitted, final_staged);
       });
     }
-    queue.single_task<GroupedAggHashCompactKernel>(
-        [=]() { run_hash_compact_kernel(device_params); });
   } else if (parallel_dense_count) {
     queue.single_task<GroupedAggDenseCountPrepareKernel>(
         [=]() { run_dense_count_prepare_kernel(device_params); });
@@ -3901,14 +5532,22 @@ void submit_grouped_agg_mode(sycl::queue& queue, const pgaccel_grouped_agg_desc&
         layout.dense_integer_partial_count != 0) {
       queue.fill(host_params.dense_integer_partials, DenseIntegerPartial{},
                  layout.dense_integer_partial_count);
+      if (layout.dense_integer_atomic_bounded && desc.row_count != 0 &&
+          desc.row_count <= kDenseIntegerAtomicMaxRows)
+        submit_dense_integer_specialization<true>(queue, desc, desc.row_count, false,
+                                                  device_params);
       submit_dense_integer_specialization<false>(queue, desc, layout.dense_integer_chunk_count,
                                                  layout.dense_integer_hierarchical, device_params);
       queue.parallel_for<GroupedAggDenseIntegerReduceKernel>(
-          sycl::range<1>(desc.group_capacity),
+          sycl::range<1>(desc.group_capacity * dense_integer_worker_count(desc)),
           [=](sycl::id<1> id) { run_dense_integer_reduce(device_params, id[0]); });
     }
-    queue.single_task<GroupedAggDenseIntegerCommitKernel>(
-        [=]() { run_dense_integer_commit_kernel(device_params); });
+    queue.single_task<GroupedAggDenseIntegerCommitKernel>([=]() {
+      if (dense_integer_atomic_batch(*device_params))
+        run_dense_integer_atomic_commit_kernel(device_params);
+      else
+        run_dense_integer_commit_kernel(device_params);
+    });
   } else {
     queue.single_task<GroupedAggDenseKernel>([=]() { run_dense_kernel(device_params); });
   }
@@ -3916,6 +5555,8 @@ void submit_grouped_agg_mode(sycl::queue& queue, const pgaccel_grouped_agg_desc&
 
 int32_t grouped_agg_kernel_mode(const pgaccel_grouped_agg_desc& desc,
                                 const WorkspaceLayout& layout) {
+  if (layout.dense_numeric)
+    return PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_NUMERIC;
   if (desc.grouping_mode == PGACCEL_GROUPED_AGG_GROUPING_HASH)
     return PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_HASH;
   if (parallel_dense_count_shape(desc) && desc.row_count <= UINT32_MAX)
@@ -3931,6 +5572,29 @@ pgaccel_status launch_grouped_agg_device(sycl::queue& queue, const pgaccel_group
                                          DeviceCompletion* const device_completion) {
   KernelParams host_params;
   bind_params(desc, layout, device_workspace, &host_params);
+  for (size_t slot = 0; slot < desc.measure_count; ++slot) {
+    if (desc.measures[slot].op != PGACCEL_GROUPED_AGG_MEASURE_SCALAR)
+      continue;
+    const auto& view = scalar_view(desc.measures[slot]);
+    ScalarKernelProgram program{};
+    program.word_count = view.word_count;
+    program.input_count = view.input_count;
+    pgaccel_scalar::Proof proof;
+    if (!pgaccel_scalar::validate_program(view.words, view.word_count, &proof))
+      return PGACCEL_ERROR;
+    program.uses_predicate_mask = proof.uses_predicate_mask;
+    std::memcpy(program.words, view.words, view.word_count * sizeof(int32_t));
+    if (view.input_count != 0)
+      std::memcpy(program.inputs, view.inputs, view.input_count * sizeof(pgaccel_scalar_input));
+    auto* destination =
+        arena_ptr<ScalarKernelProgram>(device_workspace, layout.scalar_programs[slot]);
+    if (desc.scratch_space == PGACCEL_MEM_SPACE_SHARED_USM)
+      *destination = program;
+    else {
+      auto copy = queue.memcpy(destination, &program, sizeof(program));
+      wait_grouped(copy);
+    }
+  }
   DevicePublishParams host_publish_params;
   bind_publish_params(desc, layout, device_workspace, output_mask, &host_publish_params);
   auto* const device_params =
@@ -4482,6 +6146,52 @@ pgaccel_status execute_grouped_agg_accumulate(sycl::queue& device_queue,
 
 }  // namespace
 
+extern "C" pgaccel_status pgaccel_bool_sql_mask(const uint8_t* values, const uint8_t* nulls,
+                                                size_t count, int8_t* output) try {
+  if (count == 0)
+    return PGACCEL_OK;
+  if (count > 65'536 || values == nullptr || output == nullptr ||
+      reinterpret_cast<uintptr_t>(output) % 4 != 0)
+    return PGACCEL_ERROR;
+  Span input{}, validity{}, result{};
+  if (!checked_span(values, count, 1, &input.begin, &input.end) ||
+      (nulls != nullptr && !checked_span(nulls, count, 1, &validity.begin, &validity.end)) ||
+      !checked_span(output, count, 1, &result.begin, &result.end) || spans_overlap(input, result) ||
+      (nulls != nullptr && spans_overlap(validity, result)))
+    return PGACCEL_ERROR;
+  sycl::queue* queue = pgaccel_get_queue();
+  if (queue == nullptr)
+    return PGACCEL_ERROR_NO_DEVICE;
+  if (!device_accessible(*queue, values) || !device_accessible(*queue, nulls) ||
+      !device_accessible(*queue, output))
+    return PGACCEL_ERROR;
+  // One work item owns each aligned four-byte word, including the final
+  // partial word: no competing subword stores on Metal, no padded output write.
+  queue
+      ->parallel_for(
+          sycl::range<1>((count + 3) / 4),
+          [=](sycl::id<1> id) {
+            for (size_t row = id[0] * 4; row < sycl::min(id[0] * 4 + 4, count); ++row) {
+              const uint8_t is_null = nulls == nullptr ? 0 : nulls[row];
+              if (is_null > 1)
+                output[row] = 2;
+              else if (is_null != 0)
+                output[row] = PGACCEL_EXPR_UNCERTAIN;
+              else {
+                const uint8_t value = values[row];
+                output[row] = value > 1 ? 2 : value != 0 ? PGACCEL_EXPR_TRUE : PGACCEL_EXPR_FALSE;
+              }
+            }
+          })
+      .wait_and_throw();
+  pgaccel_record_gpu_exec();
+  return PGACCEL_OK;
+} catch (const std::exception& error) {
+  return pgaccel_kernel_failure("pgaccel_bool_sql_mask", &error);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_bool_sql_mask", nullptr);
+}
+
 extern "C" uint64_t pgaccel_grouped_agg_transition_launch_count(void) {
   return g_grouped_transition_launches;
 }
@@ -4516,6 +6226,32 @@ extern "C" void pgaccel_reset_grouped_agg_telemetry(void) {
 }
 
 #if defined(PGACCEL_TEST_HOOKS)
+// Shared-USM test fixture only: seed a long-running dense SUM lifecycle near
+// int8 overflow without executing billions of input rows. Production builds
+// contain neither this entry point nor an override of the runtime proof.
+extern "C" bool pgacceltest_grouped_agg_seed_integer_prefix(const pgaccel_grouped_agg_desc* desc,
+                                                            void* workspace, uint64_t selected,
+                                                            int64_t sum) {
+  Validation validation;
+  WorkspaceLayout layout;
+  if (validate_desc(desc, &validation, &layout) != PGACCEL_OK || workspace == nullptr ||
+      !layout.dense_integer_parallel || desc->measure_count != 2 ||
+      layout.measures[0].sum == kNoOffset || layout.measures[0].nonnull == kNoOffset ||
+      layout.measures[1].count == kNoOffset)
+    return false;
+  auto* meta = arena_ptr<DeviceMeta>(workspace, layout.meta);
+  if (meta->lifecycle_cookie != kLifecycleCookie || meta->lifecycle_state != kLifecycleActive)
+    return false;
+  meta->selected = selected;
+  arena_ptr<uint64_t>(workspace, layout.measures[0].sum)[0] = static_cast<uint64_t>(sum);
+  arena_ptr<uint64_t>(workspace, layout.measures[0].nonnull)[0] = selected;
+  if (layout.measures[0].count != kNoOffset)
+    arena_ptr<uint64_t>(workspace, layout.measures[0].count)[0] = selected;
+  arena_ptr<uint64_t>(workspace, layout.measures[1].count)[0] = selected;
+  arena_ptr<uint8_t>(workspace, layout.active)[0] = 1;
+  return true;
+}
+
 extern "C" bool pgacceltest_grouped_agg_cleanup_exception_is_caught(void) {
   const unsigned caught_before = g_test_caught_scratch_cleanup.load(std::memory_order_relaxed);
   g_test_throw_scratch_cleanup.store(true, std::memory_order_release);
@@ -4531,13 +6267,12 @@ extern "C" bool pgacceltest_grouped_agg_helper_semantics(void) {
   invalid_value.tag = static_cast<pgaccel_val_tag>(std::numeric_limits<int32_t>::max());
   pgaccel_val loaded{};
   bool is_null = false;
-  const bool helper_edges =
-      val_tag_width(PGACCEL_VAL_BOOL) == sizeof(uint8_t) &&
-      val_tag_width(invalid_value.tag) == 0 &&
-      host_compare_val(invalid_value, invalid_value) == 0 &&
-      pg_compare<int32_t>(1, kOpAlways, 2, false, false) &&
-      !load_predicate_value(invalid_col, 0, &loaded, &is_null) &&
-      !compare_val(invalid_value, kOpEq, invalid_value);
+  const bool helper_edges = val_tag_width(PGACCEL_VAL_BOOL) == sizeof(uint8_t) &&
+                            val_tag_width(invalid_value.tag) == 0 &&
+                            host_compare_val(invalid_value, invalid_value) == 0 &&
+                            pg_compare<int32_t>(1, kOpAlways, 2, false, false) &&
+                            !load_predicate_value(invalid_col, 0, &loaded, &is_null) &&
+                            !compare_val(invalid_value, kOpEq, invalid_value);
 
   const int64_t near_max = std::numeric_limits<int64_t>::max() - 5;
   DenseIntegerPartial left{};

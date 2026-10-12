@@ -17,6 +17,7 @@ use super::domain::{
 use super::geometry::{ResidentGeometryColumn, ResidentGeometryColumnView};
 use super::ledger::{self, GenerationStamp, LedgerCharge};
 use super::loader::{self, ColumnRequest, StagedRelation};
+use super::numeric::{NumericDigitBounds, ResidentNumericColumn, ResidentNumericColumnView};
 
 const PENDING_RELCACHE_CAPACITY: usize = 128;
 
@@ -49,6 +50,10 @@ thread_local! {
 
 /// One raw, lossless relation column resident in GPU-readable memory.
 pub enum ResidentColumn {
+    Numeric {
+        type_oid: pg_sys::Oid,
+        data: ResidentNumericColumn,
+    },
     Empty {
         type_oid: pg_sys::Oid,
     },
@@ -108,7 +113,8 @@ impl ResidentColumn {
     #[must_use]
     pub const fn type_oid(&self) -> pg_sys::Oid {
         match self {
-            Self::Empty { type_oid }
+            Self::Numeric { type_oid, .. }
+            | Self::Empty { type_oid }
             | Self::Bool { type_oid, .. }
             | Self::I32 { type_oid, .. }
             | Self::I64 { type_oid, .. }
@@ -124,6 +130,7 @@ impl ResidentColumn {
     #[must_use]
     pub fn len(&self) -> usize {
         match self {
+            Self::Numeric { data, .. } => data.view().rows.len(),
             Self::Empty { .. } => 0,
             Self::Bool { values, .. } => values.len(),
             Self::I32 { values, .. } => values.len(),
@@ -145,6 +152,7 @@ impl ResidentColumn {
     #[must_use]
     fn has_null_sidecar(&self) -> bool {
         match self {
+            Self::Numeric { data, .. } => data.view().nulls.is_some(),
             Self::Empty { .. } => false,
             Self::Bool { nulls, .. }
             | Self::I32 { nulls, .. }
@@ -166,6 +174,7 @@ impl ResidentColumn {
                 .and_then(|bytes| u64::try_from(bytes).ok())
         };
         match self {
+            Self::Numeric { data, .. } => Some(data.device_bytes()),
             Self::Empty { .. } => Some(0),
             Self::Bool { values, nulls, .. } => checked(
                 values.len(),
@@ -287,6 +296,10 @@ impl ResidentColumn {
     #[must_use]
     pub fn view(&self) -> ResidentColumnView<'_> {
         match self {
+            Self::Numeric { type_oid, data } => ResidentColumnView::Numeric {
+                type_oid: *type_oid,
+                data: data.view(),
+            },
             Self::Empty { type_oid } => ResidentColumnView::Empty {
                 type_oid: *type_oid,
             },
@@ -385,6 +398,10 @@ impl ResidentColumn {
 /// Borrowed column view. Device pointers are reachable only while the store
 /// callback holds the owning relation entry borrowed.
 pub enum ResidentColumnView<'a> {
+    Numeric {
+        type_oid: pg_sys::Oid,
+        data: ResidentNumericColumnView<'a>,
+    },
     Empty {
         type_oid: pg_sys::Oid,
     },
@@ -444,7 +461,8 @@ impl ResidentColumnView<'_> {
     #[must_use]
     pub const fn type_oid(&self) -> pg_sys::Oid {
         match self {
-            Self::Empty { type_oid }
+            Self::Numeric { type_oid, .. }
+            | Self::Empty { type_oid }
             | Self::Bool { type_oid, .. }
             | Self::I32 { type_oid, .. }
             | Self::I64 { type_oid, .. }
@@ -460,6 +478,7 @@ impl ResidentColumnView<'_> {
     #[must_use]
     pub fn len(&self) -> usize {
         match self {
+            Self::Numeric { data, .. } => data.rows.len(),
             Self::Empty { .. } => 0,
             Self::Bool { values, .. } => values.len(),
             Self::I32 { values, .. } => values.len(),
@@ -894,6 +913,189 @@ fn build_geometry_exact_snapshot(
         exact_byte_count: exact.bytes.len(),
         storage,
     })
+}
+
+/// Reusable, generation-stamped exact bytes for one chunk's uncertain rows.
+/// The payload capacity is bounded by the largest complete source chunk, but
+/// only selected rows are copied. PostgreSQL rechecks run after the fill has
+/// released the store borrow, and never borrow resident source bytes directly.
+pub struct ResidentGeometryExactSelection {
+    snapshot: ResidentGeometryExactSnapshot,
+    source_rows: usize,
+    chunk_rows: usize,
+    selected_rows: usize,
+}
+
+/// Non-owning identity, not a residency lease. Every dispatch reacquires and
+/// validates the source; no source pointers may survive the callback.
+#[derive(Clone, Copy)]
+pub struct ResidentGeometrySelectionSource {
+    column: ResidentColumnRef,
+    dependency: ResidentDependencyStamp,
+    type_oid: pg_sys::Oid,
+    rows: usize,
+}
+
+impl ResidentGeometrySelectionSource {
+    /// Invoke raw launch code only: no PostgreSQL callbacks, allocation, status
+    /// mapping or readback under this borrow. The callback cannot return views.
+    pub fn dispatch(
+        self,
+        launch: impl FnOnce(ResidentDispatchBundle<'_>),
+    ) -> Result<(), ResidentLoadError> {
+        process_invalidations();
+        STORE.with(|store| {
+            let store = store.borrow();
+            if let Some(relid) =
+                first_dependency_mismatch(&store, std::slice::from_ref(&self.dependency))
+            {
+                return Err(ResidentLoadError::ArtifactDependencyChanged { relid });
+            }
+            let inputs = ResidentDispatchBundle {
+                store: &store,
+                columns: std::slice::from_ref(&self.column),
+                dependencies: std::slice::from_ref(&self.dependency),
+            };
+            match inputs.find_column(self.column)? {
+                ResidentColumnView::Geometry { type_oid, data }
+                    if type_oid == self.type_oid && data.row_count == self.rows => {}
+                ResidentColumnView::Empty { type_oid }
+                    if type_oid == self.type_oid && self.rows == 0 => {}
+                _ => {
+                    return Err(ResidentLoadError::Loader(
+                        "geometry dispatch source changed shape".into(),
+                    ));
+                }
+            }
+            launch(inputs);
+            Ok(())
+        })
+    }
+}
+
+impl ResidentGeometryExactSelection {
+    #[must_use]
+    pub fn source(&self) -> ResidentGeometrySelectionSource {
+        ResidentGeometrySelectionSource {
+            column: self.snapshot.column,
+            dependency: self.snapshot.dependency,
+            type_oid: self.snapshot.type_oid,
+            rows: self.source_rows,
+        }
+    }
+
+    #[must_use]
+    pub fn retained_host_bytes(&self) -> Option<u64> {
+        self.snapshot.retained_host_bytes()
+    }
+
+    #[must_use]
+    pub fn exact_value(&self, selected_index: usize) -> Option<&[u8]> {
+        (selected_index < self.selected_rows)
+            .then(|| self.snapshot.exact_value(selected_index))
+            .flatten()
+    }
+
+    fn fill(
+        &mut self,
+        exact: &RetainedExactValues,
+        first_row: usize,
+        row_count: usize,
+        indices: &[u64],
+    ) -> Result<(), ResidentLoadError> {
+        self.selected_rows = 0;
+        self.snapshot.exact_byte_count = 0;
+        let invalid = || ResidentLoadError::Loader("invalid exact geometry selection".into());
+        // Preflight sizes fixed, aligned chunks, not arbitrary sliding windows.
+        if self.chunk_rows == 0
+            || first_row > self.source_rows
+            || !first_row.is_multiple_of(self.chunk_rows)
+            || row_count != (self.source_rows - first_row).min(self.chunk_rows)
+            || indices.len() > row_count
+            || self.source_rows.checked_add(1) != Some(exact.offsets.len())
+        {
+            return Err(invalid());
+        }
+        let offset_count = self.snapshot.row_count.checked_add(1).ok_or_else(invalid)?;
+        let payload_bytes = self
+            .snapshot
+            .storage
+            .len()
+            .checked_sub(offset_count)
+            .and_then(|words| words.checked_mul(size_of::<u64>()))
+            .ok_or_else(invalid)?;
+        let mut previous = None;
+        let mut copied_bytes = 0_usize;
+        for index in indices {
+            let index = usize::try_from(*index).map_err(|_| invalid())?;
+            if index >= row_count || previous.is_some_and(|previous| index <= previous) {
+                return Err(invalid());
+            }
+            previous = Some(index);
+            let row = first_row.checked_add(index).ok_or_else(invalid)?;
+            let value = exact.value(row).ok_or_else(invalid)?;
+            copied_bytes = copied_bytes.checked_add(value.len()).ok_or_else(invalid)?;
+        }
+        if copied_bytes > payload_bytes {
+            return Err(invalid());
+        }
+        let (offsets, payload) = self.snapshot.storage.split_at_mut(offset_count);
+        // SAFETY: payload is an initialized aligned u64 slice, and its checked
+        // byte length above covers exactly this allocation's remaining words.
+        let payload = unsafe {
+            std::slice::from_raw_parts_mut(payload.as_mut_ptr().cast::<u8>(), payload_bytes)
+        };
+        offsets[0] = 0;
+        let mut end = 0;
+        for (selected, index) in indices.iter().enumerate() {
+            let value = exact
+                .value(first_row + *index as usize)
+                .ok_or_else(invalid)?;
+            payload[end..end + value.len()].copy_from_slice(value);
+            end += value.len();
+            offsets[selected + 1] = u64::try_from(end).map_err(|_| invalid())?;
+        }
+        self.snapshot.exact_byte_count = end;
+        self.selected_rows = indices.len();
+        Ok(())
+    }
+}
+
+/// Fixed-chunk capacity from offset metadata only: no geometry payload scan.
+fn geometry_exact_selection_words(
+    exact: &RetainedExactValues,
+    row_count: usize,
+    chunk_rows: usize,
+) -> Result<usize, ResidentLoadError> {
+    let invalid = || ResidentLoadError::Loader("invalid exact geometry chunk layout".into());
+    if chunk_rows == 0
+        || row_count.checked_add(1) != Some(exact.offsets.len())
+        || exact.offsets.first() != Some(&0)
+        || exact.offsets.last().copied() != u64::try_from(exact.bytes.len()).ok()
+    {
+        return Err(invalid());
+    }
+    let mut max_bytes = 0_usize;
+    for first in (0..row_count).step_by(chunk_rows) {
+        let end = first + (row_count - first).min(chunk_rows);
+        let bytes = exact.offsets[end]
+            .checked_sub(exact.offsets[first])
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .ok_or_else(invalid)?;
+        if exact.offsets[end] > exact.bytes.len() as u64 {
+            return Err(invalid());
+        }
+        max_bytes = max_bytes.max(bytes);
+    }
+    row_count
+        .min(chunk_rows)
+        .checked_add(1)
+        .and_then(|offsets| {
+            max_bytes
+                .checked_add(size_of::<u64>() - 1)
+                .and_then(|bytes| offsets.checked_add(bytes / size_of::<u64>()))
+        })
+        .ok_or(ResidentLoadError::ArtifactAccountingOverflow)
 }
 
 /// Typed derived artifact plus raw inputs under one store borrow. No device
@@ -1345,6 +1547,15 @@ pub struct ResidentRelationStatus {
     pub load_ms: f64,
 }
 
+/// Exact, pointer-free NUMERIC metadata from one resident generation. Reading
+/// these counters never copies device rows or digits back to the planner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResidentNumericColumnStats {
+    pub attno: i16,
+    pub digit_count: u64,
+    pub bounds: NumericDigitBounds,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResidentLoadEstimate {
     pub relid: pg_sys::Oid,
@@ -1361,6 +1572,12 @@ pub struct ResidentLoadEstimate {
     /// Exact proof over the selected column union of a loaded resident entry.
     /// `None` means no complete loaded entry was available to inspect.
     pub selected_columns_have_no_null_sidecars: Option<bool>,
+    /// Exact metadata for the selected NUMERIC columns. None means no complete
+    /// resident evidence; Some(empty) proves the request has no NUMERIC inputs.
+    pub resident_numeric_columns: Option<Vec<ResidentNumericColumnStats>>,
+    /// Selected attributes with resident NULL sidecars; needed to size dense
+    /// key staging exactly. None denotes unavailable loaded evidence.
+    pub resident_nullable_columns: Option<Vec<i16>>,
     pub pinned: bool,
     pub estimated_bytes: u64,
     /// True when the complete selected/pinned/existing column union is
@@ -1375,13 +1592,17 @@ pub struct ResidentLoadEstimate {
 /// A selected plan replaces or reuses its selected raw relations, so their
 /// full post-load snapshots are supplied to [`Self::projected_final_bytes`].
 /// Unrelated unpinned raw relations and every derived artifact can be evicted;
-/// only raw bytes pinned by an unrelated relation must survive locally.
+/// raw bytes pinned by unrelated relations and executor-owned allocations
+/// (including retained pools outside this LRU) must survive locally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResidentBudgetSnapshot {
     pub cluster_live_bytes: u64,
     pub current_backend_live_bytes: u64,
     pub other_backend_live_bytes: u64,
     pub pinned_unselected_raw_bytes: u64,
+    /// Executor allocations, including retained pools, cannot be reclaimed by
+    /// the relation LRU. Keep them in the planner's surviving footprint.
+    pub retained_execution_bytes: u64,
     pub evictable_or_replaced_local_bytes: u64,
 }
 
@@ -1396,6 +1617,7 @@ impl ResidentBudgetSnapshot {
     ) -> Option<u64> {
         self.other_backend_live_bytes
             .checked_add(self.pinned_unselected_raw_bytes)?
+            .checked_add(self.retained_execution_bytes)?
             .checked_add(selected_raw_bytes)?
             .checked_add(descriptor_artifact_bytes)
     }
@@ -1413,6 +1635,9 @@ pub struct SelectedRelationsEnsureOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResidentLoadError {
+    /// Read-only signal poll stopped an unpublished build. The outer executor
+    /// must service PostgreSQL only after the store borrow and charge release.
+    PreparationInterrupted,
     AutoLoadDisabled {
         relid: pg_sys::Oid,
     },
@@ -1466,6 +1691,7 @@ impl From<String> for ResidentLoadError {
 impl fmt::Display for ResidentLoadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::PreparationInterrupted => f.write_str("resident preparation interrupted"),
             Self::AutoLoadDisabled { relid } => write!(
                 f,
                 "relation OID {relid} is not resident and pg_accel.auto_load is off"
@@ -2143,7 +2369,13 @@ pub fn estimate_selected_relation(
         loader::columns_have_fixed_width_load(&columns).map_err(ResidentLoadError::Loader)?;
     let estimated_bytes = loader::estimate_resident_bytes(request.relid, &columns)
         .map_err(ResidentLoadError::Loader)?;
-    let (resident_evidence, pinned, last_load_ms) = STORE.with(|store| {
+    let (
+        resident_evidence,
+        resident_numeric_columns,
+        resident_nullable_columns,
+        pinned,
+        last_load_ms,
+    ) = STORE.with(|store| {
         let store = store.borrow();
         let entry = store
             .entries
@@ -2159,6 +2391,8 @@ pub fn estimate_selected_relation(
                         .expect("loaded entry covers every selected column"),
                 )
             }),
+            loaded_entry.and_then(|entry| selected_numeric_column_stats(entry, &request.columns)),
+            loaded_entry.and_then(|entry| selected_nullable_columns(entry, &request.columns)),
             store.pins.contains_key(&u32::from(request.relid)),
             entry.map(|entry| entry.load_ms),
         )
@@ -2170,6 +2404,8 @@ pub fn estimate_selected_relation(
         resident_selected_columns: resident_evidence.map(|_| request.columns.clone()),
         resident_rows: resident_evidence.map(|evidence| evidence.1),
         selected_columns_have_no_null_sidecars: resident_evidence.map(|evidence| evidence.2),
+        resident_numeric_columns,
+        resident_nullable_columns,
         pinned,
         estimated_bytes,
         fixed_width,
@@ -2234,6 +2470,50 @@ pub fn revalidate_planner_dependencies(dependencies: &[ResidentPlannerDependency
     })
 }
 
+fn selected_nullable_columns(entry: &ResidentRelation, selected: &[i16]) -> Option<Vec<i16>> {
+    let mut nullable = Vec::new();
+    for &attno in selected {
+        if entry.columns.get(&attno)?.has_null_sidecar() {
+            nullable.push(attno);
+        }
+    }
+    Some(nullable)
+}
+
+fn selected_numeric_column_stats(
+    entry: &ResidentRelation,
+    selected: &[i16],
+) -> Option<Vec<ResidentNumericColumnStats>> {
+    let mut columns = Vec::new();
+    for &attno in selected {
+        match entry.columns.get(&attno)? {
+            ResidentColumn::Numeric { data, .. } => {
+                let view = data.view();
+                if view.rows.len() as u64 != entry.row_count {
+                    return None;
+                }
+                columns.push(ResidentNumericColumnStats {
+                    attno,
+                    digit_count: view.digits.map_or(0, |digits| digits.len() as u64),
+                    bounds: view.bounds,
+                });
+            }
+            ResidentColumn::Empty { type_oid } if *type_oid == pg_sys::NUMERICOID => {
+                if entry.row_count != 0 {
+                    return None;
+                }
+                columns.push(ResidentNumericColumnStats {
+                    attno,
+                    digit_count: 0,
+                    bounds: NumericDigitBounds::default(),
+                });
+            }
+            _ => {}
+        }
+    }
+    Some(columns)
+}
+
 fn loaded_estimate_matches(
     store: &RelationStore,
     request: &SelectedRelation,
@@ -2246,14 +2526,26 @@ fn loaded_estimate_matches(
         return estimate.resident_dependency.is_none()
             && estimate.resident_selected_columns.is_none()
             && estimate.resident_rows.is_none()
+            && estimate.resident_numeric_columns.is_none()
+            && estimate.resident_nullable_columns.is_none()
             && estimate.selected_columns_have_no_null_sidecars.is_none();
     }
-    let (Some(dependency), Some(selected_columns), Some(row_count), Some(no_null_sidecars)) = (
+    let (
+        Some(dependency),
+        Some(selected_columns),
+        Some(row_count),
+        Some(no_null_sidecars),
+        Some(numeric_columns),
+        Some(nullable_columns),
+    ) = (
         estimate.resident_dependency,
         estimate.resident_selected_columns.as_deref(),
         estimate.resident_rows,
         estimate.selected_columns_have_no_null_sidecars,
-    ) else {
+        estimate.resident_numeric_columns.as_ref(),
+        estimate.resident_nullable_columns.as_ref(),
+    )
+    else {
         return false;
     };
     if selected_columns != request.columns.as_slice() {
@@ -2269,6 +2561,8 @@ fn loaded_estimate_matches(
     ResidentDependencyStamp::from_relation(entry) == dependency
         && entry.row_count == row_count
         && selected_columns_have_no_null_sidecars(entry, &request.columns) == Some(no_null_sidecars)
+        && selected_numeric_column_stats(entry, &request.columns).as_ref() == Some(numeric_columns)
+        && selected_nullable_columns(entry, &request.columns).as_ref() == Some(nullable_columns)
 }
 
 /// Revalidate one planner candidate's loaded row/null evidence atomically.
@@ -2343,7 +2637,8 @@ pub fn resident_budget_snapshot(selected_relids: &[pg_sys::Oid]) -> Option<Resid
         )
     })?;
     let (cluster_live_bytes, current_backend_live_bytes) = ledger::byte_snapshot();
-    if local_store_bytes != current_backend_live_bytes
+    let retained_execution_bytes = ledger::execution_memory_bytes();
+    if local_store_bytes.checked_add(retained_execution_bytes)? != current_backend_live_bytes
         || current_backend_live_bytes > cluster_live_bytes
     {
         return None;
@@ -2353,7 +2648,8 @@ pub fn resident_budget_snapshot(selected_relids: &[pg_sys::Oid]) -> Option<Resid
         current_backend_live_bytes,
         other_backend_live_bytes: cluster_live_bytes.checked_sub(current_backend_live_bytes)?,
         pinned_unselected_raw_bytes,
-        evictable_or_replaced_local_bytes: current_backend_live_bytes
+        retained_execution_bytes,
+        evictable_or_replaced_local_bytes: local_store_bytes
             .checked_sub(pinned_unselected_raw_bytes)?,
     })
 }
@@ -2391,6 +2687,64 @@ pub fn with_resident_column<R>(
             .get(&attno)
             .ok_or(ResidentLoadError::MissingColumn { relid, attno })?;
         Ok(callback(column.view()))
+    })
+}
+
+/// Borrow a complete raw-input set against exact generation stamps. Unlike
+/// artifact resolvers this does not require a derived artifact to exist first.
+/// The caller must already have checked SQL permissions and ensured inputs.
+/// No callback may re-enter the store, SPI or catalogs; synchronous GPU calls
+/// and execution-ledger reservations are allowed. Borrowed buffers cannot
+/// escape the callback. This function neither reloads nor retries stale inputs.
+#[cfg_attr(not(any(test, feature = "pg_test")), allow(dead_code))] // Staged occurrence-aware join binder.
+pub fn with_resident_dispatch_inputs<R>(
+    columns: &[ResidentColumnRef],
+    dependencies: &[ResidentDependencyStamp],
+    callback: impl FnOnce(ResidentDispatchBundle<'_>) -> R,
+) -> Result<R, ResidentLoadError> {
+    // Canonical, exact sets prevent an untracked relation from entering a
+    // dispatch through a column reference or a surplus dependency stamp.
+    if columns.is_empty()
+        || dependencies.is_empty()
+        || !dependencies
+            .windows(2)
+            .all(|pair| u32::from(pair[0].relid) < u32::from(pair[1].relid))
+        || !columns.windows(2).all(|pair| {
+            (u32::from(pair[0].relid), pair[0].attno) < (u32::from(pair[1].relid), pair[1].attno)
+        })
+        || columns.iter().any(|column| {
+            column.attno <= 0 || !dependencies.iter().any(|stamp| stamp.relid == column.relid)
+        })
+        || dependencies
+            .iter()
+            .any(|stamp| !columns.iter().any(|column| column.relid == stamp.relid))
+    {
+        return Err(ResidentLoadError::InvalidArtifactDependencies(
+            "raw dispatch requires canonical exact column/dependency sets".to_owned(),
+        ));
+    }
+    process_invalidations();
+    STORE.with(|store| {
+        let mut store = store.borrow_mut();
+        for dependency in dependencies {
+            store.touch(dependency.relid);
+        }
+    });
+    STORE.with(|store| {
+        let store = store.borrow();
+        if let Some(relid) = first_dependency_mismatch(&store, dependencies) {
+            return Err(ResidentLoadError::ArtifactDependencyChanged { relid });
+        }
+        let inputs = ResidentDispatchBundle {
+            store: &store,
+            columns,
+            dependencies,
+        };
+        // Resolve coverage before calling user code, without collecting views.
+        for column in columns {
+            inputs.find_column(*column)?;
+        }
+        Ok(callback(inputs))
     })
 }
 
@@ -2451,6 +2805,84 @@ fn resident_geometry_snapshot_source<'bundle, 'resident>(
             relfilenode: evidence.relfilenode,
         },
     ))
+}
+
+/// Exact precharged scratch capacity for one fixed chunk's selected values.
+pub fn resident_geometry_exact_selection_words(
+    requests: &[ResidentColumnRef],
+    inputs: &ResidentInputBundle<'_>,
+    column: ResidentColumnRef,
+    chunk_rows: usize,
+) -> Result<usize, ResidentLoadError> {
+    let (_, data, _) = resident_geometry_snapshot_source(requests, inputs, column)?;
+    geometry_exact_selection_words(data.exact, data.row_count, chunk_rows)
+}
+
+/// Capture identity and attach precharged scratch; copy no source payload yet.
+pub fn prepare_resident_geometry_exact_selection(
+    requests: &[ResidentColumnRef],
+    inputs: &ResidentInputBundle<'_>,
+    column: ResidentColumnRef,
+    chunk_rows: usize,
+    storage: Box<[u64]>,
+) -> Result<ResidentGeometryExactSelection, ResidentLoadError> {
+    let (type_oid, data, dependency) = resident_geometry_snapshot_source(requests, inputs, column)?;
+    if storage.len() != geometry_exact_selection_words(data.exact, data.row_count, chunk_rows)? {
+        return Err(ResidentLoadError::Loader(
+            "geometry selection allocation does not match preflight".into(),
+        ));
+    }
+    Ok(ResidentGeometryExactSelection {
+        snapshot: ResidentGeometryExactSnapshot {
+            column,
+            dependency,
+            type_oid,
+            row_count: data.row_count.min(chunk_rows),
+            exact_byte_count: 0,
+            storage,
+        },
+        source_rows: data.row_count,
+        chunk_rows,
+        selected_rows: 0,
+    })
+}
+
+/// Revalidate and copy selected exact bytes under a short immutable borrow.
+/// No PostgreSQL callback runs here, no source reference escapes, and the
+/// caller must continue holding its scratch reservation through all rechecks.
+pub fn refill_resident_geometry_exact_selection(
+    selection: &mut ResidentGeometryExactSelection,
+    first_row: usize,
+    row_count: usize,
+    indices: &[u64],
+) -> Result<(), ResidentLoadError> {
+    selection.selected_rows = 0;
+    selection.snapshot.exact_byte_count = 0;
+    process_invalidations();
+    let column = selection.snapshot.column;
+    let dependency = selection.snapshot.dependency;
+    STORE.with(|store| {
+        let store = store.borrow();
+        if let Some(relid) = first_dependency_mismatch(&store, std::slice::from_ref(&dependency)) {
+            return Err(ResidentLoadError::ArtifactDependencyChanged { relid });
+        }
+        let inputs = ResidentDispatchBundle {
+            store: &store,
+            columns: std::slice::from_ref(&column),
+            dependencies: std::slice::from_ref(&dependency),
+        };
+        match inputs.find_column(column)? {
+            ResidentColumnView::Geometry { type_oid, data }
+                if type_oid == selection.snapshot.type_oid
+                    && data.row_count == selection.source_rows =>
+            {
+                selection.fill(data.exact, first_row, row_count, indices)
+            }
+            _ => Err(ResidentLoadError::Loader(
+                "geometry selection source changed shape".into(),
+            )),
+        }
+    })
 }
 
 /// Exact aligned-word count required by [`snapshot_resident_geometry_exact`].
@@ -2795,6 +3227,29 @@ pub fn ensure_derived_artifact_with_report<T: DerivedArtifact, P>(
     prepare: impl FnOnce(ResidentInputBundle<'_>) -> Result<PreparedDerived<P>, String>,
     build: impl FnOnce(P) -> Result<T, String>,
 ) -> Result<ArtifactEnsureReport, ResidentLoadError> {
+    ensure_host_device_derived_artifact_with_report(
+        owner_relid,
+        identity,
+        dependency_relids,
+        columns,
+        0,
+        prepare,
+        build,
+    )
+}
+
+/// Reserve known retained host payload before preparation can copy it. Reserve
+/// the discovered exact device footprint afterward, then transfer both charges
+/// into the published cache entry. Hits do not reserve or invoke callbacks.
+pub fn ensure_host_device_derived_artifact_with_report<T: DerivedArtifact, P>(
+    owner_relid: pg_sys::Oid,
+    identity: &DerivedArtifactIdentity,
+    dependency_relids: &[pg_sys::Oid],
+    columns: &[ResidentColumnRef],
+    retained_host_exact_bytes: u64,
+    prepare: impl FnOnce(ResidentInputBundle<'_>) -> Result<PreparedDerived<P>, String>,
+    build: impl FnOnce(P) -> Result<T, String>,
+) -> Result<ArtifactEnsureReport, ResidentLoadError> {
     if identity.canonical_words().is_empty() {
         return Err(ResidentLoadError::InvalidArtifactDependencies(
             "canonical artifact identity is empty".to_owned(),
@@ -2813,7 +3268,18 @@ pub fn ensure_derived_artifact_with_report<T: DerivedArtifact, P>(
             None,
         )
     })? {
-        ExactArtifactLookup::Hit(report) => return Ok(report),
+        ExactArtifactLookup::Hit(report) => {
+            if report.accounting.retained_host_exact_bytes != retained_host_exact_bytes {
+                return Err(ResidentLoadError::ArtifactAccountingMismatch {
+                    declared: ResidentByteAccounting {
+                        retained_host_exact_bytes,
+                        ..report.accounting
+                    },
+                    actual: report.accounting,
+                });
+            }
+            return Ok(report);
+        }
         ExactArtifactLookup::Stale => replacing_stale = true,
         ExactArtifactLookup::Miss => {}
     }
@@ -2821,6 +3287,7 @@ pub fn ensure_derived_artifact_with_report<T: DerivedArtifact, P>(
     for raw_relid in &protected {
         STORE.with(|store| store.borrow_mut().touch(pg_sys::Oid::from(*raw_relid)));
     }
+    let host_charge = reserve_with_local_eviction_excluding(&protected, retained_host_exact_bytes)?;
     let (prepared, captured_dependencies) = STORE.with(|store| {
         let store = store.borrow();
         let captured_dependencies = dependency_stamps(&store, &protected)?;
@@ -2831,12 +3298,20 @@ pub fn ensure_derived_artifact_with_report<T: DerivedArtifact, P>(
         Ok::<_, ResidentLoadError>((prepared, captured_dependencies))
     })?;
 
-    let charge = reserve_with_local_eviction_excluding(&protected, prepared.device_bytes)?;
-    let artifact = build(prepared.prepared).map_err(ResidentLoadError::Loader)?;
     let declared = ResidentByteAccounting {
         device_bytes: prepared.device_bytes,
-        retained_host_exact_bytes: 0,
+        retained_host_exact_bytes,
     };
+    declared
+        .checked_total()
+        .map_err(|_| ResidentLoadError::ArtifactAccountingOverflow)?;
+    let charge = host_charge
+        .merge(reserve_with_local_eviction_excluding(
+            &protected,
+            prepared.device_bytes,
+        )?)
+        .map_err(|()| ResidentLoadError::ArtifactAccountingOverflow)?;
+    let artifact = build(prepared.prepared).map_err(ResidentLoadError::Loader)?;
     let actual = artifact_accounting(&artifact);
     if actual != declared {
         drop(artifact);
@@ -2883,11 +3358,31 @@ pub fn build_ephemeral_derived_artifact_with_report<T: DerivedArtifact, P>(
     prepare: impl FnOnce(ResidentInputBundle<'_>) -> Result<PreparedDerived<P>, String>,
     build: impl FnOnce(P) -> Result<T, String>,
 ) -> Result<EphemeralArtifactBuildReport<T>, ResidentLoadError> {
+    build_ephemeral_host_device_derived_artifact_with_report(
+        owner_relid,
+        dependency_relids,
+        columns,
+        0,
+        prepare,
+        build,
+    )
+}
+
+/// Query-local counterpart to the reserve-before-copy cached host/device path.
+pub fn build_ephemeral_host_device_derived_artifact_with_report<T: DerivedArtifact, P>(
+    owner_relid: pg_sys::Oid,
+    dependency_relids: &[pg_sys::Oid],
+    columns: &[ResidentColumnRef],
+    retained_host_exact_bytes: u64,
+    prepare: impl FnOnce(ResidentInputBundle<'_>) -> Result<PreparedDerived<P>, String>,
+    build: impl FnOnce(P) -> Result<T, String>,
+) -> Result<EphemeralArtifactBuildReport<T>, ResidentLoadError> {
     process_invalidations();
     let protected = canonical_dependency_relids(owner_relid, dependency_relids, columns)?;
     for raw_relid in &protected {
         STORE.with(|store| store.borrow_mut().touch(pg_sys::Oid::from(*raw_relid)));
     }
+    let host_charge = reserve_with_local_eviction_excluding(&protected, retained_host_exact_bytes)?;
     let (prepared, captured_dependencies) = STORE.with(|store| {
         let store = store.borrow();
         let captured_dependencies = dependency_stamps(&store, &protected)?;
@@ -2899,9 +3394,17 @@ pub fn build_ephemeral_derived_artifact_with_report<T: DerivedArtifact, P>(
     })?;
     let declared = ResidentByteAccounting {
         device_bytes: prepared.device_bytes,
-        retained_host_exact_bytes: 0,
+        retained_host_exact_bytes,
     };
-    let charge = reserve_with_local_eviction_excluding(&protected, prepared.device_bytes)?;
+    declared
+        .checked_total()
+        .map_err(|_| ResidentLoadError::ArtifactAccountingOverflow)?;
+    let charge = host_charge
+        .merge(reserve_with_local_eviction_excluding(
+            &protected,
+            prepared.device_bytes,
+        )?)
+        .map_err(|()| ResidentLoadError::ArtifactAccountingOverflow)?;
     let artifact = build(prepared.prepared).map_err(ResidentLoadError::Loader)?;
     let actual = artifact_accounting(&artifact);
     if actual != declared {
@@ -5390,6 +5893,8 @@ pub(super) mod tests {
                     entry,
                     &request.columns,
                 ),
+                resident_numeric_columns: selected_numeric_column_stats(entry, &request.columns),
+                resident_nullable_columns: selected_nullable_columns(entry, &request.columns),
                 pinned: false,
                 estimated_bytes: 0,
                 fixed_width: true,
@@ -5472,6 +5977,67 @@ pub(super) mod tests {
             std::slice::from_ref(&request),
             std::slice::from_ref(&estimate)
         ));
+    }
+
+    #[test]
+    fn numeric_planner_metadata_is_selected_and_revalidated() {
+        let request = SelectedRelation {
+            relid: pg_sys::Oid::from(1453_u32),
+            columns: vec![1],
+        };
+        install_planner_evidence_relation(1453, 0);
+        STORE.with(|store| {
+            store.borrow_mut().entries[0].columns.insert(
+                1,
+                ResidentColumn::Empty {
+                    type_oid: pg_sys::NUMERICOID,
+                },
+            );
+        });
+        let estimate = planner_evidence_estimate(&request);
+        assert_eq!(
+            estimate.resident_numeric_columns,
+            Some(vec![ResidentNumericColumnStats {
+                attno: 1,
+                digit_count: 0,
+                bounds: NumericDigitBounds::default(),
+            }])
+        );
+        assert!(revalidate_loaded_estimates(
+            std::slice::from_ref(&request),
+            std::slice::from_ref(&estimate)
+        ));
+        assert_eq!(estimate.resident_nullable_columns, Some(vec![]));
+        for field in 0..9 {
+            let mut changed = estimate.clone();
+            let column = &mut changed
+                .resident_numeric_columns
+                .as_mut()
+                .expect("numeric metadata")[0];
+            match field {
+                0 => column.attno = 2,
+                1 => column.digit_count = 1,
+                2 => column.bounds.min_weight = -1,
+                3 => column.bounds.max_weight = 1,
+                4 => column.bounds.max_ndigits = 1,
+                5 => changed.resident_numeric_columns = None,
+                6 => changed.resident_numeric_columns = Some(Vec::new()),
+                7 => changed.resident_nullable_columns = None,
+                _ => changed.resident_nullable_columns = Some(vec![1]),
+            }
+            assert!(!revalidate_loaded_estimates(
+                std::slice::from_ref(&request),
+                &[changed]
+            ));
+        }
+        STORE.with(|store| {
+            let store = store.borrow();
+            assert_eq!(
+                selected_numeric_column_stats(&store.entries[0], &[]),
+                Some(vec![])
+            );
+            assert!(selected_numeric_column_stats(&store.entries[0], &[2]).is_none());
+        });
     }
 
     #[test]
@@ -5632,10 +6198,19 @@ pub(super) mod tests {
             current_backend_live_bytes: local_total,
             other_backend_live_bytes: 1_000,
             pinned_unselected_raw_bytes: pinned_unselected,
+            retained_execution_bytes: 0,
             evictable_or_replaced_local_bytes: local_total - pinned_unselected,
         };
         assert_eq!(snapshot.evictable_or_replaced_local_bytes, 431);
         assert_eq!(snapshot.projected_final_bytes(150, 25), Some(1_375));
+        let with_execution = ResidentBudgetSnapshot {
+            cluster_live_bytes: snapshot.cluster_live_bytes + 512,
+            current_backend_live_bytes: snapshot.current_backend_live_bytes + 512,
+            retained_execution_bytes: 512,
+            ..snapshot
+        };
+        assert_eq!(with_execution.projected_final_bytes(150, 25), Some(1_887));
+        assert_eq!(with_execution.evictable_or_replaced_local_bytes, 431);
     }
 
     #[test]
@@ -5649,6 +6224,7 @@ pub(super) mod tests {
             current_backend_live_bytes: 0,
             other_backend_live_bytes: u64::MAX,
             pinned_unselected_raw_bytes: 0,
+            retained_execution_bytes: 0,
             evictable_or_replaced_local_bytes: 0,
         };
         assert_eq!(snapshot.projected_final_bytes(1, 0), None);
@@ -6171,6 +6747,169 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn host_device_artifacts_reserve_before_copy_and_transfer_charges_to_cache_or_query() {
+        install_test_relations(&[1100]);
+        let owner = pg_sys::Oid::from(1100_u32);
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![1100, 1]);
+        let baseline = ledger::total_bytes();
+        let prepare = |_: ResidentInputBundle<'_>| {
+            assert_eq!(
+                ledger::total_bytes(),
+                baseline + 10,
+                "host payload reserved before copy"
+            );
+            Ok(PreparedDerived {
+                prepared: (),
+                device_bytes: 7,
+            })
+        };
+        let build = |()| {
+            assert_eq!(
+                ledger::total_bytes(),
+                baseline + 17,
+                "both payloads reserved before device build"
+            );
+            Ok(AccountedArtifact {
+                device_bytes: 7,
+                retained_host_exact_bytes: 10,
+            })
+        };
+        let report = ensure_host_device_derived_artifact_with_report(
+            owner,
+            &identity,
+            &[owner],
+            &[],
+            10,
+            prepare,
+            build,
+        )
+        .expect("host/device cache build");
+        assert_eq!(report.accounting.checked_total().expect("total"), 17);
+        assert_eq!(ledger::total_bytes(), baseline + 17);
+        let hit = ensure_host_device_derived_artifact_with_report::<AccountedArtifact, ()>(
+            owner,
+            &identity,
+            &[owner],
+            &[],
+            10,
+            |_| panic!("cache hit must not copy"),
+            |()| panic!("cache hit must not build"),
+        )
+        .expect("hit");
+        assert_eq!(hit.outcome, ArtifactEnsureOutcome::Hit);
+        assert!(
+            ensure_host_device_derived_artifact_with_report::<AccountedArtifact, ()>(
+                owner,
+                &identity,
+                &[owner],
+                &[],
+                11,
+                |_| panic!("mismatched hit must not copy"),
+                |()| panic!("mismatched hit must not build")
+            )
+            .is_err()
+        );
+        assert_eq!(ledger::total_bytes(), baseline + 17);
+        STORE.with(|store| {
+            store.borrow_mut().entries[0].remove_derived(0);
+        });
+        assert_eq!(ledger::total_bytes(), baseline);
+        let local = build_ephemeral_host_device_derived_artifact_with_report(
+            owner,
+            &[owner],
+            &[],
+            10,
+            prepare,
+            build,
+        )
+        .expect("query-local host/device artifact");
+        assert_eq!(local.accounting.checked_total().expect("total"), 17);
+        STORE.with(|store| assert!(store.borrow().entries[0].derived.is_empty()));
+        drop(local);
+        assert_eq!(ledger::total_bytes(), baseline);
+        STORE.with(|store| store.borrow_mut().entries.clear());
+    }
+
+    #[test]
+    fn host_device_artifact_failures_release_both_reservations_without_publication() {
+        install_test_relations(&[1101]);
+        let owner = pg_sys::Oid::from(1101_u32);
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![1101, 1]);
+        let baseline = ledger::total_bytes();
+        let held = LedgerCharge::reserve(u64::MAX - baseline - 9, u64::MAX)
+            .expect("leave less than host payload");
+        assert!(
+            ensure_host_device_derived_artifact_with_report::<AccountedArtifact, ()>(
+                owner,
+                &identity,
+                &[owner],
+                &[],
+                10,
+                |_| panic!("budget rejection precedes program copy"),
+                |()| panic!("no device build")
+            )
+            .is_err()
+        );
+        drop(held);
+        assert_eq!(ledger::total_bytes(), baseline);
+        let held = LedgerCharge::reserve(u64::MAX - baseline - 15, u64::MAX)
+            .expect("host fits, device does not");
+        assert!(
+            ensure_host_device_derived_artifact_with_report::<AccountedArtifact, ()>(
+                owner,
+                &identity,
+                &[owner],
+                &[],
+                10,
+                |_| {
+                    assert_eq!(ledger::total_bytes(), u64::MAX - 5);
+                    Ok(PreparedDerived {
+                        prepared: (),
+                        device_bytes: 6,
+                    })
+                },
+                |()| panic!("device reservation precedes build")
+            )
+            .is_err()
+        );
+        assert_eq!(ledger::total_bytes(), u64::MAX - 15);
+        drop(held);
+        for failure in 0..3 {
+            let result = ensure_host_device_derived_artifact_with_report(
+                owner,
+                &identity,
+                &[owner],
+                &[],
+                10,
+                |_| {
+                    if failure == 0 {
+                        Err("prepare failure".into())
+                    } else {
+                        Ok(PreparedDerived {
+                            prepared: (),
+                            device_bytes: 7,
+                        })
+                    }
+                },
+                |()| {
+                    if failure == 1 {
+                        Err("build failure".into())
+                    } else {
+                        Ok(AccountedArtifact {
+                            device_bytes: 7,
+                            retained_host_exact_bytes: 11,
+                        })
+                    }
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(ledger::total_bytes(), baseline);
+            STORE.with(|store| assert!(store.borrow().entries[0].derived.is_empty()));
+        }
+        STORE.with(|store| store.borrow_mut().entries.clear());
+    }
+
+    #[test]
     fn artifact_hit_requires_the_exact_requested_dependency_set() {
         install_test_relations(&[1_010, 1_011, 1_012]);
         let owner = pg_sys::Oid::from(1_010_u32);
@@ -6334,6 +7073,63 @@ pub(super) mod tests {
         })
         .expect("accounted artifact resolves");
         STORE.with(|store| store.borrow_mut().entries.clear());
+    }
+
+    #[test]
+    fn interrupted_device_preparation_releases_charge_and_borrow_before_retry() {
+        let _guard = reserved_lifecycle_test_guard();
+        install_test_relations(&[1_149]);
+        let owner = pg_sys::Oid::from(1_149_u32);
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![9, 149, 42]);
+        let accounting = ResidentByteAccounting {
+            device_bytes: 9 * 65_537,
+            retained_host_exact_bytes: 0,
+        };
+        let before = ledger::total_bytes();
+        let result = ensure_device_derived_artifact_with_report::<AccountedArtifact>(
+            owner,
+            &identity,
+            &[owner],
+            &[],
+            accounting,
+            |_| {
+                assert_eq!(ledger::total_bytes(), before + accounting.device_bytes);
+                STORE.with(|store| assert!(store.try_borrow_mut().is_err()));
+                Err(ResidentLoadError::PreparationInterrupted)
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(ResidentLoadError::PreparationInterrupted)
+        ));
+        assert_eq!(ledger::total_bytes(), before);
+        // Emulate an outside-borrow barrier invalidating inputs. The retry must
+        // bind this new generation, not retain the interrupted input snapshot.
+        STORE.with(|store| {
+            let mut store = store.borrow_mut();
+            assert!(store.entries[0].derived.is_empty());
+            store.entries[0].generation.relation += 1;
+        });
+        let report = ensure_device_derived_artifact_with_report(
+            owner,
+            &identity,
+            &[owner],
+            &[],
+            accounting,
+            |inputs| {
+                assert_eq!(inputs.evidence[0].generation, 2);
+                Ok(AccountedArtifact {
+                    device_bytes: accounting.device_bytes,
+                    retained_host_exact_bytes: 0,
+                })
+            },
+        )
+        .expect("fresh preparation succeeds");
+        assert_eq!(report.outcome, ArtifactEnsureOutcome::Built);
+        assert_eq!(report.evidence[0].generation, 2);
+        assert_eq!(ledger::total_bytes(), before + accounting.device_bytes);
+        STORE.with(|store| store.borrow_mut().entries.clear());
+        assert_eq!(ledger::total_bytes(), before);
     }
 
     #[test]
@@ -6804,6 +7600,112 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn raw_dispatch_requires_complete_current_canonical_dependencies() {
+        let mut relation = empty_relation(1_165, false, 1);
+        relation.columns.insert(
+            1,
+            ResidentColumn::Empty {
+                type_oid: pg_sys::Oid::from(23_u32),
+            },
+        );
+        let stamp = ResidentDependencyStamp::from_relation(&relation);
+        let column = ResidentColumnRef {
+            relid: stamp.relid,
+            attno: 1,
+        };
+        STORE.with(|store| store.borrow_mut().entries.push(relation));
+        let run = |columns: &[ResidentColumnRef], dependencies: &[ResidentDependencyStamp]| {
+            let mut called = false;
+            let result = with_resident_dispatch_inputs(columns, dependencies, |inputs| {
+                called = true;
+                begin_test_allocation_count();
+                let count = inputs.column_count();
+                let empty = matches!(inputs.column(0), Ok(ResidentColumnView::Empty { .. }));
+                let allocations = finish_test_allocation_count();
+                assert_eq!(count, 1);
+                assert!(empty);
+                assert_eq!(allocations, 0);
+            });
+            (result, called)
+        };
+        assert!(matches!(run(&[column], &[stamp]), (Ok(()), true)));
+        for (columns, dependencies) in [
+            (vec![], vec![stamp]),
+            (vec![column], vec![]),
+            (vec![column, column], vec![stamp]),
+            (vec![column], vec![stamp, stamp]),
+            (vec![ResidentColumnRef { attno: 0, ..column }], vec![stamp]),
+            (
+                vec![ResidentColumnRef {
+                    relid: pg_sys::Oid::from(999_u32),
+                    ..column
+                }],
+                vec![stamp],
+            ),
+            (
+                vec![column],
+                vec![
+                    stamp,
+                    ResidentDependencyStamp {
+                        relid: pg_sys::Oid::from(9_999_u32),
+                        ..stamp
+                    },
+                ],
+            ),
+        ] {
+            assert!(matches!(
+                run(&columns, &dependencies),
+                (
+                    Err(ResidentLoadError::InvalidArtifactDependencies(_)),
+                    false
+                )
+            ));
+        }
+        assert!(matches!(
+            run(&[ResidentColumnRef { attno: 2, ..column }], &[stamp]),
+            (Err(ResidentLoadError::MissingColumn { .. }), false)
+        ));
+        for changed in [
+            ResidentDependencyStamp {
+                generation: stamp.generation + 1,
+                ..stamp
+            },
+            ResidentDependencyStamp {
+                global_generation: stamp.global_generation + 1,
+                ..stamp
+            },
+            ResidentDependencyStamp {
+                relfilenode: pg_sys::Oid::from(9_999_u32),
+                ..stamp
+            },
+        ] {
+            assert!(matches!(
+                run(&[column], &[changed]),
+                (
+                    Err(ResidentLoadError::ArtifactDependencyChanged { .. }),
+                    false
+                )
+            ));
+        }
+        TEST_PENDING_GENERATION_BUMP.with(|pending| pending.set(Some(stamp.relid)));
+        assert!(matches!(
+            run(&[column], &[stamp]),
+            (
+                Err(ResidentLoadError::ArtifactDependencyChanged { .. }),
+                false
+            )
+        ));
+        STORE.with(|store| store.borrow_mut().remove_relation(stamp.relid));
+        assert!(matches!(
+            run(&[column], &[stamp]),
+            (
+                Err(ResidentLoadError::ArtifactDependencyChanged { .. }),
+                false
+            )
+        ));
+    }
+
+    #[test]
     fn dispatch_resolver_valid_and_error_paths_allocate_nothing() {
         let requested = ResidentColumnRef {
             relid: pg_sys::Oid::from(1_163_u32),
@@ -7145,6 +8047,294 @@ pub(super) mod tests {
         assert_eq!(snapshot.exact_value(2), Some(&b"defgh"[..]));
         assert_eq!(snapshot.exact_value(3), None);
         assert_eq!(snapshot.dependency(), dependency);
+    }
+
+    fn exact_selection_fixture(
+        exact: &RetainedExactValues,
+        chunk_rows: usize,
+    ) -> ResidentGeometryExactSelection {
+        let row_count = exact.offsets.len() - 1;
+        let words =
+            geometry_exact_selection_words(exact, row_count, chunk_rows).expect("selection size");
+        let column = ResidentColumnRef {
+            relid: pg_sys::Oid::from(1_157_u32),
+            attno: 3,
+        };
+        ResidentGeometryExactSelection {
+            snapshot: ResidentGeometryExactSnapshot {
+                column,
+                dependency: ResidentDependencyStamp {
+                    relid: column.relid,
+                    generation: 7,
+                    global_generation: 9,
+                    relfilenode: pg_sys::Oid::from(88_u32),
+                },
+                type_oid: pg_sys::Oid::from(42_u32),
+                row_count: row_count.min(chunk_rows),
+                exact_byte_count: 0,
+                storage: vec![0xabab_abab_abab_abab; words].into_boxed_slice(),
+            },
+            source_rows: row_count,
+            chunk_rows,
+            selected_rows: 0,
+        }
+    }
+
+    #[test]
+    fn exact_geometry_selection_copies_all_subsets_without_allocating() {
+        let mut offsets = vec![0_u64];
+        let mut bytes = Vec::new();
+        for row in 0..8_u8 {
+            bytes.extend(std::iter::repeat_n(row, usize::from(row) % 5));
+            offsets.push(bytes.len() as u64);
+        }
+        let exact = RetainedExactValues {
+            offsets: offsets.into_boxed_slice(),
+            bytes: bytes.into_boxed_slice(),
+        };
+        for chunk_rows in 1..=9 {
+            let mut selection = exact_selection_fixture(&exact, chunk_rows);
+            for first in (0..8).step_by(chunk_rows) {
+                let count = (8 - first).min(chunk_rows);
+                for mask in 0..1_usize << count {
+                    let indices = (0..count)
+                        .filter(|row| mask & (1 << row) != 0)
+                        .map(|row| row as u64)
+                        .collect::<Vec<_>>();
+                    begin_test_allocation_count();
+                    let result = selection.fill(&exact, first, count, &indices);
+                    let allocations = finish_test_allocation_count();
+                    result.expect("valid selected rows");
+                    assert_eq!(allocations, 0);
+                    let mut copied = 0;
+                    for (selected, index) in indices.iter().enumerate() {
+                        let expected = exact.value(first + *index as usize).expect("source");
+                        assert_eq!(selection.exact_value(selected), Some(expected));
+                        copied += expected.len();
+                    }
+                    assert_eq!(selection.snapshot.exact_byte_count, copied);
+                    assert_eq!(selection.exact_value(indices.len()), None);
+                }
+            }
+        }
+        let mut selection = exact_selection_fixture(&exact, 8);
+        selection
+            .fill(&exact, 0, 8, &[2, 7])
+            .expect("owned selection");
+        drop(exact);
+        assert_eq!(selection.exact_value(0), Some(&[2, 2][..]));
+        assert_eq!(selection.exact_value(1), Some(&[7, 7][..]));
+    }
+
+    #[test]
+    fn exact_geometry_selection_rejects_bad_metadata_and_hides_stale_results() {
+        let mut exact = RetainedExactValues {
+            offsets: vec![0, 8, 16, 24, 32, 40].into_boxed_slice(),
+            bytes: vec![1; 40].into_boxed_slice(),
+        };
+        let mut selection = exact_selection_fixture(&exact, 3);
+        for (first, count, indices) in [
+            (0, 3, vec![0, 0]),
+            (0, 3, vec![2, 1]),
+            (0, 3, vec![3]),
+            (0, 3, vec![u64::MAX]),
+            (1, 3, vec![0]),
+            (3, 3, vec![0]),
+            (usize::MAX, 1, vec![0]),
+            (0, 2, vec![0]),
+        ] {
+            selection
+                .fill(&exact, 0, 3, &[0])
+                .expect("prior valid result");
+            assert!(selection.fill(&exact, first, count, &indices).is_err());
+            assert!(selection.exact_value(0).is_none());
+        }
+        exact.offsets[2] = 1000;
+        assert!(selection.fill(&exact, 0, 3, &[1]).is_err());
+        assert!(selection.exact_value(0).is_none());
+        exact.offsets[2] = 16;
+        selection
+            .fill(&exact, 3, 2, &[0, 1])
+            .expect("final partial chunk retry");
+        assert_eq!(selection.selected_rows, 2);
+        assert!(geometry_exact_selection_words(&exact, 5, 0).is_err());
+        assert!(geometry_exact_selection_words(&exact, usize::MAX, 3).is_err());
+        exact.offsets[0] = 1;
+        assert!(geometry_exact_selection_words(&exact, 5, 3).is_err());
+        exact.offsets[0] = 0;
+        exact.offsets[5] = 41;
+        assert!(geometry_exact_selection_words(&exact, 5, 3).is_err());
+    }
+
+    #[test]
+    fn exact_geometry_selection_bounds_million_row_scratch_to_one_chunk() {
+        let rows = 1_000_017_usize;
+        let chunk_rows = 65_536;
+        let exact = RetainedExactValues {
+            offsets: (0..=rows)
+                .map(|row| (row * 32) as u64)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            bytes: vec![7; rows * 32].into_boxed_slice(),
+        };
+        let mut selection = exact_selection_fixture(&exact, chunk_rows);
+        assert_eq!(selection.retained_host_bytes(), Some(2_621_448));
+        let old_bytes = (rows + 1 + rows * 4) * 8;
+        assert_eq!(old_bytes, 40_000_688);
+        selection
+            .fill(&exact, 0, chunk_rows, &[])
+            .expect("no uncertain rows");
+        assert_eq!(selection.snapshot.exact_byte_count, 0);
+        selection
+            .fill(&exact, 0, chunk_rows, &[0, 65_535])
+            .expect("sparse rechecks");
+        assert_eq!(selection.snapshot.exact_byte_count, 64);
+        assert!(
+            selection.snapshot.storage[chunk_rows + 1 + 8..]
+                .iter()
+                .all(|word| *word == 0xabab_abab_abab_abab)
+        );
+        let first = rows / chunk_rows * chunk_rows;
+        selection
+            .fill(&exact, first, rows - first, &[0, (rows - first - 1) as u64])
+            .expect("last partial chunk");
+        assert_eq!(selection.snapshot.exact_byte_count, 64);
+        let empty = RetainedExactValues {
+            offsets: vec![0].into_boxed_slice(),
+            bytes: Box::default(),
+        };
+        assert_eq!(
+            geometry_exact_selection_words(&empty, 0, chunk_rows).expect("empty size"),
+            1
+        );
+    }
+
+    #[test]
+    fn exact_geometry_selection_revalidation_rejects_eviction_and_generation_changes() {
+        let _guard = reserved_lifecycle_test_guard();
+        let exact = RetainedExactValues {
+            offsets: vec![0, 8].into_boxed_slice(),
+            bytes: vec![7; 8].into_boxed_slice(),
+        };
+        let mut selection = exact_selection_fixture(&exact, 1);
+        let relid = selection.snapshot.column.relid;
+        install_test_relations(&[u32::from(relid)]);
+        let dependency = STORE.with(|store| {
+            dependency_stamps(&store.borrow(), &BTreeSet::from([u32::from(relid)]))
+                .expect("resident stamp")[0]
+        });
+        for mismatch in 0..4 {
+            selection.snapshot.dependency = dependency;
+            match mismatch {
+                0 => selection.snapshot.dependency.generation += 1,
+                1 => selection.snapshot.dependency.global_generation += 1,
+                2 => {
+                    selection.snapshot.dependency.relfilenode =
+                        pg_sys::Oid::from(u32::from(dependency.relfilenode) + 1);
+                }
+                _ => STORE.with(|store| store.borrow_mut().entries.clear()),
+            }
+            selection
+                .fill(&exact, 0, 1, &[0])
+                .expect("previous owned bytes");
+            assert!(
+                matches!(refill_resident_geometry_exact_selection(&mut selection, 0, 1, &[0]),
+                Err(ResidentLoadError::ArtifactDependencyChanged { relid: actual }) if actual == relid)
+            );
+            assert!(selection.exact_value(0).is_none());
+            STORE
+                .with(|store| assert!(store.try_borrow_mut().is_ok(), "no borrow escapes failure"));
+        }
+        install_test_relations(&[u32::from(relid)]);
+        selection.snapshot.dependency = STORE.with(|store| {
+            dependency_stamps(&store.borrow(), &BTreeSet::from([u32::from(relid)]))
+                .expect("fresh resident stamp")[0]
+        });
+        selection
+            .fill(&exact, 0, 1, &[0])
+            .expect("owned bytes before invalidation");
+        schedule_test_generation_bump(relid);
+        assert!(
+            matches!(refill_resident_geometry_exact_selection(&mut selection, 0, 1, &[0]),
+            Err(ResidentLoadError::ArtifactDependencyChanged { relid: actual }) if actual == relid)
+        );
+        assert!(TEST_PENDING_GENERATION_BUMP.with(Cell::take).is_none());
+        assert!(selection.exact_value(0).is_none());
+        STORE.with(|store| store.borrow_mut().entries.clear());
+    }
+
+    #[test]
+    fn geometry_selection_dispatch_revalidates_without_exact_rechecks() {
+        let _guard = reserved_lifecycle_test_guard();
+        let exact = RetainedExactValues {
+            offsets: vec![0].into_boxed_slice(),
+            bytes: Box::default(),
+        };
+        let mut selection = exact_selection_fixture(&exact, 3);
+        let column = selection.snapshot.column;
+        install_test_relations(&[u32::from(column.relid)]);
+        STORE.with(|store| {
+            let mut store = store.borrow_mut();
+            store.entries[0].columns.insert(
+                column.attno,
+                ResidentColumn::Empty {
+                    type_oid: selection.snapshot.type_oid,
+                },
+            );
+            selection.snapshot.dependency =
+                ResidentDependencyStamp::from_relation(&store.entries[0]);
+        });
+        let source = selection.source();
+        // Capturing identity does not lease or retain the allocation.
+        drop(selection);
+        begin_test_allocation_count();
+        let dispatch = source.dispatch(|_| {});
+        let allocations = finish_test_allocation_count();
+        dispatch.expect("unchanged source dispatch");
+        assert_eq!(allocations, 0, "reborrowing must not allocate per chunk");
+        let mut calls = 0;
+        for _ in 0..3 {
+            source
+                .dispatch(|inputs| {
+                    assert!(matches!(
+                        inputs.find_column(column),
+                        Ok(ResidentColumnView::Empty { .. })
+                    ));
+                    STORE.with(|store| assert!(store.try_borrow_mut().is_err()));
+                    calls += 1;
+                })
+                .expect("fresh short borrow");
+            STORE.with(|store| assert!(store.try_borrow_mut().is_ok()));
+        }
+        assert_eq!(calls, 3);
+        for mismatch in 0..5 {
+            let mut changed = source;
+            match mismatch {
+                0 => changed.dependency.generation += 1,
+                1 => changed.dependency.global_generation += 1,
+                2 => changed.dependency.relfilenode = pg_sys::Oid::from(99_u32),
+                3 => changed.type_oid = pg_sys::INT4OID,
+                _ => changed.rows = 1,
+            }
+            assert!(
+                changed
+                    .dispatch(|_| panic!("stale source dispatched"))
+                    .is_err()
+            );
+            STORE.with(|store| assert!(store.try_borrow_mut().is_ok()));
+        }
+        schedule_test_generation_bump(column.relid);
+        assert!(matches!(
+            source.dispatch(|_| panic!("invalidated source dispatched")),
+            Err(ResidentLoadError::ArtifactDependencyChanged { .. })
+        ));
+        assert!(TEST_PENDING_GENERATION_BUMP.with(Cell::take).is_none());
+        STORE.with(|store| store.borrow_mut().entries.clear());
+        assert!(matches!(
+            source.dispatch(|_| panic!("evicted source dispatched")),
+            Err(ResidentLoadError::ArtifactDependencyChanged { .. })
+        ));
+        STORE.with(|store| assert!(store.try_borrow_mut().is_ok()));
     }
 
     #[test]

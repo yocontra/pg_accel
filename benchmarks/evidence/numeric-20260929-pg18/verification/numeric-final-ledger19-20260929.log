@@ -1,0 +1,5 @@
+residency-ledger integration: PASS
+  relation_oid=450933 baseline_bytes=0
+  database_a_bytes=4000000 database_b_bytes=4000000
+  numeric_a_bytes=14301015 numeric_b_bytes=14301015 (raw, derived and retained execution buffers)
+  generation=0->8->8

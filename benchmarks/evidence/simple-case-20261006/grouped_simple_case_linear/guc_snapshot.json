@@ -1,0 +1,53 @@
+{
+  "settings": [
+    [
+      "pg_accel.enabled",
+      "on"
+    ],
+    [
+      "pg_accel.gpu_enabled",
+      "on"
+    ],
+    [
+      "pg_accel.min_batch_size",
+      "65536"
+    ],
+    [
+      "pg_accel.kernel_timeout_ms",
+      "5s"
+    ],
+    [
+      "max_parallel_workers_per_gather",
+      "8"
+    ],
+    [
+      "max_parallel_workers",
+      "12"
+    ],
+    [
+      "parallel_setup_cost",
+      "0"
+    ],
+    [
+      "parallel_tuple_cost",
+      "0"
+    ],
+    [
+      "work_mem",
+      "512MB"
+    ],
+    [
+      "shared_buffers",
+      "16GB"
+    ],
+    [
+      "effective_cache_size",
+      "48GB"
+    ],
+    [
+      "server_version",
+      "18.4"
+    ]
+  ],
+  "postmaster_start_time": null
+}

@@ -1,0 +1,22 @@
+PGACCEL_TEST_START name=test_device
+pgaccel: FATAL: init failed: injected out-of-order queue construction failure
+pgaccel: grouped aggregate scratch cleanup failed: injected scratch cleanup failure
+=== Device Info ===
+  Device:          Apple M2 Max
+  Backend:         metal
+  Compute Units:   38
+  Max Alloc:       41747087360 bytes
+  FP64:            no
+  Atomic64:        no
+
+=== Platform Caps ===
+  Backend:         metal
+  FP64:            no
+  Atomic64:        no
+  OOO Queue:       yes
+  Compute Units:   38
+  Max Alloc:       41747087360 bytes
+
+All fields consistent between device_info and caps.
+Shutdown OK.
+PGACCEL_TEST_RESULT name=test_device exit_code=0 result=PASS raw_lines=20 body_sha256=5365e2c4043b55f49aaef2ef1d3f7b2f278aa61bc1f472fb01f081c5b2712062 binding_sha256=82ad979986735936a341c62294fa0fb30db10001de340294845e2680be8c6078

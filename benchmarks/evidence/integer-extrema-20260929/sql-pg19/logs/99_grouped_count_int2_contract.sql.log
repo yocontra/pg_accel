@@ -1,0 +1,20 @@
+=== 99_grouped_count_int2_contract ===
+SET
+SET
+CREATE TABLE
+INSERT 0 500000
+ANALYZE
+SET
+SELECT 3
+DO
+PGACCEL_ASSERT_OK:99_grouped_count_int2_contract.assert_001
+CREATE TABLE
+DO
+PGACCEL_ASSERT_OK:99_grouped_count_int2_contract.assert_002
+DO
+PGACCEL_ASSERT_OK:99_grouped_count_int2_contract.assert_003
+DO
+PGACCEL_ASSERT_OK:99_grouped_count_int2_contract.assert_004
+TRUNCATE TABLE
+psql:/Users/contra/Projects/pg_accel/sql/tests/99_grouped_count_int2_contract.sql:235: ERROR:  99 int2 COUNT adjacent contract FAILED: selected/dispatched (kernels 2 -> 5, stock 0)
+CONTEXT:  PL/pgSQL function inline_code_block line 45 at RAISE

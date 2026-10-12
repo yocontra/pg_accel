@@ -1,0 +1,204 @@
+{
+  "schema_version": 1,
+  "generated_unix_seconds": 1791259868,
+  "root": "benchmarks/evidence/scalar-qualification-20261005/global",
+  "entry_count": 39,
+  "total_size_bytes": 311190,
+  "entries": [
+    {
+      "path": "README.md",
+      "size_bytes": 2167,
+      "modified_unix_seconds": 1791259863
+    },
+    {
+      "path": "benchmark_failure_ledger.json",
+      "size_bytes": 985,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "benchmark_failure_ledger.md",
+      "size_bytes": 967,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "correctness_diffs/global_scalar_program-1000000.json",
+      "size_bytes": 1936,
+      "modified_unix_seconds": 1791259867
+    },
+    {
+      "path": "correctness_diffs/global_scalar_program-250000.json",
+      "size_bytes": 1935,
+      "modified_unix_seconds": 1791259865
+    },
+    {
+      "path": "crashes.json",
+      "size_bytes": 2,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "crashes.md",
+      "size_bytes": 45,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "guc_snapshot.json",
+      "size_bytes": 702,
+      "modified_unix_seconds": 1791259864
+    },
+    {
+      "path": "log_tails/run-complete/00-19.log.delta",
+      "size_bytes": 201,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "log_tails/run-complete/00-19.log.tail",
+      "size_bytes": 65585,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "log_tails/run-complete/01-pg_accel_panic.log.delta",
+      "size_bytes": 215,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "log_tails/run-complete/01-pg_accel_panic.log.tail",
+      "size_bytes": 13702,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "log_tails/run-complete/02-pg_accel_traces.jsonl.delta",
+      "size_bytes": 218,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "log_tails/run-complete/02-pg_accel_traces.jsonl.tail",
+      "size_bytes": 40933,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "log_tails/run-complete/03-pg_accel_otel.jsonl.delta",
+      "size_bytes": 216,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "log_tails/run-complete/03-pg_accel_otel.jsonl.tail",
+      "size_bytes": 14884,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "log_tails/run-complete/05-pg_accel_panic.log.delta",
+      "size_bytes": 203,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "log_tails/run-complete/05-pg_accel_panic.log.tail",
+      "size_bytes": 78,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "log_tails/run-complete/06-pg_accel_traces.jsonl.delta",
+      "size_bytes": 218,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "log_tails/run-complete/06-pg_accel_traces.jsonl.tail",
+      "size_bytes": 42480,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "log_tails/run-complete/07-pg_accel_otel.jsonl.delta",
+      "size_bytes": 204,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "log_tails/run-complete/07-pg_accel_otel.jsonl.tail",
+      "size_bytes": 79,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "manifest.json",
+      "size_bytes": 1946,
+      "modified_unix_seconds": 1791259863
+    },
+    {
+      "path": "no_dispatch_audit.json",
+      "size_bytes": 831,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "no_dispatch_audit.md",
+      "size_bytes": 840,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "plan_snippets/global_scalar_program-1000000.txt",
+      "size_bytes": 2782,
+      "modified_unix_seconds": 1791259867
+    },
+    {
+      "path": "plan_snippets/global_scalar_program-250000.txt",
+      "size_bytes": 2565,
+      "modified_unix_seconds": 1791259865
+    },
+    {
+      "path": "plans.txt",
+      "size_bytes": 8989,
+      "modified_unix_seconds": 1791259867
+    },
+    {
+      "path": "pre_risk_contexts/global_scalar_program-1000000.json",
+      "size_bytes": 6008,
+      "modified_unix_seconds": 1791259866
+    },
+    {
+      "path": "pre_risk_contexts/global_scalar_program-250000.json",
+      "size_bytes": 5806,
+      "modified_unix_seconds": 1791259864
+    },
+    {
+      "path": "provenance-warnings.txt",
+      "size_bytes": 582,
+      "modified_unix_seconds": 1791259864
+    },
+    {
+      "path": "provenance.json",
+      "size_bytes": 3552,
+      "modified_unix_seconds": 1791259864
+    },
+    {
+      "path": "report.csv",
+      "size_bytes": 1984,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "report.json",
+      "size_bytes": 66654,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "report.md",
+      "size_bytes": 15078,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "resident_boundary_audit.json",
+      "size_bytes": 428,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "resident_boundary_audit.md",
+      "size_bytes": 820,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "resume_audit_manifest.json",
+      "size_bytes": 4179,
+      "modified_unix_seconds": 1791259868
+    },
+    {
+      "path": "rust_backtrace.txt",
+      "size_bytes": 191,
+      "modified_unix_seconds": 1791259863
+    }
+  ]
+}

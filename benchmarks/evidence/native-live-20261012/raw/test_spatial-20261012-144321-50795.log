@@ -1,0 +1,111 @@
+PGACCEL_TEST_START name=test_spatial
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+=== pgaccel spatial predicate tests ===
+
+--- spatial APIs: no-device lifecycle ---
+
+=== Results: 18/18 passed ===
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+=== pgaccel spatial predicate tests ===
+
+--- point_in_ring: basic ---
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/11684871488776710216.10422208433641445224.metalar.50796.459099429760601613.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/1603846541398696076.17020898544937500221.metalar.50796.12152697085936229247.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/11684871488776710216.17274005418401058260.metalar.50796.16497229449745752922.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/11314404599029590982.6380845503187158595.metalar.50796.4971078328632765703.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6762567897877462856.12615397103539271477.metalar.50796.1500098914622067275.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/3270691723566417832.12615397103539271477.metalar.50796.16331823075559457228.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15696700658351277998.277092327870385419.metalar.50796.13342585825853895527.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10111736844367504566.277092327870385419.metalar.50796.6493375580165583790.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/11684871488776710216.9481682397217983626.metalar.50796.16448936524884937249.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/13323839073286308922.17020898544937500221.metalar.50796.712088123909644909.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/1798190166007876564.17020898544937500221.metalar.50796.5123956742939014596.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/5264597047274346270.17683065292683722599.metalar.50796.9050048984935308014.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6710619786891255484.4682877031220118531.metalar.50796.6187842764702680906.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4229568718640533472.8991702910269493153.metalar.50796.8512964463810921751.tmp (kernels_added=1 skipped=0)
+--- point_in_ring: edge cases ---
+--- point_in_ring: fp32 ---
+--- point_in_ring: triangle ---
+--- point_in_ring: fp64 bulk (1k/64k/256k/1M) ---
+--- point_in_ring: fp64 GPU dispatch counter ---
+--- point_in_polygon_bulk: simple kernel path ---
+--- point_in_polygon_bulk: all bbox-outside device dispatch ---
+--- point_in_polygon_bulk: simple kernel hole boundary ---
+--- point_in_polygon_bulk: simple slab large batch ---
+--- point_in_polygon_bulk: cooperative kernel path ---
+--- point_in_polygon_bulk: cooperative kernel hole boundary ---
+--- point_in_polygon_bulk: cooperative slab large batch with hole ---
+--- point_in_polygon_bulk: cooperative implicit and short rings ---
+--- sphere_distance: basic ---
+--- sphere_distance: edge cases ---
+--- sphere_distance: fp32 ---
+--- sphere_distance: fp64 (post-split) ---
+--- segment_intersects: basic ---
+--- segment_intersects: edge cases ---
+--- segment_intersects: fp32 ---
+--- st_area_bulk: basic fp32 ---
+--- st_area_bulk: orientation invariance ---
+--- st_area_bulk: empty input ---
+--- st_length_bulk: closed ring (Polygon perimeter) ---
+--- st_length_bulk: open path (LineString) ---
+--- st_length_bulk: degenerate inputs ---
+--- st_length_bulk: fp64 (post-split) ---
+--- st_distance_polygon_polygon: disjoint pair ---
+--- st_distance_polygon_polygon: touching boundaries ---
+--- st_distance_polygon_polygon: degenerate row -> UNCERTAIN ---
+--- spatial CSR: zero-capacity rows and reverse distance sweep ---
+--- st_equals_bulk ---
+--- spatial pairwise: implicit rings and staging validation ---
+--- algorithmic predicate: staging overflow contract ---
+--- algorithmic predicates: device equality adversarial cases ---
+--- st_touches_bulk ---
+--- st_crosses_bulk ---
+--- st_overlaps_bulk ---
+--- algorithmic predicates: slab GPU dispatch ---
+
+=== Results: 223/223 passed ===
+PGACCEL_TEST_RESULT name=test_spatial exit_code=0 result=PASS raw_lines=109 body_sha256=e0e4bebee0d45e98c2e242627d73daaeb88923830a5c87ff282a64817670125a binding_sha256=f8e8cf1c09505c74ef00d8f5755568e95e0b7b88e72185b2a6b967ba42a04fba

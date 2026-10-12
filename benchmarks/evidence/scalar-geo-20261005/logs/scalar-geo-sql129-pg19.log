@@ -1,0 +1,38 @@
+=== 129_spatial_scalar_programs ===
+SET
+SET
+SELECT 1000017
+ANALYZE
+SELECT 1
+psql:sql/tests/129_spatial_scalar_programs.sql:73: NOTICE:  129 spatial scalar matrix selected 24 of 24 query shapes
+DO
+PGACCEL_ASSERT_OK:129_spatial_scalar_programs.assert_001
+DO
+PGACCEL_ASSERT_OK:129_spatial_scalar_programs.assert_002
+SET
+DO
+DO
+PGACCEL_ASSERT_OK:129_spatial_scalar_programs.assert_003
+DEALLOCATE
+DEALLOCATE
+RESET
+INSERT 0 1000017
+ANALYZE
+DO
+PGACCEL_ASSERT_OK:129_spatial_scalar_programs.assert_004
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ f
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:129_spatial_scalar_programs

@@ -1,0 +1,55 @@
+-- pgaccel_kernels: SYCL (AdaptiveCpp) is the only supported backend; build fails without AdaptiveCpp
+-- Configuring done (0.2s)
+-- Generating done (0.1s)
+-- Build files have been written to: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+[ 26%] Built target pgaccel_kernels_shared
+[ 26%] Built target pgaccel_kernels
+[ 27%] Built target test_spatial_pairwise_boundary
+[ 28%] Built target test_reduce_minimal
+[ 32%] Built target test_reduce_stats
+[ 34%] Built target test_hashagg_spatial_matrix
+[ 35%] Built target test_hash_domain_matrix
+[ 35%] Built target test_reduce_matrix
+[ 37%] Built target test_spatial_resident
+[ 39%] Built target test_grouped_agg_workspace
+[ 41%] Built target test_spatial_dispatch
+[ 42%] Built target test_fork_warmed
+[ 44%] Built target test_spatial
+[ 45%] Built target test_bbox
+[ 46%] Built target test_hash_join
+[ 48%] Built target test_h3
+[ 49%] Built target test_device
+[ 51%] Built target test_fp64_mul_probe
+[ 54%] Built target test_correctness
+[ 55%] Built target test_exec_gpu
+[ 56%] Built target test_hash_agg_keys
+[ 58%] Built target test_fork_cold_barrier
+[ 60%] Built target test_fp64_probe_sqrt
+[ 62%] Built target test_raster_resident
+[ 64%] Built target test_kernel_failure_status
+[ 66%] Built target test_oom_invariant
+[ 68%] Built target test_spatial_bench
+[ 69%] Built target test_host_api_contract
+[ 70%] Building CXX object CMakeFiles/test_grouped_agg.dir/test/test_grouped_agg.cpp.o
+[ 71%] Built target test_grouped_agg_hash
+[ 73%] Built target test_ooo_overlap
+[ 75%] Built target test_sycl_basic
+[ 76%] Built target test_reduce_bool_bit
+[ 78%] Built target test_fp64_probe_atan2
+[ 79%] Built target test_fp64_probe_sin
+[ 81%] Building CXX object CMakeFiles/test_scalar.dir/test/test_scalar.cpp.o
+[ 81%] Built target test_fp64_probe_haversine
+[ 84%] Built target test_fp64_probe_mul
+[ 85%] Built target test_fp64_probe_cos
+[ 86%] Built target test_fork_cold
+[ 88%] Built target test_expr_memory
+[ 90%] Built target test_fork
+[ 93%] Built target test_fp64_probe_asin
+[ 93%] Built target test_fork_archive_stress
+[ 95%] Built target test_hash_agg_partial
+[ 97%] Built target test_fp64_probe_add
+[ 98%] Built target test_expr_vm_matrix
+[ 99%] Linking CXX executable test_scalar
+[ 99%] Built target test_scalar
+[100%] Linking CXX executable test_grouped_agg
+[100%] Built target test_grouped_agg

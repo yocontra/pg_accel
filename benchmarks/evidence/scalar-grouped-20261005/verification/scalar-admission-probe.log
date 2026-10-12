@@ -1,0 +1,391 @@
+SET
+CREATE TABLE
+psql:.codex/scratch/scalar-admission-probe.sql:30: NOTICE:  n=250000 keys= expr=price rejection=no_gpu_resident_pipeline plan=Custom Scan (GpuAccelAgg)  (cost=5.00..505.03 rows=1 width=64)
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_integer
+  GPU Descriptor Strategy: descriptor_ungrouped_aggregate
+  GPU Descriptor Specialization: dense_integer_with_counts_plain
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: none
+  GPU Descriptor Aggregates: m0:column(2392083.2:type=23) -> value.sum; value.avg; value.count; value.min; value.max; m1:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none; m1=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot2:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false; slot3:aggregate[m0].value.min source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot4:aggregate[m0].value.max source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot5:aggregate[m1].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 16393
+  GPU Resident Device Columns: 1
+  GPU Resident Boundary: none: no CPU boundary
+
+psql:.codex/scratch/scalar-admission-probe.sql:30: NOTICE:  n=250000 keys= expr=price+adjustment rejection=no_gpu_resident_pipeline plan=Custom Scan (GpuAccelAgg)  (cost=5.00..755.03 rows=1 width=64)
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_integer
+  GPU Descriptor Strategy: descriptor_ungrouped_aggregate
+  GPU Descriptor Specialization: dense_integer_expressions_plain
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: none
+  GPU Descriptor Aggregates: m0:add(2392083.2:type=23, 2392083.3:type=23) -> value.sum; value.avg; value.count; value.min; value.max; m1:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none; m1=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot2:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false; slot3:aggregate[m0].value.min source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot4:aggregate[m0].value.max source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot5:aggregate[m1].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 16395
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+
+psql:.codex/scratch/scalar-admission-probe.sql:30: NOTICE:  n=250000 keys= expr=price+1 rejection=no_gpu_resident_pipeline plan=Custom Scan (GpuAccelAgg)  (cost=5.00..1255.03 rows=1 width=64)
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_integer
+  GPU Descriptor Strategy: descriptor_ungrouped_aggregate
+  GPU Descriptor Specialization: dense_scalar_programs_plain
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: none
+  GPU Descriptor Aggregates: m0:bytecode(inputs=1, words=10, result_type=23) -> value.sum; value.avg; value.count; value.min; value.max; m1:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none; m1=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot2:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false; slot3:aggregate[m0].value.min source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot4:aggregate[m0].value.max source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot5:aggregate[m1].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 16395
+  GPU Resident Device Columns: 1
+  GPU Resident Boundary: none: no CPU boundary
+
+psql:.codex/scratch/scalar-admission-probe.sql:30: NOTICE:  n=250000 keys= expr=COALESCE(price,0) rejection=no_gpu_resident_pipeline plan=Custom Scan (GpuAccelAgg)  (cost=5.00..1255.03 rows=1 width=64)
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_integer
+  GPU Descriptor Strategy: descriptor_ungrouped_aggregate
+  GPU Descriptor Specialization: dense_scalar_programs_plain
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: none
+  GPU Descriptor Aggregates: m0:bytecode(inputs=1, words=10, result_type=23) -> value.sum; value.avg; value.count; value.min; value.max; m1:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none; m1=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot2:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false; slot3:aggregate[m0].value.min source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot4:aggregate[m0].value.max source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot5:aggregate[m1].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 16395
+  GPU Resident Device Columns: 1
+  GPU Resident Boundary: none: no CPU boundary
+
+psql:.codex/scratch/scalar-admission-probe.sql:30: NOTICE:  n=250000 keys= expr=CASE WHEN adjustment IS NULL THEN price WHEN price>0 THEN (price+adjustment)*(price-adjustment) ELSE COALESCE(price,0)-adjustment END rejection=no_gpu_resident_pipeline plan=Custom Scan (GpuAccelAgg)  (cost=5.00..4255.03 rows=1 width=64)
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_integer
+  GPU Descriptor Strategy: descriptor_ungrouped_aggregate
+  GPU Descriptor Specialization: dense_scalar_programs_plain
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: none
+  GPU Descriptor Aggregates: m0:bytecode(inputs=2, words=49, result_type=23) -> value.sum; value.avg; value.count; value.min; value.max; m1:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none; m1=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot2:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false; slot3:aggregate[m0].value.min source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot4:aggregate[m0].value.max source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot5:aggregate[m1].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 16395
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+
+psql:.codex/scratch/scalar-admission-probe.sql:30: NOTICE:  n=250000 keys=region expr=price rejection=no_gpu_resident_pipeline plan=Custom Scan (GpuAccelAgg)  (cost=5.00..1255.96 rows=32 width=68)
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_integer
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: dense_integer_with_counts_plain
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: k0:fact(2392083.1:type=23) type=23 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(2392083.2:type=23) -> value.sum; value.avg; value.count; value.min; value.max; m1:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none; m1=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot2:aggregate[m0].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot3:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false; slot4:aggregate[m0].value.min source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot5:aggregate[m0].value.max source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot6:aggregate[m1].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 16393
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+
+psql:.codex/scratch/scalar-admission-probe.sql:30: NOTICE:  n=250000 keys=region expr=price+adjustment rejection=no_gpu_resident_pipeline plan=Custom Scan (GpuAccelAgg)  (cost=5.00..1505.96 rows=32 width=68)
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_integer
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: dense_integer_expressions_plain
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: k0:fact(2392083.1:type=23) type=23 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:add(2392083.2:type=23, 2392083.3:type=23) -> value.sum; value.avg; value.count; value.min; value.max; m1:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none; m1=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot2:aggregate[m0].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot3:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false; slot4:aggregate[m0].value.min source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot5:aggregate[m0].value.max source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot6:aggregate[m1].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 16395
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+
+psql:.codex/scratch/scalar-admission-probe.sql:30: NOTICE:  n=250000 keys=region expr=price+1 rejection=generic_scalar_estimate_unavailable plan=HashAggregate  (cost=11309.00..11309.40 rows=32 width=68)
+  Group Key: region
+  ->  Seq Scan on scalar_probe  (cost=0.00..3809.00 rows=250000 width=8)
+
+psql:.codex/scratch/scalar-admission-probe.sql:30: NOTICE:  n=250000 keys=region expr=COALESCE(price,0) rejection=generic_scalar_estimate_unavailable plan=HashAggregate  (cost=8184.00..8184.40 rows=32 width=68)
+  Group Key: region
+  ->  Seq Scan on scalar_probe  (cost=0.00..3809.00 rows=250000 width=8)
+
+psql:.codex/scratch/scalar-admission-probe.sql:30: NOTICE:  n=250000 keys=region expr=CASE WHEN adjustment IS NULL THEN price WHEN price>0 THEN (price+adjustment)*(price-adjustment) ELSE COALESCE(price,0)-adjustment END rejection=generic_scalar_estimate_unavailable plan=HashAggregate  (cost=23809.00..23809.40 rows=32 width=68)
+  Group Key: region
+  ->  Seq Scan on scalar_probe  (cost=0.00..3809.00 rows=250000 width=12)
+
+psql:.codex/scratch/scalar-admission-probe.sql:30: NOTICE:  n=1000000 keys= expr=price rejection=no_gpu_resident_pipeline plan=Custom Scan (GpuAccelAgg)  (cost=5.00..2005.03 rows=1 width=64)
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_integer
+  GPU Descriptor Strategy: descriptor_ungrouped_aggregate
+  GPU Descriptor Specialization: dense_integer_with_counts_plain
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: none
+  GPU Descriptor Aggregates: m0:column(2392083.2:type=23) -> value.sum; value.avg; value.count; value.min; value.max; m1:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none; m1=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot2:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false; slot3:aggregate[m0].value.min source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot4:aggregate[m0].value.max source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot5:aggregate[m1].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 16393
+  GPU Resident Device Columns: 1
+  GPU Resident Boundary: none: no CPU boundary
+
+psql:.codex/scratch/scalar-admission-probe.sql:30: NOTICE:  n=1000000 keys= expr=price+adjustment rejection=no_gpu_resident_pipeline plan=Custom Scan (GpuAccelAgg)  (cost=5.00..3005.03 rows=1 width=64)
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_integer
+  GPU Descriptor Strategy: descriptor_ungrouped_aggregate
+  GPU Descriptor Specialization: dense_integer_expressions_plain
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: none
+  GPU Descriptor Aggregates: m0:add(2392083.2:type=23, 2392083.3:type=23) -> value.sum; value.avg; value.count; value.min; value.max; m1:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none; m1=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot2:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false; slot3:aggregate[m0].value.min source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot4:aggregate[m0].value.max source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot5:aggregate[m1].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 16395
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+
+psql:.codex/scratch/scalar-admission-probe.sql:30: NOTICE:  n=1000000 keys= expr=price+1 rejection=no_gpu_resident_pipeline plan=Custom Scan (GpuAccelAgg)  (cost=5.00..5005.03 rows=1 width=64)
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_integer
+  GPU Descriptor Strategy: descriptor_ungrouped_aggregate
+  GPU Descriptor Specialization: dense_scalar_programs_plain
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: none
+  GPU Descriptor Aggregates: m0:bytecode(inputs=1, words=10, result_type=23) -> value.sum; value.avg; value.count; value.min; value.max; m1:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none; m1=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot2:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false; slot3:aggregate[m0].value.min source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot4:aggregate[m0].value.max source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot5:aggregate[m1].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 16395
+  GPU Resident Device Columns: 1
+  GPU Resident Boundary: none: no CPU boundary
+
+psql:.codex/scratch/scalar-admission-probe.sql:30: NOTICE:  n=1000000 keys= expr=COALESCE(price,0) rejection=no_gpu_resident_pipeline plan=Custom Scan (GpuAccelAgg)  (cost=5.00..5005.03 rows=1 width=64)
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_integer
+  GPU Descriptor Strategy: descriptor_ungrouped_aggregate
+  GPU Descriptor Specialization: dense_scalar_programs_plain
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: none
+  GPU Descriptor Aggregates: m0:bytecode(inputs=1, words=10, result_type=23) -> value.sum; value.avg; value.count; value.min; value.max; m1:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none; m1=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot2:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false; slot3:aggregate[m0].value.min source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot4:aggregate[m0].value.max source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot5:aggregate[m1].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 16395
+  GPU Resident Device Columns: 1
+  GPU Resident Boundary: none: no CPU boundary
+
+psql:.codex/scratch/scalar-admission-probe.sql:30: NOTICE:  n=1000000 keys= expr=CASE WHEN adjustment IS NULL THEN price WHEN price>0 THEN (price+adjustment)*(price-adjustment) ELSE COALESCE(price,0)-adjustment END rejection=no_gpu_resident_pipeline plan=Custom Scan (GpuAccelAgg)  (cost=5.00..17005.03 rows=1 width=64)
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_integer
+  GPU Descriptor Strategy: descriptor_ungrouped_aggregate
+  GPU Descriptor Specialization: dense_scalar_programs_plain
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: none
+  GPU Descriptor Aggregates: m0:bytecode(inputs=2, words=49, result_type=23) -> value.sum; value.avg; value.count; value.min; value.max; m1:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none; m1=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot2:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false; slot3:aggregate[m0].value.min source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot4:aggregate[m0].value.max source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot5:aggregate[m1].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 16395
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+
+psql:.codex/scratch/scalar-admission-probe.sql:30: NOTICE:  n=1000000 keys=region expr=price rejection=no_gpu_resident_pipeline plan=Custom Scan (GpuAccelAgg)  (cost=5.00..5005.96 rows=32 width=68)
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_integer
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: dense_integer_with_counts_plain
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: k0:fact(2392083.1:type=23) type=23 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(2392083.2:type=23) -> value.sum; value.avg; value.count; value.min; value.max; m1:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none; m1=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot2:aggregate[m0].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot3:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false; slot4:aggregate[m0].value.min source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot5:aggregate[m0].value.max source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot6:aggregate[m1].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 16393
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+
+psql:.codex/scratch/scalar-admission-probe.sql:30: NOTICE:  n=1000000 keys=region expr=price+adjustment rejection=no_gpu_resident_pipeline plan=Custom Scan (GpuAccelAgg)  (cost=5.00..6005.96 rows=32 width=68)
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_integer
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: dense_integer_expressions_plain
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: k0:fact(2392083.1:type=23) type=23 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:add(2392083.2:type=23, 2392083.3:type=23) -> value.sum; value.avg; value.count; value.min; value.max; m1:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none; m1=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot2:aggregate[m0].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot3:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false; slot4:aggregate[m0].value.min source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot5:aggregate[m0].value.max source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot6:aggregate[m1].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 16395
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+
+psql:.codex/scratch/scalar-admission-probe.sql:30: NOTICE:  n=1000000 keys=region expr=price+1 rejection=generic_scalar_estimate_unavailable plan=HashAggregate  (cost=45234.00..45234.40 rows=32 width=68)
+  Group Key: region
+  ->  Seq Scan on scalar_probe  (cost=0.00..15234.00 rows=1000000 width=8)
+
+psql:.codex/scratch/scalar-admission-probe.sql:30: NOTICE:  n=1000000 keys=region expr=COALESCE(price,0) rejection=generic_scalar_estimate_unavailable plan=HashAggregate  (cost=32734.00..32734.40 rows=32 width=68)
+  Group Key: region
+  ->  Seq Scan on scalar_probe  (cost=0.00..15234.00 rows=1000000 width=8)
+
+psql:.codex/scratch/scalar-admission-probe.sql:30: NOTICE:  n=1000000 keys=region expr=CASE WHEN adjustment IS NULL THEN price WHEN price>0 THEN (price+adjustment)*(price-adjustment) ELSE COALESCE(price,0)-adjustment END rejection=generic_scalar_estimate_unavailable plan=HashAggregate  (cost=95234.00..95234.40 rows=32 width=68)
+  Group Key: region
+  ->  Seq Scan on scalar_probe  (cost=0.00..15234.00 rows=1000000 width=12)
+
+DO

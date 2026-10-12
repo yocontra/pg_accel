@@ -1,0 +1,8 @@
+source: /Users/contra/.pgrx/19.log
+run_start_offset_bytes: 1662345
+delta_start_offset_bytes: 1662345
+capture_end_offset_bytes: 1662345
+delta_max_bytes: 262144
+truncated_to_last_delta_bytes: false
+---
+

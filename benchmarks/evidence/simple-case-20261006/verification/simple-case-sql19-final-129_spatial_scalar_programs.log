@@ -1,0 +1,12 @@
+=== 129_spatial_scalar_programs ===
+SET
+SET
+SELECT 1000017
+ANALYZE
+SELECT 1
+psql:sql/tests/129_spatial_scalar_programs.sql:76: ERROR:  type "numericlse" does not exist
+LINE 1: ...ECT sum(CASE p WHEN true THEN a::numeric WHEN fa::numericlse...
+                                                             ^
+QUERY:  CREATE TEMP TABLE _spatial_oracle AS SELECT sum(CASE p WHEN true THEN a::numeric WHEN fa::numericlse THEN b::numeric ELSE 0 END) s,avg(CASE p WHEN true THEN a::numeric WHEN fa::numericlse THEN b::numeric ELSE 0 END) a,count(CASE p WHEN true THEN a::numeric WHEN fa::numericlse THEN b::numeric ELSE 0 END) c,min(CASE p WHEN true THEN a::numeric WHEN fa::numericlse THEN b::numeric ELSE 0 END) lo,max(CASE p WHEN true THEN a::numeric WHEN fa::numericlse THEN b::numeric ELSE 0 END) hi,count(*) n FROM _spatial_program WHERE (id%37<>0 AND id%41<>0 AND id%21 BETWEEN 5 AND 15 AND (id/21)%21 BETWEEN 5 AND 15
+           AND NOT (id%21>7 AND id%21<9 AND (id/21)%21>7 AND (id/21)%21<9)) AND (flag=0 OR flag IS NULL)
+CONTEXT:  PL/pgSQL function inline_code_block line 32 at EXECUTE

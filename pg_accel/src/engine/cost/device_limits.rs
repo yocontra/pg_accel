@@ -8,6 +8,13 @@ use super::platform::PlatformProfile;
 /// At this row count every accepted int4 term still fits an exact int64 SUM.
 pub(crate) const GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS: usize = 1_000_000;
 
+/// Bound point/polygon coordinate visits per synchronous native call. Larger
+/// polygons shorten chunks instead of exceeding the previously qualified work.
+pub(crate) fn spatial_point_polygon_chunk_rows(requested: usize, coordinates: usize) -> usize {
+    const MAX_COORDINATE_WORK: usize = 64 * 1024 * 1024;
+    requested.min((MAX_COORDINATE_WORK / coordinates.max(1)).max(1))
+}
+
 /// First row count at which the retired sort-based grouped-hash lane was
 /// observed to abort the backend.  The released resident descriptor kernel is
 /// a different implementation and has its own one-shot/chunk bounds above.
@@ -69,6 +76,9 @@ pub struct DeviceLimits {
     pub gpu_hash_agg_unsafe_input_rows: usize,
     /// Maximum number of groups for GPU hash aggregation.
     pub gpu_hash_agg_max_groups: usize,
+    /// H3's one-key COUNT workspace/output bound, independent of generic
+    /// multi-measure hash aggregation. At most one group per input row.
+    pub gpu_h3_max_groups: usize,
     /// Maximum elements per GPU reduce dispatch chunk.
     /// GPU runtime may abort on very large dispatch ranges.
     pub gpu_reduce_max_chunk: usize,
@@ -532,6 +542,19 @@ impl DeviceLimits {
         } else {
             100_000
         };
+        // Compact H3 COUNT needs <128 bytes/capacity slot including output,
+        // hash slots rounded to a power of two, and staging. Reserve 64KiB
+        // for fixed descriptors/alignment. Bound this lane by one eighth of device
+        // max-allocation size and one quarter of the default resident budget.
+        // Parallel compaction/merge sorting removes the serial finalizer limit;
+        // key generation and hash-row launches remain independently chunked.
+        // Keep a 16Mi-group qualification ceiling, not an input-size clamp.
+        let gpu_h3_max_groups = if mem > 0 {
+            let workspace_budget = (mem / 8).min(resident_memory_budget_bytes / 4);
+            (workspace_budget.saturating_sub(65_536) / 128).clamp(1, 16 * 1024 * 1024)
+        } else {
+            10_000
+        };
 
         // Max elements per reduce / dense-session dispatch. All backends stage
         // through device allocations, so chunk from the device allocation
@@ -618,6 +641,7 @@ impl DeviceLimits {
             gpu_hash_agg_min_rows,
             gpu_hash_agg_unsafe_input_rows,
             gpu_hash_agg_max_groups,
+            gpu_h3_max_groups,
             gpu_reduce_max_chunk,
             gpu_grouped_agg_one_shot_max_rows,
             gpu_sort_max_elements,
@@ -819,6 +843,7 @@ impl DeviceLimits {
             gpu_hash_agg_min_rows: 250_000,
             gpu_hash_agg_unsafe_input_rows: HISTORICAL_UNSAFE_GROUPED_HASH_INPUT_ROWS,
             gpu_hash_agg_max_groups: 10_000,
+            gpu_h3_max_groups: 10_000,
             gpu_reduce_max_chunk: 1_000_000,
             gpu_grouped_agg_one_shot_max_rows: GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS,
             gpu_sort_max_elements: 2_000_000,
@@ -946,6 +971,7 @@ impl DeviceLimits {
             gpu_hash_agg_min_rows,
             gpu_hash_agg_unsafe_input_rows,
             gpu_hash_agg_max_groups,
+            gpu_h3_max_groups,
             gpu_reduce_max_chunk,
             gpu_grouped_agg_one_shot_max_rows,
             gpu_sort_max_elements,

@@ -1,0 +1,79 @@
+[32m[1m       Using[0m[39m [37m[1mCliArgument("pg18")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/bin/pg_config[39m
+CARGO_TARGET_DIR="/Users/contra/Projects/pg_accel/target" PGRX_ALL_FEATURES="false" PGRX_BUILD_PROFILE="dev" PGRX_FEATURES="pg18 pg_test" PGRX_MANIFEST_PATH="/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" PGRX_NO_DEFAULT_FEATURES="true" PGRX_NO_SCHEMA="false" "/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "test" "--manifest-path" "/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" "--features" "pg18 pg_test" "--no-default-features" "numeric_residency"
+   Compiling pgrx-pg-sys v0.19.1
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+   Compiling pgrx v0.19.1
+   Compiling pgrx-tests v0.19.1
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 59.01s
+     Running unittests src/lib.rs (target/debug/deps/pg_accel-ed206a68dc782b00)
+
+running 8 tests
+[32m[1m       Using[0m[39m [37m[1mPgConfig("pg18")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/bin/pg_config[39m
+[32m[1m    Building[0m[39m extension with features [36mpg18 pg_test[39m
+[32m[1m     Running[0m[39m command [36m"/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "rustc" "--lib" "--manifest-path" "/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" "--features" "pg18 pg_test" "--no-default-features" "--message-format=json-render-diagnostics"[39m
+    Blocking waiting for file lock on build directory
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 10.56s
+[32m[1m  Installing[0m[39m extension
+[32m[1m     Copying[0m[39m control file to [36m.pgaccel/postgres/install/18.4/share/extension/pg_accel.control[39m
+[32m[1m     Copying[0m[39m shared library to [36m.pgaccel/postgres/install/18.4/lib/pg_accel.dylib[39m
+[32m[1m  Discovered[0m[39m [36m[1m304[0m[39m SQL entities: [36m[1m24[0m[39m schemas ([36m[1m3[0m[39m unique), [36m[1m278[0m[39m functions, [36m[1m0[0m[39m types, [36m[1m0[0m[39m enums, [36m[1m1[0m[39m sqls, [36m[1m0[0m[39m ords, [36m[1m0[0m[39m hashes, [36m[1m0[0m[39m aggregates, [36m[1m1[0m[39m triggers
+[32m[1m     Writing[0m[39m SQL entities to /Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/share/extension/pg_accel--1.0.0-rc1.sql
+[32m[1m    Finished[0m[39m installing pg_accel
+test tests::numeric_residency::tests::pg_pg_numeric_dense_capacity_uses_individual_postgres_domains ... ok
+test tests::numeric_residency::tests::pg_pg_numeric_resident_wire_roundtrip_full_precision_and_toast ... ok
+test tests::numeric_residency::tests::pg_pg_numeric_execution_memory_budget_and_pool_ownership ... ok
+test tests::numeric_residency::tests::pg_pg_numeric_sql_planner_preserves_projection_and_results ... FAILED
+test tests::numeric_residency::tests::pg_pg_numeric_filtered_sql_refresh_and_specials ... ok
+test tests::numeric_residency::tests::pg_pg_numeric_resident_refresh_rollback_nulls_and_empty ... ok
+test tests::numeric_residency::tests::pg_pg_numeric_native_sum_matches_postgres ... ok
+test tests::numeric_residency::tests::pg_pg_numeric_descriptor_binding_and_materialization ... ok
+
+failures:
+
+---- tests::numeric_residency::tests::pg_pg_numeric_sql_planner_preserves_projection_and_results stdout ----
+
+thread 'tests::numeric_residency::tests::pg_pg_numeric_sql_planner_preserves_projection_and_results' (2070699) panicked at /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-tests-0.19.1/src/framework.rs:195:9:
+
+
+Postgres Messages:
+[37m[2m[2026-09-29 13:49:01.832 MST] [24826] [6abc243d.60fa]: LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+[2026-09-29 13:49:01.833 MST] [24826] [6abc243d.60fa]: LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+[2026-09-29 13:49:01.835 MST] [24826] [6abc243d.60fa]: LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+[2026-09-29 13:49:01.850 MST] [24826] [6abc243d.60fa]: LOG:  listening on IPv6 address "::1", port 59071
+[2026-09-29 13:49:01.850 MST] [24826] [6abc243d.60fa]: LOG:  listening on IPv4 address "127.0.0.1", port 59071
+[2026-09-29 13:49:01.851 MST] [24826] [6abc243d.60fa]: LOG:  listening on Unix socket "/tmp/pgrx-test-sockets-18-24330/.s.PGSQL.59071"
+[2026-09-29 13:49:01.871 MST] [24826] [6abc243d.60fa]: LOG:  database system is ready to accept connections
+[0m[39m
+
+Test Function Messages:
+[36m[2026-09-29 13:49:02.211 MST] [24866] [6abc243e.6122]: LOG:  statement: START TRANSACTION
+[2026-09-29 13:49:02.211 MST] [24866] [6abc243e.6122]: LOG:  statement: SELECT "tests"."pg_numeric_sql_planner_preserves_projection_and_results"();
+[2026-09-29 13:49:08.074 MST] [24866] [6abc243e.6122]: ERROR:  SELECT sum(v) s,count(v) c FROM numeric_sql WHERE g IS NOT NULL
+[2026-09-29 13:49:08.074 MST] [24866] [6abc243e.6122]: STATEMENT:  SELECT "tests"."pg_numeric_sql_planner_preserves_projection_and_results"();
+[2026-09-29 13:49:08.077 MST] [24866] [6abc243e.6122]: LOG:  statement: ROLLBACK
+[39m
+
+Client Error:
+[31m[1mSELECT sum(v) s,count(v) c FROM numeric_sql WHERE g IS NOT NULL
+Aggregate  (cost=215.41..215.42 rows=1 width=40) (actual rows=1.00 loops=1)
+  Buffers: local hit=69
+  ->  Seq Scan on numeric_sql  (cost=0.00..169.17 rows=9247 width=6) (actual rows=9247.00 loops=1)
+        Filter: (g IS NOT NULL)
+        Rows Removed by Filter: 770
+        Buffers: local hit=69
+Planning Time: 0.073 ms
+Execution Time: 0.958 ms[0m[39m
+postgres location: [37m[2mnumeric_residency.rs:37[0m[39m
+rust location: [33m<unknown>[39m
+
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::numeric_residency::tests::pg_pg_numeric_sql_planner_preserves_projection_and_results
+
+test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 1628 filtered out; finished in 27.62s
+
+error: test failed, to rerun pass `--lib`

@@ -4,16 +4,19 @@ use std::any::Any;
 
 use pgrx::pg_sys;
 
-use super::artifact::{DescriptorAggArtifact, PreparedAggArtifact, prepare_spatial_base_artifact};
+use super::artifact::{
+    DescriptorAggArtifact, PreparedAggArtifact, descriptor_program_clone_bytes,
+    prepare_spatial_base_artifact,
+};
 use crate::engine::ffi::syscache::{
     PostgisCatalogIdentity, resolve_postgis_catalog, rethrow_if_required,
 };
 use crate::engine::residency::{
     DerivedArtifact, ResidentByteAccounting, ResidentColumnRef, ResidentColumnView,
-    ResidentDispatchBundle, ResidentGeometryColumn, ResidentGeometryExactSnapshot,
+    ResidentDispatchBundle, ResidentGeometryColumn, ResidentGeometryExactSelection,
     ResidentInputBundle, ResidentLoadError, StagedTransformPreflight, StagedTransformWorkspace,
-    materialize_resident_geometry_constant, resident_geometry_exact_snapshot_words,
-    snapshot_resident_geometry_exact,
+    materialize_resident_geometry_constant, prepare_resident_geometry_exact_selection,
+    refill_resident_geometry_exact_selection, resident_geometry_exact_selection_words,
 };
 use crate::engine::spec::{
     AggQuerySpec, ColumnRef, FilterSpec, GroupKeySource, JoinMultiplicity, ScalarValue,
@@ -37,6 +40,25 @@ const POINT_COORDINATE_BYTES: u64 = 2 * 8;
 const NULL_SIDECAR_BYTES_PER_ROW: u64 = 1;
 const CONSTANT_OFFSET_WORDS: u64 = 2;
 const CONSTANT_PREFIX_WORDS: u64 = 2;
+
+/// One exact-recheck invocation stream, never published in a resident artifact.
+/// PostGIS stores its prepared geometry in fn_extra under fn_mcxt. Recreating
+/// FmgrInfo for each point discards that cache and repeats polygon preparation.
+/// The owned child context releases the cache (including PostGIS callbacks) on
+/// success or Rust unwinding; the enclosing query context is the final backstop.
+struct ExactSpatialRecheck {
+    function: pg_sys::FmgrInfo,
+    context: pgrx::PgMemoryContexts,
+}
+
+impl ExactSpatialRecheck {
+    fn new() -> Self {
+        Self {
+            function: pg_sys::FmgrInfo::default(),
+            context: pgrx::PgMemoryContexts::new("pg_accel spatial exact recheck"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct SpatialDimensionShape {
@@ -68,6 +90,10 @@ impl SpatialConstantShape {
             GEOMETRY_ROW_BYTES,
             GEOMETRY_BBOX_BYTES,
             GEOMETRY_OFFSET_BYTES_PER_ROW,
+            checked_mul(
+                crate::gpu::resident_geometry_edge_index_boxes(self.coordinate_pairs),
+                std::mem::size_of::<[f64; 4]>(),
+            )?,
         ])
     }
 
@@ -85,8 +111,8 @@ impl SpatialConstantShape {
 }
 
 /// Host storage allocated only after the persistent and transient charges are
-/// both held. `exact_snapshot_words` is filled from resident GSERIALIZED bytes
-/// during the staged snapshot callback; preflight never copies source values.
+/// both held. `exact_snapshot_words` bounds one chunk's exact recheck values;
+/// only uncertain rows are copied after dispatch, under a fresh checked borrow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct SpatialSnapshotLayout {
     pub exact_snapshot_words: usize,
@@ -109,6 +135,25 @@ pub(super) enum SpatialPreflightError {
     ZeroChunkLimit,
     ChunkLimitExceedsNativeMaximum,
     AccountingOverflow,
+}
+
+impl SpatialPreflight {
+    /// Reserve both staged owners before snapshot preparation clones the base
+    /// spec and its prepared copy. The workspace retains one copy; publication
+    /// transfers it to the persistent owner before dropping the transient charge.
+    fn with_program_bytes(mut self, bytes: u64) -> Result<Self, SpatialPreflightError> {
+        self.published_accounting.retained_host_exact_bytes = self
+            .published_accounting
+            .retained_host_exact_bytes
+            .checked_add(bytes)
+            .ok_or(SpatialPreflightError::AccountingOverflow)?;
+        self.transient_accounting.retained_host_exact_bytes = self
+            .transient_accounting
+            .retained_host_exact_bytes
+            .checked_add(bytes)
+            .ok_or(SpatialPreflightError::AccountingOverflow)?;
+        Ok(self)
+    }
 }
 
 fn checked_mul(elements: usize, width: usize) -> Option<u64> {
@@ -156,7 +201,6 @@ fn chunk_device_bytes(rows: usize) -> Option<u64> {
         u64::try_from(PGACCEL_SPATIAL_CONTROL_BYTES).ok()?,
         u64::try_from(std::mem::size_of::<u32>()).ok()?,
         checked_mul(rows, std::mem::size_of::<i8>())?,
-        checked_mul(rows, std::mem::size_of::<i8>())?,
         checked_mul(rows, std::mem::size_of::<u64>())?,
         u64::try_from(std::mem::size_of::<u64>()).ok()?,
     ])
@@ -174,7 +218,12 @@ pub(super) fn spatial_preflight(
     if chunk_limit > PGACCEL_SPATIAL_MAX_CHUNK_ROWS {
         return Err(SpatialPreflightError::ChunkLimitExceedsNativeMaximum);
     }
+    let chunk_limit = crate::engine::cost::device_limits::spatial_point_polygon_chunk_rows(
+        chunk_limit,
+        constant.coordinate_pairs,
+    );
     let chunk_count = base.fact_rows.div_ceil(chunk_limit);
+    let largest_chunk = base.fact_rows.min(chunk_limit);
 
     let base_device_bytes =
         padded_base_device_bytes(base).ok_or(SpatialPreflightError::AccountingOverflow)?;
@@ -184,10 +233,11 @@ pub(super) fn spatial_preflight(
         .checked_add(final_mask_bytes)
         .ok_or(SpatialPreflightError::AccountingOverflow)?;
 
-    let fixed_chunk_scratch =
-        chunk_device_bytes(0).and_then(|bytes| bytes.checked_mul(u64::try_from(chunk_count).ok()?));
-    let row_chunk_scratch = checked_mul(base.fact_rows, 10);
-    let chunk_scratch = fixed_chunk_scratch.and_then(|fixed| fixed.checked_add(row_chunk_scratch?));
+    let chunk_scratch = if largest_chunk == 0 {
+        Some(0)
+    } else {
+        chunk_device_bytes(largest_chunk)
+    };
     let transient_device_bytes = base_device_bytes
         .checked_add(
             constant
@@ -195,6 +245,7 @@ pub(super) fn spatial_preflight(
                 .ok_or(SpatialPreflightError::AccountingOverflow)?,
         )
         .and_then(|bytes| bytes.checked_add(chunk_scratch?))
+        .and_then(|bytes| bytes.checked_add(final_mask_bytes))
         .ok_or(SpatialPreflightError::AccountingOverflow)?;
     let transient_host_bytes = checked_sum([
         checked_mul(snapshot.exact_snapshot_words, std::mem::size_of::<u64>())
@@ -202,15 +253,13 @@ pub(super) fn spatial_preflight(
         constant
             .host_bytes()
             .ok_or(SpatialPreflightError::AccountingOverflow)?,
-        final_mask_bytes,
-        checked_mul(base.fact_rows, std::mem::size_of::<u64>())
+        checked_mul(largest_chunk, std::mem::size_of::<u64>())
             .ok_or(SpatialPreflightError::AccountingOverflow)?,
-        checked_mul(base.fact_rows, std::mem::size_of::<i8>())
+        checked_mul(largest_chunk, std::mem::size_of::<i8>())
             .ok_or(SpatialPreflightError::AccountingOverflow)?,
     ])
     .ok_or(SpatialPreflightError::AccountingOverflow)?;
 
-    let largest_chunk = base.fact_rows.min(chunk_limit);
     let point_row_bytes = checked_sum([
         POINT_COORDINATE_BYTES,
         GEOMETRY_ROW_BYTES,
@@ -271,7 +320,10 @@ impl SpatialTransformPlan {
             left,
             right,
             distance,
-        } = &spec.fact_filter
+        } = spec
+            .fact_filter
+            .spatial()
+            .ok_or("spatial predicate missing")?
         else {
             return Err("spatial transform plan requires a spatial fact filter".to_owned());
         };
@@ -317,20 +369,22 @@ impl SpatialTransformPlan {
         )?;
         let point_type = crate::engine::residency::RESIDENT_GEOMETRY_POINT;
         let polygon_type = crate::engine::residency::RESIDENT_GEOMETRY_POLYGON;
+        let multi_type = crate::engine::residency::RESIDENT_GEOMETRY_MULTIPOLYGON;
         if geometry_typmod_shape(column_metadata) != Some((point_type, parsed.srid))
             || column_metadata.srid != Some(parsed.srid)
             || parsed.srid == 0
             || constant_metadata.kind != SpatialValueKind::Geometry
             || constant_metadata.srid != Some(parsed.srid)
             || (constant_metadata.typmod != -1
-                && geometry_typmod_shape(constant_metadata) != Some((polygon_type, parsed.srid)))
+                && geometry_typmod_shape(constant_metadata)
+                    != Some((parsed.geom_type, parsed.srid)))
         {
             return Err(
-                "spatial aggregate requires a same-SRID geometry POINT column and POLYGON constant"
+                "spatial aggregate requires a same-SRID geometry POINT column and polygonal constant"
                     .to_owned(),
             );
         }
-        if parsed.geom_type != polygon_type
+        if (parsed.geom_type != polygon_type && parsed.geom_type != multi_type)
             || parsed.coordinate_pairs == 0
             || parsed.coordinate_pairs > limits.gpu_spatial_max_vertices_per_row
         {
@@ -338,8 +392,8 @@ impl SpatialTransformPlan {
         }
         let covered_orientation = match predicate {
             SpatialPredicateKind::Intersects | SpatialPredicateKind::DWithin => true,
-            SpatialPredicateKind::Contains => !column_is_left,
-            SpatialPredicateKind::Within => column_is_left,
+            SpatialPredicateKind::Contains | SpatialPredicateKind::Covers => !column_is_left,
+            SpatialPredicateKind::Within | SpatialPredicateKind::CoveredBy => column_is_left,
             SpatialPredicateKind::Disjoint
             | SpatialPredicateKind::Equals
             | SpatialPredicateKind::Touches
@@ -351,8 +405,24 @@ impl SpatialTransformPlan {
                 "spatial aggregate predicate orientation is outside the proved lane".to_owned(),
             );
         }
+        let exact_fn_oid = match predicate {
+            SpatialPredicateKind::Intersects => catalog.intersects_fn_oid,
+            SpatialPredicateKind::Contains => catalog.contains_fn_oid,
+            SpatialPredicateKind::Within => catalog.within_fn_oid,
+            SpatialPredicateKind::Covers => catalog.covers_fn_oid,
+            SpatialPredicateKind::CoveredBy => catalog.coveredby_fn_oid,
+            SpatialPredicateKind::DWithin => catalog.dwithin_fn_oid,
+            _ => return Err("spatial aggregate predicate has no exact recheck".to_owned()),
+        };
         let predicate = match predicate {
             SpatialPredicateKind::Intersects => ResidentSpatialPredicate::Intersects,
+            // For a POINT and valid polygonal area in the proved orientation,
+            // Covers/CoveredBy have the same interior/boundary classification
+            // as Intersects. Keep the original OID above for exact rechecks;
+            // the logical spec and artifact identity retain the SQL predicate.
+            SpatialPredicateKind::Covers | SpatialPredicateKind::CoveredBy => {
+                ResidentSpatialPredicate::Intersects
+            }
             SpatialPredicateKind::Contains => ResidentSpatialPredicate::Contains,
             SpatialPredicateKind::Within => ResidentSpatialPredicate::Within,
             SpatialPredicateKind::DWithin => ResidentSpatialPredicate::DWithin,
@@ -364,13 +434,6 @@ impl SpatialTransformPlan {
             }
             None if predicate != ResidentSpatialPredicate::DWithin => 0.0,
             _ => return Err("spatial aggregate distance is not canonical float8".to_owned()),
-        };
-        let exact_fn_oid = match predicate {
-            ResidentSpatialPredicate::Intersects => catalog.intersects_fn_oid,
-            ResidentSpatialPredicate::Contains => catalog.contains_fn_oid,
-            ResidentSpatialPredicate::Within => catalog.within_fn_oid,
-            ResidentSpatialPredicate::DWithin => catalog.dwithin_fn_oid,
-            ResidentSpatialPredicate::Distance => unreachable!("boolean plan excludes distance"),
         };
         let attno = i16::try_from(column.attno)
             .map_err(|_| "spatial aggregate attribute number exceeds int16".to_owned())?;
@@ -396,6 +459,13 @@ impl SpatialTransformPlan {
 
     pub const fn column_request(&self) -> ResidentColumnRef {
         self.column_request
+    }
+
+    pub fn chunk_rows(&self) -> usize {
+        crate::engine::cost::device_limits::spatial_point_polygon_chunk_rows(
+            PGACCEL_SPATIAL_MAX_CHUNK_ROWS,
+            self.constant.coordinate_pairs,
+        )
     }
 
     pub(super) fn verify_catalog(&self) -> Result<(), ResidentLoadError> {
@@ -474,8 +544,18 @@ impl SpatialTransformPlan {
         inputs: ResidentInputBundle<'_>,
     ) -> Result<StagedTransformPreflight<SpatialPreflight>, ResidentLoadError> {
         let base = self.base_shape(spec, &inputs)?;
-        let exact_snapshot_words =
-            resident_geometry_exact_snapshot_words(requests, &inputs, self.column_request)?;
+        let chunk_rows = crate::engine::cost::device_limits::spatial_point_polygon_chunk_rows(
+            PGACCEL_SPATIAL_MAX_CHUNK_ROWS,
+            self.constant.coordinate_pairs,
+        );
+        let exact_snapshot_words = resident_geometry_exact_selection_words(
+            requests,
+            &inputs,
+            self.column_request,
+            chunk_rows,
+        )?;
+        let program_bytes =
+            descriptor_program_clone_bytes(spec).map_err(ResidentLoadError::Loader)?;
         let preflight = spatial_preflight(
             &base,
             self.constant,
@@ -484,6 +564,7 @@ impl SpatialTransformPlan {
             },
             PGACCEL_SPATIAL_MAX_CHUNK_ROWS,
         )
+        .and_then(|preflight| preflight.with_program_bytes(program_bytes))
         .map_err(|error| {
             ResidentLoadError::Loader(format!("spatial preflight failed: {error:?}"))
         })?;
@@ -505,14 +586,18 @@ impl SpatialTransformPlan {
             preflight.snapshot.exact_snapshot_words,
             "spatial exact snapshot allocation failed",
         )?;
-        let exact = snapshot_resident_geometry_exact(
+        let exact = prepare_resident_geometry_exact_selection(
             requests,
             &inputs,
             self.column_request,
+            preflight.chunk_limit,
             exact_storage,
         )?;
         let mut base_spec = spec.clone();
-        base_spec.fact_filter = FilterSpec::None;
+        base_spec.fact_filter = match &spec.fact_filter {
+            FilterSpec::SpatialAnd { scalar, .. } => *scalar.clone(),
+            _ => FilterSpec::None,
+        };
         let prepared = prepare_spatial_base_artifact(
             &base_spec,
             requests,
@@ -533,7 +618,7 @@ impl SpatialTransformPlan {
 pub(super) struct SpatialPreparedSnapshot {
     preflight: SpatialPreflight,
     prepared_base: PreparedAggArtifact,
-    exact: ResidentGeometryExactSnapshot,
+    exact: ResidentGeometryExactSelection,
 }
 
 fn expected_base_device_bytes(preflight: &SpatialPreflight) -> Result<u64, ResidentLoadError> {
@@ -611,7 +696,8 @@ impl DerivedArtifact for SpatialAggArtifact {
     }
 
     fn retained_host_exact_bytes(&self) -> u64 {
-        0
+        // Preflight reserves this payload for both staged and published owners.
+        self.base.retained_host_exact_bytes()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -625,7 +711,6 @@ struct SpatialChunkWorkspace {
     control: ExprDeviceBuffer<u8>,
     failure_flags: ExprDeviceBuffer<u32>,
     tri_state: ExprDeviceBuffer<i8>,
-    final_mask: ExprDeviceBuffer<i8>,
     uncertain_indices: ExprDeviceBuffer<u64>,
     uncertain_count: ExprDeviceBuffer<u64>,
     native_workspace: PgaccelSpatialWorkspace,
@@ -646,11 +731,11 @@ enum SpatialBorrowFailure {
 pub(super) struct SpatialWorkspace {
     preflight: SpatialPreflight,
     base: DescriptorAggArtifact,
-    exact: ResidentGeometryExactSnapshot,
+    exact: ResidentGeometryExactSelection,
     constant: ResidentGeometryColumn,
     constant_view: PgaccelResidentGeometryView,
-    chunks: Box<[SpatialChunkWorkspace]>,
-    host_final_mask: Box<[i8]>,
+    chunk: Option<SpatialChunkWorkspace>,
+    final_mask: Option<ExprDeviceBuffer<i8>>,
     host_uncertain_indices: Box<[u64]>,
     host_exact_results: Box<[i8]>,
     borrow_failure: Option<SpatialBorrowFailure>,
@@ -684,12 +769,13 @@ fn geometry_view(
         data.row_count,
         data.coordinate_pair_count,
         data.ring_count,
+        data.edge_index,
     )
     .map_err(|_| SpatialBorrowFailure::GeometryShapeChanged)
 }
 
 fn spatial_constant_bytes(spec: &AggQuerySpec) -> Option<&[u8]> {
-    let FilterSpec::Spatial { left, right, .. } = &spec.fact_filter else {
+    let FilterSpec::Spatial { left, right, .. } = spec.fact_filter.spatial()? else {
         return None;
     };
     [left, right].into_iter().find_map(|operand| match operand {
@@ -745,20 +831,28 @@ impl SpatialWorkspace {
             ));
         }
 
-        let mut chunks = Vec::new();
-        chunks
-            .try_reserve_exact(preflight.chunk_count)
-            .map_err(|_| allocation_error("spatial chunk layout allocation failed"))?;
-        for first_row in (0..preflight.fact_rows).step_by(preflight.chunk_limit) {
-            let row_count = (preflight.fact_rows - first_row).min(preflight.chunk_limit);
+        // Chunks publish into disjoint spans of one still-private device mask.
+        // Native calls complete synchronously, including byte-offset stores.
+        // Ownership moves to the artifact only after every failure/recheck gate.
+        let final_mask = if preflight.fact_rows == 0 {
+            None
+        } else {
+            Some(device_buffer::<i8>(
+                preflight.fact_rows,
+                "spatial final-mask allocation failed",
+            )?)
+        };
+        let chunk = if preflight.fact_rows == 0 {
+            None
+        } else {
+            let first_row = 0;
+            let row_count = preflight.fact_rows.min(preflight.chunk_limit);
             let control = device_buffer::<u8>(
                 PGACCEL_SPATIAL_CONTROL_BYTES,
                 "spatial control allocation failed",
             )?;
             let failure_flags = device_buffer::<u32>(1, "spatial failure-word allocation failed")?;
             let tri_state = device_buffer::<i8>(row_count, "spatial tri-state allocation failed")?;
-            let final_mask =
-                device_buffer::<i8>(row_count, "spatial chunk-mask allocation failed")?;
             let uncertain_indices =
                 device_buffer::<u64>(row_count, "spatial uncertainty-index allocation failed")?;
             let uncertain_count =
@@ -766,47 +860,49 @@ impl SpatialWorkspace {
             let native_workspace =
                 PgaccelSpatialWorkspace::from_device_buffers(&control, &failure_flags)
                     .map_err(ResidentLoadError::Gpu)?;
-            let compact_request = PgaccelSpatialRecheckCompactRequest::from_device_buffers(
+            let compact_request = PgaccelSpatialRecheckCompactRequest::from_device_buffers_at(
                 &tri_state,
-                &final_mask,
+                final_mask
+                    .as_ref()
+                    .ok_or_else(|| allocation_error("nonempty spatial mask missing"))?,
                 &uncertain_indices,
                 &uncertain_count,
                 row_count,
+                first_row,
             )
             .map_err(ResidentLoadError::Gpu)?;
-            chunks.push(SpatialChunkWorkspace {
+            Some(SpatialChunkWorkspace {
                 first_row,
                 row_count,
                 control,
                 failure_flags,
                 tri_state,
-                final_mask,
                 uncertain_indices,
                 uncertain_count,
                 native_workspace,
                 compact_request,
                 eval_outcome: None,
                 compact_outcome: None,
-            });
-        }
+            })
+        };
         let fact_rows = preflight.fact_rows;
+        // Finalization handles one chunk at a time, so recheck scratch is
+        // reusable even when every row in every chunk needs exact recheck.
+        let recheck_rows = fact_rows.min(preflight.chunk_limit);
         let workspace = Self {
             preflight,
             base,
             exact,
             constant,
             constant_view,
-            chunks: chunks.into_boxed_slice(),
-            host_final_mask: try_zeroed_box(
-                fact_rows,
-                "spatial final-mask readback allocation failed",
-            )?,
+            chunk,
+            final_mask,
             host_uncertain_indices: try_zeroed_box(
-                fact_rows,
+                recheck_rows,
                 "spatial uncertainty-index readback allocation failed",
             )?,
             host_exact_results: try_zeroed_box(
-                fact_rows,
+                recheck_rows,
                 "spatial exact-result staging allocation failed",
             )?,
             borrow_failure: None,
@@ -825,21 +921,20 @@ impl SpatialWorkspace {
 
     fn accounting(&self) -> Option<ResidentByteAccounting> {
         let constant = self.constant.accounting();
-        let chunk_device_bytes = self.chunks.iter().try_fold(0_u64, |total, chunk| {
+        let chunk_device_bytes = self.chunk.iter().try_fold(0_u64, |total, chunk| {
             let bytes = checked_sum([
                 buffer_bytes(&chunk.control)?,
                 buffer_bytes(&chunk.failure_flags)?,
                 buffer_bytes(&chunk.tri_state)?,
-                buffer_bytes(&chunk.final_mask)?,
                 buffer_bytes(&chunk.uncertain_indices)?,
                 buffer_bytes(&chunk.uncertain_count)?,
             ])?;
             total.checked_add(bytes)
         })?;
         let host_bytes = checked_sum([
+            self.base.retained_host_exact_bytes(),
             self.exact.retained_host_bytes()?,
             constant.retained_host_exact_bytes,
-            checked_mul(self.host_final_mask.len(), std::mem::size_of::<i8>())?,
             checked_mul(
                 self.host_uncertain_indices.len(),
                 std::mem::size_of::<u64>(),
@@ -851,7 +946,8 @@ impl SpatialWorkspace {
                 .base
                 .device_bytes()
                 .checked_add(constant.device_bytes)?
-                .checked_add(chunk_device_bytes)?,
+                .checked_add(chunk_device_bytes)?
+                .checked_add(self.final_mask.as_ref().map_or(Some(0), buffer_bytes)?)?,
             retained_host_exact_bytes: host_bytes,
         })
     }
@@ -860,10 +956,37 @@ impl SpatialWorkspace {
     /// mapping after the resident-store borrow is released.
     pub fn launch(&mut self, plan: &SpatialTransformPlan, inputs: ResidentDispatchBundle<'_>) {
         let view = match inputs.find_column(plan.column_request) {
+            // An empty reload has no device geometry buffers. Its typed
+            // empty lane is valid only for the exact zero-row preflight, and
+            // there must be no pending classification work to skip.
+            Ok(ResidentColumnView::Empty { type_oid })
+                if type_oid == plan.geometry_type_oid
+                    && self.preflight.fact_rows == 0
+                    && self.chunk.is_none() =>
+            {
+                return;
+            }
             Ok(ResidentColumnView::Geometry { type_oid, data })
                 if type_oid == plan.geometry_type_oid
                     && data.row_count == self.preflight.fact_rows =>
             {
+                // Geometry residency keeps its one-element offsets buffer
+                // even when every row is deleted. Native spatial views require
+                // nonzero rows; this canonical empty shape has no launch.
+                if data.row_count == 0
+                    && self.chunk.is_none()
+                    && data.coordinate_pair_count == 0
+                    && data.ring_count == 0
+                    && !data.edge_index
+                    && data.geometry_offsets.len() == 1
+                    && data.coordinates.is_none()
+                    && data.bboxes.is_none()
+                    && data.ring_offsets.is_none()
+                    && data.rows.is_none()
+                    && data.nulls.is_none()
+                {
+                    return;
+                }
                 geometry_view(data)
             }
             Ok(_) => Err(SpatialBorrowFailure::GeometryShapeChanged),
@@ -876,7 +999,7 @@ impl SpatialWorkspace {
                 return;
             }
         };
-        for chunk in &mut self.chunks {
+        if let Some(chunk) = &mut self.chunk {
             let column_operand =
                 PgaccelResidentGeometryOperand::column(column_view, chunk.first_row);
             let constant_operand = PgaccelResidentGeometryOperand::constant(self.constant_view);
@@ -956,6 +1079,7 @@ impl SpatialWorkspace {
         plan: &SpatialTransformPlan,
         spec: &AggQuerySpec,
         row: &[u8],
+        recheck: &mut ExactSpatialRecheck,
     ) -> Result<i8, ResidentLoadError> {
         let constant = spatial_constant_bytes(spec).ok_or_else(|| {
             ResidentLoadError::Loader(
@@ -970,6 +1094,18 @@ impl SpatialWorkspace {
             (constant_datum, row_datum)
         };
         let result = pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+            if recheck.function.fn_oid == pg_sys::InvalidOid {
+                // SAFETY: catalog verification proves the live PostGIS OID.
+                // The owned context outlives all calls using this FmgrInfo and
+                // is never reset while its fn_extra may be read by PostGIS.
+                unsafe {
+                    pg_sys::fmgr_info_cxt(
+                        plan.exact_fn_oid,
+                        &raw mut recheck.function,
+                        recheck.context.value(),
+                    );
+                }
+            }
             #[cfg(feature = "pg_test")]
             crate::engine::ffi::syscache::inject_test_postgres_error();
             let result = if plan.predicate == ResidentSpatialPredicate::DWithin {
@@ -978,8 +1114,8 @@ impl SpatialWorkspace {
                 // GSERIALIZED values, the float8 threshold is passed by value, and this
                 // callback runs synchronously on the main backend thread.
                 unsafe {
-                    pg_sys::OidFunctionCall3Coll(
-                        plan.exact_fn_oid,
+                    pg_sys::FunctionCall3Coll(
+                        &raw mut recheck.function,
                         pg_sys::InvalidOid,
                         left,
                         right,
@@ -992,7 +1128,12 @@ impl SpatialWorkspace {
                 // GSERIALIZED values and this callback runs synchronously on the main
                 // backend thread.
                 unsafe {
-                    pg_sys::OidFunctionCall2Coll(plan.exact_fn_oid, pg_sys::InvalidOid, left, right)
+                    pg_sys::FunctionCall2Coll(
+                        &raw mut recheck.function,
+                        pg_sys::InvalidOid,
+                        left,
+                        right,
+                    )
                 }
             };
             Ok::<_, ResidentLoadError>(result)
@@ -1014,12 +1155,43 @@ impl SpatialWorkspace {
         spec: &AggQuerySpec,
     ) -> Result<SpatialAggArtifact, ResidentLoadError> {
         plan.verify_catalog()?;
-        if let Some(failure) = self.borrow_failure {
-            return Err(ResidentLoadError::Loader(format!(
-                "spatial resident borrow failed: {failure:?}"
-            )));
-        }
-        for chunk in &mut self.chunks {
+        // Lazily allocate only when a completed GPU chunk needs exact recheck.
+        // This state survives chunk boundaries, but never query/artifact boundaries.
+        let mut exact_recheck = None;
+        for first_row in (0..self.preflight.fact_rows).step_by(self.preflight.chunk_limit) {
+            if first_row != 0 {
+                let chunk = self
+                    .chunk
+                    .as_mut()
+                    .ok_or_else(|| allocation_error("nonempty spatial workspace missing"))?;
+                chunk.first_row = first_row;
+                chunk.row_count =
+                    (self.preflight.fact_rows - first_row).min(self.preflight.chunk_limit);
+                chunk.eval_outcome = None;
+                chunk.compact_outcome = None;
+                chunk.compact_request =
+                    PgaccelSpatialRecheckCompactRequest::from_device_buffer_prefixes_at(
+                        &chunk.tri_state,
+                        self.final_mask
+                            .as_ref()
+                            .ok_or_else(|| allocation_error("nonempty spatial mask missing"))?,
+                        &chunk.uncertain_indices,
+                        &chunk.uncertain_count,
+                        chunk.row_count,
+                        first_row,
+                    )
+                    .map_err(ResidentLoadError::Gpu)?;
+                // Prior finish/patch and interrupt handling have completed.
+                // Reacquire the exact captured source, never retain its pointers.
+                self.exact
+                    .source()
+                    .dispatch(|inputs| self.launch(plan, inputs))?;
+            }
+            self.check_borrow_failure()?;
+            let chunk = self
+                .chunk
+                .as_mut()
+                .ok_or_else(|| allocation_error("nonempty spatial workspace missing"))?;
             let eval = chunk.eval_outcome.ok_or_else(|| {
                 ResidentLoadError::Loader("spatial chunk was not evaluated".to_owned())
             })?;
@@ -1045,14 +1217,13 @@ impl SpatialWorkspace {
                         "spatial uncertainty count exceeds chunk capacity".to_owned(),
                     )
                 })?;
-            let end = chunk.first_row + chunk.row_count;
-            let host_indices = &mut self.host_uncertain_indices[chunk.first_row..end];
+            let host_indices = &mut self.host_uncertain_indices[..uncertain_count];
             chunk
                 .uncertain_indices
-                .copy_to_slice(host_indices)
+                .copy_prefix_to_slice(host_indices)
                 .map_err(ResidentLoadError::Gpu)?;
             let mut previous = None;
-            for index in host_indices.iter().copied().take(uncertain_count) {
+            for index in host_indices.iter().copied() {
                 let index = usize::try_from(index)
                     .ok()
                     .filter(|index| *index < chunk.row_count)
@@ -1070,31 +1241,30 @@ impl SpatialWorkspace {
             }
 
             if uncertain_count != 0 {
-                let exact_results = &mut self.host_exact_results[chunk.first_row..end];
-                exact_results.fill(-1);
-                for (patch, local_row) in host_indices
-                    .iter()
-                    .copied()
-                    .take(uncertain_count)
-                    .enumerate()
-                {
-                    let local_row = usize::try_from(local_row).map_err(|_| {
-                        ResidentLoadError::Loader("spatial recheck row exceeds usize".to_owned())
-                    })?;
-                    let global_row = chunk
-                        .first_row
-                        .checked_add(local_row)
-                        .ok_or(ResidentLoadError::ArtifactAccountingOverflow)?;
-                    let exact = self.exact.exact_value(global_row).ok_or_else(|| {
-                        ResidentLoadError::Loader(
-                            "spatial uncertain row has no exact GSERIALIZED snapshot".to_owned(),
-                        )
-                    })?;
-                    exact_results[patch] = Self::exact_result(plan, spec, exact)?;
+                refill_resident_geometry_exact_selection(
+                    &mut self.exact,
+                    chunk.first_row,
+                    chunk.row_count,
+                    host_indices,
+                )?;
+                let recheck = exact_recheck.get_or_insert_with(ExactSpatialRecheck::new);
+                let exact_results = &mut self.host_exact_results[..uncertain_count];
+                for (patch, result) in exact_results.iter_mut().enumerate() {
+                    let exact = self
+                        .exact
+                        .exact_value(patch)
+                        .filter(|row| !row.is_empty())
+                        .ok_or_else(|| {
+                            ResidentLoadError::Loader(
+                                "spatial uncertain row has no exact GSERIALIZED snapshot"
+                                    .to_owned(),
+                            )
+                        })?;
+                    *result = Self::exact_result(plan, spec, exact, recheck)?;
                 }
                 chunk
                     .tri_state
-                    .write_from_slice(exact_results)
+                    .write_prefix_from_slice(exact_results)
                     .map_err(ResidentLoadError::Gpu)?;
                 let patch_request = PgaccelSpatialRecheckPatchRequest {
                     abi_version: PGACCEL_SPATIAL_RECHECK_ABI_VERSION,
@@ -1105,7 +1275,7 @@ impl SpatialWorkspace {
                         .ok_or(ResidentLoadError::ArtifactAccountingOverflow)?,
                     results: chunk.tri_state.as_ptr(),
                     results_bytes: uncertain_count,
-                    final_mask: chunk.final_mask.as_mut_ptr(),
+                    final_mask: chunk.compact_request.final_mask,
                     final_mask_bytes: chunk.row_count,
                     row_count: chunk.row_count,
                     patch_count: uncertain_count,
@@ -1119,25 +1289,23 @@ impl SpatialWorkspace {
                 unsafe { spatial_workspace_finish(&chunk.native_workspace) }
                     .map_err(ResidentLoadError::Gpu)?;
             }
-            chunk
-                .final_mask
-                .copy_to_slice(&mut self.host_final_mask[chunk.first_row..end])
-                .map_err(ResidentLoadError::Gpu)?;
             pgrx::check_for_interrupts!();
         }
 
-        let final_mask = if self.preflight.fact_rows == 0 {
-            None
-        } else {
-            Some(
-                ExprDeviceBuffer::copy_from_slice(&self.host_final_mask)
-                    .ok_or_else(|| allocation_error("spatial final-mask upload failed"))?,
-            )
-        };
-        let artifact = SpatialAggArtifact::new(self.base, final_mask)
+        self.check_borrow_failure()?;
+        let artifact = SpatialAggArtifact::new(self.base, self.final_mask)
             .map_err(|detail| ResidentLoadError::Loader(detail.to_owned()))?;
         plan.verify_catalog()?;
         Ok(artifact)
+    }
+
+    fn check_borrow_failure(&self) -> Result<(), ResidentLoadError> {
+        if let Some(failure) = self.borrow_failure {
+            return Err(ResidentLoadError::Loader(format!(
+                "spatial resident borrow failed: {failure:?}"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -1255,6 +1423,8 @@ mod tests {
             intersects_fn_oid: pg_sys::Oid::from(10_u32),
             contains_fn_oid: pg_sys::Oid::from(11_u32),
             within_fn_oid: pg_sys::Oid::from(12_u32),
+            covers_fn_oid: pg_sys::Oid::from(16_u32),
+            coveredby_fn_oid: pg_sys::Oid::from(17_u32),
             dwithin_fn_oid: pg_sys::Oid::from(13_u32),
             distance_fn_oid: pg_sys::Oid::from(14_u32),
             is_valid_fn_oid: pg_sys::Oid::from(15_u32),
@@ -1301,7 +1471,92 @@ mod tests {
     }
 
     #[test]
-    fn preflight_chunks_at_the_native_boundary_and_reserves_all_uncertain_rows() {
+    fn scalar_program_preflight_reserves_both_staged_owners_without_allocating() {
+        use crate::engine::residency::{begin_test_allocation_count, finish_test_allocation_count};
+        let base = spatial_preflight(
+            &shape(100),
+            constant(),
+            SpatialSnapshotLayout {
+                exact_snapshot_words: 25,
+            },
+            32,
+        )
+        .expect("geometry preflight");
+        begin_test_allocation_count();
+        let charged = base.with_program_bytes(220);
+        let allocations = finish_test_allocation_count();
+        let charged = charged.expect("program payload");
+        assert_eq!(allocations, 0);
+        assert_eq!(charged.published_accounting.retained_host_exact_bytes, 220);
+        assert_eq!(
+            charged.transient_accounting.retained_host_exact_bytes,
+            base.transient_accounting.retained_host_exact_bytes + 220
+        );
+        assert_eq!(
+            charged.published_accounting.device_bytes,
+            base.published_accounting.device_bytes
+        );
+        assert_eq!(
+            charged.transient_accounting.device_bytes,
+            base.transient_accounting.device_bytes
+        );
+        assert_eq!(base.with_program_bytes(0), Ok(base));
+        assert_eq!(
+            base.with_program_bytes(u64::MAX),
+            Err(SpatialPreflightError::AccountingOverflow)
+        );
+    }
+
+    #[test]
+    fn indexed_constant_preflight_charges_every_edge_box() {
+        for coordinates in [32, 33, 64, 65, 1_025, 2_237] {
+            let shape = SpatialConstantShape {
+                coordinate_pairs: coordinates,
+                ..constant()
+            };
+            let base = coordinates * 16 + 8 + 24 + 32 + 16;
+            let boxes = crate::gpu::resident_geometry_edge_index_boxes(coordinates);
+            assert_eq!(shape.device_bytes(), u64::try_from(base + boxes * 32).ok());
+            assert_eq!(shape.referenced_bytes(), shape.device_bytes());
+        }
+    }
+
+    #[test]
+    fn polygon_complexity_bounds_chunk_work_and_scratch_accounting() {
+        for coordinates in [5, 1_025, 4_097, 1_000_000] {
+            let polygon = SpatialConstantShape {
+                exact_bytes: coordinates * 16 + 32,
+                coordinate_pairs: coordinates,
+                ring_count: 3,
+            };
+            let preflight = spatial_preflight(
+                &shape(1_000_001),
+                polygon,
+                SpatialSnapshotLayout {
+                    exact_snapshot_words: 40,
+                },
+                PGACCEL_SPATIAL_MAX_CHUNK_ROWS,
+            )
+            .expect("bounded polygon work");
+            assert!(preflight.chunk_limit > 0);
+            assert!(preflight.chunk_limit <= PGACCEL_SPATIAL_MAX_CHUNK_ROWS);
+            assert!(preflight.chunk_limit * coordinates <= 64 * 1024 * 1024);
+            assert_eq!(
+                preflight.chunk_count,
+                1_000_001_usize.div_ceil(preflight.chunk_limit)
+            );
+            assert_eq!(
+                preflight.transient_accounting.device_bytes,
+                padded_base_device_bytes(&shape(1_000_001)).expect("base bytes")
+                    + polygon.device_bytes().expect("polygon bytes")
+                    + 1_000_001
+                    + chunk_device_bytes(preflight.chunk_limit).expect("one chunk")
+            );
+        }
+    }
+
+    #[test]
+    fn preflight_reserves_one_full_chunk_of_host_recheck_scratch() {
         let preflight = spatial_preflight(
             &shape(PGACCEL_SPATIAL_MAX_CHUNK_ROWS + 3),
             constant(),
@@ -1313,8 +1568,48 @@ mod tests {
         .expect("bounded preflight");
         assert_eq!(preflight.chunk_count, 2);
         assert_eq!(preflight.chunk_limit, 65_536);
-        let full_uncertainty_host = (PGACCEL_SPATIAL_MAX_CHUNK_ROWS as u64 + 3) * 9;
-        assert!(preflight.transient_accounting.retained_host_exact_bytes >= full_uncertainty_host);
+        assert_eq!(
+            preflight.transient_accounting.retained_host_exact_bytes,
+            40 * 8 + 128 + 65_536 * 9
+        );
+    }
+
+    #[test]
+    fn full_month_mask_publication_has_no_relation_sized_host_staging() {
+        let rows = 12_748_986;
+        let polygon = SpatialConstantShape {
+            coordinate_pairs: 2_237,
+            ..constant()
+        };
+        let mut base = shape(rows);
+        base.fact_group_key_count = 0;
+        base.dimension_count = 0;
+        let preflight = spatial_preflight(
+            &base,
+            polygon,
+            SpatialSnapshotLayout {
+                exact_snapshot_words: 0,
+            },
+            PGACCEL_SPATIAL_MAX_CHUNK_ROWS,
+        )
+        .expect("full-month accounting");
+        assert_eq!(preflight.published_accounting.device_bytes, rows as u64);
+        assert_eq!(
+            preflight.transient_accounting.retained_host_exact_bytes,
+            polygon.host_bytes().expect("constant host bytes") + preflight.chunk_limit as u64 * 9
+        );
+        assert!(preflight.transient_accounting.retained_host_exact_bytes < 300_000);
+        assert_eq!(
+            preflight.transient_accounting.device_bytes,
+            polygon.device_bytes().expect("constant device bytes")
+                + rows as u64
+                + chunk_device_bytes(preflight.chunk_limit).expect("one workspace")
+        );
+        assert_eq!(preflight.chunk_limit, 29_999);
+        assert_eq!(chunk_device_bytes(preflight.chunk_limit), Some(270_387));
+        let previous_scratch = rows as u64 * 9 + preflight.chunk_count as u64 * 396;
+        assert_eq!(previous_scratch, 114_909_174);
+        assert_eq!(previous_scratch - 270_387, 114_638_787);
     }
 
     #[test]
@@ -1358,16 +1653,47 @@ mod tests {
         let preflight = spatial_preflight(&base, constant(), snapshot, 3).expect("preflight");
         // Base: fact key 16 + dimension key 28 + fact join 16 + match 7 + multiplicity 56.
         assert_eq!(preflight.published_accounting.device_bytes, 123 + 4);
-        // W owns the padded base 123, constant 160, and chunks (384 + 4 + 8) + 10*n.
+        // W owns base 123, constant 160, one (384 + 4 + 8) + 9*n scratch, mask 4.
         assert_eq!(
             preflight.transient_accounting.device_bytes,
-            123 + 160 + 426 + 406
+            123 + 160 + 423 + 4
         );
-        // Snapshot 80 + constant host 128 + full mask/index/result 40.
+        // Snapshot 80 + constant host 128 + chunk index/result 27; no host mask.
         assert_eq!(
             preflight.transient_accounting.retained_host_exact_bytes,
-            248
+            235
         );
+    }
+
+    #[test]
+    fn recheck_scratch_is_bounded_for_empty_short_and_many_chunk_inputs() {
+        for rows in [0, 1, 2, 3, 4, 7, 1_000_001, 12_748_986] {
+            let preflight = spatial_preflight(
+                &shape(rows),
+                constant(),
+                SpatialSnapshotLayout {
+                    exact_snapshot_words: 0,
+                },
+                3,
+            )
+            .expect("bounded preflight");
+            assert_eq!(
+                preflight.transient_accounting.retained_host_exact_bytes,
+                128 + rows.min(3) as u64 * 9
+            );
+            let scratch = if rows == 0 {
+                0
+            } else {
+                396 + rows.min(3) as u64 * 9
+            };
+            assert_eq!(
+                preflight.transient_accounting.device_bytes,
+                padded_base_device_bytes(&shape(rows)).expect("base bytes")
+                    + 160
+                    + rows as u64
+                    + scratch
+            );
+        }
     }
 
     #[test]
@@ -1447,6 +1773,39 @@ mod tests {
         let error = validate_prepared_base_device_bytes(&preflight, expected + 1)
             .expect_err("mismatch must fail closed");
         assert!(matches!(error, ResidentLoadError::Loader(_)));
+    }
+
+    #[test]
+    fn covers_uses_inclusive_gpu_classification_but_its_own_exact_recheck() {
+        for (predicate, column_is_left, exact_fn) in [
+            (SpatialPredicateKind::Covers, false, catalog().covers_fn_oid),
+            (
+                SpatialPredicateKind::CoveredBy,
+                true,
+                catalog().coveredby_fn_oid,
+            ),
+        ] {
+            let spec = spatial_spec(
+                predicate,
+                column_is_left,
+                crate::engine::residency::RESIDENT_GEOMETRY_POINT,
+                TEST_SRID,
+                -1,
+            );
+            let plan = SpatialTransformPlan::new(&decoded(&spec), &catalog(), 1_024)
+                .expect("inclusive point/area plan");
+            assert_eq!(plan.predicate, ResidentSpatialPredicate::Intersects);
+            assert_eq!(plan.exact_fn_oid, exact_fn);
+            assert_eq!(plan.column_is_left, column_is_left);
+            let reversed = spatial_spec(
+                predicate,
+                !column_is_left,
+                crate::engine::residency::RESIDENT_GEOMETRY_POINT,
+                TEST_SRID,
+                -1,
+            );
+            assert!(SpatialTransformPlan::new(&decoded(&reversed), &catalog(), 1_024).is_err());
+        }
     }
 
     #[test]

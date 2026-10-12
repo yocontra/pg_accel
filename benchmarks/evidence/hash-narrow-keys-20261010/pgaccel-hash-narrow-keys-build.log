@@ -1,0 +1,14 @@
+[  7%] Built target pgaccel_metadata
+[ 14%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/grouped_agg.cpp.o
+[ 14%] Linking CXX shared library libpgaccel_kernels_shared.dylib
+ld: warning: object file (/Users/contra/Projects/pg_accel/pgaccel-kernels/build/CMakeFiles/pgaccel_metadata.dir/Release/join_rows_layout.cpp.o) was built for newer 'macOS' version (26.0) than being linked (16.0)
+[100%] Built target pgaccel_kernels_shared
+[  6%] Built target pgaccel_metadata
+[ 93%] Built target pgaccel_kernels_shared
+[100%] Building CXX object CMakeFiles/test_grouped_agg_hash.dir/test/test_grouped_agg_hash.cpp.o
+[100%] Linking CXX executable test_grouped_agg_hash
+[100%] Built target test_grouped_agg_hash
+[  6%] Built target pgaccel_metadata
+[ 87%] Built target pgaccel_kernels_shared
+[ 93%] Linking CXX executable test_grouped_agg
+[100%] Built target test_grouped_agg

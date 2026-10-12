@@ -1,0 +1,62 @@
+--- .codex/scratch/nullsafe-sql-original-inputs/111_independent_aggregate_filters.sql	2026-10-06 05:07:08
++++ sql/tests/111_independent_aggregate_filters.sql	2026-10-06 05:10:26
+@@ -129,16 +129,54 @@
+         DROP TABLE _fb_actual,_fb_expected;
+     END LOOP;
+ 
+-    -- Outside the frozen descriptor's exact representational envelope. In
+-    -- particular, UNKNOWN must never be complemented into TRUE by NOT IN.
++    -- These predicates now use scalar programs rather than the original
++    -- interval-only FILTER representation. Keep them as positive differential
++    -- cases: UNKNOWN must never be complemented into TRUE by NOT IN. Use only
++    -- INT4 measures here; the mixed INT2 matrix above has a different envelope.
+     FOREACH predicate IN ARRAY ARRAY[
+-        'amount IN (1,3,5,7,9)',
+         'amount NOT IN (1,NULL)',
+         'amount = ANY (NULL::int4[])',
+         'amount = ANY (ARRAY[]::int4[])',
+-        'amount <> ALL (ARRAY[adjustment])',
+         'amount < 0 OR adjustment > 0',
+-        'amount IS NULL OR adjustment > 0',
++        'amount IS NULL OR adjustment > 0'
++    ] LOOP
++        query := format('SELECT kb,sum(amount) FILTER (WHERE %1$s) AS s,
++            avg(amount) FILTER (WHERE %1$s) AS a,
++            count(amount) FILTER (WHERE %1$s) AS c,count(*) AS n
++            FROM _filtered_measures GROUP BY kb',predicate);
++        PERFORM set_config('pg_accel.enabled','off',false);
++        EXECUTE 'CREATE TEMP TABLE _fb_expected AS ' || query;
++        EXECUTE format('CREATE TEMP TABLE _fb_oracle AS SELECT kb,
++            sum(CASE WHEN %1$s THEN amount::numeric END) AS s,
++            avg(CASE WHEN %1$s THEN amount::numeric END) AS a,
++            sum(CASE WHEN (%1$s) AND amount IS NOT NULL THEN 1 ELSE 0 END)::int8 AS c,
++            count(*) AS n FROM _filtered_measures GROUP BY kb',predicate);
++        PERFORM set_config('pg_accel.enabled','on',false);
++        kernels := pg_accel_kernel_executions();
++        EXECUTE 'CREATE TEMP TABLE _fb_actual AS ' || query;
++        IF EXISTS ((SELECT * FROM _fb_actual EXCEPT ALL SELECT * FROM _fb_expected)
++                   UNION ALL (SELECT * FROM _fb_expected EXCEPT ALL SELECT * FROM _fb_actual)
++                   UNION ALL (SELECT * FROM _fb_actual EXCEPT ALL SELECT * FROM _fb_oracle)
++                   UNION ALL (SELECT * FROM _fb_oracle EXCEPT ALL SELECT * FROM _fb_actual)) THEN
++            RAISE EXCEPTION '111 scalar FILTER parity/CASE oracle mismatch: %',predicate;
++        END IF;
++        plan := '';
++        FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) ' || query LOOP
++            plan := plan || line."QUERY PLAN" || E'\n';
++        END LOOP;
++        IF has_gpu AND (position('GPU Kernel Dispatched: true' IN plan)=0
++                       OR pg_accel_kernel_executions() <= kernels) THEN
++            RAISE EXCEPTION '111 scalar FILTER missing dispatch: % / % / %',
++                predicate, pg_accel_last_planner_rejection_reason(), plan;
++        END IF;
++        DROP TABLE _fb_actual,_fb_expected,_fb_oracle;
++    END LOOP;
++
++    -- Remaining interval-capacity, dynamic-array, cast and volatile cases
++    -- stay native. Do not confuse that envelope with scalar FILTER support.
++    FOREACH predicate IN ARRAY ARRAY[
++        'amount IN (1,3,5,7,9)',
++        'amount <> ALL (ARRAY[adjustment])',
+         'amount::int8 > 0',
+         'amount > 0 AND random() > 0.5'
+     ] LOOP

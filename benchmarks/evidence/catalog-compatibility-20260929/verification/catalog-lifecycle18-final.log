@@ -1,0 +1,105 @@
+CREATE DATABASE
+You are now connected to database "pg_accel_catalog_12917_1790742364" as user "contra".
+DO
+SET
+SET
+SET
+SET
+SELECT 500000
+CREATE INDEX
+ANALYZE
+SET
+SELECT 64
+SET
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE SCHEMA
+CREATE FUNCTION
+SET
+ assert_native 
+---------------
+ 
+(1 row)
+
+SET
+ assert_native 
+---------------
+ 
+(1 row)
+
+RESET
+RESET
+PGACCEL_CATALOG_OK:preload_only
+BEGIN
+CREATE EXTENSION
+ assert_selected 
+-----------------
+ 
+(1 row)
+
+ROLLBACK
+ assert_native 
+---------------
+ 
+(1 row)
+
+PGACCEL_CATALOG_OK:create_rollback
+CREATE EXTENSION
+ assert_selected 
+-----------------
+ 
+(1 row)
+
+PREPARE
+ assert_selected 
+-----------------
+ 
+(1 row)
+
+PGACCEL_CATALOG_OK:installed
+BEGIN
+psql:/Users/contra/Projects/pg_accel/sql/extension_catalog_contract.sql:89: NOTICE:  drop cascades to trigger __pg_accel_residency_v2_7d9e on table _catalog_input
+DROP EXTENSION
+ assert_native 
+---------------
+ 
+(1 row)
+
+ assert_native 
+---------------
+ 
+(1 row)
+
+ROLLBACK
+ assert_selected 
+-----------------
+ 
+(1 row)
+
+ assert_selected 
+-----------------
+ 
+(1 row)
+
+PGACCEL_CATALOG_OK:drop_rollback
+psql:/Users/contra/Projects/pg_accel/sql/extension_catalog_contract.sql:97: NOTICE:  drop cascades to trigger __pg_accel_residency_v2_7d9e on table _catalog_input
+DROP EXTENSION
+ assert_native 
+---------------
+ 
+(1 row)
+
+ assert_native 
+---------------
+ 
+(1 row)
+
+CREATE EXTENSION
+ assert_selected 
+-----------------
+ 
+(1 row)
+
+DEALLOCATE
+PGACCEL_CATALOG_OK:drop_recreate
+DROP DATABASE

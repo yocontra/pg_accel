@@ -1,0 +1,94 @@
+=== 96_declined_lifecycle_contract ===
+SET
+SET
+SET
+SELECT 1
+CREATE TABLE
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 200000
+ANALYZE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+INSERT 0 1024
+ALTER TABLE
+ANALYZE
+SET
+SELECT 65
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 65
+ decline_explain 
+-----------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:96_declined_lifecycle_contract.assert_001
+SET
+SELECT 1
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 1
+ decline_explain 
+-----------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:96_declined_lifecycle_contract.assert_002
+SET
+SELECT 65
+SELECT 65
+SELECT 65
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 65
+ decline_explain 
+-----------------
+ 
+(1 row)
+
+psql:sql/tests/96_declined_lifecycle_contract.sql:293: ERROR:  96 aggregate_modifier_filter FAILED: exact reason shape_aggregate_modifier was not recorded; plan:
+        Buffers: local read=2073 written=1
+        Output: g, price, quantity
+  ->  Seq Scan on pg_temp._decline_scalar (actual rows=201024.00 loops=1)
+  Batches: 1  Memory Usage: 32kB
+  Buffers: local read=2073 written=1
+  Group Key: _decline_scalar.g
+  Output: g, sum(price) FILTER (WHERE ((quantity > 0) AND (price > 0)))
+HashAggregate (actual rows=65.00 loops=1)
+CONTEXT:  PL/pgSQL function pg_temp_6.decline_contract_ok(text,text,regclass,regclass,bigint,boolean) line 66 at RAISE
+PL/pgSQL expression "NOT pg_temp.decline_contract_ok(
+        'aggregate_modifier_filter', 'shape_aggregate_modifier',
+        '_decline_modifier_filter_native', '_decline_modifier_filter_enabled',
+        (SELECT kernels FROM _decline_modifier_filter_before)
+    )"
+PL/pgSQL function inline_code_block line 3 at IF

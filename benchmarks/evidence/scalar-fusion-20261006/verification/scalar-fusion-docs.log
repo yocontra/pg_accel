@@ -1,0 +1,28 @@
+./scripts/doc_parity.sh
+=== doc_parity summary ===
+  README.md: 13 citations
+  CLAUDE.md: 8 citations
+  ARCHITECTURE.md: 28 citations
+  TODO.md: 0 citations
+  CONTRIBUTING.md: 3 citations
+  SECURITY.md: 0 citations
+  docs/ADAPTER_GUIDE.md: 10 citations
+  docs/BENCHMARKS.md: 1 citations
+  docs/EXPLAIN_EXAMPLES.md: 8 citations
+  docs/olap-abi.md: 0 citations
+  .github/ISSUE_TEMPLATE/bug_report.md: 0 citations
+  .github/ISSUE_TEMPLATE/bug_report.yml: 0 citations
+  .github/ISSUE_TEMPLATE/feature_request.md: 0 citations
+  .github/ISSUE_TEMPLATE/feature_request.yml: 0 citations
+  exact citations:       71
+  released GUCs:         17
+  capability rows:       11
+  registered functions:  3
+  macOS brew formulas:   5
+PASS
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_doc_parity.py
+.....................
+----------------------------------------------------------------------
+Ran 21 tests in 0.062s
+
+OK

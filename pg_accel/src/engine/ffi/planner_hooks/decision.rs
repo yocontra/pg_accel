@@ -19,6 +19,8 @@ const DEFAULT_RECORDER_CAPACITY: usize = 32;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum RejectionReason {
     ExtensionDisabled,
+    ExtensionNotInstalled,
+    ExtensionCatalogInTransition,
     UnsupportedCommandType,
     GpuNotUsable,
     UnsupportedRelationKind,
@@ -90,6 +92,8 @@ impl RejectionReason {
     pub(super) const fn stats_key(self) -> &'static str {
         match self {
             Self::ExtensionDisabled => "extension_disabled",
+            Self::ExtensionNotInstalled => "extension_not_installed",
+            Self::ExtensionCatalogInTransition => "extension_catalog_in_transition",
             Self::UnsupportedCommandType => "command_type_skip",
             Self::GpuNotUsable => "gpu_not_usable",
             Self::UnsupportedRelationKind => "unsupported_relation_kind",

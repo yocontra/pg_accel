@@ -1,0 +1,35 @@
+=== 105_native_having_contract ===
+SET
+SET
+CREATE TABLE
+INSERT 0 500000
+ANALYZE
+DO
+PGACCEL_ASSERT_OK:105_native_having_contract.assert_001
+DO
+PGACCEL_ASSERT_OK:105_native_having_contract.assert_002
+SET
+PREPARE
+DO
+DEALLOCATE
+RESET
+PGACCEL_ASSERT_OK:105_native_having_contract.assert_003
+DO
+PGACCEL_ASSERT_OK:105_native_having_contract.assert_004
+DO
+PGACCEL_ASSERT_OK:105_native_having_contract.assert_005
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ t
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:105_native_having_contract

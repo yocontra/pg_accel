@@ -1,0 +1,11 @@
+=== 30_expr_arithmetic ===
+CREATE TABLE
+INSERT 0 10000
+SET
+SELECT 4048
+SET
+SELECT 4048
+DO
+PGACCEL_ASSERT_OK:30_expr_arithmetic.assert_001
+DROP TABLE
+PGACCEL_FILE_OK:30_expr_arithmetic

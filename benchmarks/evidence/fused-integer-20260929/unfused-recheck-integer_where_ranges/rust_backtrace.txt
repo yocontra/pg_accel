@@ -1,0 +1,3 @@
+RUST_BACKTRACE=1
+action=set-by-runner
+note=This records the benchmark runner process environment. Existing PostgreSQL postmasters may need a restart to inherit changed environment variables.

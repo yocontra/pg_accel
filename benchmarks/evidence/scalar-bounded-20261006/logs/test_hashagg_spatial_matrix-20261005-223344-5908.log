@@ -1,0 +1,3 @@
+PGACCEL_TEST_START name=test_hashagg_spatial_matrix
+resident-count/spatial matrix: 180 checks, 0 failures
+PGACCEL_TEST_RESULT name=test_hashagg_spatial_matrix exit_code=0 result=PASS raw_lines=1 body_sha256=ea44fba75c83fedcde938d384787946c4e86b24335e78433a81e3c293d131d06 binding_sha256=784b1fa16724aaf239e22e6959964dac8ee33cafc6014e377879721d7ade02a8

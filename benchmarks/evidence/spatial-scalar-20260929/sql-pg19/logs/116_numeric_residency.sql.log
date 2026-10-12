@@ -1,0 +1,24 @@
+=== 116_numeric_residency ===
+SET
+SET
+CREATE TABLE
+INSERT 0 10017
+INSERT 0 4
+ANALYZE
+DO
+PGACCEL_ASSERT_OK:116_numeric_residency.assert_001
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ f
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:116_numeric_residency

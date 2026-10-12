@@ -1,0 +1,4 @@
+PostgreSQL 18.4 tarball already present: /Users/contra/Projects/pg_accel/.pgaccel/postgres/distfiles/postgresql-18.4.tar.bz2
+PostgreSQL 18.4 source already unpacked: /Users/contra/Projects/pg_accel/.pgaccel/postgres/src/postgresql-18.4
+PostgreSQL 18.4 already installed: /Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4
+PostgreSQL 18 upstream compatibility gate passed; evidence: /Users/contra/Projects/pg_accel/.codex/scratch/scalar-membership-upstream18-20261006

@@ -1,0 +1,5 @@
+   Compiling pgrx-pg-sys v0.19.1
+    Checking pgrx v0.19.1
+    Checking pgrx-tests v0.19.1
+    Checking pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 26.18s

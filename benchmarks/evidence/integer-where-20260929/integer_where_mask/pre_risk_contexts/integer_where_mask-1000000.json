@@ -1,0 +1,28 @@
+{
+  "workload": "integer_where_mask",
+  "rows": 1000000,
+  "seed": 42,
+  "iterations": 10,
+  "warmup": 5,
+  "timing_mode": "raw",
+  "cache_mode": "warm",
+  "realistic_gucs": false,
+  "skip_guc_verify": false,
+  "capture_plans": true,
+  "capture_planner_stages": false,
+  "native_parity_pairing": false,
+  "backend_pid": 53920,
+  "backend_pid_error": null,
+  "setup_sql": [
+    "DROP TABLE IF EXISTS bench_filtered_sales",
+    "CREATE TABLE bench_filtered_sales (region text COLLATE \"C\", sales_day date, is_return bool, amount int4, units int2)",
+    "INSERT INTO bench_filtered_sales SELECT CASE WHEN i % 97 = 0 THEN NULL ELSE 'region-' || i % 16 END, CASE WHEN i % 97 = 0 THEN NULL ELSE date '2026-01-01' + (i / 16) % 7 END, CASE WHEN i % 97 = 0 THEN NULL ELSE (i / 112) % 2 = 0 END, CASE WHEN i % 97 = 0 OR i % 11 = 0 THEN NULL ELSE i % 10001 - 5000 END, CASE WHEN i % 13 = 0 THEN NULL ELSE (i % 101 - 50)::int2 END FROM generate_series(1, 1000000) g(i)",
+    "ANALYZE bench_filtered_sales"
+  ],
+  "pre_query_sql": [],
+  "accel_query_sql": "SELECT sum(amount) FILTER (WHERE amount BETWEEN 1000 AND 3000 OR amount IN (7,11,NULL)) AS sp, avg(amount) FILTER (WHERE amount BETWEEN 1000 AND 3000 OR amount IN (7,11,NULL)) AS ap, sum(amount) FILTER (WHERE NOT (amount >= -1000 AND amount <= 1000)) AS sn, avg(amount) FILTER (WHERE NOT (amount >= -1000 AND amount <= 1000)) AS an, sum(units) FILTER (WHERE amount IN (-5000,0,5000,NULL)) AS su, avg(units) FILTER (WHERE amount IN (-5000,0,5000,NULL)) AS au, count(*) AS n FROM bench_filtered_sales WHERE is_return",
+  "baseline_query_sql": "SELECT sum(amount) FILTER (WHERE amount BETWEEN 1000 AND 3000 OR amount IN (7,11,NULL)) AS sp, avg(amount) FILTER (WHERE amount BETWEEN 1000 AND 3000 OR amount IN (7,11,NULL)) AS ap, sum(amount) FILTER (WHERE NOT (amount >= -1000 AND amount <= 1000)) AS sn, avg(amount) FILTER (WHERE NOT (amount >= -1000 AND amount <= 1000)) AS an, sum(units) FILTER (WHERE amount IN (-5000,0,5000,NULL)) AS su, avg(units) FILTER (WHERE amount IN (-5000,0,5000,NULL)) AS au, count(*) AS n FROM bench_filtered_sales WHERE is_return",
+  "explain_sql": "EXPLAIN (VERBOSE, COSTS OFF) SELECT sum(amount) FILTER (WHERE amount BETWEEN 1000 AND 3000 OR amount IN (7,11,NULL)) AS sp, avg(amount) FILTER (WHERE amount BETWEEN 1000 AND 3000 OR amount IN (7,11,NULL)) AS ap, sum(amount) FILTER (WHERE NOT (amount >= -1000 AND amount <= 1000)) AS sn, avg(amount) FILTER (WHERE NOT (amount >= -1000 AND amount <= 1000)) AS an, sum(units) FILTER (WHERE amount IN (-5000,0,5000,NULL)) AS su, avg(units) FILTER (WHERE amount IN (-5000,0,5000,NULL)) AS au, count(*) AS n FROM bench_filtered_sales WHERE is_return",
+  "explain": "Custom Scan (GpuAccelAgg)\n  Output: (sum(amount) FILTER (WHERE (((amount >= 1000) AND (amount <= 3000)) OR (amount = ANY ('{7,11,NULL}'::integer[]))))), (avg(amount) FILTER (WHERE (((amount >= 1000) AND (amount <= 3000)) OR (amount = ANY ('{7,11,NULL}'::integer[]))))), (sum(amount) FILTER (WHERE ((amount < '-1000'::integer) OR (amount > 1000)))), (avg(amount) FILTER (WHERE ((amount < '-1000'::integer) OR (amount > 1000)))), (sum(units) FILTER (WHERE (amount = ANY ('{-5000,0,5000,NULL}'::integer[])))), (avg(units) FILTER (WHERE (amount = ANY ('{-5000,0,5000,NULL}'::integer[])))), (count(*))\n  Strategy: GpuAgg\n  Plan Selected: true\n  Batch Size: 65536\n  Expected Threads: 1\n  GPU Resident Pipeline: true\n  GPU Resident Proof Version: 2\n  GPU Resident Operator Class: resident_groupagg\n  GPU Physical Kernel Mode: parallel_dense_integer\n  GPU Descriptor Strategy: descriptor_ungrouped_aggregate\n  GPU Descriptor Specialization: invalid_dense_filtered_integer_specialization\n  GPU Descriptor Specialization Cache: miss\n  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)\n  GPU Descriptor Group Keys: none\n  GPU Descriptor Aggregates: m0:column(2233929.4:type=23) -> value.sum; value.avg; m1:column(2233929.4:type=23) -> value.sum; value.avg; m2:column(2233929.5:type=21) -> value.sum; value.avg; m3:count_star -> value.count\n  GPU Descriptor Filter: fact=sql_mask(input=2233929.3:type=16); measures=[m0=ranges(input=2233929.4:type=23, count=3); m1=ranges(input=2233929.4:type=23, count=2); m2=ranges(input=2233929.4:type=23, count=3); m3=none]; dimensions=[none]\n  GPU Descriptor Star Dimensions: none\n  GPU Descriptor Output: slot0:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot2:aggregate[m1].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot3:aggregate[m1].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot4:aggregate[m2].value.sum source_type=21 result_type=20 typmod=-1 collation=0 nullable=true; slot5:aggregate[m2].value.avg source_type=21 result_type=1700 typmod=-1 collation=0 nullable=true; slot6:aggregate[m3].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false\n  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)\n  GPU Descriptor Artifact: not initialized\n  GPU Descriptor Generations: not inspected\n  GPU Descriptor Bytes: not inspected\n  GPU Resident Stage Mask: 16395\n  GPU Resident Device Columns: 3\n  GPU Resident Boundary: none: no CPU boundary\n",
+  "explain_error": null
+}

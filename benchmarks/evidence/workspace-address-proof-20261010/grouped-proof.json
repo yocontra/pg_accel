@@ -1,0 +1,8 @@
+{
+  "base_parameter": 0,
+  "definitions": 11,
+  "detail": "pure base-derived address return; no device evidence",
+  "nullable": true,
+  "ok": true,
+  "source_sha256": "ea7fcd2f03eab126fb4738dea20963b083692837bcbd4b05f60f7191c6e15b2a"
+}

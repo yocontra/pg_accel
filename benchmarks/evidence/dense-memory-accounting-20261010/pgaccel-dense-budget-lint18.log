@@ -1,0 +1,84 @@
+    Checking pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error: used `unwrap()` on a `Result` value
+    --> pg_accel/src/gpu/grouped_agg.rs:3447:29
+     |
+3447 | ...                   grouped_output_required_bytes(plan.descriptor()).unwrap(),
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: consider using `expect()` to provide a better panic message
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+     = note: requested on the command line with `-D clippy::unwrap-used`
+
+error: used `unwrap()` on a `Result` value
+    --> pg_accel/src/gpu/grouped_agg.rs:3463:36
+     |
+3463 |                         assert_eq!(idle_grouped_execution_bytes().unwrap(), bytes as u64);
+     |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: consider using `expect()` to provide a better panic message
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> pg_accel/src/gpu/grouped_agg.rs:3469:36
+     |
+3469 |                         assert_eq!(idle_grouped_execution_bytes().unwrap(), 0);
+     |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: consider using `expect()` to provide a better panic message
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+
+error: used `unwrap_err()` on a `Result` value
+    --> pg_accel/src/gpu/grouped_agg.rs:3517:13
+     |
+3517 |             plan.preflight_one_shot_memory().unwrap_err().status,
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Ok`, it will panic
+     = help: consider using `expect_err()` to provide a better panic message
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> pg_accel/src/gpu/grouped_agg.rs:3573:20
+     |
+3573 |         assert_eq!(plan.one_shot_memory_requirements().unwrap(), required);
+     |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: consider using `expect()` to provide a better panic message
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> pg_accel/src/gpu/grouped_agg.rs:3575:13
+     |
+3575 |             GroupedAggSession::memory_requirements(&plan, 4093).unwrap(),
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: consider using `expect()` to provide a better panic message
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+    --> pg_accel/src/gpu/grouped_agg.rs:3589:21
+     |
+3589 |         let bytes = grouped_output_required_bytes(plan.descriptor()).unwrap() as u64;
+     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: consider using `expect()` to provide a better panic message
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+    --> pg_accel/src/gpu/grouped_agg.rs:3598:20
+     |
+3598 |         assert_eq!(active.charge.as_ref().unwrap().bytes(), bytes);
+     |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if this value is `None`, it will panic
+     = help: consider using `expect()` to provide a better panic message
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+
+error: could not compile `pg_accel` (lib test) due to 8 previous errors
+error: Recipe `lint` failed with exit code 101

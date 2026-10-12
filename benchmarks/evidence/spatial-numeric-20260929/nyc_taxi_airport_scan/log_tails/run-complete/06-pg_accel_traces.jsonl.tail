@@ -1,0 +1,4 @@
+source: /Users/contra/.pgrx/data-18/pg_accel_traces.jsonl
+tail_bytes: 65536
+---
+{"timestamp":"   3.248163250s","level":"ERROR","fields":{"message":"GPU kernel dispatch failed","func":"pgaccel_grouped_agg_execute_ex","status":"Error","raw":-1,"domain":"grouped_agg"},"target":"pg_accel::gpu"}

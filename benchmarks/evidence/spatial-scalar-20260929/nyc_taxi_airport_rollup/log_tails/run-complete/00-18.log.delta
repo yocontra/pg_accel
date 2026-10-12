@@ -1,0 +1,35 @@
+source: /Users/contra/.pgrx/18.log
+run_start_offset_bytes: 1826545
+delta_start_offset_bytes: 1826545
+capture_end_offset_bytes: 1831002
+delta_max_bytes: 262144
+truncated_to_last_delta_bytes: false
+---
+2026-09-29 16:28:03.598 PDT [17122] LOG:  checkpoint starting: immediate force wait
+2026-09-29 16:28:03.643 PDT [17122] LOG:  checkpoint complete: wrote 11247 buffers (0.5%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 7 recycled; write=0.040 s, sync=0.004 s, total=0.045 s; sync files=37, longest=0.002 s, average=0.001 s; distance=113422 kB, estimate=502209 kB; lsn=53F/6D86B1C8, redo lsn=53F/6D86B170
+2026-09-29 16:28:09.244 PDT [17122] LOG:  checkpoints are occurring too frequently (6 seconds apart)
+2026-09-29 16:28:09.244 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:28:09.244 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:28:12.400 PDT [17122] LOG:  checkpoint complete: wrote 114 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 1 removed, 33 recycled; write=2.958 s, sync=0.183 s, total=3.156 s; sync files=31, longest=0.182 s, average=0.006 s; distance=548484 kB, estimate=548484 kB; lsn=53F/AD55FFC0, redo lsn=53F/8F00C190
+2026-09-29 16:28:12.666 PDT [17122] LOG:  checkpoints are occurring too frequently (3 seconds apart)
+2026-09-29 16:28:12.666 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:28:12.666 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:28:15.330 PDT [17122] LOG:  checkpoint complete: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=2.653 s, sync=0.001 s, total=2.664 s; sync files=2, longest=0.001 s, average=0.001 s; distance=544617 kB, estimate=548097 kB; lsn=53F/CEEE7848, redo lsn=53F/B03E65C8
+2026-09-29 16:28:15.461 PDT [17122] LOG:  checkpoints are occurring too frequently (3 seconds apart)
+2026-09-29 16:28:15.461 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:28:15.461 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:28:17.024 PDT [17122] LOG:  checkpoint complete: wrote 29411 buffers (1.4%), wrote 1 SLRU buffers; 0 WAL file(s) added, 1 removed, 33 recycled; write=1.520 s, sync=0.003 s, total=1.563 s; sync files=13, longest=0.002 s, average=0.001 s; distance=553066 kB, estimate=553066 kB; lsn=53F/F0396BC8, redo lsn=53F/D2000EA8
+2026-09-29 16:28:17.193 PDT [17122] LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-09-29 16:28:17.193 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:28:17.193 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:28:19.067 PDT [17122] LOG:  checkpoint complete: wrote 68829 buffers (3.3%), wrote 0 SLRU buffers; 0 WAL file(s) added, 2 removed, 32 recycled; write=1.839 s, sync=0.005 s, total=1.875 s; sync files=3, longest=0.003 s, average=0.002 s; distance=557055 kB, estimate=557055 kB; lsn=540/13001688, redo lsn=53F/F4000C10
+2026-09-29 16:28:19.175 PDT [17122] LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-09-29 16:28:19.175 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:28:19.175 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:28:20.824 PDT [17122] LOG:  checkpoint complete: wrote 68915 buffers (3.3%), wrote 1 SLRU buffers; 0 WAL file(s) added, 2 removed, 32 recycled; write=1.547 s, sync=0.073 s, total=1.649 s; sync files=15, longest=0.072 s, average=0.005 s; distance=557056 kB, estimate=557056 kB; lsn=540/350026F0, redo lsn=540/16000FC0
+2026-09-29 16:28:20.931 PDT [17122] LOG:  checkpoints are occurring too frequently (1 second apart)
+2026-09-29 16:28:20.931 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:28:20.931 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:28:53.443 PDT [17122] LOG:  checkpoint complete: wrote 69213 buffers (3.3%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 34 recycled; write=32.500 s, sync=0.002 s, total=32.512 s; sync files=3, longest=0.002 s, average=0.001 s; distance=557057 kB, estimate=557057 kB; lsn=540/50E71738, redo lsn=540/38001518
+2026-09-29 16:28:53.443 PDT [17122] LOG:  checkpoint starting: immediate force wait
+2026-09-29 16:28:53.601 PDT [17122] LOG:  checkpoint complete: wrote 50679 buffers (2.4%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 24 recycled; write=0.153 s, sync=0.003 s, total=0.159 s; sync files=33, longest=0.001 s, average=0.001 s; distance=408000 kB, estimate=542151 kB; lsn=540/50E71808, redo lsn=540/50E717B0

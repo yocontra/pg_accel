@@ -1,0 +1,13 @@
+82db98f03c79a85b64c46df64df6f183026bbe15e8ae04ce043d685763e06bb1  benchmarks/evidence/hash-int4-sum-binding-20261010/pgaccel-hash-sum-binding-core18-initial.log
+0231190aedefe77edbcd06c4c505f71998fb23999881a04518c219320616435d  benchmarks/evidence/hash-int4-sum-binding-20261010/pgaccel-hash-sum-binding-core18.log
+273e08051dc7e33bc7519008d2f4853a27704e964a033f2d4e5e4b7df24cbf22  benchmarks/evidence/hash-int4-sum-binding-20261010/pgaccel-hash-sum-binding-core19.log
+4da4fca10b8349c094c3d2189fc450531acd685682e6a7980f09c656806af6c4  benchmarks/evidence/hash-int4-sum-binding-20261010/pgaccel-hash-sum-binding-docs.log
+2d01404d451d2acf5f04b22e81f484b97bcb2ea5910cd7b67dc1ba731190f61f  benchmarks/evidence/hash-int4-sum-binding-20261010/pgaccel-hash-sum-binding-lint18-initial.log
+53aafc602d500c3587aacb4fd4d368973eca3ae48886d5a68011d136bf56df5b  benchmarks/evidence/hash-int4-sum-binding-20261010/pgaccel-hash-sum-binding-lint18.log
+999f5229e9eac4ff8e26e88b86a580573a305d68efb0112f77360540e297aaef  benchmarks/evidence/hash-int4-sum-binding-20261010/pgaccel-hash-sum-binding-lint19.log
+d01e661fe1de534b36b9c6cbc11856f2ea8feb958d47ef21fa327be048b26e68  benchmarks/evidence/hash-int4-sum-binding-20261010/pgaccel-hash-sum-binding-live18.log
+4ed442f882de555baa29d1871b675994c61b90d817c1ed34cf284e19e66fe6c9  benchmarks/evidence/hash-int4-sum-binding-20261010/pgaccel-hash-sum-binding-live19.log
+6906a1b3fd78d45f59b4254c5f81bfac2c499e54c9182d9c94befec1f4988825  benchmarks/evidence/hash-int4-sum-binding-20261010/pgaccel-hash-sum-binding-safety.log
+a9dca926bebbe86c11ee483e8d33c65f95fb6bd7c90e64e2abaf1a72261add72  benchmarks/evidence/hash-int4-sum-binding-20261010/pgaccel-hash-sum-binding-scope.log
+109f3976791cc9ee3c748386f35772eade686367b04c1903a13ecd73bae84403  benchmarks/evidence/hash-int4-sum-binding-20261010/README.md
+2a76d9d4d915f0f4c54575ed7fa5eb673c59efdcb52fd46cab1f244c9eb3238f  benchmarks/evidence/hash-int4-sum-binding-20261010/source-snapshot.tar.gz

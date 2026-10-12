@@ -1,0 +1,40 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error: usage of wildcard import
+ --> pg_accel/src/engine/executor/agg/h3_count_test.rs:6:9
+  |
+6 |     use super::super::*;
+  |         ^^^^^^^^^^^^^^^ help: try: `super::super::{pg_sys, DescriptorArtifactPolicy, DescriptorAggPlan, ColumnRef, AggQuerySpec, GroupKeySource, GroupKeyEncoding, MeasureExpr, FilterSpec, AggregateSource, AggregateKind, AggOutputProjection, INT8OID, H3CountInput, validate_internal_runtime_capability, validate_normal_descriptor_capability, GroupedAggKernelMode}`
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#wildcard_imports
+  = note: `-D clippy::wildcard-imports` implied by `-D clippy::pedantic`
+  = help: to override `-D clippy::pedantic` add `#[allow(clippy::wildcard_imports)]`
+
+error: useless conversion to the same type: `pgrx::spi::SpiTupleTable<'_>`
+   --> pg_accel/src/engine/executor/agg/h3_count_test.rs:129:13
+    |
+129 | /             client
+130 | |                 .select(
+131 | |                     "SELECT h3_cell_to_parent(cell,0)::bigint, count(v) FROM hash_count_rows GROUP BY 1",
+132 | |                     None,
+...   |
+135 | |                 .expect("PostgreSQL H3 count oracle")
+136 | |                 .into_iter()
+    | |____________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#useless_conversion
+    = note: `-D clippy::useless-conversion` implied by `-D clippy::all`
+    = help: to override `-D clippy::all` add `#[allow(clippy::useless_conversion)]`
+help: consider removing `.into_iter()`
+    |
+129 ~             client
+130 +                 .select(
+131 +                     "SELECT h3_cell_to_parent(cell,0)::bigint, count(v) FROM hash_count_rows GROUP BY 1",
+132 +                     None,
+133 +                     &[],
+134 +                 )
+135 +                 .expect("PostgreSQL H3 count oracle")
+    |
+
+error: could not compile `pg_accel` (lib) due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `pg_accel` (lib test) due to 1 previous error

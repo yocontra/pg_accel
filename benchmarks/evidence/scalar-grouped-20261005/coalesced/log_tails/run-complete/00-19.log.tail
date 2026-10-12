@@ -1,0 +1,447 @@
+source: /Users/contra/.pgrx/19.log
+tail_bytes: 65536
+---
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.330892426501356466.metalar.97978.10045640776264168376.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/13810581291822887598.2809279171884071540.metalar.97978.6746717621092123656.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.2435173368789511179.metalar.97978.9216742415171800881.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.8377220170799775711.metalar.97978.13667714462485471290.tmp (kernels_added=1 skipped=0)
+2026-09-29 21:13:21.297 MST [22758] LOG:  checkpoint complete: time: wrote 183 buffers (1.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=18.812 s, sync=0.019 s, total=18.833 s; sync files=54, longest=0.006 s, average=0.001 s; distance=1782 kB, estimate=3924 kB; lsn=1/27D771A8, redo lsn=1/27BC62A0
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12987165404132410296.14083977321769289002.metalar.98206.9097991652436542120.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/3160902903123664528.4095646609794665875.metalar.98206.9008429544683114680.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6518678064586571790.17771106178896987221.metalar.98206.15505115229156082195.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/11685831682742932446.15082606419613768101.metalar.98402.9966633880947032537.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14286325069952665006.17446317351918001073.metalar.98402.5600500896917044607.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/5436284986568462560.4342561857424405891.metalar.99325.12278404027631620057.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/9636036650450711250.2809279171884071540.metalar.99325.14802285264946161557.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15645957498266366212.7341531659923589289.metalar.99325.6630009551233179551.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10900195627355951314.2809279171884071540.metalar.99325.16098278687206426072.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/9620746525974980842.2809279171884071540.metalar.99325.11921733545683983797.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.1568411235490366464.metalar.99325.8649901052082503950.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/17815961567180993092.2809279171884071540.metalar.99325.6269590378560450984.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.17367182529003602507.metalar.99325.13341279180855267212.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.7341531659923589289.metalar.99325.10398832211991460699.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15389087124731617784.1372315424860880793.metalar.519.11319729013747592835.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6354719079703378536.5644278395964028275.metalar.901.8740274582155474518.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10244442864516165838.88186814388168008.metalar.901.12999589006268838875.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15389087124731617784.4727482822935009069.metalar.901.11521066841835102653.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/5056334624264330138.17446317351918001073.metalar.901.616792589539218855.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10389901486272287036.13650420406067940234.metalar.901.7404692053832533200.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4420839391651046406.4576660436253897594.metalar.901.15247014802295749468.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.4457333513934018777.metalar.901.6263686669278736896.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.16671347054404526587.metalar.901.3703682170610914156.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/13998301624069339470.2809279171884071540.metalar.901.5184948229148462442.tmp (kernels_added=1 skipped=0)
+2026-09-29 21:18:02.299 MST [22758] LOG:  checkpoint starting: time
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16305509567563257642.16311027662747085031.metalar.1776.11231321481839831764.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16305509567563257642.2990749329336167249.metalar.1776.10315837449568979562.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/8697455164100254842.14948808181686401117.metalar.1776.13756698128300557442.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12585446269449508572.9230437420887763046.metalar.1776.3878145040120578449.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16305509567563257642.12739694002057396307.metalar.1776.12962793089442336023.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16305509567563257642.3775286098534438791.metalar.1776.1898368986722272397.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/2993083400042206172.2809279171884071540.metalar.1776.14738552685085470378.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.6362630158492154949.metalar.1776.7671707720583470009.tmp (kernels_added=1 skipped=0)
+2026-09-29 21:19:02.053 MST [22758] LOG:  checkpoint complete: time: wrote 587 buffers (3.6%), wrote 2 SLRU buffers; 0 WAL file(s) added, 0 removed, 1 recycled; write=59.747 s, sync=0.004 s, total=59.755 s; sync files=67, longest=0.001 s, average=0.001 s; distance=14803 kB, estimate=14803 kB; lsn=1/2900E958, redo lsn=1/28A3AEA8
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10389901486272287036.12562872204432622256.metalar.2413.2719428371222815306.tmp (kernels_added=1 skipped=0)
+2026-09-29 21:23:02.059 MST [22758] LOG:  checkpoint starting: time
+2026-09-30T04:23:16.407015Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:23:16.625659Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:23:16.823340Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:23:17.024610Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:23:17.230446Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:23:18.840343Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:23:19.051825Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:23:19.269930Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:23:19.487107Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:23:19.698109Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:23:21.465935Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:23:21.745733Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:23:22.026822Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:23:22.349323Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:23:22.653373Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:23:32.866827Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-29 21:24:29.561 MST [22758] LOG:  checkpoint complete: time: wrote 828 buffers (5.1%), wrote 2 SLRU buffers; 0 WAL file(s) added, 0 removed, 2 recycled; write=87.465 s, sync=0.033 s, total=87.503 s; sync files=149, longest=0.008 s, average=0.001 s; distance=29984 kB, estimate=29984 kB; lsn=1/2B801E20, redo lsn=1/2A782F58
+2026-09-29 21:26:07.514 MST [22758] LOG:  checkpoint starting: fast force wait
+2026-09-29 21:26:07.544 MST [22758] LOG:  checkpoint complete: fast force wait: wrote 464 buffers (2.8%), wrote 2 SLRU buffers; 0 WAL file(s) added, 0 removed, 2 recycled; write=0.020 s, sync=0.007 s, total=0.030 s; sync files=74, longest=0.001 s, average=0.001 s; distance=26517 kB, estimate=29637 kB; lsn=1/2C1684C8, redo lsn=1/2C168468
+2026-09-29 21:31:07.545 MST [22758] LOG:  checkpoint starting: time
+2026-09-29 21:31:33.777 MST [22758] LOG:  checkpoint complete: time: wrote 258 buffers (1.6%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=26.227 s, sync=0.004 s, total=26.233 s; sync files=42, longest=0.002 s, average=0.001 s; distance=2100 kB, estimate=26883 kB; lsn=1/2C3757F0, redo lsn=1/2C375758
+2026-09-29 21:43:16.293 MST [22755] LOG:  received fast shutdown request
+2026-09-29 21:43:16.298 MST [22755] LOG:  aborting any active transactions
+2026-09-29 21:43:16.300 MST [22755] LOG:  background worker "logical replication launcher" (PID 22763) exited with exit code 1
+2026-09-29 21:43:16.301 MST [22758] LOG:  shutting down
+2026-09-29 21:43:16.308 MST [22758] LOG:  checkpoint starting: shutdown fast
+2026-09-29 21:43:16.337 MST [22758] LOG:  checkpoint complete: shutdown fast: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.004 s, sync=0.001 s, total=0.037 s; sync files=0, longest=0.000 s, average=0.000 s; distance=0 kB, estimate=24195 kB; lsn=1/2C3758A8, redo lsn=1/2C3758A8
+2026-09-29 21:43:16.355 MST [22755] LOG:  database system is shut down
+2026-09-29 21:48:30.951 MST [33880] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-09-29 21:48:30.952 MST [33880] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-09-29 21:48:30.955 MST [33880] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-09-29 21:48:30.956 MST [33880] LOG:  listening on IPv6 address "::", port 28819
+2026-09-29 21:48:30.956 MST [33880] LOG:  listening on IPv4 address "0.0.0.0", port 28819
+2026-09-29 21:48:30.956 MST [33880] LOG:  listening on Unix socket "/Users/contra/.pgrx/.s.PGSQL.28819"
+2026-09-29 21:48:30.963 MST [33885] LOG:  database system was shut down at 2026-09-29 21:43:16 MST
+2026-09-29 21:48:30.968 MST [33880] LOG:  database system is ready to accept connections
+2026-09-30T04:51:18.244275Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:51:18.420748Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:51:18.586673Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:51:18.754267Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:51:18.920392Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:51:20.302519Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:51:20.497855Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:51:20.689436Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:51:20.885798Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:51:21.082352Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:51:22.589519Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:51:22.799416Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:51:23.007983Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:51:23.224413Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T04:51:23.441732Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-29 21:51:25.379 MST [33883] LOG:  checkpoint starting: fast force wait
+2026-09-29 21:51:25.396 MST [33883] LOG:  checkpoint complete: fast force wait: wrote 322 buffers (2.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.004 s, sync=0.012 s, total=0.018 s; sync files=49, longest=0.002 s, average=0.001 s; distance=8800 kB, estimate=8800 kB; lsn=1/2CC0DBB8, redo lsn=1/2CC0DB58
+2026-09-29 21:56:25.402 MST [33883] LOG:  checkpoint starting: time
+2026-09-29 21:56:48.804 MST [33883] LOG:  checkpoint complete: time: wrote 230 buffers (1.4%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=23.393 s, sync=0.007 s, total=23.402 s; sync files=41, longest=0.002 s, average=0.001 s; distance=1903 kB, estimate=8110 kB; lsn=1/2CDE99F0, redo lsn=1/2CDE9958
+2026-09-29 22:28:28.060 MST [33880] LOG:  received fast shutdown request
+2026-09-29 22:28:28.061 MST [33880] LOG:  aborting any active transactions
+2026-09-29 22:28:28.062 MST [33880] LOG:  background worker "logical replication launcher" (PID 33888) exited with exit code 1
+2026-09-29 22:28:28.062 MST [33883] LOG:  shutting down
+2026-09-29 22:28:28.062 MST [33883] LOG:  checkpoint starting: shutdown fast
+2026-09-29 22:28:28.064 MST [33883] LOG:  checkpoint complete: shutdown fast: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.002 s; sync files=0, longest=0.000 s, average=0.000 s; distance=0 kB, estimate=7299 kB; lsn=1/2CDE9AA8, redo lsn=1/2CDE9AA8
+2026-09-29 22:28:28.069 MST [33880] LOG:  database system is shut down
+2026-09-29 22:30:45.682 MST [59022] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-09-29 22:30:45.682 MST [59022] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-09-29 22:30:45.686 MST [59022] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-09-29 22:30:45.687 MST [59022] LOG:  listening on IPv6 address "::", port 28819
+2026-09-29 22:30:45.687 MST [59022] LOG:  listening on IPv4 address "0.0.0.0", port 28819
+2026-09-29 22:30:45.687 MST [59022] LOG:  listening on Unix socket "/Users/contra/.pgrx/.s.PGSQL.28819"
+2026-09-29 22:30:45.694 MST [59027] LOG:  database system was shut down at 2026-09-29 22:28:28 MST
+2026-09-29 22:30:45.697 MST [59022] LOG:  database system is ready to accept connections
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/5436284986568462560.6832348196486543701.metalar.59897.11127070711008165473.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/9636036650450711250.4930898406729119394.metalar.59897.2238353347162037441.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15645957498266366212.536171733580432511.metalar.59897.4819606210439284625.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10900195627355951314.4930898406729119394.metalar.59897.9058102078722774555.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/9620746525974980842.4930898406729119394.metalar.59897.8233633221884524878.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.8599232927333599446.metalar.59897.6259976886091131303.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6229825781897181524.9415879563599102008.metalar.59897.15642226285875640190.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/17815961567180993092.4930898406729119394.metalar.59897.3937318912086300875.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.10634723865526013597.metalar.59897.919197257134633942.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.536171733580432511.metalar.59897.3012303769885885766.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.899876347706894328.metalar.60473.3437797465821051782.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/3523093248116128384.4930898406729119394.metalar.60473.17229744846738644033.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/531930080529456404.3226266423499536805.metalar.60473.3642220301920161166.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/7819755321666386692.4930898406729119394.metalar.60473.999354439135811568.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/2574708908066720270.6832348196486543701.metalar.60473.15733403980462189571.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/11221253920546634960.3226266423499536805.metalar.60473.11502014543975247511.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/13600666649970294590.3226266423499536805.metalar.60473.1404431217167538167.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10244442864516165838.18041848867317649076.metalar.60473.7434771750749769712.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10244442864516165838.16403412457451864500.metalar.60473.8420314274690117882.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/2120106600545249948.3226266423499536805.metalar.60473.195916582933904793.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/2457796378833377408.4930898406729119394.metalar.60473.15344272420956005202.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/2873900909598178054.12530796105873732747.metalar.60473.15434135042151809260.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/13491105312445094594.12530796105873732747.metalar.60473.17362223016012167165.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/11258058383228655916.12530796105873732747.metalar.60473.18394259978372650911.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12585446269449508572.8881610190458618778.metalar.60473.12072851245998284386.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12585446269449508572.7099067355592182938.metalar.60473.5234805473156795250.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4463013947233864846.12530796105873732747.metalar.60473.10012638318084281444.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.14547421304110554965.metalar.60473.5138174511193291339.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/8528202153872438530.4930898406729119394.metalar.60473.943812030683959089.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.11300214803042778553.metalar.60473.3712426485224700174.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14064588806444736316.4930898406729119394.metalar.60473.4780911079007044565.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6993860855614079944.4930898406729119394.metalar.60473.7506216390247408695.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.6945372364594920953.metalar.60473.13042089283008300820.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/1835781239313333478.10416619566814926695.metalar.60473.6121668778789708543.tmp (kernels_added=1 skipped=0)
+2026-09-30T05:32:34.385969Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:32:34.554445Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:32:34.720779Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:32:34.885758Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:32:35.053925Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:32:36.400587Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:32:36.577225Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:32:36.757423Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:32:36.939093Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:32:37.118012Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:32:38.534985Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:32:38.734320Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:32:38.928169Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:32:39.133884Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:32:39.339448Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.18124137765488538348.metalar.63472.8476508503583272479.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/18384041738596059486.4930898406729119394.metalar.63472.2918478804226329970.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/9877590589045929008.6832348196486543701.metalar.63472.5675188856365452033.tmp (kernels_added=1 skipped=0)
+2026-09-29 22:34:35.398 MST [59025] LOG:  checkpoint starting: fast force wait
+2026-09-29 22:34:35.414 MST [59025] LOG:  checkpoint complete: fast force wait: wrote 317 buffers (1.9%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 1 recycled; write=0.004 s, sync=0.011 s, total=0.017 s; sync files=51, longest=0.002 s, average=0.001 s; distance=13016 kB, estimate=13016 kB; lsn=1/2DA9FE70, redo lsn=1/2DA9FE10
+2026-09-29 22:39:35.419 MST [59025] LOG:  checkpoint starting: time
+2026-09-29 22:39:35.523 MST [59025] LOG:  checkpoint complete: time: wrote 1 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.102 s, sync=0.001 s, total=0.104 s; sync files=2, longest=0.001 s, average=0.001 s; distance=3 kB, estimate=11715 kB; lsn=1/2DAA0AD0, redo lsn=1/2DAA0A70
+2026-09-29 22:44:22.534 MST [59022] LOG:  received fast shutdown request
+2026-09-29 22:44:22.534 MST [59022] LOG:  aborting any active transactions
+2026-09-29 22:44:22.535 MST [59022] LOG:  background worker "logical replication launcher" (PID 59030) exited with exit code 1
+2026-09-29 22:44:22.536 MST [59025] LOG:  shutting down
+2026-09-29 22:44:22.536 MST [59025] LOG:  checkpoint starting: shutdown fast
+2026-09-29 22:44:22.537 MST [59025] LOG:  checkpoint complete: shutdown fast: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=0, longest=0.000 s, average=0.000 s; distance=0 kB, estimate=10543 kB; lsn=1/2DAA0B88, redo lsn=1/2DAA0B88
+2026-09-29 22:44:22.540 MST [59022] LOG:  database system is shut down
+2026-09-29 22:46:20.959 MST [66724] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-09-29 22:46:20.959 MST [66724] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-09-29 22:46:20.961 MST [66724] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-09-29 22:46:20.962 MST [66724] LOG:  listening on IPv6 address "::", port 28819
+2026-09-29 22:46:20.962 MST [66724] LOG:  listening on IPv4 address "0.0.0.0", port 28819
+2026-09-29 22:46:20.963 MST [66724] LOG:  listening on Unix socket "/Users/contra/.pgrx/.s.PGSQL.28819"
+2026-09-29 22:46:20.969 MST [66737] LOG:  database system was shut down at 2026-09-29 22:44:22 MST
+2026-09-29 22:46:20.973 MST [66724] LOG:  database system is ready to accept connections
+2026-09-30T05:47:24.503345Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:47:24.669928Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:47:24.831132Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:47:24.990762Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:47:25.156117Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:47:26.517333Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:47:26.697620Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:47:26.873268Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:47:27.065938Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:47:27.255233Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:47:28.696982Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:47:28.898294Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:47:29.097342Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:47:29.305089Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T05:47:29.512537Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-29 22:51:20.980 MST [66735] LOG:  checkpoint starting: time
+2026-09-29 22:51:44.561 MST [66735] LOG:  checkpoint complete: time: wrote 232 buffers (1.4%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=23.573 s, sync=0.007 s, total=23.582 s; sync files=47, longest=0.002 s, average=0.001 s; distance=4172 kB, estimate=4172 kB; lsn=1/2DEB3F50, redo lsn=1/2DEB3EB8
+2026-09-29 23:02:05.816 MST [66724] LOG:  received fast shutdown request
+2026-09-29 23:02:05.817 MST [66724] LOG:  aborting any active transactions
+2026-09-29 23:02:05.818 MST [66724] LOG:  background worker "logical replication launcher" (PID 66740) exited with exit code 1
+2026-09-29 23:02:05.818 MST [66735] LOG:  shutting down
+2026-09-29 23:02:05.818 MST [66735] LOG:  checkpoint starting: shutdown fast
+2026-09-29 23:02:05.819 MST [66735] LOG:  checkpoint complete: shutdown fast: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.002 s; sync files=0, longest=0.000 s, average=0.000 s; distance=0 kB, estimate=3755 kB; lsn=1/2DEB4020, redo lsn=1/2DEB4020
+2026-09-29 23:02:05.823 MST [66724] LOG:  database system is shut down
+2026-09-29 23:03:56.269 MST [71086] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-09-29 23:03:56.269 MST [71086] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-09-29 23:03:56.272 MST [71086] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-09-29 23:03:56.273 MST [71086] LOG:  listening on IPv6 address "::", port 28819
+2026-09-29 23:03:56.273 MST [71086] LOG:  listening on IPv4 address "0.0.0.0", port 28819
+2026-09-29 23:03:56.273 MST [71086] LOG:  listening on Unix socket "/Users/contra/.pgrx/.s.PGSQL.28819"
+2026-09-29 23:03:56.279 MST [71091] LOG:  database system was shut down at 2026-09-29 23:02:05 MST
+2026-09-29 23:03:56.283 MST [71086] LOG:  database system is ready to accept connections
+2026-09-29 23:08:56.288 MST [71089] LOG:  checkpoint starting: time
+2026-09-29 23:08:56.292 MST [71089] LOG:  checkpoint complete: time: wrote 0 buffers (0.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.002 s, sync=0.001 s, total=0.004 s; sync files=2, longest=0.001 s, average=0.001 s; distance=0 kB, estimate=0 kB; lsn=1/2DEB4138, redo lsn=1/2DEB40D8
+2026-10-06T00:07:51.565834Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T00:07:51.744602Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T00:07:51.920236Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T00:07:52.097190Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T00:07:52.274649Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T00:07:53.685050Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T00:07:53.882039Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T00:07:54.075087Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T00:07:54.270224Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T00:07:54.465000Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T00:07:55.977073Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T00:07:56.184556Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T00:07:56.396688Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T00:07:56.609784Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T00:07:56.828848Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-05 17:08:40.116 MST [71089] LOG:  checkpoint starting: time
+2026-10-05 17:09:09.688 MST [71089] LOG:  checkpoint complete: time: wrote 192 buffers (1.2%), wrote 2 SLRU buffers; 0 WAL file(s) added, 0 removed, 1 recycled; write=29.567 s, sync=0.003 s, total=29.573 s; sync files=45, longest=0.001 s, average=0.001 s; distance=3913 kB, estimate=3913 kB; lsn=1/2E36C0A0, redo lsn=1/2E286810
+2026-10-05 17:13:40.689 MST [71089] LOG:  checkpoint starting: time
+2026-10-05 17:13:47.296 MST [71089] LOG:  checkpoint complete: time: wrote 65 buffers (0.4%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=6.602 s, sync=0.005 s, total=6.608 s; sync files=12, longest=0.003 s, average=0.001 s; distance=984 kB, estimate=3620 kB; lsn=1/2E37CAC0, redo lsn=1/2E37CA28
+2026-10-05 20:17:07.218 MST [71086] LOG:  received fast shutdown request
+2026-10-05 20:17:07.218 MST [71086] LOG:  aborting any active transactions
+2026-10-05 20:17:07.223 MST [71086] LOG:  background worker "logical replication launcher" (PID 71094) exited with exit code 1
+2026-10-05 20:17:07.223 MST [71089] LOG:  shutting down
+2026-10-05 20:17:07.224 MST [71089] LOG:  checkpoint starting: shutdown fast
+2026-10-05 20:17:07.226 MST [71089] LOG:  checkpoint complete: shutdown fast: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.003 s; sync files=0, longest=0.000 s, average=0.000 s; distance=0 kB, estimate=3258 kB; lsn=1/2E37CB78, redo lsn=1/2E37CB78
+2026-10-05 20:17:07.234 MST [71086] LOG:  database system is shut down
+2026-10-05 20:18:19.863 MST [10930] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-05 20:18:19.863 MST [10930] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-05 20:18:19.865 MST [10930] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-05 20:18:19.865 MST [10930] LOG:  listening on IPv6 address "::", port 28819
+2026-10-05 20:18:19.866 MST [10930] LOG:  listening on IPv4 address "0.0.0.0", port 28819
+2026-10-05 20:18:19.866 MST [10930] LOG:  listening on Unix socket "/Users/contra/.pgrx/.s.PGSQL.28819"
+2026-10-05 20:18:19.871 MST [10935] LOG:  database system was shut down at 2026-10-05 20:17:07 MST
+2026-10-05 20:18:19.874 MST [10930] LOG:  database system is ready to accept connections
+2026-10-06T03:19:55.022096Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:19:55.191888Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:19:55.362176Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:19:55.527334Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:19:55.698707Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:19:57.029887Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:19:57.213441Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:19:57.391911Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:19:57.571951Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:19:57.755008Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:19:59.165146Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:19:59.363014Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:19:59.555106Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:19:59.755242Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:19:59.954427Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-05 20:23:19.921 MST [10933] LOG:  checkpoint starting: time
+2026-10-05 20:23:43.169 MST [10933] LOG:  checkpoint complete: time: wrote 229 buffers (1.4%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=23.244 s, sync=0.004 s, total=23.249 s; sync files=50, longest=0.001 s, average=0.001 s; distance=4206 kB, estimate=4206 kB; lsn=1/2E798460, redo lsn=1/2E7983C8
+2026-10-05 20:30:20.572 MST [10930] LOG:  received fast shutdown request
+2026-10-05 20:30:20.572 MST [10930] LOG:  aborting any active transactions
+2026-10-05 20:30:20.573 MST [10930] LOG:  background worker "logical replication launcher" (PID 10938) exited with exit code 1
+2026-10-05 20:30:20.573 MST [10933] LOG:  shutting down
+2026-10-05 20:30:20.574 MST [10933] LOG:  checkpoint starting: shutdown fast
+2026-10-05 20:30:20.574 MST [10933] LOG:  checkpoint complete: shutdown fast: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=0, longest=0.000 s, average=0.000 s; distance=0 kB, estimate=3785 kB; lsn=1/2E798518, redo lsn=1/2E798518
+2026-10-05 20:30:20.577 MST [10930] LOG:  database system is shut down
+2026-10-05 20:32:07.406 MST [15031] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-05 20:32:07.406 MST [15031] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-05 20:32:07.408 MST [15031] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-05 20:32:07.409 MST [15031] LOG:  listening on IPv6 address "::", port 28819
+2026-10-05 20:32:07.409 MST [15031] LOG:  listening on IPv4 address "0.0.0.0", port 28819
+2026-10-05 20:32:07.410 MST [15031] LOG:  listening on Unix socket "/Users/contra/.pgrx/.s.PGSQL.28819"
+2026-10-05 20:32:07.416 MST [15040] LOG:  database system was shut down at 2026-10-05 20:30:20 MST
+2026-10-05 20:32:07.418 MST [15031] LOG:  database system is ready to accept connections
+2026-10-06T03:33:39.659180Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:33:39.824007Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:33:39.984909Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:33:40.146882Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:33:40.308436Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:33:41.613137Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:33:41.793410Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:33:41.972605Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:33:42.149812Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:33:42.330545Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:33:43.722091Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:33:43.919718Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:33:44.112975Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:33:44.313129Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:33:44.515655Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-05 20:37:07.423 MST [15038] LOG:  checkpoint starting: time
+2026-10-05 20:37:30.902 MST [15038] LOG:  checkpoint complete: time: wrote 231 buffers (1.4%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=23.468 s, sync=0.010 s, total=23.480 s; sync files=47, longest=0.002 s, average=0.001 s; distance=4227 kB, estimate=4227 kB; lsn=1/2EBB9530, redo lsn=1/2EBB9498
+2026-10-05 20:48:40.134 MST [15031] LOG:  received fast shutdown request
+2026-10-05 20:48:40.135 MST [15031] LOG:  aborting any active transactions
+2026-10-05 20:48:40.136 MST [15031] LOG:  background worker "logical replication launcher" (PID 15043) exited with exit code 1
+2026-10-05 20:48:40.137 MST [15038] LOG:  shutting down
+2026-10-05 20:48:40.137 MST [15038] LOG:  checkpoint starting: shutdown fast
+2026-10-05 20:48:40.138 MST [15038] LOG:  checkpoint complete: shutdown fast: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=0, longest=0.000 s, average=0.000 s; distance=0 kB, estimate=3805 kB; lsn=1/2EBB95E8, redo lsn=1/2EBB95E8
+2026-10-05 20:48:40.140 MST [15031] LOG:  database system is shut down
+2026-10-05 20:51:39.906 MST [20971] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-05 20:51:39.906 MST [20971] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-05 20:51:39.909 MST [20971] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-05 20:51:39.910 MST [20971] LOG:  listening on IPv6 address "::", port 28819
+2026-10-05 20:51:39.910 MST [20971] LOG:  listening on IPv4 address "0.0.0.0", port 28819
+2026-10-05 20:51:39.910 MST [20971] LOG:  listening on Unix socket "/Users/contra/.pgrx/.s.PGSQL.28819"
+2026-10-05 20:51:39.916 MST [20976] LOG:  database system was shut down at 2026-10-05 20:48:40 MST
+2026-10-05 20:51:39.918 MST [20971] LOG:  database system is ready to accept connections
+2026-10-06T03:53:11.358428Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:53:11.524951Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:53:11.686496Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:53:11.849129Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:53:12.012784Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:53:13.315643Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:53:13.493371Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:53:13.671155Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:53:13.851446Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:53:14.030370Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:53:15.415332Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:53:15.612344Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:53:15.805933Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:53:16.008281Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T03:53:16.203962Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-05 20:56:39.908 MST [20974] LOG:  checkpoint starting: time
+2026-10-05 20:57:04.173 MST [20974] LOG:  checkpoint complete: time: wrote 239 buffers (1.5%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=24.259 s, sync=0.005 s, total=24.266 s; sync files=48, longest=0.001 s, average=0.001 s; distance=4289 kB, estimate=4289 kB; lsn=1/2EFE9AE0, redo lsn=1/2EFE9A48
+2026-10-05 21:03:59.422 MST [20971] LOG:  received fast shutdown request
+2026-10-05 21:03:59.423 MST [20971] LOG:  aborting any active transactions
+2026-10-05 21:03:59.424 MST [20971] LOG:  background worker "logical replication launcher" (PID 20979) exited with exit code 1
+2026-10-05 21:03:59.425 MST [20974] LOG:  shutting down
+2026-10-05 21:03:59.425 MST [20974] LOG:  checkpoint starting: shutdown fast
+2026-10-05 21:03:59.426 MST [20974] LOG:  checkpoint complete: shutdown fast: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=0, longest=0.000 s, average=0.000 s; distance=0 kB, estimate=3860 kB; lsn=1/2EFE9B98, redo lsn=1/2EFE9B98
+2026-10-05 21:03:59.429 MST [20971] LOG:  database system is shut down
+2026-10-05 21:05:27.336 MST [26095] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-05 21:05:27.336 MST [26095] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-05 21:05:27.338 MST [26095] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-05 21:05:27.339 MST [26095] LOG:  listening on IPv6 address "::", port 28819
+2026-10-05 21:05:27.339 MST [26095] LOG:  listening on IPv4 address "0.0.0.0", port 28819
+2026-10-05 21:05:27.339 MST [26095] LOG:  listening on Unix socket "/Users/contra/.pgrx/.s.PGSQL.28819"
+2026-10-05 21:05:27.344 MST [26100] LOG:  database system was shut down at 2026-10-05 21:03:59 MST
+2026-10-05 21:05:27.347 MST [26095] LOG:  database system is ready to accept connections
+2026-10-06T04:06:58.702148Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:06:58.864016Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:06:59.020469Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:06:59.179785Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:06:59.341236Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:07:00.649497Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:07:00.826694Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:07:01.002516Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:07:01.181337Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:07:01.359364Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:07:02.736026Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:07:02.929916Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:07:03.121488Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:07:03.322153Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:07:03.524497Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-05 21:10:27.349 MST [26098] LOG:  checkpoint starting: time
+2026-10-05 21:10:50.913 MST [26098] LOG:  checkpoint complete: time: wrote 232 buffers (1.4%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 1 recycled; write=23.558 s, sync=0.004 s, total=23.564 s; sync files=47, longest=0.001 s, average=0.001 s; distance=4228 kB, estimate=4228 kB; lsn=1/2F40AE08, redo lsn=1/2F40AD70
+2026-10-05 21:18:54.048 MST [26095] LOG:  received fast shutdown request
+2026-10-05 21:18:54.048 MST [26095] LOG:  aborting any active transactions
+2026-10-05 21:18:54.050 MST [26095] LOG:  background worker "logical replication launcher" (PID 26103) exited with exit code 1
+2026-10-05 21:18:54.050 MST [26098] LOG:  shutting down
+2026-10-05 21:18:54.050 MST [26098] LOG:  checkpoint starting: shutdown fast
+2026-10-05 21:18:54.051 MST [26098] LOG:  checkpoint complete: shutdown fast: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.002 s; sync files=0, longest=0.000 s, average=0.000 s; distance=0 kB, estimate=3805 kB; lsn=1/2F40AEC0, redo lsn=1/2F40AEC0
+2026-10-05 21:18:54.054 MST [26095] LOG:  database system is shut down
+2026-10-05 21:26:02.509 MST [38766] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-05 21:26:02.510 MST [38766] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-05 21:26:02.512 MST [38766] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-05 21:26:02.513 MST [38766] LOG:  listening on IPv6 address "::", port 28819
+2026-10-05 21:26:02.513 MST [38766] LOG:  listening on IPv4 address "0.0.0.0", port 28819
+2026-10-05 21:26:02.513 MST [38766] LOG:  listening on Unix socket "/Users/contra/.pgrx/.s.PGSQL.28819"
+2026-10-05 21:26:02.519 MST [38779] LOG:  database system was shut down at 2026-10-05 21:18:54 MST
+2026-10-05 21:26:02.523 MST [38766] LOG:  database system is ready to accept connections
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10244442864516165838.12835314216761934626.metalar.41373.14587606682919503387.tmp (kernels_added=1 skipped=0)
+2026-10-06T04:27:22.376073Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:27:22.431171Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:27:22.651133Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:27:22.713580Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:27:22.954177Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:27:23.026683Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:27:58.972037Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:27:59.134204Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:27:59.295743Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:27:59.457365Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:27:59.620583Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:28:00.926185Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:28:01.097254Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:28:01.272369Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:28:01.442220Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:28:01.623786Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:28:03.026396Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:28:03.222989Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:28:03.415174Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:28:03.615246Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:28:03.815040Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-05 21:31:02.529 MST [38777] LOG:  checkpoint starting: time
+2026-10-05 21:31:30.373 MST [38777] LOG:  checkpoint complete: time: wrote 274 buffers (1.7%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=27.837 s, sync=0.007 s, total=27.845 s; sync files=47, longest=0.001 s, average=0.001 s; distance=6000 kB, estimate=6000 kB; lsn=1/2F9E7248, redo lsn=1/2F9E71B0
+2026-10-05 21:34:04.533 MST [38766] LOG:  received fast shutdown request
+2026-10-05 21:34:04.534 MST [38766] LOG:  aborting any active transactions
+2026-10-05 21:34:04.535 MST [38766] LOG:  background worker "logical replication launcher" (PID 38782) exited with exit code 1
+2026-10-05 21:34:04.536 MST [38777] LOG:  shutting down
+2026-10-05 21:34:04.536 MST [38777] LOG:  checkpoint starting: shutdown fast
+2026-10-05 21:34:04.537 MST [38777] LOG:  checkpoint complete: shutdown fast: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.000 s, total=0.001 s; sync files=0, longest=0.000 s, average=0.000 s; distance=0 kB, estimate=5400 kB; lsn=1/2F9E7300, redo lsn=1/2F9E7300
+2026-10-05 21:34:04.539 MST [38766] LOG:  database system is shut down
+2026-10-05 21:34:15.931 MST [49742] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-05 21:34:15.931 MST [49742] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-05 21:34:15.933 MST [49742] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-05 21:34:15.934 MST [49742] LOG:  listening on IPv6 address "::", port 28819
+2026-10-05 21:34:15.934 MST [49742] LOG:  listening on IPv4 address "0.0.0.0", port 28819
+2026-10-05 21:34:15.934 MST [49742] LOG:  listening on Unix socket "/Users/contra/.pgrx/.s.PGSQL.28819"
+2026-10-05 21:34:15.937 MST [49747] LOG:  database system was shut down at 2026-10-05 21:34:04 MST
+2026-10-05 21:34:15.939 MST [49742] LOG:  database system is ready to accept connections
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12585446269449508572.3675050389916077580.metalar.50550.6838309541249901356.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/1568825256363117468.4930898406729119394.metalar.50550.13373451623698726798.tmp (kernels_added=1 skipped=0)
+2026-10-06T04:34:39.766780Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:34:39.820796Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:34:40.038399Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:34:40.099644Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:34:40.335380Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:34:40.405035Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:35:48.226749Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:35:48.279664Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:35:48.494951Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:35:48.556716Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:35:48.790319Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T04:35:48.859320Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"

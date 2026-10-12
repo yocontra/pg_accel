@@ -1,0 +1,8 @@
+[artifacts] writing benchmark artifacts to benchmarks/evidence/simple-case-20261006/grouped_simple_case-fold
+[diagnostics] RUST_BACKTRACE=1 (set-by-runner)
+[setup] installing extensions: pg_accel
+[setup] pg_accel: ok
+[detect] installed extensions: plpgsql, h3, postgis, postgis_raster, h3_postgis, pg_accel
+[provenance] WARNING: pg_config installed pg_accel binary hash bd0e4f069fe450f06c4b6e55171e177160d84bf3e0cf2d6d127d17224bdd59a4 does not match local build hash 136e607d3cbc5d8513c5dc60cadf9684d976321efa569354b5300339c3e2cd49
+[provenance] ERROR: live backend loaded pg_accel hash bd0e4f069fe450f06c4b6e55171e177160d84bf3e0cf2d6d127d17224bdd59a4 from /Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/lib/pg_accel.dylib, expected local build hash 136e607d3cbc5d8513c5dc60cadf9684d976321efa569354b5300339c3e2cd49
+error: pg_accel provenance gate failed: live backend loaded pg_accel hash bd0e4f069fe450f06c4b6e55171e177160d84bf3e0cf2d6d127d17224bdd59a4 from /Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/lib/pg_accel.dylib, expected local build hash 136e607d3cbc5d8513c5dc60cadf9684d976321efa569354b5300339c3e2cd49

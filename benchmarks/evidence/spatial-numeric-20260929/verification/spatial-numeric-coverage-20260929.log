@@ -1,0 +1,249 @@
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_risk_coverage_audit.py scripts/tests/test_fuzz_contract_audit.py scripts/tests/test_crash_band_audit.py -v
+test_candidate_worktree_paths_normalize_to_repository_paths (scripts.tests.test_risk_coverage_audit.RiskCoverageAuditTests.test_candidate_worktree_paths_normalize_to_repository_paths) ... ok
+test_declaration_only_registry_rejects_unsafe_method_bodies (scripts.tests.test_risk_coverage_audit.RiskCoverageAuditTests.test_declaration_only_registry_rejects_unsafe_method_bodies) ... ok
+test_live_registry_maps_every_production_unsafe_site (scripts.tests.test_risk_coverage_audit.RiskCoverageAuditTests.test_live_registry_maps_every_production_unsafe_site) ... ok
+test_malformed_lcov_record_is_rejected (scripts.tests.test_risk_coverage_audit.RiskCoverageAuditTests.test_malformed_lcov_record_is_rejected) ... ok
+test_missing_executable_unsafe_file_still_fails_closed (scripts.tests.test_risk_coverage_audit.RiskCoverageAuditTests.test_missing_executable_unsafe_file_still_fails_closed) ... ok
+test_registered_declaration_only_site_may_be_absent_from_lcov (scripts.tests.test_risk_coverage_audit.RiskCoverageAuditTests.test_registered_declaration_only_site_may_be_absent_from_lcov) ... ok
+test_repository_globs_have_portable_recursive_semantics (scripts.tests.test_risk_coverage_audit.RiskCoverageAuditTests.test_repository_globs_have_portable_recursive_semantics) ... ok
+test_unmapped_unsafe_site_fails_closed (scripts.tests.test_risk_coverage_audit.RiskCoverageAuditTests.test_unmapped_unsafe_site_fails_closed) ... ok
+test_unsafe_coverage_below_threshold_fails_closed (scripts.tests.test_risk_coverage_audit.RiskCoverageAuditTests.test_unsafe_coverage_below_threshold_fails_closed) ... ok
+test_live_manifest_registers_every_required_target (scripts.tests.test_fuzz_contract_audit.FuzzContractAuditTests.test_live_manifest_registers_every_required_target) ... ok
+test_missing_target_fails_closed (scripts.tests.test_fuzz_contract_audit.FuzzContractAuditTests.test_missing_target_fails_closed) ... ok
+test_post_allocation_rejection_contract_fails_closed (scripts.tests.test_fuzz_contract_audit.FuzzContractAuditTests.test_post_allocation_rejection_contract_fails_closed) ... ok
+test_renamed_test_symbol_fails_closed (scripts.tests.test_fuzz_contract_audit.FuzzContractAuditTests.test_renamed_test_symbol_fails_closed) ... ok
+test_seed_must_be_fixed_lowercase_u64 (scripts.tests.test_fuzz_contract_audit.FuzzContractAuditTests.test_seed_must_be_fixed_lowercase_u64) ... ok
+test_live_contract_passes (scripts.tests.test_crash_band_audit.CrashBandAuditTests.test_live_contract_passes) ... ok
+test_missing_evidence_symbol_fails_closed (scripts.tests.test_crash_band_audit.CrashBandAuditTests.test_missing_evidence_symbol_fails_closed) ... ok
+test_missing_lane_fails_closed (scripts.tests.test_crash_band_audit.CrashBandAuditTests.test_missing_lane_fails_closed) ... ok
+test_raised_threshold_fails_closed (scripts.tests.test_crash_band_audit.CrashBandAuditTests.test_raised_threshold_fails_closed) ... ok
+
+----------------------------------------------------------------------
+Ran 18 tests in 0.206s
+
+OK
+python3 scripts/risk_coverage_audit.py --repo-root .
+{
+  "declaration_only_unsafe_site_count": 1,
+  "domain_count": 13,
+  "kind": "pg-accel-risk-coverage-audit",
+  "lcov_checked": false,
+  "schema_version": 1,
+  "status": "pass",
+  "unsafe_file_count": 52,
+  "unsafe_site_count": 1720
+}
+python3 scripts/fuzz_contract_audit.py --repo-root .
+{
+  "kind": "pg-accel-fuzz-contract-audit",
+  "minimum_case_count": 15488,
+  "runners": [
+    "ctest",
+    "pgrx",
+    "rust-lib"
+  ],
+  "schema_version": 1,
+  "seed": "0x9e3779b97f4a7c15",
+  "status": "pass",
+  "target_count": 9
+}
+python3 scripts/crash_band_audit.py --repo-root .
+{
+  "first_unsafe_rows": 100000,
+  "historical_lane_count": 2,
+  "kind": "pg-accel-crash-band-audit",
+  "required_evidence_count": 8,
+  "row_returning_join_planner_selectable": false,
+  "schema_version": 1,
+  "status": "pass"
+}
+bash -n scripts/coverage_gate.sh scripts/coverage_metal_mode.sh scripts/coverage_ooo_overlap.sh scripts/residency_ledger_integration.sh sql/tests/run_all.sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_coverage*.py'
+..........................................................................................................EEEEE.EEE..................F....................
+======================================================================
+ERROR: test_cpp_header_file_removal_fails_with_matching_regenerated_baseline (test_coverage_tools.ImmutableBaselineTests.test_cpp_header_file_removal_fails_with_matching_regenerated_baseline)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2725, in test_cpp_header_file_removal_fails_with_matching_regenerated_baseline
+    baseline = self.write_matching_baseline(
+        root, REPO_ROOT / "coverage/scope.json"
+    )
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2491, in write_matching_baseline
+    coverage_tools.release_baseline_document(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        REPO_ROOT,
+        ^^^^^^^^^^
+        scope,
+        ^^^^^^
+        REPO_ROOT / "coverage/sql-semantic-assertions.json",
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ),
+    ^
+  File "/Users/contra/Projects/pg_accel/scripts/coverage_tools.py", line 2358, in release_baseline_document
+    raise CoverageError("; ".join(manifest_errors))
+coverage_tools.CoverageError: SQL source hash drift: 118_spatial_numeric_rollups.sql; SQL assertion declaration/line drift: 118_spatial_numeric_rollups.sql; SQL manifest assertion count is below baseline or inconsistent
+
+======================================================================
+ERROR: test_cpp_headers_only_scope_is_rejected_even_with_matching_baseline (test_coverage_tools.ImmutableBaselineTests.test_cpp_headers_only_scope_is_rejected_even_with_matching_baseline)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2653, in test_cpp_headers_only_scope_is_rejected_even_with_matching_baseline
+    baseline = self.write_matching_baseline(root, scope_path)
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2491, in write_matching_baseline
+    coverage_tools.release_baseline_document(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        REPO_ROOT,
+        ^^^^^^^^^^
+        scope,
+        ^^^^^^
+        REPO_ROOT / "coverage/sql-semantic-assertions.json",
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ),
+    ^
+  File "/Users/contra/Projects/pg_accel/scripts/coverage_tools.py", line 2358, in release_baseline_document
+    raise CoverageError("; ".join(manifest_errors))
+coverage_tools.CoverageError: SQL source hash drift: 118_spatial_numeric_rollups.sql; SQL assertion declaration/line drift: 118_spatial_numeric_rollups.sql; SQL manifest assertion count is below baseline or inconsistent
+
+======================================================================
+ERROR: test_cpp_include_root_removal_is_rejected_with_matching_baseline (test_coverage_tools.ImmutableBaselineTests.test_cpp_include_root_removal_is_rejected_with_matching_baseline)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2666, in test_cpp_include_root_removal_is_rejected_with_matching_baseline
+    baseline = self.write_matching_baseline(root, scope_path)
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2491, in write_matching_baseline
+    coverage_tools.release_baseline_document(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        REPO_ROOT,
+        ^^^^^^^^^^
+        scope,
+        ^^^^^^
+        REPO_ROOT / "coverage/sql-semantic-assertions.json",
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ),
+    ^
+  File "/Users/contra/Projects/pg_accel/scripts/coverage_tools.py", line 2358, in release_baseline_document
+    raise CoverageError("; ".join(manifest_errors))
+coverage_tools.CoverageError: SQL source hash drift: 118_spatial_numeric_rollups.sql; SQL assertion declaration/line drift: 118_spatial_numeric_rollups.sql; SQL manifest assertion count is below baseline or inconsistent
+
+======================================================================
+ERROR: test_cpp_ooo_support_root_removal_is_rejected_with_matching_baseline (test_coverage_tools.ImmutableBaselineTests.test_cpp_ooo_support_root_removal_is_rejected_with_matching_baseline)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2681, in test_cpp_ooo_support_root_removal_is_rejected_with_matching_baseline
+    baseline = self.write_matching_baseline(root, scope_path)
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2491, in write_matching_baseline
+    coverage_tools.release_baseline_document(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        REPO_ROOT,
+        ^^^^^^^^^^
+        scope,
+        ^^^^^^
+        REPO_ROOT / "coverage/sql-semantic-assertions.json",
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ),
+    ^
+  File "/Users/contra/Projects/pg_accel/scripts/coverage_tools.py", line 2358, in release_baseline_document
+    raise CoverageError("; ".join(manifest_errors))
+coverage_tools.CoverageError: SQL source hash drift: 118_spatial_numeric_rollups.sql; SQL assertion declaration/line drift: 118_spatial_numeric_rollups.sql; SQL manifest assertion count is below baseline or inconsistent
+
+======================================================================
+ERROR: test_cpp_source_substitution_fails_with_matching_baseline (test_coverage_tools.ImmutableBaselineTests.test_cpp_source_substitution_fails_with_matching_baseline)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2752, in test_cpp_source_substitution_fails_with_matching_baseline
+    baseline = self.write_matching_baseline(
+        root, REPO_ROOT / "coverage/scope.json"
+    )
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2491, in write_matching_baseline
+    coverage_tools.release_baseline_document(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        REPO_ROOT,
+        ^^^^^^^^^^
+        scope,
+        ^^^^^^
+        REPO_ROOT / "coverage/sql-semantic-assertions.json",
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ),
+    ^
+  File "/Users/contra/Projects/pg_accel/scripts/coverage_tools.py", line 2358, in release_baseline_document
+    raise CoverageError("; ".join(manifest_errors))
+coverage_tools.CoverageError: SQL source hash drift: 118_spatial_numeric_rollups.sql; SQL assertion declaration/line drift: 118_spatial_numeric_rollups.sql; SQL manifest assertion count is below baseline or inconsistent
+
+======================================================================
+ERROR: test_new_constructor_header_fails_after_matching_baseline_refresh (test_coverage_tools.ImmutableBaselineTests.test_new_constructor_header_fails_after_matching_baseline_refresh)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2814, in test_new_constructor_header_fails_after_matching_baseline_refresh
+    baseline = self.write_matching_baseline(
+        root, REPO_ROOT / "coverage/scope.json"
+    )
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2491, in write_matching_baseline
+    coverage_tools.release_baseline_document(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        REPO_ROOT,
+        ^^^^^^^^^^
+        scope,
+        ^^^^^^
+        REPO_ROOT / "coverage/sql-semantic-assertions.json",
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ),
+    ^
+  File "/Users/contra/Projects/pg_accel/scripts/coverage_tools.py", line 2358, in release_baseline_document
+    raise CoverageError("; ".join(manifest_errors))
+coverage_tools.CoverageError: SQL source hash drift: 118_spatial_numeric_rollups.sql; SQL assertion declaration/line drift: 118_spatial_numeric_rollups.sql; SQL manifest assertion count is below baseline or inconsistent
+
+======================================================================
+ERROR: test_release_baseline_update_requires_explicit_acknowledgement (test_coverage_tools.ImmutableBaselineTests.test_release_baseline_update_requires_explicit_acknowledgement)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2575, in test_release_baseline_update_requires_explicit_acknowledgement
+    quiet_call(coverage_tools.update_release_baseline, args), 0
+    ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 30, in quiet_call
+    return function(*args)
+  File "/Users/contra/Projects/pg_accel/scripts/coverage_tools.py", line 2424, in update_release_baseline
+    document = release_baseline_document(
+        pathlib.Path(args.repo_root).resolve(),
+        pathlib.Path(args.scope),
+        pathlib.Path(args.manifest),
+    )
+  File "/Users/contra/Projects/pg_accel/scripts/coverage_tools.py", line 2358, in release_baseline_document
+    raise CoverageError("; ".join(manifest_errors))
+coverage_tools.CoverageError: SQL source hash drift: 118_spatial_numeric_rollups.sql; SQL assertion declaration/line drift: 118_spatial_numeric_rollups.sql; SQL manifest assertion count is below baseline or inconsistent
+
+======================================================================
+ERROR: test_rust_build_script_and_nonempty_owned_scope_are_pinned (test_coverage_tools.ImmutableBaselineTests.test_rust_build_script_and_nonempty_owned_scope_are_pinned) (mutation='remove_build')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2638, in test_rust_build_script_and_nonempty_owned_scope_are_pinned
+    baseline = self.write_matching_baseline(root, scope_path)
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2491, in write_matching_baseline
+    coverage_tools.release_baseline_document(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        REPO_ROOT,
+        ^^^^^^^^^^
+        scope,
+        ^^^^^^
+        REPO_ROOT / "coverage/sql-semantic-assertions.json",
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ),
+    ^
+  File "/Users/contra/Projects/pg_accel/scripts/coverage_tools.py", line 2358, in release_baseline_document
+    raise CoverageError("; ".join(manifest_errors))
+coverage_tools.CoverageError: SQL source hash drift: 118_spatial_numeric_rollups.sql; SQL assertion declaration/line drift: 118_spatial_numeric_rollups.sql; SQL manifest assertion count is below baseline or inconsistent
+
+======================================================================
+FAIL: test_checked_in_manifest_matches_baseline_and_raster_guards (test_coverage_tools.SqlSemanticCoverageTests.test_checked_in_manifest_matches_baseline_and_raster_guards)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 852, in test_checked_in_manifest_matches_baseline_and_raster_guards
+    self.assertEqual(generated, checked_in)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: {'bas[21702 chars]e': 140}], 'completion_id': '118_spatial_numer[76484 chars]sts'} != {'bas[21702 chars]e': 138}], 'completion_id': '118_spatial_numer[76484 chars]sts'}
+Diff is 171667 characters long. Set self.maxDiff to None to see it.
+
+----------------------------------------------------------------------
+Ran 154 tests in 171.503s
+
+FAILED (failures=1, errors=8)
+error: Recipe `coverage-audit` failed on line 464 with exit code 1

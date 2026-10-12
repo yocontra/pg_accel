@@ -1,0 +1,6 @@
+PGACCEL_TEST_START name=test_scalar
+Full CFG proof: 148 shared valid, 58 invalid programs passed
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14459244417219389470.15374149992821018108.metalar.80605.12235256360905518978.tmp (kernels_added=1 skipped=0)
+SPG1: 3875 host/device cases passed (148 shared Rust oracle cases); no SQL admission
+PGACCEL_TEST_RESULT name=test_scalar exit_code=0 result=PASS raw_lines=4 body_sha256=84e4f352f8e427990c2cea28e41950b32e849e9ec2b42327c1b1ec8f5785a14a binding_sha256=a235fe7824bc025e11b93394825eb1fbbe495a9943b9127ed1134cbe72c0b08c

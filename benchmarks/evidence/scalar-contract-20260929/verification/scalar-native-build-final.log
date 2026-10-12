@@ -1,0 +1,4 @@
+[ 86%] Built target pgaccel_kernels_shared
+[ 93%] Building CXX object CMakeFiles/test_scalar.dir/test/test_scalar.cpp.o
+[100%] Linking CXX executable test_scalar
+[100%] Built target test_scalar

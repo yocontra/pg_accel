@@ -1,0 +1,2 @@
+574554875865253537f3771feb4942e4522dd51126724ae181365b6ae2e0fe32  pgaccel-kernels/build/libpgaccel_kernels_shared.dylib
+e108844fc9af60d3fc84d046089ced05a611efbd7759bb5edb18b3f3559c0e3e  pgaccel-kernels/build/test_grouped_agg_hash

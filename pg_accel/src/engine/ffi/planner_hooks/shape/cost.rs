@@ -226,6 +226,15 @@ pub fn dense_atomic_fact_row_floor(spec: &AggQuerySpec, model: &TypedCostModel) 
     }
 }
 
+/// Exact decimal atomics have separate measured qualification from fixed-width
+/// global reduction. Use the grouped-aggregate floor even without SQL keys.
+pub fn numeric_fact_row_floor(model: &TypedCostModel) -> Rows {
+    model
+        .planner
+        .gpu_hash_agg_min_rows
+        .max(model.planner.gpu_reduce_min_rows)
+}
+
 /// Whether this descriptor has the dense integer SUM/COUNT lifecycle that may
 /// execute as one shot or as bounded accumulate calls plus finalize.
 ///
@@ -351,7 +360,7 @@ fn h3_parent_resolution(spec: &AggQuerySpec) -> Option<i32> {
     })
 }
 
-fn h3_group_bound(fact_rows: u64, resolution: i32) -> Option<u64> {
+pub fn h3_group_bound(fact_rows: u64, resolution: i32) -> Option<u64> {
     let resolution = u32::try_from(resolution)
         .ok()
         .filter(|value| *value <= 15)?;
@@ -406,7 +415,19 @@ pub fn dense_lifecycle_call_count(
 }
 
 fn has_spatial_filter(spec: &AggQuerySpec) -> bool {
-    matches!(spec.fact_filter, FilterSpec::Spatial { .. })
+    spec.fact_filter.spatial().is_some()
+}
+
+fn scalar_where_carrier(spec: &AggQuerySpec) -> Option<usize> {
+    let FilterSpec::Bytecode { inputs, program } = spec.fact_filter.scalar() else {
+        return None;
+    };
+    spec.measures.iter().position(|measure| {
+        measure.filter == FilterSpec::None
+            && matches!(&measure.expression,
+                MeasureExpr::Bytecode { inputs: bound, program: words, result_type_oid: 16 }
+                    if inputs == bound && program == words)
+    })
 }
 
 fn geometry_type_from_typmod(typmod: i32) -> Option<u32> {
@@ -438,8 +459,11 @@ fn constant_polygon_vertices(operand: &SpatialOperand) -> Option<usize> {
         crate::engine::spec::MAX_SPATIAL_CONSTANT_BYTES,
     )
     .ok()?;
-    (parsed.geom_type == crate::engine::residency::RESIDENT_GEOMETRY_POLYGON
-        && parsed.srid == metadata.srid?
+    (matches!(
+        parsed.geom_type,
+        crate::engine::residency::RESIDENT_GEOMETRY_POLYGON
+            | crate::engine::residency::RESIDENT_GEOMETRY_MULTIPOLYGON
+    ) && parsed.srid == metadata.srid?
         && parsed.coordinate_pairs > 0)
         .then_some(parsed.coordinate_pairs)
 }
@@ -453,7 +477,7 @@ pub(super) fn spatial_point_polygon_vertices(filter: &FilterSpec) -> Option<usiz
         left,
         right,
         ..
-    } = filter
+    } = filter.spatial()?
     else {
         return None;
     };
@@ -467,10 +491,10 @@ pub(super) fn spatial_point_polygon_vertices(filter: &FilterSpec) -> Option<usiz
                 None
             }
         }
-        SpatialPredicateKind::Contains => {
+        SpatialPredicateKind::Contains | SpatialPredicateKind::Covers => {
             constant_polygon_vertices(left).filter(|_| is_point_column(right))
         }
-        SpatialPredicateKind::Within => is_point_column(left)
+        SpatialPredicateKind::Within | SpatialPredicateKind::CoveredBy => is_point_column(left)
             .then(|| constant_polygon_vertices(right))
             .flatten(),
         SpatialPredicateKind::Disjoint
@@ -535,9 +559,13 @@ pub fn estimate_shape_cost(
         let operation = mul_cost(fact_rows, model.coefficients.gpu_op_cost_filter)
             * vertex_scale
             * spatial_fp64_multiplier;
-        let launches =
-            h3_transform_chunks(fact_rows, model.executor.gpu_spatial_pairwise_chunk_rows) as f64
-                * GPU_LAUNCH_OVERHEAD;
+        let spatial_chunk_rows =
+            crate::engine::cost::device_limits::spatial_point_polygon_chunk_rows(
+                model.executor.gpu_spatial_pairwise_chunk_rows.get(),
+                spatial_vertices.unwrap_or(1),
+            );
+        let launches = h3_transform_chunks(fact_rows, Rows::new(spatial_chunk_rows)) as f64
+            * GPU_LAUNCH_OVERHEAD;
         operation + launches
     } else {
         0.0
@@ -559,8 +587,76 @@ pub fn estimate_shape_cost(
     let h3_resolution = h3_parent_resolution(spec);
     let h3_group_rows_bound =
         h3_resolution.and_then(|resolution| h3_group_bound(fact_rows, resolution));
-    let aggregate =
-        mul_cost(fact_rows, aggregate_coefficient) * spec.measures.len() as f64 * fp64_multiplier;
+    let where_carrier = scalar_where_carrier(spec);
+    let value_states = spec
+        .measures
+        .iter()
+        .filter(|measure| measure.expression != MeasureExpr::CountStar)
+        .count();
+    let elided_carrier = usize::from(where_carrier.is_some() && value_states > 1);
+    // A Boolean WHERE carrier's COUNT is the selected-row count. With another
+    // value state the device derives it at merge, with no per-row worker.
+    let aggregate = mul_cost(fact_rows, aggregate_coefficient)
+        * (spec.measures.len() - elided_carrier) as f64
+        * fp64_multiplier;
+    // A computed COUNT still evaluates its checked expression. Charge one
+    // integer operation per binary state in addition to aggregate updates.
+    let integer_expressions = spec
+        .measures
+        .iter()
+        .filter(|measure| {
+            matches!(measure.expression, MeasureExpr::Binary { lhs, rhs, .. }
+            if lhs.type_oid == 23 && rhs.type_oid == 23)
+        })
+        .count();
+    let aggregate = aggregate
+        + mul_cost(fact_rows, model.coefficients.gpu_op_cost_filter) * integer_expressions as f64;
+    // Charge each scalar state even for COUNT. Forward branches use the
+    // longest valid path, including loads, literals and control flow; do not
+    // assume favorable row values, FILTER selectivity or short-circuit rates.
+    // Reuse the existing typed operation coefficient conservatively. This
+    // work model is not a promise that every eligible scalar query will win.
+    let scalar_instructions: usize = spec
+        .measures
+        .iter()
+        .enumerate()
+        .filter_map(|(index, measure)| {
+            if !matches!(measure.expression, MeasureExpr::Bytecode { .. }) {
+                return None;
+            }
+            if Some(index) == where_carrier {
+                // WHERE already proved this carrier's value is SQL TRUE.
+                return None;
+            }
+            Some(
+                crate::engine::executor::agg::scalar_measure_program(
+                    &measure.expression,
+                    spec.fact_rel,
+                )
+                .map_or(
+                    crate::engine::spec::scalar::MAX_SCALAR_INSTRUCTIONS,
+                    |proof| proof.max_path_instructions(),
+                ),
+            )
+        })
+        .sum();
+    let aggregate = aggregate
+        + mul_cost(fact_rows, model.coefficients.gpu_op_cost_filter) * scalar_instructions as f64;
+    // The dense kernels evaluate WHERE before every value-state update. Charge
+    // every repetition (COUNT(*) uses the existing row counter); never
+    // assume predicate selectivity or sharing that the device does not provide.
+    let where_instructions = match spec.fact_filter.scalar() {
+        FilterSpec::Bytecode { program, .. } => {
+            crate::engine::spec::scalar::ScalarProgram::validate_wire(program).map_or(
+                crate::engine::spec::scalar::MAX_SCALAR_INSTRUCTIONS,
+                |proof| proof.max_path_instructions(),
+            )
+        }
+        _ => 0,
+    };
+    let aggregate = aggregate
+        + mul_cost(fact_rows, model.coefficients.gpu_op_cost_filter)
+            * where_instructions.saturating_mul(value_states - elided_carrier) as f64;
     let aggregate = aggregate
         + h3_resolution.map_or(0.0, |_| {
             let transform = mul_cost(fact_rows, model.coefficients.gpu_op_cost_h3_parent_resident);
@@ -589,12 +685,25 @@ pub fn estimate_shape_cost(
     };
     cost.replace_amortized_auto_load(PgCost::new(amortized_auto_load));
 
+    let has_numeric = spec
+        .measures
+        .iter()
+        .any(crate::engine::spec::MeasureSpec::requires_numeric_accumulator);
     let required_fact_rows = if has_spatial {
-        model.planner.gpu_reduce_min_rows
+        if has_numeric {
+            model
+                .planner
+                .gpu_reduce_min_rows
+                .max(numeric_fact_row_floor(model))
+        } else {
+            model.planner.gpu_reduce_min_rows
+        }
     } else if h3_resolution.is_some() {
         model.planner.gpu_h3_group_min_rows
     } else if !spec.star_dims.is_empty() {
         model.planner.gpu_preagg_min_fact_rows
+    } else if has_numeric {
+        numeric_fact_row_floor(model)
     } else if spec.group_keys.is_empty() {
         model.planner.gpu_reduce_min_rows
     } else {
@@ -670,10 +779,15 @@ pub fn estimate_shape_cost(
     } else {
         let gate_group_rows = h3_group_rows_bound.unwrap_or(input.estimated_output_rows);
         let estimated_groups = Rows::new(rows(gate_group_rows));
-        if !spec.group_keys.is_empty() && estimated_groups > model.memory.gpu_hash_agg_max_groups {
+        let maximum = if h3_resolution.is_some() {
+            model.memory.gpu_h3_max_groups
+        } else {
+            model.memory.gpu_hash_agg_max_groups
+        };
+        if !spec.group_keys.is_empty() && estimated_groups > maximum {
             ShapeCostGate::GroupsExceedDeviceMaximum {
                 estimated: estimated_groups,
-                maximum: model.memory.gpu_hash_agg_max_groups,
+                maximum,
             }
         } else {
             ShapeCostGate::Eligible

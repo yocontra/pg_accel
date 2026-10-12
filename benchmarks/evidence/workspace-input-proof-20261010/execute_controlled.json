@@ -1,0 +1,7 @@
+{
+  "calls": [],
+  "detail": "workspace offset input has a mutation, escape or unproved value source",
+  "offset_inputs": [],
+  "ok": false,
+  "source_sha256": "29497d95caa919f3ce90266d7f16f8dbe23f91f293af214cd3fa8c6d5fd30411"
+}

@@ -1,0 +1,9 @@
+PGACCEL_TEST_START name=test_expr_vm_matrix
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+test_expr_vm_matrix no-device: 5 check(s)
+test_expr_vm_matrix no-device: 0 failure(s)
+test_expr_vm_matrix: 231 check(s)
+test_expr_vm_matrix: 0 failure(s)
+PGACCEL_TEST_RESULT name=test_expr_vm_matrix exit_code=0 result=PASS raw_lines=7 body_sha256=32dfaed26dfb7dc6e95bccd8b0f62b9d6c879f8156354f93357866d43c50da8b binding_sha256=4ac2be777e4f51d1f4247d567d5376c29ca75ef40f04ee7e1a1966c59deeacfa

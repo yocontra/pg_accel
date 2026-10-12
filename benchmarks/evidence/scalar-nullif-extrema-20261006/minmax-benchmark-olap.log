@@ -1,0 +1,144 @@
+[artifacts] writing benchmark artifacts to .codex/scratch/minmax-benchmark-olap-20261006
+[diagnostics] RUST_BACKTRACE=1 (set-by-runner)
+[setup] installing extensions: pg_accel
+[setup] pg_accel: ok
+[detect] installed extensions: plpgsql, h3, postgis, postgis_raster, h3_postgis, pg_accel
+[provenance] pg_accel extension provenance accepted
+
+[scale] grouped_bounded_ratio @ 250K rows
+[setup] grouped_bounded_ratio -- seed 42 (setseed=0.000042), 250000 rows
+[quiescence] setup checkpoint completed at 2026-10-06 06:00:08.248039-07 (wal_lsn=549/8091D048)
+[grouped_bounded_ratio] warmup 1/10 [warm]: accel=29.78ms  parallel=13.33ms
+[grouped_bounded_ratio] warmup 2/10 [warm]: accel=2.41ms  parallel=12.06ms
+[grouped_bounded_ratio] warmup 3/10 [warm]: accel=2.72ms  parallel=11.99ms
+[grouped_bounded_ratio] warmup 4/10 [warm]: accel=2.09ms  parallel=11.56ms
+[grouped_bounded_ratio] warmup 5/10 [warm]: accel=1.94ms  parallel=11.78ms
+[grouped_bounded_ratio] warmup 6/10 [warm]: accel=1.97ms  parallel=11.92ms
+[grouped_bounded_ratio] warmup 7/10 [warm]: accel=2.24ms  parallel=11.98ms
+[grouped_bounded_ratio] warmup 8/10 [warm]: accel=2.08ms  parallel=11.97ms
+[grouped_bounded_ratio] warmup 9/10 [warm]: accel=2.08ms  parallel=12.00ms
+[grouped_bounded_ratio] warmup 10/10 [warm]: accel=2.35ms  parallel=11.95ms
+[grouped_bounded_ratio] bench 1/30 [warm]: accel=2.76ms  parallel=11.82ms
+[grouped_bounded_ratio] bench 2/30 [warm]: accel=2.74ms  parallel=11.72ms
+[grouped_bounded_ratio] bench 3/30 [warm]: accel=2.81ms  parallel=11.85ms
+[grouped_bounded_ratio] bench 4/30 [warm]: accel=2.71ms  parallel=11.83ms
+[grouped_bounded_ratio] bench 5/30 [warm]: accel=2.15ms  parallel=12.09ms
+[grouped_bounded_ratio] bench 6/30 [warm]: accel=2.77ms  parallel=12.22ms
+[grouped_bounded_ratio] bench 7/30 [warm]: accel=2.69ms  parallel=11.83ms
+[grouped_bounded_ratio] bench 8/30 [warm]: accel=2.56ms  parallel=11.65ms
+[grouped_bounded_ratio] bench 9/30 [warm]: accel=2.16ms  parallel=11.73ms
+[grouped_bounded_ratio] bench 10/30 [warm]: accel=2.11ms  parallel=11.66ms
+[grouped_bounded_ratio] bench 11/30 [warm]: accel=1.83ms  parallel=12.01ms
+[grouped_bounded_ratio] bench 12/30 [warm]: accel=2.13ms  parallel=12.54ms
+[grouped_bounded_ratio] bench 13/30 [warm]: accel=2.48ms  parallel=11.80ms
+[grouped_bounded_ratio] bench 14/30 [warm]: accel=2.33ms  parallel=11.67ms
+[grouped_bounded_ratio] bench 15/30 [warm]: accel=2.49ms  parallel=11.88ms
+[grouped_bounded_ratio] bench 16/30 [warm]: accel=2.61ms  parallel=11.77ms
+[grouped_bounded_ratio] bench 17/30 [warm]: accel=2.72ms  parallel=12.05ms
+[grouped_bounded_ratio] bench 18/30 [warm]: accel=2.75ms  parallel=12.17ms
+[grouped_bounded_ratio] bench 19/30 [warm]: accel=2.84ms  parallel=11.96ms
+[grouped_bounded_ratio] bench 20/30 [warm]: accel=2.67ms  parallel=11.90ms
+[grouped_bounded_ratio] bench 21/30 [warm]: accel=2.62ms  parallel=11.84ms
+[grouped_bounded_ratio] bench 22/30 [warm]: accel=2.74ms  parallel=12.11ms
+[grouped_bounded_ratio] bench 23/30 [warm]: accel=2.57ms  parallel=12.41ms
+[grouped_bounded_ratio] bench 24/30 [warm]: accel=2.70ms  parallel=11.73ms
+[grouped_bounded_ratio] bench 25/30 [warm]: accel=2.63ms  parallel=11.52ms
+[grouped_bounded_ratio] bench 26/30 [warm]: accel=2.66ms  parallel=11.49ms
+[grouped_bounded_ratio] bench 27/30 [warm]: accel=2.62ms  parallel=11.76ms
+[grouped_bounded_ratio] bench 28/30 [warm]: accel=2.13ms  parallel=11.94ms
+[grouped_bounded_ratio] bench 29/30 [warm]: accel=1.90ms  parallel=11.90ms
+[grouped_bounded_ratio] bench 30/30 [warm]: accel=1.99ms  parallel=11.72ms
+[quiescence] checkpointer counters remained unchanged through 2026-10-06 06:00:09.055645-07
+[cleanup] grouped_bounded_ratio -- tables dropped
+
+[scale] grouped_bounded_ratio @ 1M rows
+[setup] grouped_bounded_ratio -- seed 42 (setseed=0.000042), 1000000 rows
+[quiescence] setup checkpoint completed at 2026-10-06 06:00:10.748002-07 (wal_lsn=549/84D43B50)
+[grouped_bounded_ratio] warmup 1/10 [warm]: accel=36.42ms  parallel=32.53ms
+[grouped_bounded_ratio] warmup 2/10 [warm]: accel=4.91ms  parallel=31.80ms
+[grouped_bounded_ratio] warmup 3/10 [warm]: accel=3.03ms  parallel=30.98ms
+[grouped_bounded_ratio] warmup 4/10 [warm]: accel=5.38ms  parallel=30.94ms
+[grouped_bounded_ratio] warmup 5/10 [warm]: accel=4.21ms  parallel=30.97ms
+[grouped_bounded_ratio] warmup 6/10 [warm]: accel=3.27ms  parallel=30.93ms
+[grouped_bounded_ratio] warmup 7/10 [warm]: accel=3.01ms  parallel=31.04ms
+[grouped_bounded_ratio] warmup 8/10 [warm]: accel=3.31ms  parallel=31.11ms
+[grouped_bounded_ratio] warmup 9/10 [warm]: accel=3.94ms  parallel=31.06ms
+[grouped_bounded_ratio] warmup 10/10 [warm]: accel=3.61ms  parallel=32.18ms
+[grouped_bounded_ratio] bench 1/30 [warm]: accel=3.23ms  parallel=30.85ms
+[grouped_bounded_ratio] bench 2/30 [warm]: accel=3.53ms  parallel=30.85ms
+[grouped_bounded_ratio] bench 3/30 [warm]: accel=3.60ms  parallel=31.59ms
+[grouped_bounded_ratio] bench 4/30 [warm]: accel=4.35ms  parallel=31.41ms
+[grouped_bounded_ratio] bench 5/30 [warm]: accel=3.94ms  parallel=30.90ms
+[grouped_bounded_ratio] bench 6/30 [warm]: accel=4.11ms  parallel=31.55ms
+[grouped_bounded_ratio] bench 7/30 [warm]: accel=5.64ms  parallel=31.27ms
+[grouped_bounded_ratio] bench 8/30 [warm]: accel=3.51ms  parallel=31.05ms
+[grouped_bounded_ratio] bench 9/30 [warm]: accel=3.31ms  parallel=31.05ms
+[grouped_bounded_ratio] bench 10/30 [warm]: accel=3.09ms  parallel=31.04ms
+[grouped_bounded_ratio] bench 11/30 [warm]: accel=4.88ms  parallel=31.28ms
+[grouped_bounded_ratio] bench 12/30 [warm]: accel=3.21ms  parallel=30.87ms
+[grouped_bounded_ratio] bench 13/30 [warm]: accel=3.67ms  parallel=31.30ms
+[grouped_bounded_ratio] bench 14/30 [warm]: accel=3.22ms  parallel=31.50ms
+[grouped_bounded_ratio] bench 15/30 [warm]: accel=3.60ms  parallel=34.51ms
+[grouped_bounded_ratio] bench 16/30 [warm]: accel=3.73ms  parallel=31.92ms
+[grouped_bounded_ratio] bench 17/30 [warm]: accel=5.07ms  parallel=30.76ms
+[grouped_bounded_ratio] bench 18/30 [warm]: accel=4.96ms  parallel=31.33ms
+[grouped_bounded_ratio] bench 19/30 [warm]: accel=5.50ms  parallel=30.96ms
+[grouped_bounded_ratio] bench 20/30 [warm]: accel=3.31ms  parallel=32.38ms
+[grouped_bounded_ratio] bench 21/30 [warm]: accel=3.40ms  parallel=32.10ms
+[grouped_bounded_ratio] bench 22/30 [warm]: accel=3.69ms  parallel=32.23ms
+[grouped_bounded_ratio] bench 23/30 [warm]: accel=3.93ms  parallel=31.29ms
+[grouped_bounded_ratio] bench 24/30 [warm]: accel=5.49ms  parallel=31.76ms
+[grouped_bounded_ratio] bench 25/30 [warm]: accel=5.39ms  parallel=31.53ms
+[grouped_bounded_ratio] bench 26/30 [warm]: accel=5.22ms  parallel=30.68ms
+[grouped_bounded_ratio] bench 27/30 [warm]: accel=3.60ms  parallel=30.95ms
+[grouped_bounded_ratio] bench 28/30 [warm]: accel=3.20ms  parallel=31.28ms
+[grouped_bounded_ratio] bench 29/30 [warm]: accel=3.50ms  parallel=31.23ms
+[grouped_bounded_ratio] bench 30/30 [warm]: accel=3.23ms  parallel=30.96ms
+[quiescence] checkpointer counters remained unchanged through 2026-10-06 06:00:12.525422-07
+[cleanup] grouped_bounded_ratio -- tables dropped
+
+[scale] grouped_bounded_ratio @ 2M rows
+[setup] grouped_bounded_ratio -- seed 42 (setseed=0.000042), 2000000 rows
+[quiescence] setup checkpoint completed at 2026-10-06 06:00:15.228992-07 (wal_lsn=549/8D554760)
+[grouped_bounded_ratio] warmup 1/10 [warm]: accel=44.89ms  parallel=68.87ms
+[grouped_bounded_ratio] warmup 2/10 [warm]: accel=9.20ms  parallel=62.93ms
+[grouped_bounded_ratio] warmup 3/10 [warm]: accel=9.99ms  parallel=61.80ms
+[grouped_bounded_ratio] warmup 4/10 [warm]: accel=6.76ms  parallel=57.48ms
+[grouped_bounded_ratio] warmup 5/10 [warm]: accel=5.80ms  parallel=61.03ms
+[grouped_bounded_ratio] warmup 6/10 [warm]: accel=7.67ms  parallel=57.60ms
+[grouped_bounded_ratio] warmup 7/10 [warm]: accel=8.27ms  parallel=62.82ms
+[grouped_bounded_ratio] warmup 8/10 [warm]: accel=10.42ms  parallel=68.56ms
+[grouped_bounded_ratio] warmup 9/10 [warm]: accel=6.97ms  parallel=58.09ms
+[grouped_bounded_ratio] warmup 10/10 [warm]: accel=9.55ms  parallel=56.84ms
+[grouped_bounded_ratio] bench 1/30 [warm]: accel=8.26ms  parallel=56.04ms
+[grouped_bounded_ratio] bench 2/30 [warm]: accel=6.88ms  parallel=56.31ms
+[grouped_bounded_ratio] bench 3/30 [warm]: accel=7.75ms  parallel=56.63ms
+[grouped_bounded_ratio] bench 4/30 [warm]: accel=8.50ms  parallel=56.39ms
+[grouped_bounded_ratio] bench 5/30 [warm]: accel=9.99ms  parallel=55.83ms
+[grouped_bounded_ratio] bench 6/30 [warm]: accel=7.31ms  parallel=56.12ms
+[grouped_bounded_ratio] bench 7/30 [warm]: accel=7.14ms  parallel=56.23ms
+[grouped_bounded_ratio] bench 8/30 [warm]: accel=7.49ms  parallel=56.26ms
+[grouped_bounded_ratio] bench 9/30 [warm]: accel=6.99ms  parallel=56.51ms
+[grouped_bounded_ratio] bench 10/30 [warm]: accel=7.04ms  parallel=55.71ms
+[grouped_bounded_ratio] bench 11/30 [warm]: accel=5.59ms  parallel=56.18ms
+[grouped_bounded_ratio] bench 12/30 [warm]: accel=7.25ms  parallel=56.11ms
+[grouped_bounded_ratio] bench 13/30 [warm]: accel=8.32ms  parallel=57.29ms
+[grouped_bounded_ratio] bench 14/30 [warm]: accel=9.26ms  parallel=58.88ms
+[grouped_bounded_ratio] bench 15/30 [warm]: accel=6.44ms  parallel=57.93ms
+[grouped_bounded_ratio] bench 16/30 [warm]: accel=5.69ms  parallel=57.09ms
+[grouped_bounded_ratio] bench 17/30 [warm]: accel=9.91ms  parallel=59.64ms
+[grouped_bounded_ratio] bench 18/30 [warm]: accel=6.16ms  parallel=58.60ms
+[grouped_bounded_ratio] bench 19/30 [warm]: accel=5.60ms  parallel=56.64ms
+[grouped_bounded_ratio] bench 20/30 [warm]: accel=6.47ms  parallel=56.57ms
+[grouped_bounded_ratio] bench 21/30 [warm]: accel=7.19ms  parallel=63.52ms
+[grouped_bounded_ratio] bench 22/30 [warm]: accel=7.44ms  parallel=62.95ms
+[grouped_bounded_ratio] bench 23/30 [warm]: accel=8.39ms  parallel=61.97ms
+[grouped_bounded_ratio] bench 24/30 [warm]: accel=9.57ms  parallel=60.76ms
+[grouped_bounded_ratio] bench 25/30 [warm]: accel=5.92ms  parallel=56.96ms
+[grouped_bounded_ratio] bench 26/30 [warm]: accel=7.06ms  parallel=55.98ms
+[grouped_bounded_ratio] bench 27/30 [warm]: accel=8.02ms  parallel=56.38ms
+[grouped_bounded_ratio] bench 28/30 [warm]: accel=6.87ms  parallel=56.31ms
+[grouped_bounded_ratio] bench 29/30 [warm]: accel=7.39ms  parallel=56.43ms
+[grouped_bounded_ratio] bench 30/30 [warm]: accel=7.26ms  parallel=56.37ms
+[quiescence] checkpointer counters remained unchanged through 2026-10-06 06:00:18.417519-07
+[cleanup] grouped_bounded_ratio -- tables dropped

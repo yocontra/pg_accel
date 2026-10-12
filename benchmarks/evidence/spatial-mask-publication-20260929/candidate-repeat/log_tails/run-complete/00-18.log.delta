@@ -1,0 +1,31 @@
+source: /Users/contra/.pgrx/18.log
+run_start_offset_bytes: 1945553
+delta_start_offset_bytes: 1945553
+capture_end_offset_bytes: 1949402
+delta_max_bytes: 262144
+truncated_to_last_delta_bytes: false
+---
+2026-09-29 18:49:10.491 PDT [68599] LOG:  checkpoint starting: immediate force wait
+2026-09-29 18:49:10.543 PDT [68599] LOG:  checkpoint complete: wrote 9436 buffers (0.4%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 6 recycled; write=0.048 s, sync=0.004 s, total=0.053 s; sync files=41, longest=0.002 s, average=0.001 s; distance=102899 kB, estimate=498077 kB; lsn=545/5BF39820, redo lsn=545/5BF397C8
+2026-09-29 18:49:17.605 PDT [68599] LOG:  checkpoints are occurring too frequently (7 seconds apart)
+2026-09-29 18:49:17.605 PDT [68599] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 18:49:17.605 PDT [68599] LOG:  checkpoint starting: wal
+2026-09-29 18:49:22.178 PDT [68599] LOG:  checkpoint complete: wrote 43 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 1 removed, 33 recycled; write=4.383 s, sync=0.178 s, total=4.574 s; sync files=28, longest=0.177 s, average=0.007 s; distance=541489 kB, estimate=541489 kB; lsn=545/9B6754E0, redo lsn=545/7D005FB0
+2026-09-29 18:49:22.451 PDT [68599] LOG:  checkpoints are occurring too frequently (5 seconds apart)
+2026-09-29 18:49:22.451 PDT [68599] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 18:49:22.451 PDT [68599] LOG:  checkpoint starting: wal
+2026-09-29 18:49:24.809 PDT [68599] LOG:  checkpoint complete: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=2.348 s, sync=0.001 s, total=2.359 s; sync files=1, longest=0.001 s, average=0.001 s; distance=546177 kB, estimate=546177 kB; lsn=545/BC3F3A78, redo lsn=545/9E566570
+2026-09-29 18:49:25.002 PDT [68599] LOG:  checkpoints are occurring too frequently (3 seconds apart)
+2026-09-29 18:49:25.002 PDT [68599] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 18:49:25.002 PDT [68599] LOG:  checkpoint starting: wal
+2026-09-29 18:49:27.004 PDT [68599] LOG:  checkpoint complete: wrote 44437 buffers (2.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 1 removed, 33 recycled; write=1.982 s, sync=0.006 s, total=2.002 s; sync files=11, longest=0.006 s, average=0.001 s; distance=551529 kB, estimate=551529 kB; lsn=545/DE80B9C8, redo lsn=545/C00009E8
+2026-09-29 18:49:27.198 PDT [68599] LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-09-29 18:49:27.198 PDT [68599] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 18:49:27.198 PDT [68599] LOG:  checkpoint starting: wal
+2026-09-29 18:49:29.104 PDT [68599] LOG:  checkpoint complete: wrote 69795 buffers (3.3%), wrote 0 SLRU buffers; 0 WAL file(s) added, 3 removed, 31 recycled; write=1.865 s, sync=0.001 s, total=1.907 s; sync files=3, longest=0.001 s, average=0.001 s; distance=557059 kB, estimate=557059 kB; lsn=546/2056EA0, redo lsn=545/E2001788
+2026-09-29 18:49:29.162 PDT [68599] LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-09-29 18:49:29.162 PDT [68599] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 18:49:29.162 PDT [68599] LOG:  checkpoint starting: wal
+2026-09-29 18:49:48.594 PDT [68599] LOG:  checkpoint complete: wrote 68674 buffers (3.3%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 34 recycled; write=19.407 s, sync=0.014 s, total=19.432 s; sync files=11, longest=0.013 s, average=0.002 s; distance=557058 kB, estimate=557059 kB; lsn=546/204D7C78, redo lsn=546/40022A0
+2026-09-29 18:49:48.594 PDT [68599] LOG:  checkpoint starting: immediate force wait
+2026-09-29 18:49:48.772 PDT [68599] LOG:  checkpoint complete: wrote 50571 buffers (2.4%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 28 recycled; write=0.173 s, sync=0.002 s, total=0.179 s; sync files=33, longest=0.001 s, average=0.001 s; distance=463702 kB, estimate=547723 kB; lsn=546/204D7D48, redo lsn=546/204D7CF0

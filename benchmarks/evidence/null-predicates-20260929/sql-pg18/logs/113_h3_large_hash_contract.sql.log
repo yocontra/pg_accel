@@ -1,0 +1,60 @@
+=== 113_h3_large_hash_contract ===
+SET
+SET
+SET
+CREATE TABLE
+INSERT 0 2000019
+ANALYZE
+CREATE FUNCTION
+ check_large_h3 
+----------------
+ 
+(1 row)
+
+BEGIN
+UPDATE 1979401
+ check_large_h3 
+----------------
+ 
+(1 row)
+
+ROLLBACK
+ check_large_h3 
+----------------
+ 
+(1 row)
+
+PGACCEL_ASSERT_OK:113_h3_large_hash_contract.assert_001
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ t
+(1 row)
+
+SET
+TRUNCATE TABLE
+INSERT 0 705894
+INSERT 0 1
+ANALYZE
+DO
+PGACCEL_ASSERT_OK:113_h3_large_hash_contract.assert_002
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ t
+(1 row)
+
+DROP FUNCTION
+DROP TABLE
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:113_h3_large_hash_contract

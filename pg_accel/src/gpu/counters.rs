@@ -80,7 +80,7 @@ impl GpuFailureDomain {
             Self::Expr
         } else if func.starts_with("pgaccel_grouped_agg_") {
             Self::GroupedAgg
-        } else if func.starts_with("pgaccel_hash_join_") {
+        } else if func.starts_with("pgaccel_hash_join_") || func.starts_with("pgaccel_join_rows_") {
             Self::HashJoin
         } else if func.starts_with("pgaccel_hash_count_") || func.starts_with("pgaccel_agg_") {
             Self::HashAgg

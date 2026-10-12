@@ -1,0 +1,269 @@
+=== pg_accel benchmark plans - captured once per workload/scale ===
+
+=== grouped_simple_case_linear @ rows=250000 ===
+Finalize GroupAggregate  (cost=3631.65..3639.97 rows=32 width=68) (actual time=73.031..73.939 rows=33.00 loops=1)
+  Output: region, sum(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), avg(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), count(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), min(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), max(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), count(*)
+  Group Key: bench_scalar_sales.region
+  Buffers: shared hit=1358
+  ->  Gather Merge  (cost=3631.65..3635.65 rows=224 width=68) (actual time=73.005..73.802 rows=264.00 loops=1)
+        Output: region, (PARTIAL sum(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL avg(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL count(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL min(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL max(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL count(*))
+        Workers Planned: 7
+        Workers Launched: 7
+        Buffers: shared hit=1358
+        ->  Sort  (cost=3631.53..3631.61 rows=32 width=68) (actual time=33.638..33.640 rows=33.00 loops=8)
+              Output: region, (PARTIAL sum(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL avg(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL count(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL min(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL max(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL count(*))
+              Sort Key: bench_scalar_sales.region
+              Sort Method: quicksort  Memory: 28kB
+              Buffers: shared hit=1358
+              Worker 0:  actual time=12.838..12.839 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=64
+              Worker 1:  actual time=19.436..19.438 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=62
+              Worker 2:  actual time=37.373..37.374 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=175
+              Worker 3:  actual time=20.183..20.184 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=102
+              Worker 4:  actual time=40.112..40.113 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=266
+              Worker 5:  actual time=20.214..20.215 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=78
+              Worker 6:  actual time=46.440..46.441 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=282
+              ->  Partial HashAggregate  (cost=3630.41..3630.73 rows=32 width=68) (actual time=33.591..33.596 rows=33.00 loops=8)
+                    Output: region, PARTIAL sum(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), PARTIAL avg(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), PARTIAL count(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), PARTIAL min(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), PARTIAL max(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), PARTIAL count(*)
+                    Group Key: bench_scalar_sales.region
+                    Batches: 1  Memory Usage: 32kB
+                    Buffers: shared hit=1309
+                    Worker 0:  actual time=12.737..12.743 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=57
+                    Worker 1:  actual time=19.377..19.385 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=55
+                    Worker 2:  actual time=37.347..37.351 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=168
+                    Worker 3:  actual time=20.157..20.161 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=95
+                    Worker 4:  actual time=40.074..40.077 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=259
+                    Worker 5:  actual time=20.144..20.148 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=71
+                    Worker 6:  actual time=46.412..46.415 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=275
+                    ->  Parallel Seq Scan on public.bench_scalar_sales  (cost=0.00..1666.14 rows=35714 width=12) (actual time=0.285..8.413 rows=31250.00 loops=8)
+                          Output: region, price, adjustment
+                          Buffers: shared hit=1309
+                          Worker 0:  actual time=0.490..1.484 rows=10761.00 loops=1
+                            Buffers: shared hit=57
+                          Worker 1:  actual time=0.027..1.421 rows=10507.00 loops=1
+                            Buffers: shared hit=55
+                          Worker 2:  actual time=0.012..7.253 rows=32104.00 loops=1
+                            Buffers: shared hit=168
+                          Worker 3:  actual time=0.011..6.950 rows=18150.00 loops=1
+                            Buffers: shared hit=95
+                          Worker 4:  actual time=0.014..15.782 rows=49495.00 loops=1
+                            Buffers: shared hit=259
+                          Worker 5:  actual time=0.028..10.836 rows=13566.00 loops=1
+                            Buffers: shared hit=71
+                          Worker 6:  actual time=1.684..17.977 rows=52547.00 loops=1
+                            Buffers: shared hit=275
+Planning:
+  Buffers: shared hit=103
+Planning Time: 53.255 ms
+Execution Time: 74.021 ms
+
+=== grouped_simple_case_linear @ rows=1000000 ===
+Finalize GroupAggregate  (cost=13360.26..13369.92 rows=32 width=68) (actual time=56.190..59.426 rows=33.00 loops=1)
+  Output: region, sum(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), avg(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), count(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), min(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), max(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), count(*)
+  Group Key: bench_scalar_sales.region
+  Buffers: shared hit=5290
+  ->  Gather Merge  (cost=13360.26..13365.04 rows=256 width=68) (actual time=56.162..59.244 rows=297.00 loops=1)
+        Output: region, (PARTIAL sum(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL avg(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL count(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL min(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL max(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL count(*))
+        Workers Planned: 8
+        Workers Launched: 8
+        Buffers: shared hit=5290
+        ->  Sort  (cost=13360.12..13360.20 rows=32 width=68) (actual time=45.863..45.865 rows=33.00 loops=9)
+              Output: region, (PARTIAL sum(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL avg(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL count(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL min(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL max(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL count(*))
+              Sort Key: bench_scalar_sales.region
+              Sort Method: quicksort  Memory: 28kB
+              Buffers: shared hit=5290
+              Worker 0:  actual time=39.720..39.720 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=376
+              Worker 1:  actual time=44.172..44.175 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=602
+              Worker 2:  actual time=42.736..42.739 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=398
+              Worker 3:  actual time=46.203..46.205 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=551
+              Worker 4:  actual time=44.172..44.173 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=574
+              Worker 5:  actual time=46.633..46.634 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=803
+              Worker 6:  actual time=47.799..47.801 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=627
+              Worker 7:  actual time=45.597..45.598 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=504
+              ->  Partial HashAggregate  (cost=13359.00..13359.32 rows=32 width=68) (actual time=45.826..45.831 rows=33.00 loops=9)
+                    Output: region, PARTIAL sum(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), PARTIAL avg(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), PARTIAL count(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), PARTIAL min(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), PARTIAL max(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), PARTIAL count(*)
+                    Group Key: bench_scalar_sales.region
+                    Batches: 1  Memory Usage: 32kB
+                    Buffers: shared hit=5234
+                    Worker 0:  actual time=39.668..39.671 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=369
+                    Worker 1:  actual time=44.103..44.112 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=595
+                    Worker 2:  actual time=42.688..42.697 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=391
+                    Worker 3:  actual time=46.173..46.176 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=544
+                    Worker 4:  actual time=44.143..44.146 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=567
+                    Worker 5:  actual time=46.610..46.613 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=796
+                    Worker 6:  actual time=47.774..47.778 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=620
+                    Worker 7:  actual time=45.556..45.559 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=497
+                    ->  Parallel Seq Scan on public.bench_scalar_sales  (cost=0.00..6484.00 rows=125000 width=12) (actual time=0.014..10.882 rows=111111.11 loops=9)
+                          Output: region, price, adjustment
+                          Buffers: shared hit=5234
+                          Worker 0:  actual time=0.021..13.383 rows=70512.00 loops=1
+                            Buffers: shared hit=369
+                          Worker 1:  actual time=0.019..9.998 rows=113699.00 loops=1
+                            Buffers: shared hit=595
+                          Worker 2:  actual time=0.018..11.241 rows=74717.00 loops=1
+                            Buffers: shared hit=391
+                          Worker 3:  actual time=0.011..9.952 rows=103945.00 loops=1
+                            Buffers: shared hit=544
+                          Worker 4:  actual time=0.011..11.205 rows=108206.00 loops=1
+                            Buffers: shared hit=567
+                          Worker 5:  actual time=0.011..12.744 rows=152117.00 loops=1
+                            Buffers: shared hit=796
+                          Worker 6:  actual time=0.013..10.592 rows=118462.00 loops=1
+                            Buffers: shared hit=620
+                          Worker 7:  actual time=0.018..11.021 rows=94968.00 loops=1
+                            Buffers: shared hit=497
+Planning:
+  Buffers: shared hit=103
+Planning Time: 0.758 ms
+Execution Time: 59.488 ms
+
+=== grouped_simple_case_linear @ rows=2000000 ===
+Finalize GroupAggregate  (cost=26718.26..26727.92 rows=32 width=68) (actual time=1560.545..1562.189 rows=33.00 loops=1)
+  Output: region, sum(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), avg(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), count(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), min(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), max(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), count(*)
+  Group Key: bench_scalar_sales.region
+  Buffers: shared hit=10523
+  ->  Gather Merge  (cost=26718.26..26723.04 rows=256 width=68) (actual time=1560.524..1562.125 rows=297.00 loops=1)
+        Output: region, (PARTIAL sum(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL avg(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL count(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL min(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL max(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL count(*))
+        Workers Planned: 8
+        Workers Launched: 8
+        Buffers: shared hit=10523
+        ->  Sort  (cost=26718.12..26718.20 rows=32 width=68) (actual time=1444.948..1444.952 rows=33.00 loops=9)
+              Output: region, (PARTIAL sum(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL avg(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL count(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL min(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL max(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL count(*))
+              Sort Key: bench_scalar_sales.region
+              Sort Method: quicksort  Memory: 28kB
+              Buffers: shared hit=10523
+              Worker 0:  actual time=1364.759..1364.763 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=942
+              Worker 1:  actual time=1414.737..1414.739 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=1543
+              Worker 2:  actual time=1408.124..1408.130 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=1123
+              Worker 3:  actual time=1430.474..1430.482 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=1255
+              Worker 4:  actual time=1427.341..1427.343 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=1223
+              Worker 5:  actual time=1495.073..1495.075 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=1103
+              Worker 6:  actual time=1452.665..1452.666 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=944
+              Worker 7:  actual time=1485.126..1485.129 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=1089
+              ->  Partial HashAggregate  (cost=26717.00..26717.32 rows=32 width=68) (actual time=1444.081..1444.089 rows=33.00 loops=9)
+                    Output: region, PARTIAL sum(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), PARTIAL avg(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), PARTIAL count(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), PARTIAL min(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), PARTIAL max(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), PARTIAL count(*)
+                    Group Key: bench_scalar_sales.region
+                    Batches: 1  Memory Usage: 32kB
+                    Buffers: shared hit=10467
+                    Worker 0:  actual time=1364.688..1364.697 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=935
+                    Worker 1:  actual time=1414.684..1414.688 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=1536
+                    Worker 2:  actual time=1408.049..1408.066 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=1116
+                    Worker 3:  actual time=1430.410..1430.419 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=1248
+                    Worker 4:  actual time=1427.296..1427.303 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=1216
+                    Worker 5:  actual time=1495.015..1495.019 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=1096
+                    Worker 6:  actual time=1452.572..1452.575 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=937
+                    Worker 7:  actual time=1477.803..1477.807 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=1082
+                    ->  Parallel Seq Scan on public.bench_scalar_sales  (cost=0.00..12967.00 rows=250000 width=12) (actual time=0.292..314.496 rows=222222.22 loops=9)
+                          Output: region, price, adjustment
+                          Buffers: shared hit=10467
+                          Worker 0:  actual time=0.027..381.095 rows=178593.00 loops=1
+                            Buffers: shared hit=935
+                          Worker 1:  actual time=2.413..131.323 rows=293509.00 loops=1
+                            Buffers: shared hit=1536
+                          Worker 2:  actual time=0.025..358.198 rows=213242.00 loops=1
+                            Buffers: shared hit=1116
+                          Worker 3:  actual time=0.027..472.640 rows=238470.00 loops=1
+                            Buffers: shared hit=1248
+                          Worker 4:  actual time=0.017..185.099 rows=232360.00 loops=1
+                            Buffers: shared hit=1216
+                          Worker 5:  actual time=0.026..315.422 rows=209414.00 loops=1
+                            Buffers: shared hit=1096
+                          Worker 6:  actual time=0.055..500.909 rows=179040.00 loops=1
+                            Buffers: shared hit=937
+                          Worker 7:  actual time=0.033..204.928 rows=206760.00 loops=1
+                            Buffers: shared hit=1082
+Planning:
+  Buffers: shared hit=103
+Planning Time: 7.810 ms
+Execution Time: 1562.250 ms

@@ -1,0 +1,11 @@
+source: /Users/contra/.pgrx/18.log
+run_start_offset_bytes: 1787214
+delta_start_offset_bytes: 1787214
+capture_end_offset_bytes: 1788038
+delta_max_bytes: 262144
+truncated_to_last_delta_bytes: false
+---
+2026-09-29 15:50:41.158 PDT [68592] LOG:  checkpoint starting: immediate force wait
+2026-09-29 15:50:41.186 PDT [68592] LOG:  checkpoint complete: wrote 2011 buffers (0.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 1 removed, 0 recycled; write=0.020 s, sync=0.003 s, total=0.028 s; sync files=34, longest=0.002 s, average=0.001 s; distance=22605 kB, estimate=411432 kB; lsn=53C/EB9613A0, redo lsn=53C/EB961348
+2026-09-29 15:50:44.608 PDT [68592] LOG:  checkpoint starting: immediate force wait
+2026-09-29 15:50:44.664 PDT [68592] LOG:  checkpoint complete: wrote 2357 buffers (0.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 6 removed, 0 recycled; write=0.016 s, sync=0.016 s, total=0.056 s; sync files=36, longest=0.014 s, average=0.001 s; distance=89704 kB, estimate=379259 kB; lsn=53C/F10FB688, redo lsn=53C/F10FB630

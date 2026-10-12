@@ -1,0 +1,187 @@
+........................................................EEEEE.EEE..................F....................
+======================================================================
+ERROR: test_cpp_header_file_removal_fails_with_matching_regenerated_baseline (scripts.tests.test_coverage_tools.ImmutableBaselineTests.test_cpp_header_file_removal_fails_with_matching_regenerated_baseline)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2729, in test_cpp_header_file_removal_fails_with_matching_regenerated_baseline
+    baseline = self.write_matching_baseline(
+        root, REPO_ROOT / "coverage/scope.json"
+    )
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2491, in write_matching_baseline
+    coverage_tools.release_baseline_document(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        REPO_ROOT,
+        ^^^^^^^^^^
+        scope,
+        ^^^^^^
+        REPO_ROOT / "coverage/sql-semantic-assertions.json",
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ),
+    ^
+  File "/Users/contra/Projects/pg_accel/scripts/coverage_tools.py", line 2364, in release_baseline_document
+    raise CoverageError("; ".join(manifest_errors))
+coverage_tools.CoverageError: SQL source hash drift: 136_scalar_nullif_extrema.sql
+
+======================================================================
+ERROR: test_cpp_headers_only_scope_is_rejected_even_with_matching_baseline (scripts.tests.test_coverage_tools.ImmutableBaselineTests.test_cpp_headers_only_scope_is_rejected_even_with_matching_baseline)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2657, in test_cpp_headers_only_scope_is_rejected_even_with_matching_baseline
+    baseline = self.write_matching_baseline(root, scope_path)
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2491, in write_matching_baseline
+    coverage_tools.release_baseline_document(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        REPO_ROOT,
+        ^^^^^^^^^^
+        scope,
+        ^^^^^^
+        REPO_ROOT / "coverage/sql-semantic-assertions.json",
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ),
+    ^
+  File "/Users/contra/Projects/pg_accel/scripts/coverage_tools.py", line 2364, in release_baseline_document
+    raise CoverageError("; ".join(manifest_errors))
+coverage_tools.CoverageError: SQL source hash drift: 136_scalar_nullif_extrema.sql
+
+======================================================================
+ERROR: test_cpp_include_root_removal_is_rejected_with_matching_baseline (scripts.tests.test_coverage_tools.ImmutableBaselineTests.test_cpp_include_root_removal_is_rejected_with_matching_baseline)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2670, in test_cpp_include_root_removal_is_rejected_with_matching_baseline
+    baseline = self.write_matching_baseline(root, scope_path)
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2491, in write_matching_baseline
+    coverage_tools.release_baseline_document(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        REPO_ROOT,
+        ^^^^^^^^^^
+        scope,
+        ^^^^^^
+        REPO_ROOT / "coverage/sql-semantic-assertions.json",
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ),
+    ^
+  File "/Users/contra/Projects/pg_accel/scripts/coverage_tools.py", line 2364, in release_baseline_document
+    raise CoverageError("; ".join(manifest_errors))
+coverage_tools.CoverageError: SQL source hash drift: 136_scalar_nullif_extrema.sql
+
+======================================================================
+ERROR: test_cpp_ooo_support_root_removal_is_rejected_with_matching_baseline (scripts.tests.test_coverage_tools.ImmutableBaselineTests.test_cpp_ooo_support_root_removal_is_rejected_with_matching_baseline)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2685, in test_cpp_ooo_support_root_removal_is_rejected_with_matching_baseline
+    baseline = self.write_matching_baseline(root, scope_path)
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2491, in write_matching_baseline
+    coverage_tools.release_baseline_document(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        REPO_ROOT,
+        ^^^^^^^^^^
+        scope,
+        ^^^^^^
+        REPO_ROOT / "coverage/sql-semantic-assertions.json",
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ),
+    ^
+  File "/Users/contra/Projects/pg_accel/scripts/coverage_tools.py", line 2364, in release_baseline_document
+    raise CoverageError("; ".join(manifest_errors))
+coverage_tools.CoverageError: SQL source hash drift: 136_scalar_nullif_extrema.sql
+
+======================================================================
+ERROR: test_cpp_source_substitution_fails_with_matching_baseline (scripts.tests.test_coverage_tools.ImmutableBaselineTests.test_cpp_source_substitution_fails_with_matching_baseline)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2756, in test_cpp_source_substitution_fails_with_matching_baseline
+    baseline = self.write_matching_baseline(
+        root, REPO_ROOT / "coverage/scope.json"
+    )
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2491, in write_matching_baseline
+    coverage_tools.release_baseline_document(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        REPO_ROOT,
+        ^^^^^^^^^^
+        scope,
+        ^^^^^^
+        REPO_ROOT / "coverage/sql-semantic-assertions.json",
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ),
+    ^
+  File "/Users/contra/Projects/pg_accel/scripts/coverage_tools.py", line 2364, in release_baseline_document
+    raise CoverageError("; ".join(manifest_errors))
+coverage_tools.CoverageError: SQL source hash drift: 136_scalar_nullif_extrema.sql
+
+======================================================================
+ERROR: test_new_constructor_header_fails_after_matching_baseline_refresh (scripts.tests.test_coverage_tools.ImmutableBaselineTests.test_new_constructor_header_fails_after_matching_baseline_refresh)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2818, in test_new_constructor_header_fails_after_matching_baseline_refresh
+    baseline = self.write_matching_baseline(
+        root, REPO_ROOT / "coverage/scope.json"
+    )
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2491, in write_matching_baseline
+    coverage_tools.release_baseline_document(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        REPO_ROOT,
+        ^^^^^^^^^^
+        scope,
+        ^^^^^^
+        REPO_ROOT / "coverage/sql-semantic-assertions.json",
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ),
+    ^
+  File "/Users/contra/Projects/pg_accel/scripts/coverage_tools.py", line 2364, in release_baseline_document
+    raise CoverageError("; ".join(manifest_errors))
+coverage_tools.CoverageError: SQL source hash drift: 136_scalar_nullif_extrema.sql
+
+======================================================================
+ERROR: test_release_baseline_update_requires_explicit_acknowledgement (scripts.tests.test_coverage_tools.ImmutableBaselineTests.test_release_baseline_update_requires_explicit_acknowledgement)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2575, in test_release_baseline_update_requires_explicit_acknowledgement
+    quiet_call(coverage_tools.update_release_baseline, args), 0
+    ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 30, in quiet_call
+    return function(*args)
+  File "/Users/contra/Projects/pg_accel/scripts/coverage_tools.py", line 2430, in update_release_baseline
+    document = release_baseline_document(
+        pathlib.Path(args.repo_root).resolve(),
+        pathlib.Path(args.scope),
+        pathlib.Path(args.manifest),
+    )
+  File "/Users/contra/Projects/pg_accel/scripts/coverage_tools.py", line 2364, in release_baseline_document
+    raise CoverageError("; ".join(manifest_errors))
+coverage_tools.CoverageError: SQL source hash drift: 136_scalar_nullif_extrema.sql
+
+======================================================================
+ERROR: test_rust_build_script_and_nonempty_owned_scope_are_pinned (scripts.tests.test_coverage_tools.ImmutableBaselineTests.test_rust_build_script_and_nonempty_owned_scope_are_pinned) (mutation='remove_build')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2642, in test_rust_build_script_and_nonempty_owned_scope_are_pinned
+    baseline = self.write_matching_baseline(root, scope_path)
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2491, in write_matching_baseline
+    coverage_tools.release_baseline_document(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        REPO_ROOT,
+        ^^^^^^^^^^
+        scope,
+        ^^^^^^
+        REPO_ROOT / "coverage/sql-semantic-assertions.json",
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ),
+    ^
+  File "/Users/contra/Projects/pg_accel/scripts/coverage_tools.py", line 2364, in release_baseline_document
+    raise CoverageError("; ".join(manifest_errors))
+coverage_tools.CoverageError: SQL source hash drift: 136_scalar_nullif_extrema.sql
+
+======================================================================
+FAIL: test_checked_in_manifest_matches_baseline_and_raster_guards (scripts.tests.test_coverage_tools.SqlSemanticCoverageTests.test_checked_in_manifest_matches_baseline_and_raster_guards)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 852, in test_checked_in_manifest_matches_baseline_and_raster_guards
+    self.assertEqual(generated, checked_in)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: {'bas[38561 chars]6': '041b894b4535aa4bb41bf18c2a2c95cdc603c005b[75623 chars]sts'} != {'bas[38561 chars]6': 'fb24740aba7cf3144ea87cbde8fadc7523eec08f8[75623 chars]sts'}
+Diff is 198542 characters long. Set self.maxDiff to None to see it.
+
+----------------------------------------------------------------------
+Ran 104 tests in 147.597s
+
+FAILED (failures=1, errors=8)

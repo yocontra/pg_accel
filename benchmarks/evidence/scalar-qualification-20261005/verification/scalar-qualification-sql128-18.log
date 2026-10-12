@@ -1,0 +1,37 @@
+=== 128_scalar_program_aggregates ===
+SET
+SET
+SELECT 250017
+ANALYZE
+psql:sql/tests/128_scalar_program_aggregates.sql:58: NOTICE:  128 scalar matrix selected 24 query shapes
+DO
+PGACCEL_ASSERT_OK:128_scalar_program_aggregates.assert_001
+DO
+PGACCEL_ASSERT_OK:128_scalar_program_aggregates.assert_002
+SET
+PREPARE
+DO
+PGACCEL_ASSERT_OK:128_scalar_program_aggregates.assert_003
+DEALLOCATE
+RESET
+INSERT 0 250017
+ANALYZE
+DO
+PGACCEL_ASSERT_OK:128_scalar_program_aggregates.assert_004
+DO
+PGACCEL_ASSERT_OK:128_scalar_program_aggregates.assert_005
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ f
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:128_scalar_program_aggregates

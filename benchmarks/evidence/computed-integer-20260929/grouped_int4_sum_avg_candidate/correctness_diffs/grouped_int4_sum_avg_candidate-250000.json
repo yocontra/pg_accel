@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "workload": "grouped_int4_sum_avg_candidate",
+  "rows": 250000,
+  "status": "pass",
+  "order_sensitive": false,
+  "accel_rows": 3,
+  "baseline_rows": 3,
+  "accel_minus_baseline_count": 0,
+  "baseline_minus_accel_count": 0,
+  "sample_limit": 20,
+  "accel_minus_baseline_samples": [],
+  "baseline_minus_accel_samples": [],
+  "accel_query_sql": "SELECT bool_key, sum(observed) AS observed_sum, avg(observed) AS observed_avg, count(*) AS input_rows FROM bench_grouped_int4_sum_avg GROUP BY bool_key",
+  "baseline_query_sql": "SELECT bool_key, sum(observed) AS observed_sum, avg(observed) AS observed_avg, count(*) AS input_rows FROM bench_grouped_int4_sum_avg GROUP BY bool_key",
+  "error": null
+}

@@ -1,0 +1,6 @@
+pgaccel: pgaccel_grouped_agg_execute_ex: GPU kernel failure: from /Users/contra/Projects/pg_accel/.pgaccel/src/AdaptiveCpp/src/runtime/metal/metal_code_object.cpp:831 @ get_or_create_kernel_pipeline(): metal: Failed to create compute pipeline state after bounded retries: Unable to reach MTLCompilerService. The process is unavailable because the compiler is no longer active. Latest invalidation reason: Connection init failed at lookup with error 3 - No such process
+2026-10-06T13:37:50.701657Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06 06:37:50.701 PDT [39697] ERROR:  pg_accel: generic aggregate dispatch failed (grouped chunk kernel failed: GPU grouped_agg kernel(grouped_agg_execute) failed with execution_failed); refusing CPU fallback
+2026-10-06 06:37:50.701 PDT [39697] CONTEXT:  SQL statement "CREATE TEMP TABLE _integer_where_actual AS SELECT g,count(*) n,sum(v) s,avg(v) a,count(v) c FROM _integer_where_agg WHERE b GROUP BY g"
+	PL/pgSQL function inline_code_block line 38 at EXECUTE
+2026-10-06 06:37:50.701 PDT [39697] STATEMENT:  DO $$

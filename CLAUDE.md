@@ -44,7 +44,7 @@ Do not delete the cache with an ad hoc recursive command.
    candidates.
 2. **Shape model**: `planner_hooks/shape/` extracts a reducing query into a
    `ShapePlan` or returns a stable decline code.
-3. **Neutral contract**: `pg_accel/src/engine/spec/` owns AQS3 logical semantics
+3. **Neutral contract**: `pg_accel/src/engine/spec/` owns AQS6 logical semantics
    and the separate AOP2 output projection. It contains no device pointers.
 4. **Residency**: `pg_accel/src/engine/residency/` owns backend-local resident
    columns/artifacts, generations, pins, and the cluster byte ledger.
@@ -83,7 +83,7 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) before changing a cross-layer contract.
 
 1. PostgreSQL C APIs and palloc-owned values stay on the backend main thread.
 2. Device pointers live only in execution-time ABI bindings; never place them in
-   AQS3, AOP2, `custom_private`, shared memory, or another backend.
+   AQS6, AOP2, `custom_private`, shared memory, or another backend.
 3. Every `unsafe` block requires a specific `// SAFETY:` justification.
 4. Do not use `unwrap()` outside tests. Propagate or map errors deliberately.
 5. Check PostgreSQL interrupts between bounded synchronous calls. A running

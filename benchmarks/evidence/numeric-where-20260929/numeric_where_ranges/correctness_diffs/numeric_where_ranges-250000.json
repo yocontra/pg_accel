@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "workload": "numeric_where_ranges",
+  "rows": 250000,
+  "status": "pass",
+  "order_sensitive": false,
+  "accel_rows": 64,
+  "baseline_rows": 64,
+  "accel_minus_baseline_count": 0,
+  "baseline_minus_accel_count": 0,
+  "sample_limit": 20,
+  "accel_minus_baseline_samples": [],
+  "baseline_minus_accel_samples": [],
+  "accel_query_sql": "SELECT g,h,k,count(*) n,sum(v) s,avg(qty) FILTER (WHERE h=1) a FROM bench_numeric_rollup WHERE g IN (0,2) GROUP BY g,h,k",
+  "baseline_query_sql": "SELECT g,h,k,count(*) n,sum(v) s,avg(qty) FILTER (WHERE h=1) a FROM bench_numeric_rollup WHERE g IN (0,2) GROUP BY g,h,k",
+  "error": null
+}

@@ -1,0 +1,128 @@
+[32m[1m       Using[0m[39m [37m[1mCliArgument("pg18")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.codex/scratch/hash-implied-filter-20261012/postgres/18.4/bin/pg_config[39m
+CARGO_PGRX_TEST_PGDATA="/Users/contra/Projects/pg_accel/.codex/scratch/hash-implied-filter-20261012/pgdata18" CARGO_TARGET_DIR="/Users/contra/Projects/pg_accel/target" PGRX_ALL_FEATURES="false" PGRX_BUILD_PROFILE="dev" PGRX_FEATURES="pg18 pg_test" PGRX_MANIFEST_PATH="/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" PGRX_NO_DEFAULT_FEATURES="true" PGRX_NO_SCHEMA="false" "/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "test" "--manifest-path" "/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" "--features" "pg18 pg_test" "--no-default-features" "where_"
+   Compiling bindgen v0.72.1
+   Compiling pgrx-bindgen v0.19.1
+   Compiling pgrx-pg-sys v0.19.1
+warning: pgrx-pg-sys@0.19.1: postgres v18 was compiled against an SDK Root which does not seem to exist on this machine (/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk). You may need to re-run `cargo pgrx init` and/or update your command line tools.
+warning: pgrx-pg-sys@0.19.1: postgres v18 was compiled against an SDK Root which does not seem to exist on this machine (/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk). You may need to re-run `cargo pgrx init` and/or update your command line tools.
+warning: pgrx-pg-sys@0.19.1: clang: warning: no such sysroot directory: '/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk' [-Wmissing-sysroot]
+warning: pgrx-pg-sys@0.19.1: In file included from /Users/contra/Projects/pg_accel/target/debug/build/pgrx-pg-sys-1623d6de9b27d943/out/pgrx-cshim.c:15:
+warning: pgrx-pg-sys@0.19.1: In file included from /Users/contra/Projects/pg_accel/target/debug/build/pgrx-pg-sys-1623d6de9b27d943/out/pgrx-cshim-static-pg18.c:1:
+warning: pgrx-pg-sys@0.19.1: In file included from /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-pg-sys-0.19.1/include/pg18.h:12:
+warning: pgrx-pg-sys@0.19.1: In file included from /Users/contra/Projects/pg_accel/.codex/scratch/hash-implied-filter-20261012/postgres/18.4/include/server/postgres.h:48:
+warning: pgrx-pg-sys@0.19.1: In file included from /Users/contra/Projects/pg_accel/.codex/scratch/hash-implied-filter-20261012/postgres/18.4/include/server/c.h:62:
+warning: pgrx-pg-sys@0.19.1: /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/include/inttypes.h:24:15: fatal error: 'inttypes.h' file not found
+warning: pgrx-pg-sys@0.19.1:    24 | #include_next <inttypes.h>
+warning: pgrx-pg-sys@0.19.1:       |               ^~~~~~~~~~~~
+warning: pgrx-pg-sys@0.19.1: 1 error generated.
+error: failed to run custom build command for `pgrx-pg-sys v0.19.1`
+
+Caused by:
+  process didn't exit successfully: `/Users/contra/Projects/pg_accel/target/debug/build/pgrx-pg-sys-20a83fc3dd4a6da5/build-script-bindgen` (exit status: 1)
+  --- stdout
+  cargo:rustc-check-cfg=cfg(docsrs)
+  cargo:rerun-if-env-changed=DOCS_RS
+  cargo:rerun-if-env-changed=PGRX_BUILD_VERBOSE
+  cargo:rerun-if-env-changed=PGRX_PG_CONFIG_PATH
+  cargo:rerun-if-env-changed=PGRX_PG_CONFIG_AS_ENV
+  cargo:rerun-if-env-changed=LLVM_CONFIG_PATH
+  cargo:rerun-if-env-changed=LIBCLANG_PATH
+  cargo:rerun-if-env-changed=LIBCLANG_STATIC_PATH
+  cargo:rerun-if-env-changed=BINDGEN_EXTRA_CLANG_ARGS
+  cargo:rerun-if-env-changed=BINDGEN_EXTRA_CLANG_ARGS_aarch64-apple-darwin
+  cargo:rerun-if-env-changed=BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_darwin
+  cargo:rerun-if-env-changed=PGRX_PG_SYS_GENERATE_BINDINGS_FOR_RELEASE
+  cargo:rerun-if-changed=include
+  cargo:rerun-if-changed=pgrx-cshim.c
+  cargo:rerun-if-changed=/Users/contra/Projects/pg_accel/.codex/scratch/hash-implied-filter-20261012/pgrx/config.toml
+  cargo:rerun-if-env-changed=PGRX_PG_SYS_GENERATE_BINDINGS_FOR_RELEASE
+  cargo:rerun-if-env-changed=PGRX_PG_SYS_GENERATE_BINDINGS_FOR_RELEASE
+  cargo:rerun-if-env-changed=PGRX_TARGET_INFO_PATH_PG18_aarch64-apple-darwin
+  cargo:rerun-if-env-changed=PGRX_TARGET_INFO_PATH_PG18
+  cargo:rerun-if-env-changed=PGRX_INCLUDEDIR_SERVER_PG18_aarch64-apple-darwin
+  cargo:rerun-if-env-changed=PGRX_INCLUDEDIR_SERVER_PG18
+  cargo:rerun-if-env-changed=PGRX_INCLUDEDIR_SERVER_aarch64-apple-darwin
+  cargo:rerun-if-env-changed=PGRX_INCLUDEDIR_SERVER
+  cargo:rerun-if-env-changed=PGRX_BINDGEN_NO_DETECT_INCLUDES_aarch64-apple-darwin
+  cargo:rerun-if-env-changed=PGRX_BINDGEN_NO_DETECT_INCLUDES
+  cargo:warning=postgres v18 was compiled against an SDK Root which does not seem to exist on this machine (/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk). You may need to re-run `cargo pgrx init` and/or update your command line tools.
+  cargo:rerun-if-env-changed=PGRX_PG_SYS_EXTRA_OUTPUT_PATH
+  cargo:rustc-link-search=/Users/contra/Projects/pg_accel/.codex/scratch/hash-implied-filter-20261012/postgres/18.4/lib
+  cargo:rerun-if-env-changed=CC_aarch64-apple-darwin
+  CC_aarch64-apple-darwin = None
+  cargo:rerun-if-env-changed=CC_aarch64_apple_darwin
+  CC_aarch64_apple_darwin = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET
+  MACOSX_DEPLOYMENT_TARGET = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_apple_darwin
+  CFLAGS_aarch64_apple_darwin = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-apple-darwin
+  CFLAGS_aarch64-apple-darwin = None
+  cargo:rerun-if-env-changed=PGRX_INCLUDEDIR_SERVER_PG18_aarch64-apple-darwin
+  cargo:rerun-if-env-changed=PGRX_INCLUDEDIR_SERVER_PG18
+  cargo:rerun-if-env-changed=PGRX_INCLUDEDIR_SERVER_aarch64-apple-darwin
+  cargo:rerun-if-env-changed=PGRX_INCLUDEDIR_SERVER
+  cargo:warning=postgres v18 was compiled against an SDK Root which does not seem to exist on this machine (/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk). You may need to re-run `cargo pgrx init` and/or update your command line tools.
+  cargo:rerun-if-env-changed=CC_FORCE_DISABLE
+  CC_FORCE_DISABLE = None
+  cargo:rerun-if-env-changed=CC_aarch64-apple-darwin
+  CC_aarch64-apple-darwin = None
+  cargo:rerun-if-env-changed=CC_aarch64_apple_darwin
+  CC_aarch64_apple_darwin = None
+  cargo:rerun-if-env-changed=HOST_CC
+  HOST_CC = None
+  cargo:rerun-if-env-changed=CC
+  CC = None
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CFLAGS
+  HOST_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64_apple_darwin
+  CFLAGS_aarch64_apple_darwin = None
+  cargo:rerun-if-env-changed=CFLAGS_aarch64-apple-darwin
+  CFLAGS_aarch64-apple-darwin = None
+  cargo:warning=clang: warning: no such sysroot directory: '/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk' [-Wmissing-sysroot]
+  cargo:warning=In file included from /Users/contra/Projects/pg_accel/target/debug/build/pgrx-pg-sys-1623d6de9b27d943/out/pgrx-cshim.c:15:
+  cargo:warning=In file included from /Users/contra/Projects/pg_accel/target/debug/build/pgrx-pg-sys-1623d6de9b27d943/out/pgrx-cshim-static-pg18.c:1:
+  cargo:warning=In file included from /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-pg-sys-0.19.1/include/pg18.h:12:
+  cargo:warning=In file included from /Users/contra/Projects/pg_accel/.codex/scratch/hash-implied-filter-20261012/postgres/18.4/include/server/postgres.h:48:
+  cargo:warning=In file included from /Users/contra/Projects/pg_accel/.codex/scratch/hash-implied-filter-20261012/postgres/18.4/include/server/c.h:62:
+  cargo:warning=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/include/inttypes.h:24:15: fatal error: 'inttypes.h' file not found
+  cargo:warning=   24 | #include_next <inttypes.h>
+  cargo:warning=      |               ^~~~~~~~~~~~
+  cargo:warning=1 error generated.
+
+  --- stderr
+  build_paths=BuildPaths { manifest_dir: "/Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-pg-sys-0.19.1", out_dir: "/Users/contra/Projects/pg_accel/target/debug/build/pgrx-pg-sys-1623d6de9b27d943/out", src_dir: "/Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-pg-sys-0.19.1/src/include", shim_src: "/Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-pg-sys-0.19.1/pgrx-cshim.c", shim_dst: "/Users/contra/Projects/pg_accel/target/debug/build/pgrx-pg-sys-1623d6de9b27d943/out/pgrx-cshim.c" }
+  Generating bindings for pg18
+  pg_config --configure CLANG = None
+  pg_target_includes = ["/Users/contra/Projects/pg_accel/.codex/scratch/hash-implied-filter-20261012/postgres/18.4/include/server/"]
+  Bindgen found Apple clang version 21.0.0 (clang-2100.3.34.2)
+  found libclang at /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/libclang.dylib
+  Found include dirs ["/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/include"]
+  [[bindings_diff]] cd "." && env -u DEBUG -u DYLD_FALLBACK_LIBRARY_PATH -u MAKEFLAGS -u MAKELEVEL -u MFLAGS -u NUM_JOBS -u OPT_LEVEL -u OUT_DIR -u PROFILE "rustfmt" "/Users/contra/Projects/pg_accel/target/debug/build/pgrx-pg-sys-1623d6de9b27d943/out/pg18.rs" "--edition" "2021"
+  [[bindings_diff]] -------- cd "." && env -u DEBUG -u DYLD_FALLBACK_LIBRARY_PATH -u MAKEFLAGS -u MAKELEVEL -u MFLAGS -u NUM_JOBS -u OPT_LEVEL -u OUT_DIR -u PROFILE "rustfmt" "/Users/contra/Projects/pg_accel/target/debug/build/pgrx-pg-sys-1623d6de9b27d943/out/pg18.rs" "--edition" "2021" -------- 
+  [[bindings_diff]] /----------------------------------------
+
+  [[bindings_diff]] cd "." && env -u DEBUG -u DYLD_FALLBACK_LIBRARY_PATH -u MAKEFLAGS -u MAKELEVEL -u MFLAGS -u NUM_JOBS -u OPT_LEVEL -u OUT_DIR -u PROFILE "rustfmt" "/Users/contra/Projects/pg_accel/target/debug/build/pgrx-pg-sys-1623d6de9b27d943/out/pg18_oids.rs" "--edition" "2021"
+  [[bindings_diff]] -------- cd "." && env -u DEBUG -u DYLD_FALLBACK_LIBRARY_PATH -u MAKEFLAGS -u MAKELEVEL -u MFLAGS -u NUM_JOBS -u OPT_LEVEL -u OUT_DIR -u PROFILE "rustfmt" "/Users/contra/Projects/pg_accel/target/debug/build/pgrx-pg-sys-1623d6de9b27d943/out/pg18_oids.rs" "--edition" "2021" -------- 
+  [[bindings_diff]] /----------------------------------------
+
+
+
+  error occurred in cc-rs: command did not execute successfully (status code exit status: 1): env -u IPHONEOS_DEPLOYMENT_TARGET LC_ALL="C" "cc" "-O0" "-ffunction-sections" "-fdata-sections" "-fPIC" "-g" "-gdwarf-2" "-fno-omit-frame-pointer" "--target=arm64-apple-macosx" "-mmacosx-version-min=27.0" "-Wall" "-Wextra" "-ffunction-sections" "-fdata-sections" "-I/Users/contra/Projects/pg_accel/.codex/scratch/hash-implied-filter-20261012/postgres/18.4/include/server/" "-isysroot" "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk" "-DPGRX_CSHIM_STATIC=\"pgrx-cshim-static-pg18.c\"" "-o" "/Users/contra/Projects/pg_accel/target/debug/build/pgrx-pg-sys-1623d6de9b27d943/out/ac6000bcc5e68da8-pgrx-cshim.o" "-c" "/Users/contra/Projects/pg_accel/target/debug/build/pgrx-pg-sys-1623d6de9b27d943/out/pgrx-cshim.c"
+
+

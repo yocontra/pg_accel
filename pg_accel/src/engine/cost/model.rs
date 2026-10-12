@@ -70,6 +70,8 @@ impl From<&DeviceLimits> for HardwareCaps {
 pub struct MemoryModel {
     /// Maximum groups admitted for GPU hash aggregation.
     pub gpu_hash_agg_max_groups: Rows,
+    /// Capacity bound for compact H3 parent COUNT, including scratch/output.
+    pub gpu_h3_max_groups: Rows,
     /// Maximum dimension rows per dimension for PreAgg.
     pub gpu_preagg_max_dim_rows: Rows,
     /// Maximum state bytes per group for hash aggregation.
@@ -82,6 +84,7 @@ impl From<&DeviceLimits> for MemoryModel {
     fn from(limits: &DeviceLimits) -> Self {
         Self {
             gpu_hash_agg_max_groups: Rows::new(limits.gpu_hash_agg_max_groups),
+            gpu_h3_max_groups: Rows::new(limits.gpu_h3_max_groups),
             gpu_preagg_max_dim_rows: Rows::new(limits.gpu_preagg_max_dim_rows),
             hashagg_max_state_bytes_per_group: Bytes::new(limits.hashagg_max_state_bytes_per_group),
             gpu_spatial_max_vertices_per_row: Rows::new(limits.gpu_spatial_max_vertices_per_row),

@@ -1,0 +1,106 @@
+=== 128_scalar_program_aggregates ===
+SET
+SET
+SELECT 250017
+ANALYZE
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=(a+1)*(b-2) keys= restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=(a+1)*(b-2) keys= restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=(a+1)*(b-2) keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=(a+1)*(b-2) keys=g restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=(a+1)*(b-2) keys=g restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=(a+1)*(b-2) keys=g restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=(a+1)*(b-2) keys=g,flag restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=(a+1)*(b-2) keys=g,flag restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=(a+1)*(b-2) keys=g,flag restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=(a+1)*(b-2) keys=g,flag,p restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=(a+1)*(b-2) keys=g,flag,p restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=(a+1)*(b-2) keys=g,flag,p restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=COALESCE(a,b,0) keys= restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=COALESCE(a,b,0) keys= restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=COALESCE(a,b,0) keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=COALESCE(a,b,0) keys=g restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=COALESCE(a,b,0) keys=g restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=COALESCE(a,b,0) keys=g restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=COALESCE(a,b,0) keys=g,flag restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=COALESCE(a,b,0) keys=g,flag restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=COALESCE(a,b,0) keys=g,flag restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=COALESCE(a,b,0) keys=g,flag,p restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=COALESCE(a,b,0) keys=g,flag,p restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=COALESCE(a,b,0) keys=g,flag,p restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=-COALESCE(a,0) keys= restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=-COALESCE(a,0) keys= restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=-COALESCE(a,0) keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=-COALESCE(a,0) keys=g restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=-COALESCE(a,0) keys=g restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=-COALESCE(a,0) keys=g restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=-COALESCE(a,0) keys=g,flag restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=-COALESCE(a,0) keys=g,flag restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=-COALESCE(a,0) keys=g,flag restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=-COALESCE(a,0) keys=g,flag,p restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=-COALESCE(a,0) keys=g,flag,p restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=-COALESCE(a,0) keys=g,flag,p restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b IS NULL THEN a WHEN a>0 THEN (a+b)*(a-b) ELSE COALESCE(a,0)-b END keys= restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b IS NULL THEN a WHEN a>0 THEN (a+b)*(a-b) ELSE COALESCE(a,0)-b END keys= restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b IS NULL THEN a WHEN a>0 THEN (a+b)*(a-b) ELSE COALESCE(a,0)-b END keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b IS NULL THEN a WHEN a>0 THEN (a+b)*(a-b) ELSE COALESCE(a,0)-b END keys=g restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b IS NULL THEN a WHEN a>0 THEN (a+b)*(a-b) ELSE COALESCE(a,0)-b END keys=g restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b IS NULL THEN a WHEN a>0 THEN (a+b)*(a-b) ELSE COALESCE(a,0)-b END keys=g restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b IS NULL THEN a WHEN a>0 THEN (a+b)*(a-b) ELSE COALESCE(a,0)-b END keys=g,flag restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b IS NULL THEN a WHEN a>0 THEN (a+b)*(a-b) ELSE COALESCE(a,0)-b END keys=g,flag restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b IS NULL THEN a WHEN a>0 THEN (a+b)*(a-b) ELSE COALESCE(a,0)-b END keys=g,flag restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b IS NULL THEN a WHEN a>0 THEN (a+b)*(a-b) ELSE COALESCE(a,0)-b END keys=g,flag,p restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b IS NULL THEN a WHEN a>0 THEN (a+b)*(a-b) ELSE COALESCE(a,0)-b END keys=g,flag,p restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b IS NULL THEN a WHEN a>0 THEN (a+b)*(a-b) ELSE COALESCE(a,0)-b END keys=g,flag,p restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a/b END keys= restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a/b END keys= restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a/b END keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a/b END keys=g restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a/b END keys=g restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a/b END keys=g restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a/b END keys=g,flag restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a/b END keys=g,flag restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a/b END keys=g,flag restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a/b END keys=g,flag,p restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a/b END keys=g,flag,p restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a/b END keys=g,flag,p restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a%b END keys= restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a%b END keys= restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a%b END keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a%b END keys=g restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a%b END keys=g restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a%b END keys=g restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a%b END keys=g,flag restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a%b END keys=g,flag restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a%b END keys=g,flag restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a%b END keys=g,flag,p restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a%b END keys=g,flag,p restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a%b END keys=g,flag,p restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=1 keys= restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=1 keys= restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=1 keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=1 keys=g restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=1 keys=g restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=1 keys=g restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=1 keys=g,flag restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=1 keys=g,flag restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=1 keys=g,flag restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=1 keys=g,flag,p restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=1 keys=g,flag,p restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=1 keys=g,flag,p restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=NULL::int4 keys= restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=NULL::int4 keys= restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=NULL::int4 keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=NULL::int4 keys=g restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=NULL::int4 keys=g restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=NULL::int4 keys=g restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=NULL::int4 keys=g,flag restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=NULL::int4 keys=g,flag restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=NULL::int4 keys=g,flag restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=NULL::int4 keys=g,flag,p restriction=
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=NULL::int4 keys=g,flag,p restriction= WHERE p
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 selected expression=NULL::int4 keys=g,flag,p restriction= WHERE flag=2 OR flag IS NULL
+psql:sql/tests/128_scalar_program_aggregates.sql:61: NOTICE:  128 scalar matrix selected 96 query shapes (72 grouped)
+DO
+PGACCEL_ASSERT_OK:128_scalar_program_aggregates.assert_001
+psql:sql/tests/128_scalar_program_aggregates.sql:113: ERROR:  128 wrong count-state sharing: /*separate_count*/ SELECT count(*) FILTER (WHERE flag=1) n,sum(COALESCE(a,b,0)) FILTER (WHERE flag=0) s FROM _scalar_program / Custom Scan (GpuAccelAgg) (actual rows=1.00 loops=1)  Strategy: GpuAgg  Plan Selected: true  Batch Size: 65536  Expected Threads: 1  GPU Resident Pipeline: true  GPU Resident Proof Version: 2  GPU Resident Operator Class: resident_groupagg  GPU Physical Kernel Mode: parallel_dense_integer  GPU Dispatched Physical Kernel Mode: parallel_dense_integer  GPU Physical Kernel Mode Verified: true  GPU Planned Lifecycle Calls: 1  GPU Lifecycle Calls Verified: true  GPU Descriptor Strategy: descriptor_ungrouped_aggregate  GPU Descriptor Specialization: dense_scalar_programs_plain  GPU Descriptor Specialization Cache: hit  GPU Descriptor Artifact Policy: cached_reusable reason=exact_cache_hit construction_bytes=84 ephemeral_bytes=84 construction_time_us=1 expected_reuses=8 cache_hit=true invalidation_risk_ppm=50000 cached_build_launches=0 ephemeral_build_launches=0 consumer_launches=1 budget_headroom_bytes=8427352312  GPU Descriptor Group Keys: none  GPU Descriptor Aggregates: m0:bytecode(inputs=2, words=15, result_type=23) -> value.sum; m1:column(2396272.6:type=23) -> value.count  GPU Descriptor Filter: fact=none; measures=[m0=ranges(input=2396272.6:type=23, count=1); m1=ranges(input=2396272.6:type=23, count=1)]; dimensions=[none]  GPU Descriptor Star Dimensions: none  GPU Descriptor Output: slot0:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot1:aggregate[m1].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)  GPU Descriptor Artifact: hit  GPU Descriptor Generations: rel=2396272 generation=1 global=1 relfilenode=2396272  GPU Descriptor Bytes: raw=6250425 derived=156020652 artifact=0 total=162271077  GPU Resident Stage Mask: 16395  GPU Resident Device Columns: 3  GPU Resident Boundary: none: no CPU boundary  GPU Kernel Dispatched: true  Rows Returned To CPU: 0  Rows Dispatched: 250017  Batches: 1  Rows Per Batch: 250017.000  Dispatch Time: 2.340 ms  Avg Dispatch Time Per Batch: 2.340 ms  Counter Scope: Local Backend  GPU Dispatched: true  Raw Relation Load Time: 0.000 ms  Total Residency Preparation Time: 0.003 msPlanning:  Buffers: shared hit=98Planning Time: 0.401 msExecution Time: 2.386 ms
+CONTEXT:  PL/pgSQL function inline_code_block line 40 at RAISE

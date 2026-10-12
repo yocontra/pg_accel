@@ -1,0 +1,4 @@
+source: /Users/contra/.pgrx/data-18/pg_accel_otel.jsonl
+tail_bytes: 65536
+---
+

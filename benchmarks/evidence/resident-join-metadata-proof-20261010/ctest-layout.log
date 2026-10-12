@@ -1,0 +1,10 @@
+Test project /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+    Start 2: test_join_rows_layout
+1/1 Test #2: test_join_rows_layout ............   Passed    0.27 sec
+
+100% tests passed out of 1
+
+Label Time Summary:
+host    =   0.27 sec*proc (1 test)
+
+Total Test time (real) =   0.27 sec

@@ -1109,6 +1109,19 @@ fn system_workload_gate_workloads()
             .into());
         }
     }
+    let tpch_names = selected
+        .iter()
+        .filter(|workload| workload.category() == "tpch")
+        .map(|workload| workload.name().to_owned())
+        .collect::<BTreeSet<_>>();
+    let expected_tpch_names = (1..=22)
+        .map(|number| format!("tpch_q{number}"))
+        .collect::<BTreeSet<_>>();
+    if tpch_names != expected_tpch_names {
+        return Err(
+            "system workload gate requires the complete 22-query TPC-H-derived corpus".into(),
+        );
+    }
     Ok(selected)
 }
 
@@ -1907,6 +1920,7 @@ fn enforce_weighted_count_ship_gate_complete(
             || result.physical_kernel_mode_counts.parallel_dense_count == 0
             || result.physical_kernel_mode_counts.parallel_hash != 0
             || result.physical_kernel_mode_counts.parallel_dense_integer != 0
+            || result.physical_kernel_mode_counts.parallel_dense_numeric != 0
             || result.physical_kernel_mode_counts.serial_generic != 0
         {
             gaps.push(format!(
@@ -2167,7 +2181,9 @@ fn cmd_run(
         cache_mode: runner::CacheMode::from(cache_mode),
         capture_planner_stages,
         native_parity_pairing,
-        headline_speedup_allowed: true,
+        headline_speedup_allowed: !workloads
+            .iter()
+            .any(|w| w.external_fixture_manifest().is_some()),
         plans_capture_path: if capture_plans {
             Some(run_artifacts.join("plans.txt"))
         } else {
@@ -2530,6 +2546,8 @@ fn resolve_workloads(
             if wls.is_empty() {
                 return Err(format!("no workloads match category filter: {cats}").into());
             }
+        } else {
+            wls.retain(|w| w.external_fixture_manifest().is_none());
         }
         Ok(wls)
     }
@@ -3629,7 +3647,7 @@ mod tests {
                 contract.verification_rows.len()
             })
             .sum::<usize>();
-        assert_eq!(cell_count, 40);
+        assert_eq!(cell_count, 53);
     }
 
     #[test]
@@ -3821,7 +3839,20 @@ mod tests {
         }));
 
         let all = resolve_workloads(None, None).expect("unfiltered registry should resolve");
-        assert_eq!(all.len(), workloads::all_workloads().len());
+        assert_eq!(
+            all.len(),
+            workloads::all_workloads()
+                .iter()
+                .filter(|w| w.external_fixture_manifest().is_none())
+                .count()
+        );
+        let corpus = resolve_workloads(None, Some("nyc_taxi")).expect("explicit corpus category");
+        assert_eq!(corpus.len(), 17);
+        assert!(
+            corpus
+                .iter()
+                .all(|w| w.external_fixture_manifest().is_some())
+        );
 
         let unknown = resolve_workloads(Some("not_a_real_workload"), None)
             .err()

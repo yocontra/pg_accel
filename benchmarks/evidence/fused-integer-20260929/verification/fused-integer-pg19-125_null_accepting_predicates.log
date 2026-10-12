@@ -1,0 +1,30 @@
+=== 125_null_accepting_predicates ===
+SET
+SET
+SELECT 1000017
+ANALYZE
+DO
+PGACCEL_ASSERT_OK:125_null_accepting_predicates.assert_001
+SET
+PREPARE
+PREPARE
+DO
+PGACCEL_ASSERT_OK:125_null_accepting_predicates.assert_002
+DEALLOCATE
+DEALLOCATE
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ f
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:125_null_accepting_predicates

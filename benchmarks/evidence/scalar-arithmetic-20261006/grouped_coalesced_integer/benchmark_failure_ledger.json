@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "total_measured_rows": 3,
+  "ship_gate_failure_count": 0,
+  "h3_lane_gate_failure_count": 0,
+  "crash_count": 0,
+  "rows_below_parity_count": 0,
+  "gpu_dispatched_below_parity_count": 0,
+  "native_below_parity_count": 0,
+  "planner_declined_below_parity_count": 0,
+  "stock_fallback_rows": 0,
+  "custom_scan_selected_not_dispatched_rows": 0,
+  "unique_work_items": 0,
+  "rows": []
+}

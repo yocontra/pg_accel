@@ -1,0 +1,73 @@
+    Blocking waiting for file lock on build directory
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error: pub(crate) struct inside private module
+  --> pg_accel/src/engine/executor/join.rs:28:1
+   |
+28 | pub(crate) struct ResidentJoinInputs {
+   | ----------^^^^^^^^^^^^^^^^^^^^^^^^^^
+   | |
+   | help: consider using: `pub`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_pub_crate
+   = note: `-D clippy::redundant-pub-crate` implied by `-D clippy::nursery`
+   = help: to override `-D clippy::nursery` add `#[allow(clippy::redundant_pub_crate)]`
+
+error: pub(crate) struct inside private module
+  --> pg_accel/src/engine/executor/join.rs:94:1
+   |
+94 | pub(crate) struct BoundJoinInputs<'a> {
+   | ----------^^^^^^^^^^^^^^^^^^^^^^^
+   | |
+   | help: consider using: `pub`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_pub_crate
+
+error: large size difference between variants
+   --> pg_accel/src/engine/executor/join.rs:139:1
+    |
+139 | /   pub(crate) enum JoinStageOutcome {
+140 | | /     Complete {
+141 | | |         columns: ResidentJoinProjection,
+142 | | |         kernel_launches: u64,
+143 | | |     },
+    | | |_____- the largest variant contains at least 688 bytes
+144 | | /     NeedsCapacity {
+145 | | |         required_rows: u64,
+146 | | |         kernel_launches: u64,
+147 | | |     },
+    | | |_____- the second-largest variant contains at least 16 bytes
+148 | |   }
+    | |___^ the entire enum is at least 688 bytes
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#large_enum_variant
+    = note: `-D clippy::large-enum-variant` implied by `-D clippy::all`
+    = help: to override `-D clippy::all` add `#[allow(clippy::large_enum_variant)]`
+help: consider boxing the large fields or introducing indirection in some other way to reduce the total size of the enum
+    |
+141 -         columns: ResidentJoinProjection,
+141 +         columns: Box<ResidentJoinProjection>,
+    |
+
+error: pub(crate) enum inside private module
+   --> pg_accel/src/engine/executor/join.rs:139:1
+    |
+139 | pub(crate) enum JoinStageOutcome {
+    | ----------^^^^^^^^^^^^^^^^^^^^^^
+    | |
+    | help: consider using: `pub`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_pub_crate
+
+error: pub(crate) function inside private module
+    --> pg_accel/src/engine/residency/store.rs:2513:1
+     |
+2513 | pub(crate) fn with_resident_dispatch_inputs<R>(
+     | ----------^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     | |
+     | help: consider using: `pub`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_pub_crate
+
+error: could not compile `pg_accel` (lib) due to 5 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `pg_accel` (lib test) due to 5 previous errors

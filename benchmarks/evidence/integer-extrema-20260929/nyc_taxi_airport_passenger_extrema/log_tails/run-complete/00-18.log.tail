@@ -1,0 +1,359 @@
+source: /Users/contra/.pgrx/18.log
+tail_bytes: 65536
+---
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.9638110518477108610.metalar.31483.16754826687363183621.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/3523093248116128384.14831025715812508888.metalar.31483.4539673229010149032.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14640837531610470134.10263411340970429576.metalar.31483.7222585499117874505.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/7819755321666386692.14831025715812508888.metalar.31483.11646755578670670130.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/2574708908066720270.15523084153171782447.metalar.31483.5260388800485303357.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.1113939646638042190.metalar.31717.13920705689169666434.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16555657627412307434.14831025715812508888.metalar.31717.689272386857823765.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.5569726248696748930.metalar.31717.7512777702257549214.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.17273946843885561118.metalar.31717.9860874308748726741.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/13810581291822887598.14831025715812508888.metalar.31717.16121707799657170449.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.14620244100898435751.metalar.31717.6981698464920541386.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.11488452399907758451.metalar.31717.8634012407314924519.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/2457796378833377408.14831025715812508888.metalar.32021.12686162094673648987.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/17931957249611448910.2619448036889421553.metalar.32073.8656855741028520090.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12987165404132410296.2907817979138464646.metalar.32073.10643973098012669798.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/3160902903123664528.15274058393261019967.metalar.32073.15651898216192164415.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6518678064586571790.2139584896796596985.metalar.32073.6942615402717837362.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.8230801054212513942.metalar.32073.9593291584936698996.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.18189808119524707159.metalar.32073.12204508497395125332.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/9877590589045929008.15523084153171782447.metalar.32073.17813310397061391281.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/11685831682742932446.4215049748981696265.metalar.32394.14764378164204140688.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14286325069952665006.1815855517054256413.metalar.32394.15111450172079331317.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12970380103121138026.14831025715812508888.metalar.32499.15464102990189464889.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14335368489825160388.10263411340970429576.metalar.32555.9255128241419699663.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.10026437890492888661.metalar.32555.12332751625258468217.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10244442864516165838.16420782046507633214.metalar.32675.5235128371990455020.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.13278966321154085757.metalar.32905.10389324688274395377.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/5436284986568462560.15523084153171782447.metalar.32970.16569491473531656555.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10900195627355951314.14831025715812508888.metalar.32970.9064028268923213723.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15645957498266366212.10289792691675469317.metalar.32970.664025851734201320.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/9620746525974980842.14831025715812508888.metalar.32970.3226544193185073070.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.18368756262761339564.metalar.32970.2954542417170849782.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/17815961567180993092.14831025715812508888.metalar.32970.3402770555945476609.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.1885411426837519591.metalar.32970.5116760278230519579.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/9636036650450711250.14831025715812508888.metalar.32970.8280487665380544674.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.10289792691675469317.metalar.32970.5352063934288483756.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15589476389351072860.11923968863309753311.metalar.34919.17603851361204212990.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15389087124731617784.17880841180286198069.metalar.34919.10080371324356516472.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15386323514753433198.11923968863309753311.metalar.34919.8674990272187463650.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6354719079703378536.11923968863309753311.metalar.35074.10505374366771469898.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10244442864516165838.16868160637556456420.metalar.35074.14250558874879660410.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15389087124731617784.12300904388162013569.metalar.35074.10692791786956814209.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/5056334624264330138.1815855517054256413.metalar.35074.5790856001089632663.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10389901486272287036.6223687454605563174.metalar.35074.9130515019447575890.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4420839391651046406.15325014652681907670.metalar.35074.10063573205063898076.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.15489377743107688053.metalar.35074.17754495499513831449.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.896909138426396503.metalar.35074.3438037069186436929.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/13998301624069339470.14831025715812508888.metalar.35074.15321829626660612653.tmp (kernels_added=1 skipped=0)
+2026-09-29 16:21:36.945 PDT [17122] LOG:  checkpoint starting: time
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/11587074641377135398.11923968863309753311.metalar.35582.17551296651454124134.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/3789050777654801272.11923968863309753311.metalar.35582.13626456681734514530.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/17655480011007121532.2619448036889421553.metalar.35582.15440963490739348583.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16305509567563257642.680776883111048779.metalar.35582.2280398677479381973.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16305509567563257642.14028630796356318717.metalar.35582.10601844808150181028.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/9245433528323173684.2619448036889421553.metalar.35582.6451981118524971584.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/1447493498570855786.2619448036889421553.metalar.35582.3978271066815918262.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/8697455164100254842.2619448036889421553.metalar.35582.1655444561109414178.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12585446269449508572.7725901140474296010.metalar.35582.4820054336989034686.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16305509567563257642.6621012700949634815.metalar.35582.16694650592284275911.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16305509567563257642.16089797408776522027.metalar.35582.8022165725632021438.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15754782506404105962.14831025715812508888.metalar.35582.1387193390826530621.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/2993083400042206172.14831025715812508888.metalar.35582.4631263310087687138.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/3145246316047114048.14831025715812508888.metalar.35582.14890811652043579168.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.10596747785524396427.metalar.35582.3695750401836478873.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.12926010023345201897.metalar.35582.1102143797532628285.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10244442864516165838.17960353141949919966.metalar.36339.4317469871613709840.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10389901486272287036.5005393093737339932.metalar.36339.9879981562222598491.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.16319587327434732669.metalar.36339.9786907699064001483.tmp (kernels_added=1 skipped=0)
+2026-09-29 16:22:57.102 PDT [17122] LOG:  checkpoint complete: wrote 790 buffers (0.0%), wrote 2 SLRU buffers; 0 WAL file(s) added, 1 removed, 0 recycled; write=80.148 s, sync=0.002 s, total=80.158 s; sync files=73, longest=0.001 s, average=0.001 s; distance=17437 kB, estimate=17437 kB; lsn=53C/F2CE98C0, redo lsn=53C/F2296B88
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.16321009904991765069.metalar.37004.3918166286982756406.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10244442864516165838.1581906865334390956.metalar.37004.2586304047422492773.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.11056742216561296649.metalar.37004.5838647188088415041.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.2946731671106242995.metalar.37218.17953541688311940218.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.3684563074472755045.metalar.37218.4846824031375982844.tmp (kernels_added=1 skipped=0)
+2026-09-29 16:24:41.251 PDT [17122] LOG:  checkpoint starting: immediate force wait
+2026-09-29 16:24:41.339 PDT [17122] LOG:  checkpoint complete: wrote 10546 buffers (0.5%), wrote 3 SLRU buffers; 0 WAL file(s) added, 8 removed, 0 recycled; write=0.047 s, sync=0.015 s, total=0.088 s; sync files=137, longest=0.002 s, average=0.001 s; distance=128542 kB, estimate=128542 kB; lsn=53C/FA01E430, redo lsn=53C/FA01E3D8
+2026-09-29 16:24:48.658 PDT [17122] LOG:  checkpoints are occurring too frequently (7 seconds apart)
+2026-09-29 16:24:48.658 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:24:48.659 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:24:52.818 PDT [17122] LOG:  checkpoint complete: wrote 34 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=3.982 s, sync=0.174 s, total=4.160 s; sync files=27, longest=0.173 s, average=0.007 s; distance=545936 kB, estimate=545936 kB; lsn=53D/39ABD750, redo lsn=53D/1B542760
+2026-09-29 16:24:53.281 PDT [17122] LOG:  checkpoints are occurring too frequently (5 seconds apart)
+2026-09-29 16:24:53.281 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:24:53.281 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:24:59.001 PDT [17122] LOG:  checkpoint complete: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=5.709 s, sync=0.001 s, total=5.720 s; sync files=1, longest=0.001 s, average=0.001 s; distance=545518 kB, estimate=545895 kB; lsn=53D/5A986258, redo lsn=53D/3C9FE0C0
+2026-09-29 16:24:59.198 PDT [17122] LOG:  checkpoints are occurring too frequently (6 seconds apart)
+2026-09-29 16:24:59.198 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:24:59.199 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:25:02.649 PDT [17122] LOG:  checkpoint complete: wrote 42695 buffers (2.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=3.436 s, sync=0.006 s, total=3.451 s; sync files=11, longest=0.006 s, average=0.001 s; distance=532619 kB, estimate=544567 kB; lsn=53D/7B00B370, redo lsn=53D/5D220D78
+2026-09-29 16:25:02.850 PDT [17122] LOG:  checkpoints are occurring too frequently (3 seconds apart)
+2026-09-29 16:25:02.850 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:25:02.850 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:25:04.769 PDT [17122] LOG:  checkpoint complete: wrote 68172 buffers (3.3%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=1.909 s, sync=0.002 s, total=1.919 s; sync files=3, longest=0.001 s, average=0.001 s; distance=547838 kB, estimate=547838 kB; lsn=53D/9CC72958, redo lsn=53D/7E920790
+2026-09-29 16:25:04.905 PDT [17122] LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-09-29 16:25:04.905 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:25:04.905 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:25:06.402 PDT [17122] LOG:  checkpoint complete: wrote 67871 buffers (3.2%), wrote 1 SLRU buffers; 0 WAL file(s) added, 1 removed, 33 recycled; write=1.470 s, sync=0.023 s, total=1.497 s; sync files=11, longest=0.022 s, average=0.003 s; distance=547712 kB, estimate=547825 kB; lsn=53D/BE573138, redo lsn=53D/A0000828
+2026-09-29 16:25:23.859 PDT [17122] LOG:  checkpoint starting: immediate force wait
+2026-09-29 16:25:24.068 PDT [17122] LOG:  checkpoint complete: wrote 51606 buffers (2.5%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 30 recycled; write=0.202 s, sync=0.004 s, total=0.209 s; sync files=40, longest=0.001 s, average=0.001 s; distance=498757 kB, estimate=542919 kB; lsn=53D/BE711D60, redo lsn=53D/BE711D08
+2026-09-29 16:25:43.853 PDT [17122] LOG:  checkpoint starting: immediate force wait
+2026-09-29 16:25:43.897 PDT [17122] LOG:  checkpoint complete: wrote 10388 buffers (0.5%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 7 recycled; write=0.040 s, sync=0.004 s, total=0.045 s; sync files=38, longest=0.002 s, average=0.001 s; distance=110716 kB, estimate=499698 kB; lsn=53D/C5330D68, redo lsn=53D/C5330D10
+2026-09-29 16:25:51.193 PDT [17122] LOG:  checkpoints are occurring too frequently (8 seconds apart)
+2026-09-29 16:25:51.193 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:25:51.193 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:25:55.803 PDT [17122] LOG:  checkpoint complete: wrote 37 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=4.588 s, sync=0.015 s, total=4.610 s; sync files=27, longest=0.015 s, average=0.001 s; distance=542804 kB, estimate=542804 kB; lsn=53E/46AEE18, redo lsn=53D/E6545EF0
+2026-09-29 16:25:56.084 PDT [17122] LOG:  checkpoints are occurring too frequently (5 seconds apart)
+2026-09-29 16:25:56.084 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:25:56.084 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:25:58.645 PDT [17122] LOG:  checkpoint complete: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=2.551 s, sync=0.001 s, total=2.562 s; sync files=2, longest=0.001 s, average=0.001 s; distance=540605 kB, estimate=542584 kB; lsn=53E/25F3D3E8, redo lsn=53E/7535510
+2026-09-29 16:25:58.787 PDT [17122] LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-09-29 16:25:58.787 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:25:58.787 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:26:00.583 PDT [17122] LOG:  checkpoint complete: wrote 32224 buffers (1.5%), wrote 1 SLRU buffers; 0 WAL file(s) added, 2 removed, 32 recycled; write=1.734 s, sync=0.005 s, total=1.796 s; sync files=12, longest=0.004 s, average=0.001 s; distance=551723 kB, estimate=551723 kB; lsn=53E/485D58F8, redo lsn=53E/29000260
+2026-09-29 16:26:00.699 PDT [17122] LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-09-29 16:26:00.699 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:26:00.699 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:26:02.664 PDT [17122] LOG:  checkpoint complete: wrote 70730 buffers (3.4%), wrote 0 SLRU buffers; 0 WAL file(s) added, 2 removed, 32 recycled; write=1.852 s, sync=0.001 s, total=1.966 s; sync files=3, longest=0.001 s, average=0.001 s; distance=557059 kB, estimate=557059 kB; lsn=53E/6A06DD08, redo lsn=53E/4B001010
+2026-09-29 16:26:02.764 PDT [17122] LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-09-29 16:26:02.764 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:26:02.764 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:26:04.446 PDT [17122] LOG:  checkpoint complete: wrote 66793 buffers (3.2%), wrote 1 SLRU buffers; 0 WAL file(s) added, 2 removed, 32 recycled; write=1.573 s, sync=0.071 s, total=1.682 s; sync files=13, longest=0.070 s, average=0.006 s; distance=557052 kB, estimate=557058 kB; lsn=53E/8C4298E8, redo lsn=53E/6D000220
+2026-09-29 16:26:04.537 PDT [17122] LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-09-29 16:26:04.537 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:26:04.537 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:26:36.986 PDT [17122] LOG:  checkpoint complete: wrote 69010 buffers (3.3%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 34 recycled; write=32.443 s, sync=0.002 s, total=32.449 s; sync files=4, longest=0.002 s, average=0.001 s; distance=557061 kB, estimate=557061 kB; lsn=53E/9BFBDA40, redo lsn=53E/8F001878
+2026-09-29 16:26:36.986 PDT [17122] LOG:  checkpoint starting: immediate force wait
+2026-09-29 16:26:37.083 PDT [17122] LOG:  checkpoint complete: wrote 26331 buffers (1.3%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 12 recycled; write=0.093 s, sync=0.003 s, total=0.097 s; sync files=35, longest=0.001 s, average=0.001 s; distance=212720 kB, estimate=522627 kB; lsn=53E/9BFBDB10, redo lsn=53E/9BFBDAB8
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15717125445685190202.2139584896796596985.metalar.39426.17415263668000357237.tmp (kernels_added=1 skipped=0)
+2026-09-29 16:27:04.537 PDT [17122] LOG:  checkpoint starting: immediate force wait
+2026-09-29 16:27:04.582 PDT [17122] LOG:  checkpoint complete: wrote 9419 buffers (0.4%), wrote 1 SLRU buffers; 0 WAL file(s) added, 1 removed, 6 recycled; write=0.037 s, sync=0.003 s, total=0.046 s; sync files=38, longest=0.001 s, average=0.001 s; distance=102783 kB, estimate=480643 kB; lsn=53E/A241D8A0, redo lsn=53E/A241D848
+2026-09-29 16:27:11.783 PDT [17122] LOG:  checkpoints are occurring too frequently (7 seconds apart)
+2026-09-29 16:27:11.783 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:27:11.783 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:27:16.566 PDT [17122] LOG:  checkpoint complete: wrote 40 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 1 removed, 33 recycled; write=4.592 s, sync=0.180 s, total=4.784 s; sync files=27, longest=0.179 s, average=0.007 s; distance=552874 kB, estimate=552874 kB; lsn=53E/E2852D90, redo lsn=53E/C40083D8
+2026-09-29 16:27:16.824 PDT [17122] LOG:  checkpoints are occurring too frequently (5 seconds apart)
+2026-09-29 16:27:16.824 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:27:16.824 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:27:19.181 PDT [17122] LOG:  checkpoint complete: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=2.347 s, sync=0.001 s, total=2.358 s; sync files=1, longest=0.001 s, average=0.001 s; distance=545924 kB, estimate=552179 kB; lsn=53F/3EAC498, redo lsn=53E/E5529710
+2026-09-29 16:27:19.342 PDT [17122] LOG:  checkpoints are occurring too frequently (3 seconds apart)
+2026-09-29 16:27:19.342 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:27:19.342 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:27:21.159 PDT [17122] LOG:  checkpoint complete: wrote 46550 buffers (2.2%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 34 recycled; write=1.781 s, sync=0.005 s, total=1.817 s; sync files=11, longest=0.005 s, average=0.001 s; distance=551777 kB, estimate=552139 kB; lsn=53F/24D19348, redo lsn=53F/7001E00
+2026-09-29 16:27:21.359 PDT [17122] LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-09-29 16:27:21.359 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:27:21.359 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:27:23.141 PDT [17122] LOG:  checkpoint complete: wrote 69335 buffers (3.3%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=1.747 s, sync=0.002 s, total=1.783 s; sync files=3, longest=0.001 s, average=0.001 s; distance=555210 kB, estimate=555210 kB; lsn=53F/46EF4458, redo lsn=53F/28E347A0
+2026-09-29 16:27:23.267 PDT [17122] LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-09-29 16:27:23.267 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:27:23.268 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:27:42.163 PDT [17122] LOG:  checkpoint complete: wrote 66425 buffers (3.2%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 34 recycled; write=18.889 s, sync=0.001 s, total=18.896 s; sync files=13, longest=0.001 s, average=0.001 s; distance=542702 kB, estimate=553959 kB; lsn=53F/669A77F0, redo lsn=53F/4A030258
+2026-09-29 16:27:42.163 PDT [17122] LOG:  checkpoint starting: immediate force wait
+2026-09-29 16:27:42.334 PDT [17122] LOG:  checkpoint complete: wrote 52816 buffers (2.5%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 28 recycled; write=0.161 s, sync=0.008 s, total=0.171 s; sync files=33, longest=0.006 s, average=0.001 s; distance=468445 kB, estimate=545408 kB; lsn=53F/669A78C0, redo lsn=53F/669A7868
+2026-09-29 16:28:03.598 PDT [17122] LOG:  checkpoint starting: immediate force wait
+2026-09-29 16:28:03.643 PDT [17122] LOG:  checkpoint complete: wrote 11247 buffers (0.5%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 7 recycled; write=0.040 s, sync=0.004 s, total=0.045 s; sync files=37, longest=0.002 s, average=0.001 s; distance=113422 kB, estimate=502209 kB; lsn=53F/6D86B1C8, redo lsn=53F/6D86B170
+2026-09-29 16:28:09.244 PDT [17122] LOG:  checkpoints are occurring too frequently (6 seconds apart)
+2026-09-29 16:28:09.244 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:28:09.244 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:28:12.400 PDT [17122] LOG:  checkpoint complete: wrote 114 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 1 removed, 33 recycled; write=2.958 s, sync=0.183 s, total=3.156 s; sync files=31, longest=0.182 s, average=0.006 s; distance=548484 kB, estimate=548484 kB; lsn=53F/AD55FFC0, redo lsn=53F/8F00C190
+2026-09-29 16:28:12.666 PDT [17122] LOG:  checkpoints are occurring too frequently (3 seconds apart)
+2026-09-29 16:28:12.666 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:28:12.666 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:28:15.330 PDT [17122] LOG:  checkpoint complete: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=2.653 s, sync=0.001 s, total=2.664 s; sync files=2, longest=0.001 s, average=0.001 s; distance=544617 kB, estimate=548097 kB; lsn=53F/CEEE7848, redo lsn=53F/B03E65C8
+2026-09-29 16:28:15.461 PDT [17122] LOG:  checkpoints are occurring too frequently (3 seconds apart)
+2026-09-29 16:28:15.461 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:28:15.461 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:28:17.024 PDT [17122] LOG:  checkpoint complete: wrote 29411 buffers (1.4%), wrote 1 SLRU buffers; 0 WAL file(s) added, 1 removed, 33 recycled; write=1.520 s, sync=0.003 s, total=1.563 s; sync files=13, longest=0.002 s, average=0.001 s; distance=553066 kB, estimate=553066 kB; lsn=53F/F0396BC8, redo lsn=53F/D2000EA8
+2026-09-29 16:28:17.193 PDT [17122] LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-09-29 16:28:17.193 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:28:17.193 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:28:19.067 PDT [17122] LOG:  checkpoint complete: wrote 68829 buffers (3.3%), wrote 0 SLRU buffers; 0 WAL file(s) added, 2 removed, 32 recycled; write=1.839 s, sync=0.005 s, total=1.875 s; sync files=3, longest=0.003 s, average=0.002 s; distance=557055 kB, estimate=557055 kB; lsn=540/13001688, redo lsn=53F/F4000C10
+2026-09-29 16:28:19.175 PDT [17122] LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-09-29 16:28:19.175 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:28:19.175 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:28:20.824 PDT [17122] LOG:  checkpoint complete: wrote 68915 buffers (3.3%), wrote 1 SLRU buffers; 0 WAL file(s) added, 2 removed, 32 recycled; write=1.547 s, sync=0.073 s, total=1.649 s; sync files=15, longest=0.072 s, average=0.005 s; distance=557056 kB, estimate=557056 kB; lsn=540/350026F0, redo lsn=540/16000FC0
+2026-09-29 16:28:20.931 PDT [17122] LOG:  checkpoints are occurring too frequently (1 second apart)
+2026-09-29 16:28:20.931 PDT [17122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 16:28:20.931 PDT [17122] LOG:  checkpoint starting: wal
+2026-09-29 16:28:53.443 PDT [17122] LOG:  checkpoint complete: wrote 69213 buffers (3.3%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 34 recycled; write=32.500 s, sync=0.002 s, total=32.512 s; sync files=3, longest=0.002 s, average=0.001 s; distance=557057 kB, estimate=557057 kB; lsn=540/50E71738, redo lsn=540/38001518
+2026-09-29 16:28:53.443 PDT [17122] LOG:  checkpoint starting: immediate force wait
+2026-09-29 16:28:53.601 PDT [17122] LOG:  checkpoint complete: wrote 50679 buffers (2.4%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 24 recycled; write=0.153 s, sync=0.003 s, total=0.159 s; sync files=33, longest=0.001 s, average=0.001 s; distance=408000 kB, estimate=542151 kB; lsn=540/50E71808, redo lsn=540/50E717B0
+2026-09-29 16:33:53.586 PDT [17122] LOG:  checkpoint starting: time
+2026-09-29 16:33:54.923 PDT [17122] LOG:  checkpoint complete: wrote 13 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=1.334 s, sync=0.001 s, total=1.338 s; sync files=9, longest=0.001 s, average=0.001 s; distance=70 kB, estimate=487943 kB; lsn=540/50E83180, redo lsn=540/50E83128
+2026-09-29 16:41:43.015 PDT [17097] LOG:  received fast shutdown request
+2026-09-29 16:41:43.015 PDT [17097] LOG:  aborting any active transactions
+2026-09-29 16:41:43.018 PDT [17097] LOG:  background worker "logical replication launcher" (PID 17127) exited with exit code 1
+2026-09-29 16:41:43.020 PDT [17122] LOG:  shutting down
+2026-09-29 16:41:43.020 PDT [17122] LOG:  checkpoint starting: shutdown immediate
+2026-09-29 16:41:43.029 PDT [17122] LOG:  checkpoint complete: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.008 s, sync=0.001 s, total=0.009 s; sync files=0, longest=0.000 s, average=0.000 s; distance=0 kB, estimate=439149 kB; lsn=540/50E83230, redo lsn=540/50E83230
+2026-09-29 16:41:43.095 PDT [17097] LOG:  database system is shut down
+2026-09-29 16:42:21.617 PDT [53010] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-09-29 16:42:21.617 PDT [53010] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-09-29 16:42:21.650 PDT [53010] LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-09-29 16:42:21.651 PDT [53010] LOG:  listening on IPv6 address "::", port 28818
+2026-09-29 16:42:21.651 PDT [53010] LOG:  listening on IPv4 address "0.0.0.0", port 28818
+2026-09-29 16:42:21.652 PDT [53010] LOG:  listening on Unix socket "/Users/contra/.pgrx/.s.PGSQL.28818"
+2026-09-29 16:42:21.661 PDT [53018] LOG:  database system was shut down at 2026-09-29 16:41:43 PDT
+2026-09-29 16:42:21.663 PDT [53010] LOG:  database system is ready to accept connections
+2026-09-29 16:47:21.665 PDT [53016] LOG:  checkpoint starting: time
+2026-09-29 16:47:21.786 PDT [53016] LOG:  checkpoint complete: wrote 1 buffers (0.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.118 s, sync=0.001 s, total=0.121 s; sync files=3, longest=0.001 s, average=0.001 s; distance=7 kB, estimate=7 kB; lsn=540/50E84FD8, redo lsn=540/50E84F80
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/5675009796786793974.15838927696693884544.metalar.74425.8791497915553265060.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10530747801834659044.17484570530743528263.metalar.74425.10723064425355220664.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6378418892537067390.17642412070592549059.metalar.74425.12834350999615704856.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/5367130068703040894.555526314883010541.metalar.74425.5972072594542657077.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/18322867980138363648.4122738322015582404.metalar.74665.10008804135995304469.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6378418892537067390.9899840428722415661.metalar.74762.909945644235789969.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/3236860468330501802.13938743479207491959.metalar.74762.9322818637504963479.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15501845101315406556.9425128177434775847.metalar.74762.13883908018878168300.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/8109421476835546926.13938743479207491959.metalar.74762.9532256035267973070.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4590326676160259620.15838927696693884544.metalar.74762.15937439324225154992.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6378418892537067390.276896800945861089.metalar.75014.5360293387036564199.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/18000512997758628288.13938743479207491959.metalar.75014.7031587951148262569.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6378418892537067390.4749497276802090541.metalar.75014.15864279228334728043.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6378418892537067390.16364776177120000177.metalar.75014.2242916874735953909.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/11792151525350170244.13938743479207491959.metalar.75014.4188942919656336713.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15551458140028698414.14287586894551805704.metalar.75014.13650514496167297566.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15551458140028698414.10650186897277074652.metalar.75014.6128121397588519167.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4473465441109095594.13938743479207491959.metalar.75356.5611333355645679906.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16488863280501436004.2952135965405559646.metalar.75356.17992095913012679700.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12120461990315421586.2664049686550054441.metalar.75356.11084380571896985721.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4022525527406293690.16094287502577356432.metalar.75356.7186973635922293733.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/5078326446917790756.1230445012078970710.metalar.75356.4198462502140108557.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6378418892537067390.9123048110748810553.metalar.75356.1393283117135371359.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15551458140028698414.17351542552453256952.metalar.75356.1051921319288413602.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10744297438753003546.15838927696693884544.metalar.75356.8079868127225078651.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/13700869080145477620.3953284654347524774.metalar.75760.1742784044184314515.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15729966443247741316.1554033106090432690.metalar.75760.2987200669982805472.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12109935499800845632.13938743479207491959.metalar.75868.10647702131517845834.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15780151739095359726.9425128177434775847.metalar.75932.14701989206461100885.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15551458140028698414.9765825148209605626.metalar.75932.10967975070666488753.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10530747801834659044.17239894125318723473.metalar.76060.17248653193976906270.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15551458140028698414.13036341589084442322.metalar.76278.18389847715526897300.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6304680704078920906.15838927696693884544.metalar.76339.11255711002490827259.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/11075826552742846200.13938743479207491959.metalar.76339.10622178944933164110.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14208490292815289646.9398609966698220458.metalar.76339.8464435391331971100.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10036957851966029048.13938743479207491959.metalar.76339.10236113742196069225.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/11064473646463321280.13938743479207491959.metalar.76339.11135188575782956023.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6378418892537067390.17458433097633318659.metalar.76339.4440554101313276430.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16947093158385442414.13938743479207491959.metalar.76339.3690619620231082153.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15551458140028698414.1623668253733192008.metalar.76339.1033445284542132603.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15551458140028698414.9398609966698220458.metalar.76339.13681843763836012279.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14148018626217494646.12238616210926810736.metalar.76809.14674801305156215048.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14528098799835647442.17620259091461373082.metalar.76809.908054359278506548.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14521886005437387332.12238616210926810736.metalar.76809.8367261542540515194.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4917744440091350594.12238616210926810736.metalar.76953.2916366242580494774.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10530747801834659044.16624335036925290059.metalar.76953.3253833738158444780.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14528098799835647442.11968220655837811758.metalar.76953.16304638411422948371.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6495488480554612656.1554033106090432690.metalar.76953.6489762965925563235.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10105920936332098838.6556331604503267465.metalar.76953.15742654330119581014.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/2402340375155689516.15568765486497181817.metalar.76953.14269493995516307594.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15551458140028698414.15733163554867698650.metalar.76953.6138999009495734348.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15551458140028698414.58625974881788664.metalar.76953.9577625999421660391.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16018420966446912868.13938743479207491959.metalar.76953.643538807492869918.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/13601617615119804172.12238616210926810736.metalar.77409.321233380886595429.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/2925721610488504146.12238616210926810736.metalar.77409.17798904591727860382.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16792784260649399382.2952135965405559646.metalar.77409.2878549593158647713.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/18322867980138363648.419016113526270948.metalar.77409.9221373539664049120.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/18322867980138363648.14847676900149045330.metalar.77409.18008758080036476020.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/11259360917757985054.2952135965405559646.metalar.77409.11205744589799745133.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/583689475055499584.2952135965405559646.metalar.77409.3542630575151158158.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/7258879777761980496.2952135965405559646.metalar.77409.12427996427107689055.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12873351953360124662.7464105328226151269.metalar.77409.13264290373906445313.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/18322867980138363648.6287220656609657680.metalar.77409.1142621033339883215.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/18322867980138363648.15269541838166709380.metalar.77409.17110006620077494428.tmp (kernels_added=1 skipped=0)
+2026-09-29 17:02:21.808 PDT [53016] LOG:  checkpoint starting: time
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14315556599330022080.13938743479207491959.metalar.77409.2644727708598900044.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/3856973164000296950.13938743479207491959.metalar.77409.11959578699287221196.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4010738089533764458.13938743479207491959.metalar.77409.8014850852532682476.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15551458140028698414.11505865744165542948.metalar.77409.9036110554322991174.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15551458140028698414.13817140109195444038.metalar.77409.359601254661969148.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10530747801834659044.17698513348984483697.metalar.78151.17640733228236495781.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10105920936332098838.5320022638983905715.metalar.78151.5389316640847173276.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15551458140028698414.17210765654357109202.metalar.78151.17460229420345245632.tmp (kernels_added=1 skipped=0)
+2026-09-29 17:03:37.514 PDT [53016] LOG:  checkpoint complete: wrote 746 buffers (0.0%), wrote 2 SLRU buffers; 0 WAL file(s) added, 2 removed, 0 recycled; write=75.698 s, sync=0.004 s, total=75.707 s; sync files=72, longest=0.002 s, average=0.001 s; distance=20452 kB, estimate=20452 kB; lsn=540/52D010E0, redo lsn=540/5227E350
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10530747801834659044.13378490706854383187.metalar.78354.9268579638270212435.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12873351953360124662.8412042973297812063.metalar.78354.14872219508314406250.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12873351953360124662.4073970919011091325.metalar.78354.11928796451638526608.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15551458140028698414.9087982554052359770.metalar.78354.16460865468507630176.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15551458140028698414.17212157518871977954.metalar.78950.7163284602140479677.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10530747801834659044.1825701610652060931.metalar.78950.104388419024055168.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15551458140028698414.4575670968503788234.metalar.78950.9642322090586518253.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15551458140028698414.2614017216872059932.metalar.79155.3980132898324597932.tmp (kernels_added=1 skipped=0)
+2026-09-29 17:05:34.211 PDT [53016] LOG:  checkpoint starting: immediate force wait
+2026-09-29 17:05:34.269 PDT [53016] LOG:  checkpoint complete: wrote 6512 buffers (0.3%), wrote 2 SLRU buffers; 0 WAL file(s) added, 6 removed, 0 recycled; write=0.030 s, sync=0.012 s, total=0.058 s; sync files=136, longest=0.002 s, average=0.001 s; distance=98010 kB, estimate=98010 kB; lsn=540/58234CC8, redo lsn=540/58234C70
+2026-09-29 17:05:41.615 PDT [53016] LOG:  checkpoints are occurring too frequently (7 seconds apart)
+2026-09-29 17:05:41.615 PDT [53016] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 17:05:41.615 PDT [53016] LOG:  checkpoint starting: wal
+2026-09-29 17:05:46.628 PDT [53016] LOG:  checkpoint complete: wrote 27 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=5.001 s, sync=0.001 s, total=5.013 s; sync files=21, longest=0.001 s, average=0.001 s; distance=544641 kB, estimate=544641 kB; lsn=540/978F39C0, redo lsn=540/79615388
+2026-09-29 17:05:46.814 PDT [53016] LOG:  checkpoints are occurring too frequently (5 seconds apart)
+2026-09-29 17:05:46.814 PDT [53016] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 17:05:46.814 PDT [53016] LOG:  checkpoint starting: wal
+2026-09-29 17:05:48.884 PDT [53016] LOG:  checkpoint complete: wrote 26767 buffers (1.3%), wrote 1 SLRU buffers; 0 WAL file(s) added, 2 removed, 32 recycled; write=2.044 s, sync=0.005 s, total=2.071 s; sync files=13, longest=0.004 s, average=0.001 s; distance=550835 kB, estimate=550835 kB; lsn=540/BA5D19F0, redo lsn=540/9B001FF0
+2026-09-29 17:05:49.241 PDT [53016] LOG:  checkpoints are occurring too frequently (3 seconds apart)
+2026-09-29 17:05:49.241 PDT [53016] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 17:05:49.241 PDT [53016] LOG:  checkpoint starting: wal
+2026-09-29 17:05:52.915 PDT [53016] LOG:  checkpoint complete: wrote 68870 buffers (3.3%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 34 recycled; write=3.669 s, sync=0.001 s, total=3.674 s; sync files=10, longest=0.001 s, average=0.001 s; distance=557048 kB, estimate=557048 kB; lsn=540/BD254BC0, redo lsn=540/BD000380
+2026-09-29 17:05:52.915 PDT [53016] LOG:  checkpoint starting: immediate force wait
+2026-09-29 17:05:52.927 PDT [53016] LOG:  checkpoint complete: wrote 347 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.009 s, sync=0.004 s, total=0.013 s; sync files=49, longest=0.001 s, average=0.001 s; distance=2386 kB, estimate=501582 kB; lsn=540/BD254C90, redo lsn=540/BD254C38
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14272289330406912528.1230445012078970710.metalar.80285.9097350357743563082.tmp (kernels_added=1 skipped=0)
+2026-09-29 17:06:00.838 PDT [53016] LOG:  checkpoint starting: immediate force wait
+2026-09-29 17:06:00.885 PDT [53016] LOG:  checkpoint complete: wrote 9446 buffers (0.5%), wrote 1 SLRU buffers; 0 WAL file(s) added, 3 removed, 3 recycled; write=0.034 s, sync=0.004 s, total=0.047 s; sync files=39, longest=0.001 s, average=0.001 s; distance=102970 kB, estimate=461721 kB; lsn=540/C36E34C8, redo lsn=540/C36E3470
+2026-09-29 17:06:05.511 PDT [53016] LOG:  checkpoints are occurring too frequently (5 seconds apart)
+2026-09-29 17:06:05.511 PDT [53016] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 17:06:05.511 PDT [53016] LOG:  checkpoint starting: wal
+2026-09-29 17:06:08.442 PDT [53016] LOG:  checkpoint complete: wrote 42 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=2.757 s, sync=0.165 s, total=2.931 s; sync files=28, longest=0.164 s, average=0.006 s; distance=542883 kB, estimate=542883 kB; lsn=541/24A8890, redo lsn=540/E490C438
+2026-09-29 17:06:08.714 PDT [53016] LOG:  checkpoints are occurring too frequently (3 seconds apart)
+2026-09-29 17:06:08.714 PDT [53016] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 17:06:08.714 PDT [53016] LOG:  checkpoint starting: wal
+2026-09-29 17:06:10.868 PDT [53016] LOG:  checkpoint complete: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=2.146 s, sync=0.001 s, total=2.154 s; sync files=1, longest=0.001 s, average=0.001 s; distance=537109 kB, estimate=542306 kB; lsn=541/2394F340, redo lsn=541/5591990
+2026-09-29 17:06:11.019 PDT [53016] LOG:  checkpoints are occurring too frequently (3 seconds apart)
+2026-09-29 17:06:11.019 PDT [53016] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 17:06:11.019 PDT [53016] LOG:  checkpoint starting: wal
+2026-09-29 17:06:12.657 PDT [53016] LOG:  checkpoint complete: wrote 51912 buffers (2.5%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 34 recycled; write=1.389 s, sync=0.006 s, total=1.639 s; sync files=11, longest=0.005 s, average=0.001 s; distance=551359 kB, estimate=551359 kB; lsn=541/44DAB870, redo lsn=541/270017C0
+2026-09-29 17:06:12.855 PDT [53016] LOG:  checkpoints are occurring too frequently (1 second apart)
+2026-09-29 17:06:12.855 PDT [53016] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 17:06:12.855 PDT [53016] LOG:  checkpoint starting: wal
+2026-09-29 17:06:14.617 PDT [53016] LOG:  checkpoint complete: wrote 60832 buffers (2.9%), wrote 0 SLRU buffers; 0 WAL file(s) added, 2 removed, 31 recycled; write=1.746 s, sync=0.001 s, total=1.763 s; sync files=3, longest=0.001 s, average=0.001 s; distance=556705 kB, estimate=556705 kB; lsn=541/6824D9E8, redo lsn=541/48FA9E70
+2026-09-29 17:06:14.671 PDT [53016] LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-09-29 17:06:14.671 PDT [53016] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 17:06:14.671 PDT [53016] LOG:  checkpoint starting: wal
+2026-09-29 17:06:16.142 PDT [53016] LOG:  checkpoint complete: wrote 67140 buffers (3.2%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 34 recycled; write=1.452 s, sync=0.016 s, total=1.471 s; sync files=11, longest=0.015 s, average=0.002 s; distance=541022 kB, estimate=555137 kB; lsn=541/87C487C8, redo lsn=541/6A001708
+2026-09-29 17:06:32.451 PDT [53016] LOG:  checkpoint starting: immediate force wait
+2026-09-29 17:06:32.611 PDT [53016] LOG:  checkpoint complete: wrote 52104 buffers (2.5%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 29 recycled; write=0.154 s, sync=0.004 s, total=0.160 s; sync files=32, longest=0.002 s, average=0.001 s; distance=487925 kB, estimate=548416 kB; lsn=541/87C7EDC0, redo lsn=541/87C7ED68

@@ -104,6 +104,147 @@ fn single_table_input() -> ShapeInput {
     }
 }
 
+#[test]
+fn numeric_outputs_share_state_and_preserve_sql_order_around_count_star() {
+    let mut input = single_table_input();
+    let value = MeasureExpr::Column(column(1, 100, 2, u32::from(pg_sys::NUMERICOID)).column);
+    let outputs = [
+        aggregate(
+            MeasureExpr::CountStar,
+            AggregateKind::Count,
+            u32::from(pg_sys::INT8OID),
+        ),
+        aggregate(
+            value.clone(),
+            AggregateKind::Sum,
+            u32::from(pg_sys::NUMERICOID),
+        ),
+        aggregate(
+            value.clone(),
+            AggregateKind::Avg,
+            u32::from(pg_sys::NUMERICOID),
+        ),
+        aggregate(
+            value.clone(),
+            AggregateKind::Count,
+            u32::from(pg_sys::INT8OID),
+        ),
+    ];
+    input.aggregates = outputs.iter().map(|(expr, _)| expr.clone()).collect();
+    input.projections = outputs
+        .iter()
+        .enumerate()
+        .map(|(index, (_, output))| InputProjection::Aggregate {
+            aggregate_index: index as u32,
+            output: *output,
+        })
+        .collect();
+    let mut filtered = input.clone();
+    filtered.relation_filters.push((
+        100,
+        FilterSpec::Ranges {
+            input: column(1, 100, 3, 23).column,
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::I32(1),
+                hi: ScalarValue::I32(1),
+            }],
+        },
+    ));
+    let filtered = build_shape(filtered, &model()).expect("hidden WHERE input before COUNT(*)");
+    assert_eq!(filtered.spec.measures.len(), 3);
+    assert_eq!(filtered.spec.measures[2].expression, MeasureExpr::CountStar);
+    let binding = filtered
+        .descriptor_measures
+        .fact_filter
+        .expect("range binding");
+    assert!(binding.hidden);
+    assert_eq!(binding.measure_index, 1);
+    assert!(matches!(
+        filtered.projections[0].source,
+        ProjectionSource::Aggregate {
+            measure_index: 2,
+            ..
+        }
+    ));
+    assert_eq!(
+        crate::engine::executor::agg::planned_descriptor_kernel_mode(&filtered.spec, false),
+        crate::gpu::GroupedAggKernelMode::ParallelDenseNumeric,
+    );
+    let shape = build_shape(input, &model()).expect("exact decimal shape");
+    assert_eq!(shape.spec.measures.len(), 2);
+    assert_eq!(shape.spec.measures[0].expression, value);
+    assert_eq!(shape.spec.measures[0].outputs.len(), 3);
+    assert_eq!(shape.spec.measures[1].expression, MeasureExpr::CountStar);
+    for (projection, expected) in shape.projections.iter().zip([1, 0, 0, 0]) {
+        assert!(
+            matches!(projection.source, ProjectionSource::Aggregate { measure_index, .. } if measure_index == expected)
+        );
+    }
+}
+
+#[test]
+fn mixed_numeric_integer_filter_needs_no_hidden_predicate_aggregate() {
+    let mut input = single_table_input();
+    let decimal = MeasureExpr::Column(column(1, 100, 2, 1700).column);
+    let integer = MeasureExpr::Column(column(1, 100, 3, 23).column);
+    let mut outputs = [
+        aggregate(decimal, AggregateKind::Sum, 1700),
+        aggregate(integer, AggregateKind::Avg, 1700),
+    ];
+    outputs[1].0.filter = FilterSpec::Ranges {
+        input: column(1, 100, 4, 23).column,
+        ranges: vec![ScalarRange {
+            lo: ScalarValue::I32(1),
+            hi: ScalarValue::I32(1),
+        }],
+    };
+    input.aggregates = outputs.iter().map(|(expr, _)| expr.clone()).collect();
+    input.projections = outputs
+        .iter()
+        .enumerate()
+        .map(|(index, (_, output))| InputProjection::Aggregate {
+            aggregate_index: index as u32,
+            output: *output,
+        })
+        .collect();
+    let shape = build_shape(input, &model()).expect("mixed independent predicate");
+    assert_eq!(shape.spec.measures.len(), 2);
+    assert_eq!(
+        crate::engine::executor::agg::planned_descriptor_kernel_mode(&shape.spec, false),
+        crate::gpu::GroupedAggKernelMode::ParallelDenseNumeric,
+    );
+}
+
+#[test]
+fn numeric_global_admission_uses_decimal_row_floor_not_fixed_width_reduce_floor() {
+    let model = model();
+    let required = super::numeric_fact_row_floor(&model);
+    assert!(required >= model.planner.gpu_hash_agg_min_rows);
+    assert!(required >= model.planner.gpu_reduce_min_rows);
+    for rows in [required.get() - 1, required.get(), required.get() + 1] {
+        let mut input = single_table_input();
+        input.relations[0].estimated_rows = rows as u64;
+        let (expression, output) = aggregate(
+            MeasureExpr::Column(column(1, 100, 2, u32::from(pg_sys::NUMERICOID)).column),
+            AggregateKind::Sum,
+            u32::from(pg_sys::NUMERICOID),
+        );
+        input.aggregates = vec![expression];
+        input.projections = vec![InputProjection::Aggregate {
+            aggregate_index: 0,
+            output,
+        }];
+        let shape = build_shape(input, &model).expect("global decimal shape");
+        assert_eq!(
+            matches!(
+                shape.cost_gate,
+                ShapeCostGate::FactRowsBelowDeviceMinimum { .. }
+            ),
+            rows < required.get()
+        );
+    }
+}
+
 fn bool_grouped_count_input() -> ShapeInput {
     let group = column(1, 100, 3, u32::from(pg_sys::BOOLOID));
     let observed = column(1, 100, 4, u32::from(pg_sys::BOOLOID));
@@ -1123,6 +1264,37 @@ fn add_test_spatial_filter(input: &mut ShapeInput, coordinate_pairs: usize) {
 }
 
 #[test]
+fn spatial_range_conjunction_keeps_both_dependencies_and_hidden_binding() {
+    let mut input = integer_sum_avg_input(u32::from(pg_sys::INT4OID));
+    add_test_spatial_filter(&mut input, 1025);
+    let spatial = input.relation_filters[0].1.clone();
+    input.relation_filters[0].1 = FilterSpec::SpatialAnd {
+        spatial: Box::new(spatial),
+        scalar: Box::new(FilterSpec::Ranges {
+            input: column(1, 100, 9, u32::from(pg_sys::INT4OID)).column,
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::I32(1),
+                hi: ScalarValue::I32(2),
+            }],
+        }),
+    };
+    let plan = build_shape(input, &model()).expect("combined spatial/range shape");
+    assert!(plan.descriptor_measures.derived_spatial_mask);
+    assert!(
+        plan.descriptor_measures
+            .fact_filter
+            .expect("range binding")
+            .hidden
+    );
+    assert!(plan.required_relations[0].attnos.contains(&9));
+    assert!(plan.required_relations[0].attnos.contains(&3));
+    assert_eq!(
+        planned_descriptor_kernel_mode(&plan.spec, false),
+        GroupedAggKernelMode::ParallelDenseInteger
+    );
+}
+
+#[test]
 fn spatial_fact_filter_requires_postgis_mask_and_exact_point_polygon_work() {
     let mut input = single_table_input();
     add_test_spatial_filter(&mut input, 4);
@@ -1211,7 +1383,9 @@ fn postgis_typmod_adapter_requires_known_2d_supported_shape_and_srid() {
     assert!(super::postgres::postgis_geometry_typmod_metadata(-1).is_none());
     assert!(super::postgres::postgis_geometry_typmod_metadata(4_326 << 8).is_none());
     assert!(super::postgres::postgis_geometry_typmod_metadata(point_4326 | 1).is_none());
-    let unsupported = (4_326 << 8) | 6 << 2;
+    let multi = (4_326 << 8) | 6 << 2;
+    assert!(super::postgres::postgis_geometry_typmod_metadata(multi).is_some());
+    let unsupported = (4_326 << 8) | 7 << 2;
     assert!(super::postgres::postgis_geometry_typmod_metadata(unsupported).is_none());
 }
 
@@ -1517,6 +1691,7 @@ fn range_table_preflight_rejects_function_inputs_without_device_discovery() {
                 kind: PreflightRangeTableKind::Unsupported,
                 eligible_base_relation: false,
                 has_table_sample: false,
+                permission_context_matches: true,
             },
         ),
         Err(ShapeDecline::UnsupportedRangeTableEntry { varno: 3 })
@@ -1528,6 +1703,7 @@ fn range_table_preflight_rejects_function_inputs_without_device_discovery() {
                 kind: PreflightRangeTableKind::BaseRelation,
                 eligible_base_relation: true,
                 has_table_sample: false,
+                permission_context_matches: true,
             },
         ),
         Ok(true)
@@ -1539,9 +1715,56 @@ fn range_table_preflight_rejects_function_inputs_without_device_discovery() {
                 kind: PreflightRangeTableKind::Synthetic,
                 eligible_base_relation: false,
                 has_table_sample: false,
+                permission_context_matches: true,
             },
         ),
         Ok(false)
+    );
+}
+
+#[test]
+fn pulled_up_subquery_requires_every_inactivity_and_security_proof() {
+    use super::postgres::{PulledUpSubqueryFacts, is_pulled_up_subquery};
+    for mask in 0_u16..512 {
+        let bit = |n: u32| (mask & (1_u16 << n)) != 0_u16;
+        assert_eq!(
+            is_pulled_up_subquery(PulledUpSubqueryFacts {
+                is_subquery: bit(0),
+                query_was_cleared: bit(1),
+                security_barrier: bit(2),
+                has_security_quals: bit(3),
+                has_table_sample: bit(4),
+                planner_slot_valid: bit(5),
+                planner_slot_empty: bit(6),
+                baserel_set_present: bit(7),
+                is_baserel: bit(8),
+            }),
+            mask == 227,
+            "facts mask={mask}"
+        );
+    }
+}
+
+#[test]
+fn range_table_preflight_keeps_other_role_permissions_native() {
+    use super::postgres::{
+        PreflightRangeTableEntry, PreflightRangeTableKind, preflight_range_table_entry,
+    };
+    assert_eq!(
+        preflight_range_table_entry(
+            7,
+            PreflightRangeTableEntry {
+                kind: PreflightRangeTableKind::BaseRelation,
+                eligible_base_relation: true,
+                has_table_sample: false,
+                permission_context_matches: false,
+            }
+        ),
+        Err(ShapeDecline::UnsupportedPermissionContext { varno: 7 })
+    );
+    assert_eq!(
+        ShapeDecline::UnsupportedPermissionContext { varno: 7 }.code(),
+        "shape_permission_context"
     );
 }
 
@@ -1926,7 +2149,7 @@ fn h3_parent_group_capacity_uses_exact_resolution_universe_bound() {
     let mut limits = DeviceLimits::cpu_only();
     limits.gpu_h3_group_min_rows = 1;
     limits.gpu_hash_agg_min_rows = 1;
-    limits.gpu_hash_agg_max_groups = 122;
+    limits.gpu_h3_max_groups = 122;
 
     let plan = build_shape(
         h3_parent_input(1_000, 0),
@@ -1942,7 +2165,7 @@ fn h3_parent_group_capacity_uses_exact_resolution_universe_bound() {
         "resolution zero has 122 H3 cells plus one NULL group",
     );
 
-    limits.gpu_hash_agg_max_groups = 99;
+    limits.gpu_h3_max_groups = 99;
     let plan = build_shape(
         h3_parent_input(100, 15),
         &TypedCostModel::from_limits(&limits),
@@ -1956,6 +2179,37 @@ fn h3_parent_group_capacity_uses_exact_resolution_universe_bound() {
         },
         "the exact bound is min(N, 120 * 7^r + 3)",
     );
+}
+
+#[test]
+fn h3_all_resolutions_use_bounded_row_capacity_not_generic_group_limit() {
+    let mut limits = DeviceLimits::cpu_only();
+    limits.gpu_h3_group_min_rows = 1;
+    limits.gpu_hash_agg_min_rows = 1;
+    limits.gpu_hash_agg_max_groups = 100;
+    limits.gpu_h3_max_groups = 1_000_000;
+    for resolution in 0..=15 {
+        let plan = build_shape(
+            h3_parent_input(500_000, resolution),
+            &TypedCostModel::from_limits(&limits),
+        )
+        .expect("valid H3 shape");
+        assert_eq!(
+            plan.cost_gate,
+            ShapeCostGate::Eligible,
+            "resolution {resolution}"
+        );
+    }
+    limits.gpu_h3_max_groups = 499_999;
+    let plan = build_shape(
+        h3_parent_input(500_000, 15),
+        &TypedCostModel::from_limits(&limits),
+    )
+    .expect("retain safe memory decline");
+    assert!(matches!(
+        plan.cost_gate,
+        ShapeCostGate::GroupsExceedDeviceMaximum { .. }
+    ));
 }
 
 #[test]
@@ -2114,16 +2368,22 @@ fn each_modifier_has_a_precise_decline() {
 }
 
 #[test]
-fn numeric_transition_aggregates_are_explicitly_out_of_scope() {
-    for oid in [
-        pg_sys::F_SUM_INT8,
-        pg_sys::F_SUM_NUMERIC,
-        pg_sys::F_AVG_INT8,
-        pg_sys::F_AVG_NUMERIC,
-        pg_sys::F_AVG_INTERVAL,
+fn exact_numeric_and_bigint_aggregates_are_classified_but_interval_remains_out_of_scope() {
+    assert!(super::postgres::needs_numeric_accumulator(
+        pg_sys::F_AVG_INTERVAL
+    ));
+    assert_eq!(
+        super::postgres::classify_aggregate(pg_sys::F_AVG_INTERVAL),
+        None
+    );
+    for (oid, kind) in [
+        (pg_sys::F_SUM_NUMERIC, AggregateKind::Sum),
+        (pg_sys::F_AVG_NUMERIC, AggregateKind::Avg),
+        (pg_sys::F_SUM_INT8, AggregateKind::Sum),
+        (pg_sys::F_AVG_INT8, AggregateKind::Avg),
     ] {
-        assert!(super::postgres::needs_numeric_accumulator(oid));
-        assert_eq!(super::postgres::classify_aggregate(oid), None);
+        assert!(!super::postgres::needs_numeric_accumulator(oid));
+        assert_eq!(super::postgres::classify_aggregate(oid), Some(kind));
     }
     for oid in [pg_sys::F_AVG_INT2, pg_sys::F_AVG_INT4, pg_sys::F_AVG_FLOAT8] {
         assert!(!super::postgres::needs_numeric_accumulator(oid));
@@ -2239,6 +2499,18 @@ fn aggregate_filter_admits_only_the_exact_bounded_int4_release_shape() {
         FilterSpec::Ranges { .. }
     ));
 
+    let mut independent = aggregate_filter_grouped_input();
+    let FilterSpec::Ranges { input, .. } = &mut independent.aggregates[0].filter else {
+        unreachable!("filter fixture")
+    };
+    input.attno = 9;
+    let plan = build_shape(independent, &model()).expect("predicate-only INT4 column");
+    assert_eq!(plan.spec.measures.len(), 2, "no hidden predicate aggregate");
+    assert_eq!(
+        planned_descriptor_kernel_mode(&plan.spec, false),
+        GroupedAggKernelMode::ParallelDenseInteger
+    );
+
     let mut input = single_table_input();
     input.aggregates[0].filter = FilterSpec::Ranges {
         input: ColumnRef {
@@ -2260,8 +2532,6 @@ fn aggregate_filter_admits_only_the_exact_bounded_int4_release_shape() {
 #[test]
 fn straightforward_column_aggregate_types_decline_without_performance_evidence() {
     let declined = [
-        (u32::from(pg_sys::INT2OID), AggregateKind::Min),
-        (u32::from(pg_sys::INT2OID), AggregateKind::Max),
         (u32::from(pg_sys::FLOAT4OID), AggregateKind::Min),
         (u32::from(pg_sys::FLOAT4OID), AggregateKind::Max),
         (u32::from(pg_sys::DATEOID), AggregateKind::Min),
@@ -2429,7 +2699,7 @@ fn int2_column_count_candidate_admits_only_the_qualified_physical_shape() {
     projection_output.source_type_oid = u32::from(pg_sys::INT4OID);
     assert_eq!(
         planned_mode(int4_measure),
-        GroupedAggKernelMode::SerialGeneric
+        GroupedAggKernelMode::ParallelDenseCount
     );
 
     let mut int2_group = int2_grouped_count_input();
@@ -2441,7 +2711,7 @@ fn int2_column_count_candidate_admits_only_the_qualified_physical_shape() {
     };
     assert_eq!(
         planned_mode(int2_group),
-        GroupedAggKernelMode::SerialGeneric
+        GroupedAggKernelMode::ParallelDenseCount
     );
 
     let mut filtered = int2_grouped_count_input();
@@ -2456,7 +2726,10 @@ fn int2_column_count_candidate_admits_only_the_qualified_physical_shape() {
             kind: crate::engine::spec::MaskKind::Sql,
         },
     ));
-    assert_eq!(planned_mode(filtered), GroupedAggKernelMode::SerialGeneric);
+    assert_eq!(
+        planned_mode(filtered),
+        GroupedAggKernelMode::ParallelDenseCount
+    );
 
     let mut joined = int2_grouped_count_input();
     add_dimension(&mut joined, 2, 200, false);
@@ -2491,7 +2764,7 @@ fn int8_column_count_candidate_admits_only_the_qualified_physical_shape() {
     projection_output.source_type_oid = u32::from(pg_sys::INT4OID);
     assert_eq!(
         planned_mode(int4_measure),
-        GroupedAggKernelMode::SerialGeneric
+        GroupedAggKernelMode::ParallelDenseCount
     );
 
     let mut int8_group = int8_grouped_count_input();
@@ -2570,7 +2843,7 @@ fn date_column_count_candidate_admits_only_the_qualified_physical_shape() {
     projection_output.source_type_oid = u32::from(pg_sys::INT4OID);
     assert_eq!(
         planned_mode(int4_measure),
-        GroupedAggKernelMode::SerialGeneric
+        GroupedAggKernelMode::ParallelDenseCount
     );
 
     let mut date_group = date_grouped_count_input();
@@ -2655,7 +2928,7 @@ fn timestamp_column_count_candidates_admit_only_the_qualified_physical_shape() {
     projection_output.source_type_oid = u32::from(pg_sys::INT4OID);
     assert_eq!(
         planned_mode(int4_measure),
-        GroupedAggKernelMode::SerialGeneric
+        GroupedAggKernelMode::ParallelDenseCount
     );
 
     let mut timestamp_group = timestamp_grouped_count_input(u32::from(pg_sys::TIMESTAMPOID));
@@ -2737,7 +3010,7 @@ fn float_column_count_candidates_admit_only_the_qualified_physical_shape() {
     projection_output.source_type_oid = u32::from(pg_sys::INT4OID);
     assert_eq!(
         planned_mode(int4_measure),
-        GroupedAggKernelMode::SerialGeneric
+        GroupedAggKernelMode::ParallelDenseCount
     );
 
     let mut float_group = float_grouped_count_input(u32::from(pg_sys::FLOAT8OID));
@@ -2772,7 +3045,7 @@ fn float_column_count_candidates_admit_only_the_qualified_physical_shape() {
 }
 
 #[test]
-fn widened_integer_sum_avg_candidates_admit_only_the_exact_combined_shape() {
+fn widened_integer_sum_avg_candidates_admit_independent_outputs() {
     let planned_mode = |input| {
         let shape = build_shape(input, &model())
             .expect("widened integer SUM/AVG shape should be representable");
@@ -2832,7 +3105,7 @@ fn widened_integer_sum_avg_candidates_admit_only_the_exact_combined_shape() {
     }
     assert_eq!(
         planned_mode(avg_without_sum),
-        GroupedAggKernelMode::SerialGeneric
+        GroupedAggKernelMode::ParallelDenseInteger
     );
 
     let mut additional_min = integer_sum_avg_input(u32::from(pg_sys::INT4OID));
@@ -2853,7 +3126,7 @@ fn widened_integer_sum_avg_candidates_admit_only_the_exact_combined_shape() {
     });
     assert_eq!(
         planned_mode(additional_min),
-        GroupedAggKernelMode::SerialGeneric
+        GroupedAggKernelMode::ParallelDenseInteger
     );
 
     let mut joined = integer_sum_avg_input(u32::from(pg_sys::INT2OID));
@@ -2862,7 +3135,7 @@ fn widened_integer_sum_avg_candidates_admit_only_the_exact_combined_shape() {
 }
 
 #[test]
-fn bounded_int4_range_intersection_admits_only_the_fused_product_shape() {
+fn int4_range_intersection_admits_computed_measures_without_joins() {
     let planned_mode = |input| {
         let shape = build_shape(input, &model()).expect("range shape should be representable");
         planned_descriptor_kernel_mode(&shape.spec, false)
@@ -2891,7 +3164,10 @@ fn bounded_int4_range_intersection_admits_only_the_fused_product_shape() {
         unreachable!("range fixture")
     };
     ranges[0].lo = ScalarValue::I32(i32::MIN);
-    assert_eq!(planned_mode(one_sided), GroupedAggKernelMode::SerialGeneric);
+    assert_eq!(
+        planned_mode(one_sided),
+        GroupedAggKernelMode::ParallelDenseInteger
+    );
 
     let mut rhs_filter = range_intersection_grouped_input();
     let FilterSpec::Ranges { input, .. } = &mut rhs_filter.relation_filters[0].1 else {
@@ -2900,7 +3176,7 @@ fn bounded_int4_range_intersection_admits_only_the_fused_product_shape() {
     input.attno = 3;
     assert_eq!(
         planned_mode(rhs_filter),
-        GroupedAggKernelMode::SerialGeneric
+        GroupedAggKernelMode::ParallelDenseInteger
     );
 
     let mut joined = range_intersection_grouped_input();
@@ -2930,16 +3206,23 @@ fn structured_and_extension_measure_types_decline_in_generic_shape_analysis() {
 }
 
 #[test]
-fn int4_binary_mul_and_sub_admit_all_descriptor_outputs() {
-    for op in [BinaryMeasureOp::Mul, BinaryMeasureOp::Sub] {
+fn int4_binary_arithmetic_admits_all_parallel_outputs() {
+    for op in [
+        BinaryMeasureOp::Mul,
+        BinaryMeasureOp::Sub,
+        BinaryMeasureOp::Add,
+    ] {
         for kind in [
             AggregateKind::Sum,
+            AggregateKind::Avg,
             AggregateKind::Count,
             AggregateKind::Min,
             AggregateKind::Max,
         ] {
             let mut input = single_table_input();
-            let result_type_oid = if matches!(kind, AggregateKind::Sum | AggregateKind::Count) {
+            let result_type_oid = if kind == AggregateKind::Avg {
+                u32::from(pg_sys::NUMERICOID)
+            } else if matches!(kind, AggregateKind::Sum | AggregateKind::Count) {
                 u32::from(pg_sys::INT8OID)
             } else {
                 u32::from(pg_sys::INT4OID)
@@ -2967,9 +3250,498 @@ fn int4_binary_mul_and_sub_admit_all_descriptor_outputs() {
                 output: projection,
             }];
 
-            build_shape(input, &model()).unwrap_or_else(|error| {
+            let shape = build_shape(input, &model()).unwrap_or_else(|error| {
                 panic!("INT4 {op:?} feeding {kind:?} should be admitted: {error:?}")
             });
+            assert_eq!(
+                planned_descriptor_kernel_mode(&shape.spec, false),
+                GroupedAggKernelMode::ParallelDenseInteger
+            );
+        }
+    }
+}
+
+#[test]
+fn scalar_shape_shares_typed_states_and_costs_the_longest_lazy_path() {
+    use crate::engine::spec::scalar::{ScalarInstruction as I, ScalarProgram, ScalarType};
+    let cost_model = model();
+    let mut input = single_table_input();
+    let expression = MeasureExpr::Bytecode {
+        inputs: vec![column(1, 100, 4, 16).column],
+        program: ScalarProgram::new(
+            vec![ScalarType::Bool],
+            ScalarType::Int4,
+            vec![
+                I::Input(0),
+                I::JumpIfNotTrue(6),
+                I::Int4(1),
+                I::Int4(2),
+                I::Add,
+                I::Jump(7),
+                I::Int4(3),
+            ],
+        )
+        .expect("lazy program")
+        .encode(),
+        result_type_oid: 23,
+    };
+    let outputs = [
+        aggregate(MeasureExpr::CountStar, AggregateKind::Count, 20),
+        aggregate(expression.clone(), AggregateKind::Sum, 20),
+        aggregate(expression.clone(), AggregateKind::Avg, 1700),
+        aggregate(expression.clone(), AggregateKind::Count, 20),
+        aggregate(expression.clone(), AggregateKind::Min, 23),
+        aggregate(expression.clone(), AggregateKind::Max, 23),
+    ];
+    input.aggregates = outputs
+        .iter()
+        .map(|(aggregate, _)| aggregate.clone())
+        .collect();
+    input.projections = outputs
+        .iter()
+        .enumerate()
+        .map(|(index, (_, output))| InputProjection::Aggregate {
+            aggregate_index: index as u32,
+            output: *output,
+        })
+        .collect();
+    let plan = build_shape(input.clone(), &cost_model).expect("typed scalar shape");
+    assert_eq!(
+        plan.spec.measures.len(),
+        1,
+        "non-NULL scalar outputs also share COUNT(*)"
+    );
+    assert_eq!(plan.spec.measures[0].expression, expression);
+    assert_eq!(plan.spec.measures[0].outputs.len(), 5);
+    assert_eq!(
+        planned_descriptor_kernel_mode(&plan.spec, false),
+        GroupedAggKernelMode::ParallelDenseInteger
+    );
+    let projection = AggOutputProjection {
+        slots: plan.projections.clone(),
+    };
+    assert_eq!(
+        projection.slots[0].source,
+        crate::engine::spec::AggOutputSource::Aggregate {
+            measure_index: 0,
+            source: AggregateSource::Value,
+            kind: AggregateKind::Count,
+        }
+    );
+    let expected = 1_000_000.0
+        * 6.0_f64.mul_add(
+            cost_model.coefficients.gpu_op_cost_filter.get(),
+            cost_model.coefficients.gpu_op_cost_reduce.get(),
+        );
+    assert!((plan.cost.aggregate.get() - expected).abs() < 1e-8);
+    assert_eq!(plan.required_relations[0].attnos, vec![4]);
+    assert!(
+        crate::engine::executor::agg::validate_normal_descriptor_capability(
+            &plan.spec,
+            &projection
+        )
+        .is_ok()
+    );
+
+    // Independent FILTERs need distinct state evaluation; sharing the same
+    // words does not allow one filtered program to stand in for another.
+    input.aggregates[3].filter = FilterSpec::NullOrRanges {
+        input: column(1, 100, 1, 23).column,
+        ranges: vec![],
+    };
+    let filtered = build_shape(input, &cost_model).expect("independently filtered scalar count");
+    assert_eq!(filtered.spec.measures.len(), 2);
+    let extra = 1_000_000.0
+        * 6.0_f64.mul_add(
+            cost_model.coefficients.gpu_op_cost_filter.get(),
+            cost_model.coefficients.gpu_op_cost_reduce.get(),
+        );
+    assert!((filtered.cost.aggregate.get() - plan.cost.aggregate.get() - extra).abs() < 1e-8);
+    assert_eq!(filtered.required_relations[0].attnos, vec![1, 4]);
+}
+
+#[test]
+fn scalar_count_sharing_obeys_nullability_filters_and_state_capacity() {
+    use crate::engine::spec::scalar::{ScalarInstruction as I, ScalarProgram, ScalarType};
+    for non_null in [false, true] {
+        for count_first in [false, true] {
+            let mut input = single_table_input();
+            let mut outputs = (0..4)
+                .map(|fallback| {
+                    let expression = MeasureExpr::Bytecode {
+                        inputs: vec![column(1, 100, 1, 23).column],
+                        program: ScalarProgram::new(
+                            vec![ScalarType::Int4],
+                            ScalarType::Int4,
+                            if non_null {
+                                vec![I::Input(0), I::JumpIfNotNull(3), I::Int4(fallback)]
+                            } else {
+                                vec![I::Input(0), I::Int4(fallback), I::Add]
+                            },
+                        )
+                        .expect("program")
+                        .encode(),
+                        result_type_oid: 23,
+                    };
+                    aggregate(expression, AggregateKind::Sum, 20)
+                })
+                .collect::<Vec<_>>();
+            let count_index = if count_first { 0 } else { outputs.len() };
+            outputs.insert(
+                count_index,
+                aggregate(MeasureExpr::CountStar, AggregateKind::Count, 20),
+            );
+            input.aggregates = outputs
+                .iter()
+                .map(|(aggregate, _)| aggregate.clone())
+                .collect();
+            input.projections = outputs
+                .iter()
+                .enumerate()
+                .map(|(index, (_, output))| InputProjection::Aggregate {
+                    aggregate_index: index as u32,
+                    output: *output,
+                })
+                .collect();
+            let built = build_shape(input, &model());
+            if !non_null {
+                assert!(matches!(
+                    built,
+                    Err(ShapeDecline::TooManyMeasures {
+                        actual: 5,
+                        maximum: 4
+                    })
+                ));
+                continue;
+            }
+            let plan = built.expect("COUNT(*) must not consume a fifth state");
+            assert_eq!(plan.spec.measures.len(), 4);
+            assert_eq!(plan.projections[count_index].source_type_oid, 23);
+            assert_eq!(plan.projections[count_index].result_type_oid, 20);
+            AggOutputProjection {
+                slots: plan.projections,
+            }
+            .validate(&plan.spec)
+            .expect("physical projection");
+
+            let mut input = single_table_input();
+            let mut scalar = outputs[usize::from(count_first)].clone();
+            let mut count = outputs[count_index].clone();
+            scalar.0.filter = FilterSpec::NullOrRanges {
+                input: column(1, 100, 1, 23).column,
+                ranges: vec![],
+            };
+            for same_filter in [false, true] {
+                if same_filter {
+                    count.0.filter = scalar.0.filter.clone();
+                }
+                input.aggregates = vec![count.0.clone(), scalar.0.clone()];
+                input.projections = vec![
+                    InputProjection::Aggregate {
+                        aggregate_index: 0,
+                        output: count.1,
+                    },
+                    InputProjection::Aggregate {
+                        aggregate_index: 1,
+                        output: scalar.1,
+                    },
+                ];
+                let plan = build_shape(input.clone(), &model()).expect("filtered shape");
+                assert_eq!(plan.spec.measures.len(), if same_filter { 1 } else { 2 });
+            }
+            // Strict FILTER lowering can represent COUNT(*) as a raw column
+            // COUNT. A NULL-accepting predicate must never enable that rewrite.
+            count.0.expression = MeasureExpr::Column(column(1, 100, 1, 23).column);
+            count.1.source_type_oid = 23;
+            for accepts_null in [false, true] {
+                let ranges = vec![ScalarRange {
+                    lo: ScalarValue::I32(0),
+                    hi: ScalarValue::I32(1),
+                }];
+                let predicate = column(1, 100, 1, 23).column;
+                scalar.0.filter = if accepts_null {
+                    FilterSpec::NullOrRanges {
+                        input: predicate,
+                        ranges,
+                    }
+                } else {
+                    FilterSpec::Ranges {
+                        input: predicate,
+                        ranges,
+                    }
+                };
+                count.0.filter = scalar.0.filter.clone();
+                input.aggregates = vec![count.0.clone(), scalar.0.clone()];
+                input.projections = vec![
+                    InputProjection::Aggregate {
+                        aggregate_index: 0,
+                        output: count.1,
+                    },
+                    InputProjection::Aggregate {
+                        aggregate_index: 1,
+                        output: scalar.1,
+                    },
+                ];
+                let plan = build_shape(input.clone(), &model()).expect("normalized filtered count");
+                assert_eq!(plan.spec.measures.len(), if accepts_null { 2 } else { 1 });
+            }
+        }
+    }
+}
+
+#[test]
+fn scalar_where_cost_elides_only_a_redundant_carrier_worker() {
+    use crate::engine::spec::scalar::{ScalarInstruction as I, ScalarProgram, ScalarType};
+    let cost_model = model();
+    let inputs = vec![column(1, 100, 1, 23).column, column(1, 100, 2, 23).column];
+    let program = ScalarProgram::new(
+        vec![ScalarType::Int4; 2],
+        ScalarType::Bool,
+        vec![I::Input(0), I::Input(1), I::Gt],
+    )
+    .expect("WHERE program")
+    .encode();
+    for values in 0..=2 {
+        for count_star in [false, true] {
+            for carrier_first in [false, true] {
+                let mut input = single_table_input();
+                let carrier = aggregate(
+                    MeasureExpr::Bytecode {
+                        inputs: inputs.clone(),
+                        program: program.clone(),
+                        result_type_oid: 16,
+                    },
+                    AggregateKind::Count,
+                    20,
+                );
+                let mut outputs = (0..values)
+                    .map(|index| {
+                        aggregate(MeasureExpr::Column(inputs[index]), AggregateKind::Count, 20)
+                    })
+                    .collect::<Vec<_>>();
+                outputs.insert(if carrier_first { 0 } else { values }, carrier);
+                if count_star {
+                    outputs.push(aggregate(MeasureExpr::CountStar, AggregateKind::Count, 20));
+                }
+                input.aggregates = outputs.iter().map(|(expr, _)| expr.clone()).collect();
+                input.projections = outputs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (_, output))| InputProjection::Aggregate {
+                        aggregate_index: index as u32,
+                        output: *output,
+                    })
+                    .collect();
+                input.relation_filters = vec![(
+                    100,
+                    FilterSpec::Bytecode {
+                        inputs: inputs.clone(),
+                        program: program.clone(),
+                    },
+                )];
+                let shape = build_shape(input, &cost_model).expect("WHERE counts");
+                assert_eq!(
+                    shape.spec.measures.len(),
+                    values + 1 + usize::from(count_star)
+                );
+                let workers = values.max(1) as f64;
+                let transitions = workers + f64::from(count_star);
+                let expected = 1_000_000.0
+                    * (workers * 3.0).mul_add(
+                        cost_model.coefficients.gpu_op_cost_filter.get(),
+                        transitions * cost_model.coefficients.gpu_op_cost_reduce.get(),
+                    );
+                assert!(
+                    (shape.cost.aggregate.get() - expected).abs() < 1e-8,
+                    "{values} values, star={count_star}, first={carrier_first}: {} != {expected}",
+                    shape.cost.aggregate.get()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn scalar_where_carrier_consumes_capacity_and_boolean_outputs_stay_count_only() {
+    use crate::engine::spec::scalar::{ScalarInstruction as I, ScalarProgram, ScalarType};
+    let mut input = single_table_input();
+    let expression = MeasureExpr::Bytecode {
+        inputs: vec![column(1, 100, 4, 16).column],
+        program: ScalarProgram::new(
+            vec![ScalarType::Bool],
+            ScalarType::Bool,
+            vec![I::Input(0), I::Not],
+        )
+        .expect("Boolean program")
+        .encode(),
+        result_type_oid: 16,
+    };
+    let (value, metadata) = aggregate(expression, AggregateKind::Count, 20);
+    input.aggregates = vec![value];
+    input.projections = vec![InputProjection::Aggregate {
+        aggregate_index: 0,
+        output: metadata,
+    }];
+    input.relation_filters = vec![(
+        100,
+        FilterSpec::NullOrRanges {
+            input: column(1, 100, 1, 23).column,
+            ranges: vec![],
+        },
+    )];
+    let shape = build_shape(input.clone(), &model()).expect("Boolean count with WHERE");
+    assert_eq!(
+        shape.spec.measures.len(),
+        2,
+        "WHERE needs an independent raw value carrier"
+    );
+    assert_eq!(
+        planned_descriptor_kernel_mode(&shape.spec, false),
+        GroupedAggKernelMode::ParallelDenseInteger
+    );
+    for kind in [
+        AggregateKind::Sum,
+        AggregateKind::Avg,
+        AggregateKind::Min,
+        AggregateKind::Max,
+    ] {
+        input.aggregates[0].output.kind = kind;
+        assert!(build_shape(input.clone(), &model()).is_err());
+    }
+    input.aggregates[0].output.kind = AggregateKind::Count;
+    for ordinal in 0..4 {
+        let mut measure = input.aggregates[0].clone();
+        measure.filter = FilterSpec::Ranges {
+            input: column(1, 100, 2, 23).column,
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::I32(ordinal),
+                hi: ScalarValue::I32(ordinal),
+            }],
+        };
+        input.aggregates.push(measure);
+    }
+    assert!(matches!(
+        build_shape(input, &model()),
+        Err(ShapeDecline::TooManyMeasures { .. })
+    ));
+}
+
+#[test]
+fn computed_count_cost_includes_expression_evaluation() {
+    let cost_model = model();
+    let mut input = single_table_input();
+    let lhs = column(1, 100, 1, 23).column;
+    let rhs = column(1, 100, 2, 23).column;
+    let (expr, metadata) = aggregate(MeasureExpr::Column(lhs), AggregateKind::Count, 20);
+    input.aggregates = vec![expr];
+    input.projections = vec![InputProjection::Aggregate {
+        aggregate_index: 0,
+        output: metadata,
+    }];
+    let direct = build_shape(input.clone(), &cost_model).expect("direct count");
+    for op in [
+        BinaryMeasureOp::Add,
+        BinaryMeasureOp::Sub,
+        BinaryMeasureOp::Mul,
+    ] {
+        input.aggregates[0].expression = MeasureExpr::Binary { op, lhs, rhs };
+        let computed = build_shape(input.clone(), &cost_model).expect("computed count");
+        let expected = 1_000_000.0 * cost_model.coefficients.gpu_op_cost_filter.get();
+        assert!(
+            (computed.cost.aggregate.get() - direct.cost.aggregate.get() - expected).abs() < 1e-8
+        );
+    }
+}
+
+#[test]
+fn computed_filters_preserve_rhs_and_budget_hidden_predicate_states() {
+    let lhs = column(1, 100, 1, 23).column;
+    let rhs = column(1, 100, 2, 23).column;
+    for predicate in [lhs, rhs, column(1, 100, 9, 23).column] {
+        for op in [
+            BinaryMeasureOp::Add,
+            BinaryMeasureOp::Sub,
+            BinaryMeasureOp::Mul,
+        ] {
+            let mut input = single_table_input();
+            let (mut expr, metadata) = aggregate(
+                MeasureExpr::Binary { op, lhs, rhs },
+                AggregateKind::Avg,
+                1700,
+            );
+            expr.filter = FilterSpec::NullOrRanges {
+                input: predicate,
+                ranges: vec![],
+            };
+            input.aggregates = vec![expr];
+            input.projections = vec![InputProjection::Aggregate {
+                aggregate_index: 0,
+                output: metadata,
+            }];
+            input.relation_filters = vec![(
+                100,
+                FilterSpec::NullOrRanges {
+                    input: predicate,
+                    ranges: vec![],
+                },
+            )];
+            let shape =
+                build_shape(input.clone(), &model()).expect("independent expression predicate");
+            assert_eq!(
+                shape.spec.measures[0].expression,
+                MeasureExpr::Binary { op, lhs, rhs }
+            );
+            assert_eq!(
+                shape.spec.measures.len(),
+                if predicate == lhs { 1 } else { 2 }
+            );
+            assert_eq!(
+                planned_descriptor_kernel_mode(&shape.spec, false),
+                GroupedAggKernelMode::ParallelDenseInteger
+            );
+            if predicate != lhs {
+                assert_eq!(
+                    shape.spec.measures[1].expression,
+                    MeasureExpr::Column(predicate)
+                );
+                assert!(
+                    shape
+                        .descriptor_measures
+                        .fact_filter
+                        .expect("hidden WHERE carrier")
+                        .hidden
+                );
+            }
+            // Four independently filtered states leave no capacity for a fifth
+            // raw predicate carrier. Never reuse/overwrite an arithmetic RHS.
+            input.relation_filters.clear();
+            for index in 1..4 {
+                let mut next = input.aggregates[0].clone();
+                next.filter = FilterSpec::Ranges {
+                    input: predicate,
+                    ranges: vec![ScalarRange {
+                        lo: ScalarValue::I32(index),
+                        hi: ScalarValue::I32(index),
+                    }],
+                };
+                input.aggregates.push(next);
+                input.projections.push(InputProjection::Aggregate {
+                    aggregate_index: index as u32,
+                    output: metadata,
+                });
+            }
+            let result = build_shape(input, &model());
+            if predicate == lhs {
+                assert!(result.is_ok());
+            } else {
+                assert_eq!(
+                    result,
+                    Err(ShapeDecline::TooManyMeasures {
+                        actual: 5,
+                        maximum: 4
+                    })
+                );
+            }
         }
     }
 }
@@ -3054,7 +3826,7 @@ fn int8_binary_sub_admits_count_min_max_but_not_sum() {
             },
         },
         AggregateKind::Sum,
-        u32::from(pg_sys::INT8OID),
+        u32::from(pg_sys::NUMERICOID),
     );
     input.aggregates = vec![sum];
     input.projections = vec![InputProjection::Aggregate {
@@ -3063,8 +3835,9 @@ fn int8_binary_sub_admits_count_min_max_but_not_sum() {
     }];
     assert_eq!(
         build_shape(input, &model()),
-        Err(ShapeDecline::NumericAccumulatorTypeUnavailable {
+        Err(ShapeDecline::UnsupportedAggregateInput {
             type_oid: u32::from(pg_sys::INT8OID),
+            kind: AggregateKind::Sum,
         })
     );
 }
@@ -3661,4 +4434,20 @@ fn binary_measure_uses_frozen_neutral_expression() {
         }
     ));
     assert_eq!(plan.required_relations[0].attnos, vec![2, 3]);
+}
+#[test]
+fn dense_capacity_multiplies_individual_domains_and_null_slots() {
+    use super::dense_slot_product;
+    assert_eq!(dense_slot_product(&[], &[]), Some(1));
+    assert_eq!(dense_slot_product(&[10; 3], &[false; 3]), Some(1000));
+    assert_eq!(dense_slot_product(&[10; 3], &[true; 3]), Some(1331));
+    assert_eq!(
+        dense_slot_product(&[10; 3], &[true, false, true]),
+        Some(1210)
+    );
+    assert_eq!(dense_slot_product(&[0], &[true]), Some(1));
+    assert_eq!(dense_slot_product(&[0], &[false]), Some(1));
+    assert_eq!(dense_slot_product(&[1], &[]), None);
+    assert_eq!(dense_slot_product(&[u64::MAX], &[true]), None);
+    assert_eq!(dense_slot_product(&[u64::MAX, 2], &[false; 2]), None);
 }

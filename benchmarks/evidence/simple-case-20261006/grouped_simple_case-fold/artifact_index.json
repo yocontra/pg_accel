@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "generated_unix_seconds": 1791268591,
+  "root": "benchmarks/evidence/simple-case-20261006/grouped_simple_case-fold",
+  "entry_count": 23,
+  "total_size_bytes": 239633,
+  "entries": [
+    {
+      "path": "README.md",
+      "size_bytes": 2167,
+      "modified_unix_seconds": 1791268591
+    },
+    {
+      "path": "crashes.json",
+      "size_bytes": 2,
+      "modified_unix_seconds": 1791268591
+    },
+    {
+      "path": "crashes.md",
+      "size_bytes": 45,
+      "modified_unix_seconds": 1791268591
+    },
+    {
+      "path": "failure-provenance.txt",
+      "size_bytes": 311,
+      "modified_unix_seconds": 1791268591
+    },
+    {
+      "path": "log_tails/provenance/00-19.log.delta",
+      "size_bytes": 201,
+      "modified_unix_seconds": 1791268591
+    },
+    {
+      "path": "log_tails/provenance/00-19.log.tail",
+      "size_bytes": 65547,
+      "modified_unix_seconds": 1791268591
+    },
+    {
+      "path": "log_tails/provenance/01-pg_accel_panic.log.delta",
+      "size_bytes": 215,
+      "modified_unix_seconds": 1791268591
+    },
+    {
+      "path": "log_tails/provenance/01-pg_accel_panic.log.tail",
+      "size_bytes": 13702,
+      "modified_unix_seconds": 1791268591
+    },
+    {
+      "path": "log_tails/provenance/02-pg_accel_traces.jsonl.delta",
+      "size_bytes": 218,
+      "modified_unix_seconds": 1791268591
+    },
+    {
+      "path": "log_tails/provenance/02-pg_accel_traces.jsonl.tail",
+      "size_bytes": 65588,
+      "modified_unix_seconds": 1791268591
+    },
+    {
+      "path": "log_tails/provenance/03-pg_accel_otel.jsonl.delta",
+      "size_bytes": 216,
+      "modified_unix_seconds": 1791268591
+    },
+    {
+      "path": "log_tails/provenance/03-pg_accel_otel.jsonl.tail",
+      "size_bytes": 14884,
+      "modified_unix_seconds": 1791268591
+    },
+    {
+      "path": "log_tails/provenance/05-pg_accel_panic.log.delta",
+      "size_bytes": 203,
+      "modified_unix_seconds": 1791268591
+    },
+    {
+      "path": "log_tails/provenance/05-pg_accel_panic.log.tail",
+      "size_bytes": 78,
+      "modified_unix_seconds": 1791268591
+    },
+    {
+      "path": "log_tails/provenance/06-pg_accel_traces.jsonl.delta",
+      "size_bytes": 218,
+      "modified_unix_seconds": 1791268591
+    },
+    {
+      "path": "log_tails/provenance/06-pg_accel_traces.jsonl.tail",
+      "size_bytes": 65588,
+      "modified_unix_seconds": 1791268591
+    },
+    {
+      "path": "log_tails/provenance/07-pg_accel_otel.jsonl.delta",
+      "size_bytes": 204,
+      "modified_unix_seconds": 1791268591
+    },
+    {
+      "path": "log_tails/provenance/07-pg_accel_otel.jsonl.tail",
+      "size_bytes": 79,
+      "modified_unix_seconds": 1791268591
+    },
+    {
+      "path": "manifest.json",
+      "size_bytes": 1946,
+      "modified_unix_seconds": 1791268591
+    },
+    {
+      "path": "provenance-warnings.txt",
+      "size_bytes": 504,
+      "modified_unix_seconds": 1791268591
+    },
+    {
+      "path": "provenance.json",
+      "size_bytes": 4084,
+      "modified_unix_seconds": 1791268591
+    },
+    {
+      "path": "resume_audit_manifest.json",
+      "size_bytes": 3442,
+      "modified_unix_seconds": 1791268591
+    },
+    {
+      "path": "rust_backtrace.txt",
+      "size_bytes": 191,
+      "modified_unix_seconds": 1791268591
+    }
+  ]
+}

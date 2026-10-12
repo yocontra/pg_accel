@@ -1,0 +1,269 @@
+=== pg_accel benchmark plans - captured once per workload/scale ===
+
+=== grouped_derived_ratio @ rows=250000 ===
+Finalize GroupAggregate  (cost=2649.52..2657.84 rows=32 width=68) (actual time=8.848..10.532 rows=33.00 loops=1)
+  Output: bench_scalar_sales.region, sum((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), avg((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), count((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), min((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), max((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), count(*)
+  Group Key: bench_scalar_sales.region
+  Buffers: shared hit=1358
+  ->  Gather Merge  (cost=2649.52..2653.52 rows=224 width=68) (actual time=8.768..10.412 rows=264.00 loops=1)
+        Output: bench_scalar_sales.region, (PARTIAL sum((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL avg((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL count((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL min((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL max((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL count(*))
+        Workers Planned: 7
+        Workers Launched: 7
+        Buffers: shared hit=1358
+        ->  Sort  (cost=2649.40..2649.48 rows=32 width=68) (actual time=5.557..5.558 rows=33.00 loops=8)
+              Output: bench_scalar_sales.region, (PARTIAL sum((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL avg((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL count((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL min((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL max((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL count(*))
+              Sort Key: bench_scalar_sales.region
+              Sort Method: quicksort  Memory: 28kB
+              Buffers: shared hit=1358
+              Worker 0:  actual time=4.329..4.330 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=134
+              Worker 1:  actual time=4.690..4.691 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=143
+              Worker 2:  actual time=4.912..4.913 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=151
+              Worker 3:  actual time=4.993..4.994 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=154
+              Worker 4:  actual time=5.352..5.353 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=161
+              Worker 5:  actual time=5.688..5.689 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=177
+              Worker 6:  actual time=5.866..5.867 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=177
+              ->  Partial HashAggregate  (cost=2648.28..2648.60 rows=32 width=68) (actual time=5.540..5.543 rows=33.00 loops=8)
+                    Output: bench_scalar_sales.region, PARTIAL sum((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), PARTIAL avg((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), PARTIAL count((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), PARTIAL min((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), PARTIAL max((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), PARTIAL count(*)
+                    Group Key: bench_scalar_sales.region
+                    Batches: 1  Memory Usage: 32kB
+                    Buffers: shared hit=1309
+                    Worker 0:  actual time=4.312..4.315 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=127
+                    Worker 1:  actual time=4.673..4.676 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=136
+                    Worker 2:  actual time=4.895..4.898 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=144
+                    Worker 3:  actual time=4.974..4.977 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=147
+                    Worker 4:  actual time=5.335..5.338 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=154
+                    Worker 5:  actual time=5.670..5.672 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=170
+                    Worker 6:  actual time=5.848..5.851 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=170
+                    ->  Parallel Seq Scan on public.bench_scalar_sales  (cost=0.00..2023.28 rows=35714 width=8) (actual time=0.006..2.507 rows=31250.00 loops=8)
+                          Output: bench_scalar_sales.region, LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)
+                          Buffers: shared hit=1309
+                          Worker 0:  actual time=0.006..1.994 rows=24269.00 loops=1
+                            Buffers: shared hit=127
+                          Worker 1:  actual time=0.006..2.146 rows=25986.00 loops=1
+                            Buffers: shared hit=136
+                          Worker 2:  actual time=0.007..2.276 rows=27513.00 loops=1
+                            Buffers: shared hit=144
+                          Worker 3:  actual time=0.006..2.325 rows=28093.00 loops=1
+                            Buffers: shared hit=147
+                          Worker 4:  actual time=0.007..2.386 rows=29425.00 loops=1
+                            Buffers: shared hit=154
+                          Worker 5:  actual time=0.005..2.672 rows=32485.00 loops=1
+                            Buffers: shared hit=170
+                          Worker 6:  actual time=0.005..2.670 rows=32488.00 loops=1
+                            Buffers: shared hit=170
+Planning:
+  Buffers: shared hit=43
+Planning Time: 0.145 ms
+Execution Time: 10.569 ms
+
+=== grouped_derived_ratio @ rows=1000000 ===
+Finalize GroupAggregate  (cost=9922.76..9932.42 rows=32 width=68) (actual time=25.141..27.112 rows=33.00 loops=1)
+  Output: bench_scalar_sales.region, sum((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), avg((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), count((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), min((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), max((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), count(*)
+  Group Key: bench_scalar_sales.region
+  Buffers: shared hit=5290
+  ->  Gather Merge  (cost=9922.76..9927.54 rows=256 width=68) (actual time=25.044..26.973 rows=297.00 loops=1)
+        Output: bench_scalar_sales.region, (PARTIAL sum((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL avg((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL count((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL min((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL max((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL count(*))
+        Workers Planned: 8
+        Workers Launched: 8
+        Buffers: shared hit=5290
+        ->  Sort  (cost=9922.62..9922.70 rows=32 width=68) (actual time=21.223..21.224 rows=33.00 loops=9)
+              Output: bench_scalar_sales.region, (PARTIAL sum((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL avg((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL count((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL min((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL max((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL count(*))
+              Sort Key: bench_scalar_sales.region
+              Sort Method: quicksort  Memory: 28kB
+              Buffers: shared hit=5290
+              Worker 0:  actual time=20.000..20.001 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=579
+              Worker 1:  actual time=20.253..20.253 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=597
+              Worker 2:  actual time=20.539..20.540 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=479
+              Worker 3:  actual time=20.786..20.787 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=618
+              Worker 4:  actual time=21.145..21.146 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=574
+              Worker 5:  actual time=21.136..21.137 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=634
+              Worker 6:  actual time=20.664..20.665 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=554
+              Worker 7:  actual time=21.708..21.709 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=520
+              ->  Partial HashAggregate  (cost=9921.50..9921.82 rows=32 width=68) (actual time=21.203..21.206 rows=33.00 loops=9)
+                    Output: bench_scalar_sales.region, PARTIAL sum((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), PARTIAL avg((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), PARTIAL count((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), PARTIAL min((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), PARTIAL max((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), PARTIAL count(*)
+                    Group Key: bench_scalar_sales.region
+                    Batches: 1  Memory Usage: 32kB
+                    Buffers: shared hit=5234
+                    Worker 0:  actual time=19.983..19.986 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=572
+                    Worker 1:  actual time=20.235..20.237 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=590
+                    Worker 2:  actual time=20.520..20.523 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=472
+                    Worker 3:  actual time=20.767..20.770 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=611
+                    Worker 4:  actual time=21.125..21.127 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=567
+                    Worker 5:  actual time=21.115..21.118 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=627
+                    Worker 6:  actual time=20.634..20.637 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=547
+                    Worker 7:  actual time=21.685..21.692 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=513
+                    ->  Parallel Seq Scan on public.bench_scalar_sales  (cost=0.00..7734.00 rows=125000 width=8) (actual time=0.007..9.599 rows=111111.11 loops=9)
+                          Output: bench_scalar_sales.region, LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)
+                          Buffers: shared hit=5234
+                          Worker 0:  actual time=0.006..9.244 rows=109299.00 loops=1
+                            Buffers: shared hit=572
+                          Worker 1:  actual time=0.007..9.208 rows=112729.00 loops=1
+                            Buffers: shared hit=590
+                          Worker 2:  actual time=0.007..9.437 rows=90198.00 loops=1
+                            Buffers: shared hit=472
+                          Worker 3:  actual time=0.006..9.624 rows=116626.00 loops=1
+                            Buffers: shared hit=611
+                          Worker 4:  actual time=0.006..9.466 rows=108345.00 loops=1
+                            Buffers: shared hit=567
+                          Worker 5:  actual time=0.005..9.820 rows=119807.00 loops=1
+                            Buffers: shared hit=627
+                          Worker 6:  actual time=0.015..9.359 rows=104519.00 loops=1
+                            Buffers: shared hit=547
+                          Worker 7:  actual time=0.006..9.934 rows=98021.00 loops=1
+                            Buffers: shared hit=513
+Planning:
+  Buffers: shared hit=43
+Planning Time: 0.148 ms
+Execution Time: 27.154 ms
+
+=== grouped_derived_ratio @ rows=2000000 ===
+Finalize GroupAggregate  (cost=19843.26..19852.92 rows=32 width=68) (actual time=45.663..47.673 rows=33.00 loops=1)
+  Output: bench_scalar_sales.region, sum((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), avg((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), count((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), min((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), max((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), count(*)
+  Group Key: bench_scalar_sales.region
+  Buffers: shared hit=10523
+  ->  Gather Merge  (cost=19843.26..19848.04 rows=256 width=68) (actual time=45.610..47.484 rows=297.00 loops=1)
+        Output: bench_scalar_sales.region, (PARTIAL sum((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL avg((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL count((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL min((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL max((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL count(*))
+        Workers Planned: 8
+        Workers Launched: 8
+        Buffers: shared hit=10523
+        ->  Sort  (cost=19843.12..19843.20 rows=32 width=68) (actual time=41.901..41.902 rows=33.00 loops=9)
+              Output: bench_scalar_sales.region, (PARTIAL sum((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL avg((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL count((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL min((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL max((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)))), (PARTIAL count(*))
+              Sort Key: bench_scalar_sales.region
+              Sort Method: quicksort  Memory: 28kB
+              Buffers: shared hit=10523
+              Worker 0:  actual time=39.744..39.745 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=965
+              Worker 1:  actual time=40.847..40.848 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=1202
+              Worker 2:  actual time=41.203..41.204 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=1067
+              Worker 3:  actual time=41.472..41.473 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=1261
+              Worker 4:  actual time=41.700..41.701 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=1127
+              Worker 5:  actual time=42.029..42.030 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=1257
+              Worker 6:  actual time=42.343..42.344 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=1264
+              Worker 7:  actual time=42.447..42.448 rows=33.00 loops=1
+                Sort Method: quicksort  Memory: 28kB
+                Buffers: shared hit=1056
+              ->  Partial HashAggregate  (cost=19842.00..19842.32 rows=32 width=68) (actual time=41.883..41.886 rows=33.00 loops=9)
+                    Output: bench_scalar_sales.region, PARTIAL sum((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), PARTIAL avg((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), PARTIAL count((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), PARTIAL min((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), PARTIAL max((LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100))), PARTIAL count(*)
+                    Group Key: bench_scalar_sales.region
+                    Batches: 1  Memory Usage: 32kB
+                    Buffers: shared hit=10467
+                    Worker 0:  actual time=39.726..39.729 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=958
+                    Worker 1:  actual time=40.829..40.832 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=1195
+                    Worker 2:  actual time=41.185..41.188 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=1060
+                    Worker 3:  actual time=41.455..41.457 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=1254
+                    Worker 4:  actual time=41.681..41.684 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=1120
+                    Worker 5:  actual time=42.011..42.014 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=1250
+                    Worker 6:  actual time=42.324..42.327 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=1257
+                    Worker 7:  actual time=42.424..42.427 rows=33.00 loops=1
+                      Batches: 1  Memory Usage: 32kB
+                      Buffers: shared hit=1049
+                    ->  Parallel Seq Scan on public.bench_scalar_sales  (cost=0.00..15467.00 rows=250000 width=8) (actual time=0.010..18.836 rows=222222.22 loops=9)
+                          Output: bench_scalar_sales.region, LEAST(GREATEST((bench_scalar_sales.price / NULLIF(bench_scalar_sales.adjustment, 0)), '-100'::integer), 100)
+                          Buffers: shared hit=10467
+                          Worker 0:  actual time=0.009..18.091 rows=183065.00 loops=1
+                            Buffers: shared hit=958
+                          Worker 1:  actual time=0.009..18.201 rows=228355.00 loops=1
+                            Buffers: shared hit=1195
+                          Worker 2:  actual time=0.012..18.707 rows=202555.00 loops=1
+                            Buffers: shared hit=1060
+                          Worker 3:  actual time=0.010..18.949 rows=239618.00 loops=1
+                            Buffers: shared hit=1254
+                          Worker 4:  actual time=0.010..19.265 rows=214011.00 loops=1
+                            Buffers: shared hit=1120
+                          Worker 5:  actual time=0.010..19.308 rows=238778.00 loops=1
+                            Buffers: shared hit=1250
+                          Worker 6:  actual time=0.011..18.949 rows=240181.00 loops=1
+                            Buffers: shared hit=1257
+                          Worker 7:  actual time=0.011..19.215 rows=200438.00 loops=1
+                            Buffers: shared hit=1049
+Planning:
+  Buffers: shared hit=43
+Planning Time: 0.172 ms
+Execution Time: 47.719 ms

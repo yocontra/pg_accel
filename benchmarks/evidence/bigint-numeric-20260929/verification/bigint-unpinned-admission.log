@@ -1,0 +1,15 @@
+SET
+SET
+SELECT 10000
+ANALYZE
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Aggregate  (cost=189.00..189.01 rows=1 width=32)
+   ->  Seq Scan on _bigint_unpinned  (cost=0.00..164.00 rows=10000 width=8)
+(2 rows)
+
+ pg_accel_last_planner_rejection_reason 
+----------------------------------------
+ generic_numeric_estimate_unavailable
+(1 row)
+

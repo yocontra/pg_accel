@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "workload": "bigint_grouped_sum_avg",
+  "rows": 1000000,
+  "status": "pass",
+  "order_sensitive": false,
+  "accel_rows": 191,
+  "baseline_rows": 191,
+  "accel_minus_baseline_count": 0,
+  "baseline_minus_accel_count": 0,
+  "sample_limit": 20,
+  "accel_minus_baseline_samples": [],
+  "baseline_minus_accel_samples": [],
+  "accel_query_sql": "SELECT g,h,k,sum(v) s,avg(w) a,count(w) c,count(*) n FROM bench_bigint_rollup GROUP BY g,h,k",
+  "baseline_query_sql": "SELECT g,h,k,sum(v) s,avg(w) a,count(w) c,count(*) n FROM bench_bigint_rollup GROUP BY g,h,k",
+  "error": null
+}

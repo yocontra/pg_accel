@@ -1,0 +1,116 @@
+Test project /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+    Start 19: test_grouped_agg
+1/1 Test #19: test_grouped_agg .................***Failed   32.18 sec
+--- workspace and descriptor validation ---
+--- dense chunk lifecycle equivalence ---
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:1484: execute_in_workspace(chunk, req, workspace, nullptr, &detail) returned -1, expected 0
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:1485: detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:1484: execute_in_workspace(chunk, req, workspace, nullptr, &detail) returned -1, expected 0
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:1485: detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:1484: execute_in_workspace(chunk, req, workspace, nullptr, &detail) returned -1, expected 0
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:1485: detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:1491: execute_in_workspace(finalize, req, workspace, &chunked.out, &detail) returned -1, expected 0
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:548: actual.out.emitted_group_count == expected.out.emitted_group_count
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:549: actual.out.selected_count == expected.out.selected_count
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:551: actual.active == expected.active
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:552: actual.group_codes == expected.group_codes
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:553: actual.key_values == expected.key_values
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:556: actual.measures[i].sum == expected.measures[i].sum
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:557: actual.measures[i].min == expected.measures[i].min
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:558: actual.measures[i].max == expected.measures[i].max
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:561: actual.measures[i].nonnull == expected.measures[i].nonnull
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:560: actual.measures[i].count == expected.measures[i].count
+pgaccel: pgaccel_grouped_agg_execute_ex: GPU kernel failure: injected grouped aggregate lifecycle failure
+pgaccel: pgaccel_grouped_agg_execute_ex: GPU kernel failure: injected grouped aggregate lifecycle failure
+pgaccel: pgaccel_grouped_agg_execute_ex: GPU kernel failure: injected grouped aggregate lifecycle failure
+pgaccel: pgaccel_grouped_agg_execute_ex: GPU kernel failure: injected grouped aggregate lifecycle failure
+--- dense chunk lifecycle fail closed ---
+--- empty ungrouped active semantics ---
+--- parallel dense COUNT(*) lifecycle ---
+parallel dense COUNT(*) 262144 rows/17 groups: 0.904 ms
+--- parallel dense nullable INT2 column COUNT ---
+--- parallel dense nullable INT8 column COUNT ---
+--- parallel dense nullable DATE column COUNT ---
+--- parallel dense nullable TIMESTAMP column COUNT ---
+--- parallel dense nullable FLOAT column COUNT ---
+--- parallel dense Phase2 integer lanes ---
+parallel dense SUM/MIN/MAX+COUNT(*) 262144 rows/17 groups: 1.293 ms
+--- parallel dense integer SUM/non-NULL state without COUNT(*) ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- global exact integer SUM/COUNT with independent filters ---
+--- parallel dense multiple independent integer SUM/AVG states ---
+--- parallel dense multiple independent integer SUM/AVG states ---
+--- parallel independent aggregate ranges and predicate NULLs ---
+--- parallel independent count-only states without SUM allocation ---
+--- parallel dense int4 product SUM+COUNT(*) ---
+parallel dense int4 MUL/SUM+COUNT(*) 263157 rows/128 groups: 1.706 ms
+--- parallel dense aggregate-local INT4 range FILTER ---
+--- parallel dense SUM+COUNT(*) mask/two unique dimensions ---
+row-parallel dense SUM+COUNT(*) 262144 rows/35 groups: 1.598 ms
+--- parallel dense COUNT(*) unique dimension ---
+--- parallel dense weighted global COUNT(*) ---
+--- row-parallel dense SUM low-word carry ---
+--- row-parallel dense negative nullable SUM publication ---
+--- dense I64 four-measure lanes ---
+--- dense F64 stats pair and NaN ordering ---
+--- I64 stats pair and F64 binary measures ---
+--- global and per-measure filters ---
+--- predicate-only physical COUNT lanes ---
+--- ordered physical MIN/MAX/COUNT lanes ---
+--- four dimensions and multiplicity ---
+--- mixed radix compact and keyed empty ---
+--- device publication variable-width/no-write contract ---
+--- grouped allocation/copy/wait/materialization failure lifecycle ---
+--- group activity ignores measure validity ---
+--- generic device error and rejection matrix ---
+--- specialized dense branch matrix ---
+--- weighted overflow branch matrix ---
+--- compact full-lane state copy ---
+--- grouped output descriptor validation ---
+--- grouped pointer span validation ---
+--- integer expression overflow semantics ---
+--- error and unsupported statuses ---
+--- fixed-seed mixed-radix fuzz ---
+--- dense full-lane reference ---
+--- filtered product reference ---
+--- two-key dimension reference ---
+--- three-key dimension reference ---
+--- dimension subtraction reference ---
+test_grouped_agg: 25572 passed, 17 failed
+gpu-noise[test_grouped_agg]: suppressed archive-write=73, kernel-cache=1; raw log: /Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs/test_grouped_agg-20260929-163919-46728.log
+gpu-test[test_grouped_agg]: failed with exit code 1
+--- failure summary from /Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs/test_grouped_agg-20260929-163919-46728.log ---
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:1484: execute_in_workspace(chunk, req, workspace, nullptr, &detail) returned -1, expected 0 (repeated 3x)
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:1485: detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE (repeated 3x)
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:1491: execute_in_workspace(finalize, req, workspace, &chunked.out, &detail) returned -1, expected 0
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:548: actual.out.emitted_group_count == expected.out.emitted_group_count
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:549: actual.out.selected_count == expected.out.selected_count
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:551: actual.active == expected.active
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:552: actual.group_codes == expected.group_codes
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:553: actual.key_values == expected.key_values
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:556: actual.measures[i].sum == expected.measures[i].sum
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:557: actual.measures[i].min == expected.measures[i].min
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:558: actual.measures[i].max == expected.measures[i].max
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:561: actual.measures[i].nonnull == expected.measures[i].nonnull
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg.cpp:560: actual.measures[i].count == expected.measures[i].count
+PGACCEL_TEST_RESULT name=test_grouped_agg exit_code=1 result=FAIL raw_lines=161 body_sha256=f26ba6edc8d70aaf68e6b80785d3c1b2ac15c84eb315fc191d91204641172054 binding_sha256=55fa20a8fcdaeb2c61bbb87e7c0db8f9d400fe04c18c3c03afb01156490b67db
+
+
+0% tests passed, 1 tests failed out of 1
+
+Total Test time (real) =  32.18 sec
+
+The following tests FAILED:
+	 19 - test_grouped_agg (Failed)
+Errors while running CTest

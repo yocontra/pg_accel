@@ -1,0 +1,68 @@
+PGACCEL_TEST_START name=test_spatial
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+=== pgaccel spatial predicate tests ===
+
+--- spatial APIs: no-device lifecycle ---
+
+=== Results: 18/18 passed ===
+=== pgaccel spatial predicate tests ===
+
+--- point_in_ring: basic ---
+--- point_in_ring: edge cases ---
+--- point_in_ring: fp32 ---
+--- point_in_ring: triangle ---
+--- point_in_ring: fp64 bulk (1k/64k/256k/1M) ---
+--- point_in_ring: fp64 GPU dispatch counter ---
+--- point_in_polygon_bulk: simple kernel path ---
+--- point_in_polygon_bulk: all bbox-outside device dispatch ---
+--- point_in_polygon_bulk: simple kernel hole boundary ---
+--- point_in_polygon_bulk: simple slab large batch ---
+--- point_in_polygon_bulk: cooperative kernel path ---
+--- point_in_polygon_bulk: cooperative kernel hole boundary ---
+--- point_in_polygon_bulk: cooperative slab large batch with hole ---
+--- point_in_polygon_bulk: cooperative implicit and short rings ---
+--- sphere_distance: basic ---
+--- sphere_distance: edge cases ---
+--- sphere_distance: fp32 ---
+--- sphere_distance: fp64 (post-split) ---
+--- segment_intersects: basic ---
+--- segment_intersects: edge cases ---
+--- segment_intersects: fp32 ---
+--- st_area_bulk: basic fp32 ---
+--- st_area_bulk: orientation invariance ---
+--- st_area_bulk: empty input ---
+--- st_length_bulk: closed ring (Polygon perimeter) ---
+--- st_length_bulk: open path (LineString) ---
+--- st_length_bulk: degenerate inputs ---
+--- st_length_bulk: fp64 (post-split) ---
+--- st_distance_polygon_polygon: disjoint pair ---
+--- st_distance_polygon_polygon: touching boundaries ---
+--- st_distance_polygon_polygon: degenerate row -> UNCERTAIN ---
+--- spatial CSR: zero-capacity rows and reverse distance sweep ---
+--- st_equals_bulk ---
+--- spatial pairwise: implicit rings and staging validation ---
+--- algorithmic predicate: staging overflow contract ---
+--- algorithmic predicates: device equality adversarial cases ---
+--- st_touches_bulk ---
+--- st_crosses_bulk ---
+--- st_overlaps_bulk ---
+--- algorithmic predicates: slab GPU dispatch ---
+
+=== Results: 223/223 passed ===
+PGACCEL_TEST_RESULT name=test_spatial exit_code=0 result=PASS raw_lines=66 body_sha256=ab18dba809b45ac0e3719fcc99c1773d71febbcf64ead69c13b3adb3eade0546 binding_sha256=ab0be9274c3408a80d05574b703ad2ffc7d576c3ecaa9557c5226b1ad2195d5c

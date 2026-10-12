@@ -1,0 +1,60 @@
+=== 96_declined_lifecycle_contract ===
+SET
+SET
+SET
+SELECT 1
+CREATE TABLE
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 200000
+ANALYZE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+INSERT 0 1024
+ALTER TABLE
+ANALYZE
+SET
+SELECT 65
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 65
+ decline_explain 
+-----------------
+ 
+(1 row)
+
+psql:/Users/contra/Projects/pg_accel/sql/tests/96_declined_lifecycle_contract.sql:245: ERROR:  96 and_range FAILED: exact reason shape_multiple_range_predicates was not recorded; plan:
+        Buffers: local read=2073 written=1
+        Filter: ((_decline_scalar.price >= 200) AND (_decline_scalar.price <= 800) AND (_decline_scalar.price >= 250))
+        Output: g, price, quantity
+        Rows Removed by Filter: 91914
+  ->  Seq Scan on pg_temp._decline_scalar (actual rows=109110.00 loops=1)
+  Batches: 1  Memory Usage: 32kB
+  Buffers: local read=2073 written=1
+  Group Key: _decline_scalar.g
+  Output: g, sum((price * quantity)), count(*)
+HashAggregate (actual rows=65.00 loops=1)
+CONTEXT:  PL/pgSQL function pg_temp_82.decline_contract_ok(text,text,regclass,regclass,bigint,boolean) line 66 at RAISE
+PL/pgSQL expression "NOT pg_temp.decline_contract_ok(
+        'and_range', 'shape_multiple_range_predicates',
+        '_decline_range_native', '_decline_range_enabled',
+        (SELECT kernels FROM _decline_range_before)
+    )"
+PL/pgSQL function inline_code_block line 3 at IF

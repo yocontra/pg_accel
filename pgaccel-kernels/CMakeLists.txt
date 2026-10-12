@@ -44,20 +44,111 @@ set(KERNEL_SOURCES
     src/expr_eval.cpp
     src/expr_memory.cpp
     src/hash_join.cpp
+    src/join_rows.cpp
+    src/join_rows_layout.cpp
     src/resident_count.cpp
     src/grouped_agg.cpp
     src/grouped_agg_workspace.cpp
 )
 
+# Metadata is proved and compiled from one frozen Clang source/header snapshot.
+# It has no SYCL implementation or fallback. Keep it in the source inventory
+# above, but never send it through AdaptiveCpp's source-rewriting launcher.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    set(PGACCEL_METADATA_CXX "${CMAKE_CXX_COMPILER}")
+else()
+    find_program(PGACCEL_METADATA_CXX NAMES clang++ REQUIRED)
+endif()
+set(metadata_driver "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/metadata_build.py")
+set(metadata_verifier "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/metadata_effects.py")
+set(metadata_source "${CMAKE_CURRENT_SOURCE_DIR}/src/join_rows_layout.cpp")
+set(metadata_object_dir "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/pgaccel_metadata.dir/$<CONFIG>")
+set(metadata_object "${metadata_object_dir}/join_rows_layout.cpp.o")
+set(metadata_flags --flag=-fPIC --flag=-ffast-math
+    "--flag=-I${CMAKE_CURRENT_SOURCE_DIR}/include")
+separate_arguments(metadata_common_flags NATIVE_COMMAND "${CMAKE_CXX_FLAGS}")
+foreach(flag IN LISTS metadata_common_flags)
+    list(APPEND metadata_flags "--flag=${flag}")
+endforeach()
+foreach(config Debug Release RelWithDebInfo MinSizeRel)
+    string(TOUPPER "${config}" upper_config)
+    separate_arguments(config_flags NATIVE_COMMAND "${CMAKE_CXX_FLAGS_${upper_config}}")
+    foreach(flag IN LISTS config_flags)
+        list(APPEND metadata_flags "$<$<CONFIG:${config}>:--flag=${flag}>")
+    endforeach()
+endforeach()
+if(CMAKE_OSX_SYSROOT)
+    list(APPEND metadata_flags --flag=-isysroot "--flag=${CMAKE_OSX_SYSROOT}")
+endif()
+if(CMAKE_OSX_DEPLOYMENT_TARGET)
+    list(APPEND metadata_flags "--flag=-mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET}")
+endif()
+foreach(arch IN LISTS CMAKE_OSX_ARCHITECTURES)
+    list(APPEND metadata_flags --flag=-arch "--flag=${arch}")
+endforeach()
+if(CMAKE_CXX_COMPILER_TARGET)
+    list(APPEND metadata_flags --flag=-target "--flag=${CMAKE_CXX_COMPILER_TARGET}")
+endif()
+if(CMAKE_SYSROOT)
+    list(APPEND metadata_flags "--flag=--sysroot=${CMAKE_SYSROOT}")
+endif()
+if(PGACCEL_ENABLE_COVERAGE)
+    list(APPEND metadata_flags --flag=-fprofile-instr-generate --flag=-fcoverage-mapping)
+endif()
+add_custom_command(OUTPUT "${metadata_object}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${metadata_object_dir}"
+    COMMAND ${CMAKE_COMMAND} -E env PYTHONDONTWRITEBYTECODE=1
+        ${Python3_EXECUTABLE} "${metadata_driver}"
+        --compiler "${PGACCEL_METADATA_CXX}" --source "${metadata_source}"
+        --output "${metadata_object}" --depfile "${metadata_object}.d"
+        ${metadata_flags}
+    DEPENDS "${metadata_source}" "${metadata_driver}" "${metadata_verifier}"
+    DEPFILE "${metadata_object}.d"
+    BYPRODUCTS "${metadata_object}.metadata.json"
+    COMMAND_EXPAND_LISTS VERBATIM)
+add_custom_target(pgaccel_metadata
+    COMMAND ${CMAKE_COMMAND} -E env PYTHONDONTWRITEBYTECODE=1
+        ${Python3_EXECUTABLE} "${metadata_driver}"
+        --verify "${metadata_object}.metadata.json"
+        --compiler "${PGACCEL_METADATA_CXX}" --source "${metadata_source}"
+        --output "${metadata_object}" ${metadata_flags}
+    DEPENDS "${metadata_object}"
+    COMMAND_EXPAND_LISTS VERBATIM)
+set_source_files_properties("${metadata_object}" PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
+list(REMOVE_ITEM KERNEL_SOURCES src/join_rows_layout.cpp)
+
 # Static library for embedding into the Rust extension.
-add_library(pgaccel_kernels STATIC ${KERNEL_SOURCES})
+add_library(pgaccel_kernels STATIC ${KERNEL_SOURCES} "${metadata_object}")
+add_dependencies(pgaccel_kernels pgaccel_metadata)
 
 target_include_directories(pgaccel_kernels PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
 # Shared library for standalone test executables.
-add_library(pgaccel_kernels_shared SHARED ${KERNEL_SOURCES})
+add_library(pgaccel_kernels_shared SHARED ${KERNEL_SOURCES} "${metadata_object}")
+add_dependencies(pgaccel_kernels_shared pgaccel_metadata)
+
+# Linker ownership is part of release metadata approval, not merely a list of
+# exported names. Bind the map and linked bytes after this exact link succeeds.
+set(metadata_link_driver "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/metadata_link.py")
+if(APPLE)
+    target_link_options(pgaccel_kernels_shared PRIVATE
+        "LINKER:-map,$<TARGET_FILE:pgaccel_kernels_shared>.map")
+else()
+    target_link_options(pgaccel_kernels_shared PRIVATE
+        "LINKER:-Map,$<TARGET_FILE:pgaccel_kernels_shared>.map")
+endif()
+set_property(TARGET pgaccel_kernels_shared APPEND PROPERTY LINK_DEPENDS "${metadata_link_driver}")
+add_custom_command(TARGET pgaccel_kernels_shared POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E env PYTHONDONTWRITEBYTECODE=1
+        ${Python3_EXECUTABLE} "${metadata_link_driver}"
+        --library "$<TARGET_FILE:pgaccel_kernels_shared>"
+        --map "$<TARGET_FILE:pgaccel_kernels_shared>.map"
+        --object "${metadata_object}"
+        --output "$<TARGET_FILE:pgaccel_kernels_shared>.metadata-binding.json"
+    VERBATIM)
 
 target_include_directories(pgaccel_kernels_shared PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -141,6 +232,14 @@ target_link_libraries(test_hash_agg_keys PRIVATE pgaccel_kernels_shared)
 
 add_executable(test_hash_join test/test_hash_join.cpp)
 target_link_libraries(test_hash_join PRIVATE pgaccel_kernels_shared)
+add_executable(test_join_rows test/test_join_rows.cpp)
+target_link_libraries(test_join_rows PRIVATE pgaccel_kernels_shared)
+
+# The exact public workspace queries, without SYCL or either kernel library.
+# Linking this target also guards against hidden runtime dependencies.
+add_executable(test_join_rows_layout test/test_join_rows_layout.cpp "${metadata_object}")
+add_dependencies(test_join_rows_layout pgaccel_metadata)
+target_include_directories(test_join_rows_layout PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 add_executable(test_hash_domain_matrix test/test_hash_domain_matrix.cpp)
 target_link_libraries(test_hash_domain_matrix PRIVATE pgaccel_kernels_shared)
@@ -159,6 +258,8 @@ target_link_libraries(test_expr_vm_matrix PRIVATE pgaccel_kernels_shared)
 
 add_executable(test_raster_resident test/test_raster_resident.cpp)
 target_link_libraries(test_raster_resident PRIVATE pgaccel_kernels_shared)
+add_executable(test_raster_lookup test/test_raster_lookup.cpp)
+target_include_directories(test_raster_lookup PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 add_executable(test_correctness test/test_correctness.cpp)
 target_link_libraries(test_correctness PRIVATE pgaccel_kernels_shared)
@@ -219,6 +320,12 @@ target_link_libraries(test_spatial_bench PRIVATE pgaccel_kernels_shared)
 add_executable(test_sycl_basic test/test_sycl_basic.cpp)
 target_link_libraries(test_sycl_basic PRIVATE pgaccel_kernels_shared)
 add_sycl_to_target(TARGET test_sycl_basic)
+
+add_executable(test_scalar test/test_scalar.cpp)
+target_link_libraries(test_scalar PRIVATE pgaccel_kernels_shared)
+target_compile_definitions(test_scalar PRIVATE
+    PGACCEL_SCALAR_CASES="${CMAKE_CURRENT_SOURCE_DIR}/test/scalar_cases.txt")
+add_sycl_to_target(TARGET test_scalar)
 
 add_executable(test_fp64_mul_probe test/test_fp64_mul_probe.cpp)
 target_link_libraries(test_fp64_mul_probe PRIVATE pgaccel_kernels_shared)
@@ -291,6 +398,10 @@ endfunction()
 
 add_pgaccel_gpu_test(test_host_api_contract)
 set_tests_properties(test_host_api_contract PROPERTIES LABELS host)
+add_pgaccel_gpu_test(test_join_rows_layout)
+set_tests_properties(test_join_rows_layout PROPERTIES LABELS host)
+add_pgaccel_gpu_test(test_raster_lookup)
+set_tests_properties(test_raster_lookup PROPERTIES LABELS host)
 
 add_pgaccel_gpu_test(test_device)
 add_pgaccel_gpu_test(test_bbox)
@@ -307,6 +418,7 @@ add_pgaccel_gpu_test(test_fork_warmed)
 add_pgaccel_gpu_test(test_fork_cold)
 add_pgaccel_gpu_test(test_fork_cold_barrier TIMEOUT 1200)
 add_pgaccel_gpu_test(test_sycl_basic)
+add_pgaccel_gpu_test(test_scalar)
 add_pgaccel_gpu_test(test_reduce_stats)
 add_pgaccel_gpu_test(test_reduce_bool_bit)
 add_pgaccel_gpu_test(test_grouped_agg)
@@ -315,6 +427,7 @@ add_pgaccel_gpu_test(test_grouped_agg_workspace)
 add_pgaccel_gpu_test(test_hash_agg_partial)
 add_pgaccel_gpu_test(test_hash_agg_keys)
 add_pgaccel_gpu_test(test_hash_join)
+add_pgaccel_gpu_test(test_join_rows)
 add_pgaccel_gpu_test(test_hash_domain_matrix)
 add_pgaccel_gpu_test(test_hashagg_spatial_matrix)
 add_pgaccel_gpu_test(test_reduce_matrix)
@@ -342,6 +455,6 @@ add_pgaccel_gpu_test(test_kernel_failure_status)
 
 install(TARGETS pgaccel_kernels LIBRARY DESTINATION lib)
 install(FILES include/pgaccel_ffi.h include/pgaccel_expr.h
-              include/pgaccel_hash_join.h include/pgaccel_olap.h
+              include/pgaccel_hash_join.h include/pgaccel_join_rows.h include/pgaccel_olap.h
               include/pgaccel_resident_count.h
         DESTINATION include)

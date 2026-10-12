@@ -33,6 +33,7 @@ pub(super) fn bounded_qual_conjunct_indices(
 struct ExpressionInventory {
     aggregate_nodes: Vec<*mut pg_sys::Aggref>,
     join_nodes: Vec<*mut pg_sys::JoinExpr>,
+    from_nodes: Vec<*mut pg_sys::FromExpr>,
     vars: Vec<*mut pg_sys::Var>,
     saw_window_function: bool,
     saw_sublink: bool,
@@ -61,7 +62,17 @@ unsafe extern "C-unwind" fn inventory_walker(node: *mut Node, context: *mut c_vo
     }
     // SAFETY: PostgreSQL passed a valid node from the current query tree and
     // the callback/context remain live until query_tree_walker_impl returns.
-    unsafe { pg_sys::expression_tree_walker_impl(node, Some(inventory_walker), context) }
+    let stopped =
+        unsafe { pg_sys::expression_tree_walker_impl(node, Some(inventory_walker), context) };
+    // PostgreSQL distributes jointree qualifiers child-first. Pulled-up
+    // subqueries can leave nested FromExprs even with a single base relation.
+    // SAFETY: node and context remain live across the synchronous recursion.
+    if unsafe { (*node).type_ } == NodeTag::T_FromExpr {
+        unsafe { &mut *context.cast::<ExpressionInventory>() }
+            .from_nodes
+            .push(node.cast());
+    }
+    stopped
 }
 
 unsafe fn inventory_query(query: *mut pg_sys::Query) -> ExpressionInventory {
@@ -83,7 +94,7 @@ unsafe fn inventory_query(query: *mut pg_sys::Query) -> ExpressionInventory {
     inventory
 }
 
-fn list_len(list: *mut pg_sys::List) -> usize {
+pub(super) fn list_len(list: *mut pg_sys::List) -> usize {
     if list.is_null() {
         0
     } else {
@@ -93,7 +104,7 @@ fn list_len(list: *mut pg_sys::List) -> usize {
     }
 }
 
-unsafe fn list_item<T>(list: *mut pg_sys::List, index: usize) -> Option<*mut T> {
+pub(super) unsafe fn list_item<T>(list: *mut pg_sys::List, index: usize) -> Option<*mut T> {
     if index >= list_len(list) {
         return None;
     }
@@ -116,7 +127,7 @@ unsafe fn rte_for_varno(
     unsafe { list_item(query.rtable, index) }
 }
 
-unsafe fn direct_var(node: *mut Node, query: &pg_sys::Query) -> Option<PlannerColumn> {
+pub(super) unsafe fn direct_var(node: *mut Node, query: &pg_sys::Query) -> Option<PlannerColumn> {
     if node.is_null() {
         return None;
     }
@@ -323,6 +334,58 @@ unsafe fn target_entry_expr(
     (!expr.is_null()).then_some((target, expr))
 }
 
+fn checked_cardinalities(cardinalities: impl IntoIterator<Item = f64>) -> Option<Vec<u64>> {
+    cardinalities
+        .into_iter()
+        .map(|cardinality| {
+            if !cardinality.is_finite() || cardinality < 0.0 || cardinality >= u64::MAX as f64 {
+                return None;
+            }
+            Some(cardinality.ceil().max(1.0) as u64)
+        })
+        .collect()
+}
+
+/// Estimate each dictionary separately: joint ndistinct cannot size a dense
+/// Cartesian radix domain when keys are correlated. No row-count cap applies
+/// to the resulting product. Root and its query must remain planner-owned.
+pub(super) unsafe fn estimate_dense_key_cardinalities(
+    root: *mut pg_sys::PlannerInfo,
+    input_rows: u64,
+) -> Option<Vec<u64>> {
+    if root.is_null() {
+        return None;
+    }
+    // SAFETY: caller guarantees root's planner lifetime; null parse is rejected.
+    let query = unsafe { (*root).parse.as_ref() }?;
+    let mut cardinalities = Vec::with_capacity(list_len(query.groupClause));
+    for index in 0..list_len(query.groupClause) {
+        // SAFETY: index is in the live query's group-clause list.
+        let clause = unsafe { list_item::<pg_sys::SortGroupClause>(query.groupClause, index) }?;
+        // SAFETY: clause and targetList belong to the same analyzed Query.
+        let expression = unsafe { pg_sys::get_sortgroupclause_expr(clause, query.targetList) };
+        if expression.is_null() {
+            return None;
+        }
+        // SAFETY: lappend creates a temporary one-element pointer list; the
+        // expression itself remains query-owned. Only list cells are freed.
+        let estimate = unsafe {
+            let expressions = pg_sys::lappend(std::ptr::null_mut(), expression.cast());
+            let estimate = pg_sys::estimate_num_groups(
+                root,
+                expressions,
+                input_rows as f64,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+            pg_sys::list_free(expressions);
+            estimate
+        };
+        cardinalities.push(estimate);
+    }
+    checked_cardinalities(cardinalities)
+}
+
 unsafe fn group_keys(query: &pg_sys::Query) -> Result<Vec<PlannerGroupKey>, ShapeDecline> {
     let mut groups = Vec::with_capacity(list_len(query.groupClause));
     for index in 0..list_len(query.groupClause) {
@@ -395,9 +458,12 @@ unsafe fn group_keys(query: &pg_sys::Query) -> Result<Vec<PlannerGroupKey>, Shap
 
 pub(super) fn classify_aggregate(aggregate_oid: u32) -> Option<AggregateKind> {
     match aggregate_oid {
-        pg_sys::F_SUM_INT2 | pg_sys::F_SUM_INT4 | pg_sys::F_SUM_FLOAT4 | pg_sys::F_SUM_FLOAT8 => {
-            Some(AggregateKind::Sum)
-        }
+        pg_sys::F_SUM_INT2
+        | pg_sys::F_SUM_INT8
+        | pg_sys::F_SUM_INT4
+        | pg_sys::F_SUM_FLOAT4
+        | pg_sys::F_SUM_FLOAT8
+        | pg_sys::F_SUM_NUMERIC => Some(AggregateKind::Sum),
         pg_sys::F_COUNT_ANY | pg_sys::F_COUNT_ => Some(AggregateKind::Count),
         pg_sys::F_MIN_INT2
         | pg_sys::F_MIN_INT4
@@ -419,27 +485,24 @@ pub(super) fn classify_aggregate(aggregate_oid: u32) -> Option<AggregateKind> {
         | pg_sys::F_MAX_TIMETZ
         | pg_sys::F_MAX_TIMESTAMP
         | pg_sys::F_MAX_TIMESTAMPTZ => Some(AggregateKind::Max),
-        pg_sys::F_AVG_INT2 | pg_sys::F_AVG_INT4 | pg_sys::F_AVG_FLOAT4 | pg_sys::F_AVG_FLOAT8 => {
-            Some(AggregateKind::Avg)
-        }
+        pg_sys::F_AVG_INT2
+        | pg_sys::F_AVG_INT8
+        | pg_sys::F_AVG_INT4
+        | pg_sys::F_AVG_FLOAT4
+        | pg_sys::F_AVG_FLOAT8
+        | pg_sys::F_AVG_NUMERIC => Some(AggregateKind::Avg),
         pg_sys::F_STDDEV_FLOAT8 | pg_sys::F_STDDEV_SAMP_FLOAT8 => Some(AggregateKind::StddevSamp),
         _ => None,
     }
 }
 
 pub(super) fn needs_numeric_accumulator(aggregate_oid: u32) -> bool {
-    matches!(
-        aggregate_oid,
-        pg_sys::F_SUM_INT8
-            | pg_sys::F_SUM_NUMERIC
-            | pg_sys::F_AVG_INT8
-            | pg_sys::F_AVG_NUMERIC
-            | pg_sys::F_AVG_INTERVAL
-    )
+    matches!(aggregate_oid, pg_sys::F_AVG_INTERVAL)
 }
 
 fn classify_binary_function(function_oid: u32) -> Option<BinaryMeasureOp> {
     match function_oid {
+        pg_sys::F_INT4PL => Some(BinaryMeasureOp::Add),
         pg_sys::F_INT2MUL
         | pg_sys::F_INT4MUL
         | pg_sys::F_INT8MUL
@@ -467,6 +530,28 @@ unsafe fn first_aggregate_argument(aggregate: &pg_sys::Aggref) -> Option<*mut No
 }
 
 unsafe fn measure_expression(
+    aggregate: &pg_sys::Aggref,
+    query: &pg_sys::Query,
+    kind: AggregateKind,
+) -> Result<MeasureExpr, ShapeDecline> {
+    // Preserve the released raw-column and two-column binary representations.
+    // SAFETY: caller supplies the active analyzed aggregate and Query.
+    match unsafe { legacy_measure_expression(aggregate, query, kind) } {
+        Ok(expression) => return Ok(expression),
+        Err(ShapeDecline::UnsupportedMeasureExpression) => {}
+        Err(error) => return Err(error),
+    }
+    // Lower the original argument, not the coercion-stripped legacy probe.
+    // SAFETY: aggregate arguments share the active planner tree's lifetime.
+    let argument = unsafe { first_aggregate_argument(aggregate) }
+        .ok_or(ShapeDecline::UnsupportedMeasureExpression)?;
+    // SAFETY: lowerer reads planner-simplified nodes synchronously on the
+    // backend thread and retains only validated logical identities/programs.
+    let lowered = unsafe { super::postgres_scalar::lower_scalar_expression(argument, query) }?;
+    Ok(lowered.into_measure_expression())
+}
+
+unsafe fn legacy_measure_expression(
     aggregate: &pg_sys::Aggref,
     query: &pg_sys::Query,
     kind: AggregateKind,
@@ -527,7 +612,7 @@ unsafe fn measure_expression(
     })
 }
 
-unsafe fn parse_aggregate(
+pub(super) unsafe fn parse_aggregate(
     node: *mut Node,
     query: &pg_sys::Query,
 ) -> Result<AggregateExpr, ShapeDecline> {
@@ -558,7 +643,37 @@ unsafe fn parse_aggregate(
     let expression = unsafe { measure_expression(aggregate, query, kind) }?;
     // SAFETY: aggfilter, when present, belongs to this analyzed Aggref and
     // shares the active Query's planner lifetime.
-    let filter = unsafe { aggregate_filter(aggregate.aggfilter.cast::<Node>(), query) }?;
+    let (expression, filter) =
+        match unsafe { aggregate_filter(aggregate.aggfilter.cast::<Node>(), query) } {
+            Ok(filter) => (lower_filtered_count(expression, kind, &filter), filter),
+            Err(ShapeDecline::UnsupportedAggregateModifier) => {
+                // The built-in aggregate and argument shape were checked above.
+                // Qualified strict INT4/DATE aggregates or Boolean COUNT can use
+                // a lazy scalar producer: rejected rows yield NULL, never an
+                // argument evaluation, while group activity stays unchanged.
+                let argument = if expression == MeasureExpr::CountStar {
+                    None
+                } else {
+                    // SAFETY: aggregate is the same validated, live Aggref.
+                    Some(
+                        unsafe { first_aggregate_argument(aggregate) }
+                            .ok_or(ShapeDecline::UnsupportedAggregateModifier)?,
+                    )
+                };
+                // SAFETY: predicate/argument belong to this simplified query;
+                // no PostgreSQL pointers escape the synchronous lowerer.
+                let lowered = unsafe {
+                    super::postgres_scalar::lower_filtered_scalar_expression(
+                        aggregate.aggfilter.cast::<Node>(),
+                        argument,
+                        query,
+                    )
+                }
+                .map_err(|_| ShapeDecline::UnsupportedAggregateModifier)?;
+                (lowered.into_measure_expression(), FilterSpec::None)
+            }
+            Err(error) => return Err(error),
+        };
     Ok(AggregateExpr {
         expression,
         output: AggregateOutput {
@@ -567,6 +682,26 @@ unsafe fn parse_aggregate(
         },
         filter,
     })
+}
+
+fn lower_filtered_count(
+    expression: MeasureExpr,
+    kind: AggregateKind,
+    filter: &FilterSpec,
+) -> MeasureExpr {
+    // Every accepted interval row has a non-NULL predicate input. Therefore
+    // COUNT(*) FILTER (WHERE p(x)) is exactly COUNT(x) FILTER (WHERE p(x)).
+    // Keep the filter: removing it would incorrectly count every non-NULL x.
+    if expression == MeasureExpr::CountStar
+        && kind == AggregateKind::Count
+        && let FilterSpec::Ranges { input, ranges } = filter
+        && input.type_oid == u32::from(pg_sys::INT4OID)
+        && !ranges.is_empty()
+    {
+        MeasureExpr::Column(*input)
+    } else {
+        expression
+    }
 }
 
 unsafe fn column_is_nullable(column: PlannerColumn) -> bool {
@@ -612,18 +747,15 @@ unsafe fn output_metadata(
 unsafe fn projections_and_aggregates(
     query: &pg_sys::Query,
     inventory: &ExpressionInventory,
+    targets: *mut pg_sys::List,
 ) -> Result<(Vec<InputProjection>, Vec<AggregateExpr>), ShapeDecline> {
     let mut projections = Vec::new();
     let mut aggregates = Vec::new();
-    let mut direct_aggregate_nodes = BTreeSet::new();
-    for index in 0..list_len(query.targetList) {
+    let mut direct_aggregate_nodes = Vec::new();
+    for index in 0..list_len(targets) {
         // SAFETY: index is bounded by list_len(targetList).
-        let (target, expression) = unsafe { target_entry_expr(query.targetList, index) }
+        let (_, expression) = unsafe { target_entry_expr(targets, index) }
             .ok_or(ShapeDecline::UnsupportedProjection)?;
-        // SAFETY: target_entry_expr returned a valid TargetEntry.
-        if unsafe { (*target).resjunk } {
-            continue;
-        }
         // SAFETY: expression belongs to this Query target list.
         if let Some(group) = unsafe { direct_var(expression, query) } {
             projections.push(InputProjection::Group {
@@ -684,16 +816,116 @@ unsafe fn projections_and_aggregates(
             // SAFETY: expression is the active non-junk target expression.
             output: unsafe { output_metadata(expression, source_type_oid, nullable) },
         });
-        direct_aggregate_nodes.insert(stripped.addr());
+        direct_aggregate_nodes.push(stripped);
     }
-    if inventory
-        .aggregate_nodes
-        .iter()
-        .any(|aggregate| !direct_aggregate_nodes.contains(&aggregate.addr()))
-    {
+    if inventory.aggregate_nodes.iter().any(|aggregate| {
+        !direct_aggregate_nodes.iter().any(|projected| {
+            // HAVING owns separate Aggref nodes for the same aggregate.
+            // Compare expressions, not allocation addresses; setrefs uses
+            // the same equality when binding the CPU qual to scan outputs.
+            // SAFETY: both nodes belong to this live planner Query.
+            unsafe { pg_sys::equal(aggregate.cast(), (*projected).cast()) }
+        })
+    }) {
         return Err(ShapeDecline::UnsupportedProjection);
     }
     Ok((projections, aggregates))
+}
+
+/// Construct the internal scan layout without changing PostgreSQL's query or
+/// final output. Junk grouping/sort keys and hidden HAVING aggregates are real
+/// scan attributes; PostgreSQL projects them away after evaluating the qual.
+///
+/// # Safety
+/// `query` must belong to the current live planner invocation.
+pub unsafe fn aggregate_scan_target_list(
+    query: &pg_sys::Query,
+) -> Result<*mut pg_sys::List, ShapeDecline> {
+    // SAFETY: targetList is a planner-owned List<TargetEntry>.
+    let mut targets: *mut pg_sys::List =
+        unsafe { pg_sys::copyObjectImpl(query.targetList.cast()).cast() };
+    let mut inventory = ExpressionInventory::default();
+    // SAFETY: the synchronous walker borrows only the live HAVING expression.
+    unsafe { inventory_walker(query.havingQual, (&raw mut inventory).cast()) };
+    for aggregate in inventory.aggregate_nodes {
+        // SAFETY: all nodes are planner-owned; equality deduplicates Aggrefs.
+        unsafe {
+            if pg_sys::tlist_member(aggregate.cast(), targets).is_null() {
+                let expression = pg_sys::copyObjectImpl(aggregate.cast()).cast();
+                let target = pg_sys::makeTargetEntry(
+                    expression,
+                    (pg_sys::list_length(targets) + 1)
+                        .try_into()
+                        .map_err(|_| ShapeDecline::UnsupportedProjection)?,
+                    std::ptr::null_mut(),
+                    false,
+                );
+                targets = pg_sys::lappend(targets, target.cast());
+            }
+        }
+    }
+    // Qualified kernels put value measures before COUNT(*). SQL output order
+    // must not dictate that device layout, especially when a value is hidden
+    // in HAVING. Stable grouping preserves the order within each category.
+    let mut entries: Vec<*mut pg_sys::TargetEntry> = (0..list_len(targets))
+        .map(|index| {
+            // SAFETY: targets contains copied or newly allocated TargetEntries.
+            unsafe { pg_sys::list_nth(targets, index as i32).cast() }
+        })
+        .collect();
+    entries.sort_by_key(|target| {
+        // SAFETY: every target expression belongs to this planner context.
+        unsafe {
+            let expression = pg_sys::strip_implicit_coercions((**target).expr.cast());
+            if !expression.is_null() && (*expression).type_ == NodeTag::T_Aggref {
+                if (*expression.cast::<pg_sys::Aggref>()).aggstar {
+                    2
+                } else {
+                    1
+                }
+            } else {
+                0
+            }
+        }
+    });
+    targets = std::ptr::null_mut();
+    // Internal attributes must be dense and must not be dropped as junk.
+    for (index, target) in entries.into_iter().enumerate() {
+        // SAFETY: targets contains copied or newly allocated TargetEntries.
+        unsafe {
+            (*target).resno = (index + 1)
+                .try_into()
+                .map_err(|_| ShapeDecline::UnsupportedProjection)?;
+            (*target).resjunk = false;
+            targets = pg_sys::lappend(targets, target.cast());
+        }
+    }
+    Ok(targets)
+}
+
+/// A native qual may consume only materialized scan values. Stop at a matching
+/// output expression rather than descending into its input Vars.
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn unsupported_having_input(
+    node: *mut Node,
+    context: *mut c_void,
+) -> bool {
+    if node.is_null() {
+        return false;
+    }
+    let targets = context.cast::<pg_sys::List>();
+    // SAFETY: targets and node are planner-owned for this synchronous walk.
+    let target = unsafe { pg_sys::tlist_member(node.cast(), targets) };
+    // SAFETY: tlist_member returns null or a TargetEntry from targets.
+    if !target.is_null() && !unsafe { (*target).resjunk } {
+        return false;
+    }
+    // SAFETY: PostgreSQL supplies a live expression node.
+    if matches!(unsafe { (*node).type_ }, NodeTag::T_Var | NodeTag::T_Aggref) {
+        return true;
+    }
+    // SAFETY: the same planner-owned target list remains live during recursion.
+    unsafe { pg_sys::expression_tree_walker_impl(node, Some(unsupported_having_input), context) }
 }
 
 fn scalar_value(constant: &pg_sys::Const) -> Result<ScalarValue, ShapeDecline> {
@@ -873,6 +1105,7 @@ pub(super) fn postgis_geometry_typmod_metadata(typmod: i32) -> Option<SpatialVal
         crate::engine::residency::RESIDENT_GEOMETRY_POINT
             | crate::engine::residency::RESIDENT_GEOMETRY_LINESTRING
             | crate::engine::residency::RESIDENT_GEOMETRY_POLYGON
+            | crate::engine::residency::RESIDENT_GEOMETRY_MULTIPOLYGON
     ) {
         return None;
     }
@@ -1010,12 +1243,8 @@ enum PendingFilter {
     },
 }
 
-/// Extract the first released aggregate-local predicate shape.
-///
-/// A bounded INT4 interval over one column is losslessly representable by the
-/// frozen descriptor ABI and has a dedicated parallel dense implementation.
-/// Everything else retains the aggregate-modifier decline instead of falling
-/// through to the generic serial descriptor path.
+/// Lower a bounded, single-column three-valued predicate to exact INT4 TRUE
+/// intervals. This is input-independent planning, not host row filtering.
 unsafe fn aggregate_filter(
     node: *mut Node,
     query: &pg_sys::Query,
@@ -1023,31 +1252,253 @@ unsafe fn aggregate_filter(
     if node.is_null() {
         return Ok(FilterSpec::None);
     }
-    let mut joins = Vec::new();
-    let mut filters = BTreeMap::new();
-    // SAFETY: node is the planner-owned Aggref filter for this active Query.
-    unsafe { parse_qual(node, query, &mut joins, &mut filters) }
+    // SAFETY: node and query share the active analyzed planner lifetime.
+    let (input, predicate) = unsafe { aggregate_int4_predicate(node, query, &mut 64) }
         .map_err(|_| ShapeDecline::UnsupportedAggregateModifier)?;
-    if !joins.is_empty() || filters.len() != 1 {
-        return Err(ShapeDecline::UnsupportedAggregateModifier);
-    }
-    let Some(PendingFilter::Ranges { input, range, .. }) = filters.into_values().next() else {
-        return Err(ShapeDecline::UnsupportedAggregateModifier);
-    };
-    let (ScalarValue::I32(lo), ScalarValue::I32(hi)) = (range.lo, range.hi) else {
-        return Err(ShapeDecline::UnsupportedAggregateModifier);
-    };
-    if input.column.type_oid != u32::from(pg_sys::INT4OID)
-        || lo == i32::MIN
-        || hi == i32::MAX
-        || lo >= hi
+    normalized_int4_filter(input, predicate)
+}
+
+fn normalized_int4_filter(
+    input: Option<PlannerColumn>,
+    predicate: super::int4_predicate::Int4Predicate,
+) -> Result<FilterSpec, ShapeDecline> {
+    let input = input.ok_or(ShapeDecline::UnsupportedAggregateModifier)?;
+    let accept_null = predicate.null_truth == super::int4_predicate::Truth::True;
+    if (!accept_null && predicate.true_ranges.is_empty())
+        || predicate.true_ranges.len()
+            > crate::engine::spec::abi::PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES
     {
+        // Zero ordinary ranges disables the ABI lane; a NULL-accepting
+        // predicate instead carries an explicit active flag, including IS NULL.
         return Err(ShapeDecline::UnsupportedAggregateModifier);
     }
-    Ok(FilterSpec::Ranges {
-        input: input.column,
-        ranges: vec![range],
+    let ranges = predicate
+        .true_ranges
+        .into_iter()
+        .map(|(lo, hi)| ScalarRange {
+            lo: ScalarValue::I32(lo),
+            hi: ScalarValue::I32(hi),
+        })
+        .collect();
+    Ok(if accept_null {
+        FilterSpec::NullOrRanges {
+            input: input.column,
+            ranges,
+        }
+    } else {
+        FilterSpec::Ranges {
+            input: input.column,
+            ranges,
+        }
     })
+}
+
+unsafe fn aggregate_int4_operator(operator: pg_sys::Oid) -> Result<(i32, bool), ShapeDecline> {
+    // SAFETY: OID is from an analyzed comparison over two exact INT4 inputs.
+    if let Some(strategy) = unsafe { btree_strategy(operator, pg_sys::INT4OID) } {
+        return Ok((strategy, false));
+    }
+    // SAFETY: catalog lookup on the backend thread; only the ordinary equality
+    // operator's reciprocal negator is accepted, never a name-based match.
+    let negator = unsafe { pg_sys::get_negator(operator) };
+    if negator != pg_sys::InvalidOid
+        && unsafe { btree_strategy(negator, pg_sys::INT4OID) } == Some(3)
+        && unsafe { pg_sys::get_negator(negator) } == operator
+    {
+        Ok((3, true))
+    } else {
+        Err(ShapeDecline::UnsupportedAggregateModifier)
+    }
+}
+
+fn aggregate_int4_constant(constant: &pg_sys::Const) -> Result<Option<i32>, ShapeDecline> {
+    if constant.consttype != pg_sys::INT4OID || !constant.constbyval || constant.constlen != 4 {
+        return Err(ShapeDecline::UnsupportedAggregateModifier);
+    }
+    // SAFETY: exact INT4 physical representation was checked above.
+    Ok((!constant.constisnull).then(|| unsafe { pg_sys::DatumGetInt32(constant.constvalue) }))
+}
+
+unsafe fn aggregate_int4_predicate(
+    node: *mut Node,
+    query: &pg_sys::Query,
+    budget: &mut usize,
+) -> Result<(Option<PlannerColumn>, super::int4_predicate::Int4Predicate), ShapeDecline> {
+    use super::int4_predicate::{Int4Predicate, Truth};
+    use pgrx::FromDatum;
+    *budget = budget
+        .checked_sub(1)
+        .ok_or(ShapeDecline::UnsupportedAggregateModifier)?;
+    if node.is_null() {
+        return Err(ShapeDecline::UnsupportedAggregateModifier);
+    }
+    // SAFETY: node belongs to the active query and is non-null.
+    match unsafe { (*node).type_ } {
+        NodeTag::T_BoolExpr | NodeTag::T_List => {
+            // SAFETY: the tag is one of the two layouts in this arm. Planner
+            // WHERE lists represent implicit AND; explicit Boolean nodes
+            // carry their own operation and argument list.
+            let (args, boolop) = unsafe {
+                if (*node).type_ == NodeTag::T_List {
+                    (node.cast::<pg_sys::List>(), pg_sys::BoolExprType::AND_EXPR)
+                } else {
+                    let boolean = &*node.cast::<pg_sys::BoolExpr>();
+                    (boolean.args, boolean.boolop)
+                }
+            };
+            let count = list_len(args);
+            if count == 0 || count > 64 {
+                return Err(ShapeDecline::UnsupportedAggregateModifier);
+            }
+            let mut input = None;
+            let mut result: Option<Int4Predicate> = None;
+            for index in 0..count {
+                // SAFETY: index is bounded by the list length.
+                let child = unsafe { list_item::<Node>(args, index) }
+                    .ok_or(ShapeDecline::UnsupportedAggregateModifier)?;
+                // SAFETY: child shares the analyzed query lifetime; budget bounds recursion.
+                let (column, next) = unsafe { aggregate_int4_predicate(child, query, budget) }?;
+                if input.is_some() && column.is_some() && input != column {
+                    return Err(ShapeDecline::UnsupportedAggregateModifier);
+                }
+                input = input.or(column);
+                result = Some(match (boolop, result) {
+                    (pg_sys::BoolExprType::NOT_EXPR, None) if count == 1 => next.not(),
+                    (pg_sys::BoolExprType::AND_EXPR | pg_sys::BoolExprType::OR_EXPR, None) => next,
+                    (pg_sys::BoolExprType::AND_EXPR, Some(previous)) => previous.and(next)?,
+                    (pg_sys::BoolExprType::OR_EXPR, Some(previous)) => previous.or(next)?,
+                    _ => return Err(ShapeDecline::UnsupportedAggregateModifier),
+                });
+            }
+            Ok((
+                input,
+                result.ok_or(ShapeDecline::UnsupportedAggregateModifier)?,
+            ))
+        }
+        NodeTag::T_Const => {
+            // SAFETY: tag proves Const layout.
+            let constant = unsafe { &*node.cast::<pg_sys::Const>() };
+            if constant.consttype != pg_sys::BOOLOID
+                || !constant.constbyval
+                || constant.constlen != 1
+            {
+                return Err(ShapeDecline::UnsupportedAggregateModifier);
+            }
+            let truth = if constant.constisnull {
+                Truth::Unknown
+            }
+            // SAFETY: checked the boolean Datum representation above.
+            else if unsafe { pg_sys::DatumGetBool(constant.constvalue) } {
+                Truth::True
+            } else {
+                Truth::False
+            };
+            Ok((None, Int4Predicate::constant(truth)))
+        }
+        NodeTag::T_NullTest => {
+            // SAFETY: this tag proves NullTest layout in the live query tree.
+            let test = unsafe { &*node.cast::<pg_sys::NullTest>() };
+            // SAFETY: arg belongs to the same analyzed query.
+            let column = unsafe { direct_var(test.arg.cast(), query) }
+                .filter(|column| {
+                    !test.argisrow && column.column.type_oid == u32::from(pg_sys::INT4OID)
+                })
+                .ok_or(ShapeDecline::UnsupportedAggregateModifier)?;
+            let predicate = Int4Predicate::is_null();
+            Ok((
+                Some(column),
+                if test.nulltesttype == pg_sys::NullTestType::IS_NULL {
+                    predicate
+                } else {
+                    predicate.not()
+                },
+            ))
+        }
+        NodeTag::T_OpExpr | NodeTag::T_ScalarArrayOpExpr => {
+            // SAFETY: each tag proves the corresponding struct layout.
+            let (operator, args, array_mode) = unsafe {
+                if (*node).type_ == NodeTag::T_OpExpr {
+                    let op = &*node.cast::<pg_sys::OpExpr>();
+                    (op.opno, op.args, None)
+                } else {
+                    let op = &*node.cast::<pg_sys::ScalarArrayOpExpr>();
+                    (op.opno, op.args, Some(op.useOr))
+                }
+            };
+            if list_len(args) != 2 {
+                return Err(ShapeDecline::UnsupportedAggregateModifier);
+            }
+            // SAFETY: both indices are within the checked list length.
+            let left = unsafe { list_item::<Node>(args, 0) }
+                .ok_or(ShapeDecline::UnsupportedAggregateModifier)?;
+            // SAFETY: both indices are within the checked list length.
+            let right = unsafe { list_item::<Node>(args, 1) }
+                .ok_or(ShapeDecline::UnsupportedAggregateModifier)?;
+            // SAFETY: both operands belong to this query.
+            let (column, constant_node, swapped) =
+                if let Some(column) = unsafe { direct_var(left, query) } {
+                    (column, right, false)
+                } else if array_mode.is_none() {
+                    (
+                        unsafe { direct_var(right, query) }
+                            .ok_or(ShapeDecline::UnsupportedAggregateModifier)?,
+                        left,
+                        true,
+                    )
+                } else {
+                    return Err(ShapeDecline::UnsupportedAggregateModifier);
+                };
+            if column.column.type_oid != u32::from(pg_sys::INT4OID) {
+                return Err(ShapeDecline::UnsupportedAggregateModifier);
+            }
+            // SAFETY: analyzed comparison over the exact checked input type.
+            let (mut strategy, negate) = unsafe { aggregate_int4_operator(operator) }?;
+            if swapped {
+                strategy = 6 - strategy;
+            }
+            let compare = |value| {
+                Int4Predicate::comparison(value, strategy)
+                    .map(|predicate| if negate { predicate.not() } else { predicate })
+            };
+            // SAFETY: constant_node belongs to the analyzed operator.
+            let constant = unsafe { direct_const(constant_node) }
+                .ok_or(ShapeDecline::UnsupportedAggregateModifier)?;
+            let predicate = if let Some(any) = array_mode {
+                if constant.consttype != pg_sys::INT4ARRAYOID
+                    || constant.constbyval
+                    || constant.constlen != -1
+                {
+                    return Err(ShapeDecline::UnsupportedAggregateModifier);
+                }
+                if constant.constisnull {
+                    Int4Predicate::constant(Truth::Unknown)
+                } else {
+                    // SAFETY: exact non-NULL INT4[] Datum from PostgreSQL-owned Const.
+                    let array =
+                        unsafe { pgrx::Array::<i32>::from_datum(constant.constvalue, false) }
+                            .ok_or(ShapeDecline::UnsupportedAggregateModifier)?;
+                    if array.len() > 256 {
+                        return Err(ShapeDecline::UnsupportedAggregateModifier);
+                    }
+                    let mut result =
+                        Int4Predicate::constant(if any { Truth::False } else { Truth::True });
+                    for item in array.iter() {
+                        let next = compare(item)?;
+                        result = if any {
+                            result.or(next)?
+                        } else {
+                            result.and(next)?
+                        };
+                    }
+                    result
+                }
+            } else {
+                compare(aggregate_int4_constant(&constant)?)?
+            };
+            Ok((Some(column), predicate))
+        }
+        _ => Err(ShapeDecline::UnsupportedAggregateModifier),
+    }
 }
 
 fn intersect_ranges(left: ScalarRange, right: ScalarRange) -> Result<ScalarRange, ShapeDecline> {
@@ -1298,6 +1749,8 @@ unsafe fn parse_function_predicate(
         PostgisSpatialFunction::Intersects => (SpatialPredicateKind::Intersects, 2),
         PostgisSpatialFunction::Contains => (SpatialPredicateKind::Contains, 2),
         PostgisSpatialFunction::Within => (SpatialPredicateKind::Within, 2),
+        PostgisSpatialFunction::Covers => (SpatialPredicateKind::Covers, 2),
+        PostgisSpatialFunction::CoveredBy => (SpatialPredicateKind::CoveredBy, 2),
         PostgisSpatialFunction::DWithin => (SpatialPredicateKind::DWithin, 3),
         // ST_Distance is a scalar value producer, not a boolean fact filter.
         PostgisSpatialFunction::Distance => return Err(ShapeDecline::UnsupportedPredicate),
@@ -1424,10 +1877,273 @@ unsafe fn parse_qual(
 
 type ExtractedPredicates = (Vec<EquiJoin>, Vec<(u32, FilterSpec)>);
 
+/// Consume every top-level AND conjunct. Only scalar subtrees may contain
+/// OR/NOT; a spatial OR must never be mistaken for a prefiltering conjunction.
+unsafe fn spatial_and_scalar_filter(
+    node: *mut Node,
+    query: &pg_sys::Query,
+) -> Result<(u32, FilterSpec), ShapeDecline> {
+    let mut pending = vec![node];
+    let mut budget = 64;
+    let mut spatial_filters = BTreeMap::new();
+    let mut scalar_input = None;
+    let mut scalar_predicate: Option<super::int4_predicate::Int4Predicate> = None;
+    while let Some(node) = pending.pop() {
+        if node.is_null() || budget == 0 {
+            return Err(ShapeDecline::UnsupportedPredicate);
+        }
+        budget -= 1;
+        // SAFETY: all pending nodes originate in this live analyzed query.
+        let node = unsafe { pg_sys::strip_implicit_coercions(node) };
+        // SAFETY: a non-null planner node has its tagged PostgreSQL layout.
+        let tag = unsafe { (*node).type_ };
+        let conjunction = if tag == NodeTag::T_List {
+            Some(node.cast::<pg_sys::List>())
+        } else if tag == NodeTag::T_BoolExpr {
+            // SAFETY: tag proves BoolExpr layout.
+            let boolean = unsafe { &*node.cast::<pg_sys::BoolExpr>() };
+            (boolean.boolop == pg_sys::BoolExprType::AND_EXPR).then_some(boolean.args)
+        } else {
+            None
+        };
+        if let Some(args) = conjunction {
+            let count = list_len(args);
+            if count == 0 || count > budget || pending.len() + count > budget {
+                return Err(ShapeDecline::UnsupportedPredicate);
+            }
+            for index in (0..count).rev() {
+                // SAFETY: index is bounded by this planner-owned argument list.
+                pending.push(
+                    unsafe { list_item::<Node>(args, index) }
+                        .ok_or(ShapeDecline::UnsupportedPredicate)?,
+                );
+            }
+        } else if tag == NodeTag::T_FuncExpr {
+            // SAFETY: tag proves FuncExpr; catalog and operands are validated
+            // by the existing exact PostGIS parser on the backend thread.
+            unsafe {
+                parse_function_predicate(
+                    &*node.cast::<pg_sys::FuncExpr>(),
+                    query,
+                    &mut spatial_filters,
+                )
+            }?;
+        } else {
+            // SAFETY: this subtree shares query lifetime; the shared budget
+            // bounds both scalar recursion and the outer conjunction walk.
+            let (input, predicate) = unsafe { aggregate_int4_predicate(node, query, &mut budget) }?;
+            if scalar_input.is_some() && input.is_some() && scalar_input != input {
+                return Err(ShapeDecline::UnsupportedPredicate);
+            }
+            scalar_input = scalar_input.or(input);
+            scalar_predicate = Some(match scalar_predicate {
+                Some(previous) => previous.and(predicate)?,
+                None => predicate,
+            });
+        }
+    }
+    if spatial_filters.len() != 1 {
+        return Err(ShapeDecline::UnsupportedPredicate);
+    }
+    let (relation_oid, spatial) = spatial_filters
+        .into_iter()
+        .next()
+        .ok_or(ShapeDecline::UnsupportedPredicate)?;
+    let PendingFilter::Spatial { filter, .. } = spatial else {
+        return Err(ShapeDecline::UnsupportedPredicate);
+    };
+    if scalar_input.is_none_or(|input| input.column.relation_oid != relation_oid) {
+        return Err(ShapeDecline::UnsupportedPredicate);
+    }
+    let scalar = normalized_int4_filter(
+        scalar_input,
+        scalar_predicate.ok_or(ShapeDecline::UnsupportedPredicate)?,
+    )?;
+    Ok((
+        relation_oid,
+        FilterSpec::SpatialAnd {
+            spatial: Box::new(filter),
+            scalar: Box::new(scalar),
+        },
+    ))
+}
+
+/// Compile the complete qualification, substituting exactly one top-level
+/// spatial conjunct with its execution-time SQL mask. Keeping the mask in the
+/// program preserves native qual-cost ordering, including throwing scalars.
+unsafe fn spatial_program_filter(
+    root: *mut pg_sys::PlannerInfo,
+    node: *mut Node,
+    query: &pg_sys::Query,
+) -> Result<(u32, FilterSpec), ShapeDecline> {
+    let mut pending = vec![node];
+    let mut budget = MAX_QUAL_CONJUNCTS;
+    let mut spatial_filters = BTreeMap::new();
+    let mut mask_node: *mut Node = std::ptr::null_mut();
+    let mut spatial_column = None;
+    while let Some(node) = pending.pop() {
+        if node.is_null() || budget == 0 {
+            return Err(ShapeDecline::UnsupportedPredicate);
+        }
+        budget -= 1;
+        // SAFETY: every pending node belongs to the caller's live WHERE tree.
+        let tag = unsafe { (*node).type_ };
+        let conjunction = if tag == NodeTag::T_List {
+            Some(node.cast::<pg_sys::List>())
+        } else if tag == NodeTag::T_BoolExpr {
+            // SAFETY: tag proves BoolExpr layout.
+            let boolean = unsafe { &*node.cast::<pg_sys::BoolExpr>() };
+            (boolean.boolop == pg_sys::BoolExprType::AND_EXPR).then_some(boolean.args)
+        } else {
+            None
+        };
+        if let Some(args) = conjunction {
+            let count = list_len(args);
+            if count == 0 || pending.len() + count > budget {
+                return Err(ShapeDecline::UnsupportedPredicate);
+            }
+            for index in (0..count).rev() {
+                // SAFETY: bounded index in this planner-owned argument list.
+                pending.push(
+                    unsafe { list_item::<Node>(args, index) }
+                        .ok_or(ShapeDecline::UnsupportedPredicate)?,
+                );
+            }
+        } else if tag == NodeTag::T_FuncExpr {
+            if !mask_node.is_null() {
+                return Err(ShapeDecline::UnsupportedPredicate);
+            }
+            // SAFETY: tag proves the layout; exact catalog/operand validation
+            // is shared with the existing qualified spatial parser.
+            let function = unsafe { &*node.cast::<pg_sys::FuncExpr>() };
+            // SAFETY: function/query share this planner invocation.
+            unsafe { parse_function_predicate(function, query, &mut spatial_filters)? };
+            for index in 0..2 {
+                // SAFETY: the successful parser proved at least two arguments.
+                let argument = unsafe { list_item::<Node>(function.args, index) }
+                    .ok_or(ShapeDecline::UnsupportedPredicate)?;
+                // SAFETY: this is an operand in the same analyzed query.
+                if let Some(column) = unsafe { direct_var(argument, query) } {
+                    if spatial_column
+                        .is_some_and(|previous: PlannerColumn| previous.varno != column.varno)
+                    {
+                        return Err(ShapeDecline::UnsupportedPredicate);
+                    }
+                    spatial_column = Some(column);
+                }
+            }
+            mask_node = node;
+        }
+    }
+    let column = spatial_column.ok_or(ShapeDecline::UnsupportedPredicate)?;
+    let Some((relation_oid, PendingFilter::Spatial { filter, .. })) =
+        spatial_filters.into_iter().next()
+    else {
+        return Err(ShapeDecline::UnsupportedPredicate);
+    };
+    // SAFETY: mask_node is the sole exact spatial conjunct in this same tree.
+    let lowered = unsafe {
+        super::postgres_scalar::lower_spatial_where_expression(root, node, query, mask_node)?
+    };
+    if lowered.inputs.is_empty()
+        || lowered
+            .inputs
+            .iter()
+            .any(|input| input.varno != column.varno || input.column.relation_oid != relation_oid)
+    {
+        return Err(ShapeDecline::UnsupportedPredicate);
+    }
+    Ok((
+        relation_oid,
+        FilterSpec::SpatialAnd {
+            spatial: Box::new(filter),
+            scalar: Box::new(FilterSpec::Bytecode {
+                inputs: lowered.inputs.iter().map(|input| input.column).collect(),
+                program: lowered.program.encode(),
+            }),
+        },
+    ))
+}
+
 unsafe fn joins_and_filters(
+    root: *mut pg_sys::PlannerInfo,
     query: &pg_sys::Query,
     inventory: &ExpressionInventory,
+    dense_where: bool,
 ) -> Result<ExtractedPredicates, ShapeDecline> {
+    // Collect every FromExpr qualification, not just the outermost WHERE.
+    // Keep planner-owned expression nodes and build only a fresh list spine.
+    let mut where_quals = std::ptr::null_mut();
+    for from in &inventory.from_nodes {
+        // SAFETY: inventory records live FromExpr pointers in child-first order.
+        let quals = unsafe { (**from).quals };
+        if quals.is_null() {
+            continue;
+        }
+        // SAFETY: quals is a live planner expression or implicit-AND List.
+        if unsafe { (*quals).type_ } == NodeTag::T_List {
+            // SAFETY: copies list cells without mutating either input list.
+            where_quals = unsafe { pg_sys::list_concat_copy(where_quals, quals.cast()) };
+        } else {
+            // SAFETY: append the borrowed expression to our own list spine.
+            where_quals = unsafe { pg_sys::lappend(where_quals, quals.cast()) };
+        }
+    }
+    let where_qual = where_quals.cast::<Node>();
+    if dense_where && inventory.join_nodes.is_empty() && !query.jointree.is_null() {
+        // SAFETY: jointree belongs to the live analyzed Query. Normalize the
+        // complete WHERE, never a selected subexpression of a larger filter.
+        let normalized = unsafe { aggregate_filter(where_qual, query) };
+        if let Ok(
+            filter @ (FilterSpec::Ranges { input, .. } | FilterSpec::NullOrRanges { input, .. }),
+        ) = normalized
+        {
+            return Ok((Vec::new(), vec![(input.relation_oid, filter)]));
+        }
+        // SAFETY: consume the complete WHERE and return only if every
+        // conjunct participates in the validated combined contract.
+        if let Ok(filter) = unsafe { spatial_and_scalar_filter(where_qual, query) } {
+            return Ok((Vec::new(), vec![filter]));
+        }
+        // SAFETY: the complete WHERE and root belong to this same planner tree.
+        if let Ok(filter) = unsafe { spatial_program_filter(root, where_qual, query) } {
+            return Ok((Vec::new(), vec![filter]));
+        }
+        // SAFETY: lower the entire live WHERE, preserving lazy expression
+        // semantics and one range-table occurrence across all scalar inputs.
+        if let Ok(lowered) =
+            unsafe { super::postgres_scalar::lower_where_expression(root, where_qual, query) }
+            && lowered.program.result_type() == crate::engine::spec::scalar::ScalarType::Bool
+            && let Some(input) = lowered.inputs.first()
+        {
+            if lowered.inputs.len() == 1
+                && lowered.program.instructions()
+                    == [crate::engine::spec::scalar::ScalarInstruction::Input(0)]
+            {
+                // Keep the existing direct Boolean mask admission and costs.
+                return Ok((
+                    Vec::new(),
+                    vec![(
+                        input.column.relation_oid,
+                        FilterSpec::Mask {
+                            input: input.column,
+                            kind: MaskKind::Sql,
+                        },
+                    )],
+                ));
+            }
+            return Ok((
+                Vec::new(),
+                vec![(
+                    input.column.relation_oid,
+                    FilterSpec::Bytecode {
+                        inputs: lowered.inputs.iter().map(|input| input.column).collect(),
+                        program: lowered.program.encode(),
+                    },
+                )],
+            ));
+        }
+    }
     let mut joins = Vec::new();
     let mut filters = BTreeMap::new();
     let mut seen_joins = BTreeSet::new();
@@ -1444,12 +2160,8 @@ unsafe fn joins_and_filters(
         // SAFETY: join.quals and query belong to the same planner tree.
         unsafe { parse_qual(join.quals, query, &mut joins, &mut filters) }?;
     }
-    if !query.jointree.is_null() {
-        // SAFETY: jointree was checked non-null and belongs to query.
-        let where_qual = unsafe { (*query.jointree).quals };
-        // SAFETY: where_qual and query belong to the same planner tree.
-        unsafe { parse_qual(where_qual, query, &mut joins, &mut filters) }?;
-    }
+    // SAFETY: all collected qualifications and query share the planner tree.
+    unsafe { parse_qual(where_qual, query, &mut joins, &mut filters) }?;
     let relation_filters = filters
         .into_iter()
         .map(|(relation_oid, filter)| {
@@ -1613,13 +2325,8 @@ unsafe fn relation_shapes(
         let varno = u32::try_from(index + 1).unwrap_or(u32::MAX);
         if !preflight_range_table_entry(
             varno,
-            PreflightRangeTableEntry {
-                kind: preflight_kind(rte_ref.rtekind),
-                eligible_base_relation: rte_ref.relid != pg_sys::InvalidOid
-                    && !rte_ref.inh
-                    && rte_ref.relkind as u8 == pg_sys::RELKIND_RELATION,
-                has_table_sample: !rte_ref.tablesample.is_null(),
-            },
+            // SAFETY: root/query/RTE share this active planner invocation.
+            unsafe { preflight_rte_facts(root, query, varno, rte_ref) },
         )? {
             continue;
         }
@@ -1702,6 +2409,126 @@ pub(super) struct PreflightRangeTableEntry {
     pub kind: PreflightRangeTableKind,
     pub eligible_base_relation: bool,
     pub has_table_sample: bool,
+    pub permission_context_matches: bool,
+}
+
+/// A cleared subquery is metadata left by PostgreSQL's own pull-up pass, not
+/// another input. Require independent planner inactivity evidence as well.
+#[derive(Debug, Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)]
+pub(super) struct PulledUpSubqueryFacts {
+    pub is_subquery: bool,
+    pub query_was_cleared: bool,
+    pub security_barrier: bool,
+    pub has_security_quals: bool,
+    pub has_table_sample: bool,
+    pub planner_slot_valid: bool,
+    pub planner_slot_empty: bool,
+    pub baserel_set_present: bool,
+    pub is_baserel: bool,
+}
+
+pub(super) const fn is_pulled_up_subquery(facts: PulledUpSubqueryFacts) -> bool {
+    facts.is_subquery
+        && facts.query_was_cleared
+        && !facts.security_barrier
+        && !facts.has_security_quals
+        && !facts.has_table_sample
+        && facts.planner_slot_valid
+        && facts.planner_slot_empty
+        && facts.baserel_set_present
+        && !facts.is_baserel
+}
+
+unsafe fn preflight_rte_facts(
+    root: &pg_sys::PlannerInfo,
+    query: &pg_sys::Query,
+    varno: pg_sys::Index,
+    rte: &pg_sys::RangeTblEntry,
+) -> PreflightRangeTableEntry {
+    let mut kind = preflight_kind(rte.rtekind);
+    if rte.rtekind == pg_sys::RTEKind::RTE_SUBQUERY {
+        let index = i32::try_from(varno).ok();
+        let valid_slot = !root.simple_rel_array.is_null()
+            && index.is_some_and(|index| index > 0 && index < root.simple_rel_array_size);
+        // SAFETY: valid_slot proves the array/index; this only reads a slot.
+        let empty_slot =
+            valid_slot && unsafe { (*root.simple_rel_array.add(varno as usize)).is_null() };
+        // SAFETY: all_baserels is a planner-owned bitmap (or NULL); index is
+        // a checked nonnegative range-table identity, never a relation OID.
+        let is_baserel =
+            index.is_some_and(|index| unsafe { pg_sys::bms_is_member(index, root.all_baserels) });
+        if is_pulled_up_subquery(PulledUpSubqueryFacts {
+            is_subquery: true,
+            query_was_cleared: rte.subquery.is_null(),
+            security_barrier: rte.security_barrier,
+            has_security_quals: !rte.securityQuals.is_null(),
+            has_table_sample: !rte.tablesample.is_null(),
+            planner_slot_valid: valid_slot,
+            planner_slot_empty: empty_slot,
+            baserel_set_present: !root.all_baserels.is_null(),
+            is_baserel,
+        }) {
+            kind = PreflightRangeTableKind::Synthetic;
+        }
+    }
+    let permission_context_matches = if kind == PreflightRangeTableKind::BaseRelation {
+        let permission_index = usize::try_from(rte.perminfoindex)
+            .ok()
+            .and_then(|index| index.checked_sub(1));
+        // SAFETY: list_item checks bounds in the current Query's permission
+        // list. PostgreSQL retains these entries when pulling up a view/CTE.
+        let info = permission_index.and_then(|index| unsafe {
+            list_item::<pg_sys::RTEPermissionInfo>(query.rteperminfos, index)
+        });
+        info.is_some_and(|info| {
+            // SAFETY: bounded non-NULL entry in this query's permission list.
+            let info = unsafe { &*info };
+            if info.checkAsUser != pg_sys::InvalidOid && root.glob.is_null() {
+                return false;
+            }
+            info.relid == rte.relid
+                && (info.checkAsUser == pg_sys::InvalidOid
+                // SAFETY: backend-local effective role. Residency intentionally
+                // checks that role; never substitute a view owner's identity.
+                || info.checkAsUser == unsafe { pg_sys::GetUserId() })
+        })
+    } else {
+        true
+    };
+    PreflightRangeTableEntry {
+        kind,
+        eligible_base_relation: rte.relid != pg_sys::InvalidOid
+            && !rte.inh
+            && rte.relkind as u8 == pg_sys::RELKIND_RELATION,
+        has_table_sample: !rte.tablesample.is_null(),
+        permission_context_matches,
+    }
+}
+
+/// Preserve role-sensitive admission across prepared-plan reuse, including
+/// negative-cache hits. Like PostgreSQL's useridiscurrent FDW gate, matching
+/// checkAsUser to the loader's current role is a planning assumption.
+pub(in crate::engine::ffi::planner_hooks) unsafe fn mark_permission_role_dependency(
+    root: *mut pg_sys::PlannerInfo,
+) {
+    // SAFETY: hook-owned root; nullable fields are checked before dereference.
+    if root.is_null() || unsafe { (*root).parse.is_null() || (*root).glob.is_null() } {
+        return;
+    }
+    // SAFETY: parse was checked and is live for this planner invocation.
+    let permissions = unsafe { (*(*root).parse).rteperminfos };
+    for index in 0..list_len(permissions) {
+        // SAFETY: bounded access to this query's permission list.
+        if let Some(info) = unsafe { list_item::<pg_sys::RTEPermissionInfo>(permissions, index) }
+            // SAFETY: list_item returns a non-NULL planner-owned permission node.
+            && unsafe { (*info).checkAsUser } != pg_sys::InvalidOid
+        {
+            // SAFETY: glob is the shared planner state checked above.
+            unsafe { (*(*root).glob).dependsOnRole = true };
+            return;
+        }
+    }
 }
 
 fn preflight_kind(rtekind: pg_sys::RTEKind::Type) -> PreflightRangeTableKind {
@@ -1725,6 +2552,9 @@ pub(super) fn preflight_range_table_entry(
     reject_table_sample(entry.has_table_sample)?;
     if entry.kind != PreflightRangeTableKind::BaseRelation || !entry.eligible_base_relation {
         return Err(ShapeDecline::UnsupportedRangeTableEntry { varno });
+    }
+    if !entry.permission_context_matches {
+        return Err(ShapeDecline::UnsupportedPermissionContext { varno });
     }
     Ok(true)
 }
@@ -1760,13 +2590,8 @@ pub(super) unsafe fn preflight_base_relations(
         let rte = unsafe { &*rte };
         preflight_range_table_entry(
             varno,
-            PreflightRangeTableEntry {
-                kind: preflight_kind(rte.rtekind),
-                eligible_base_relation: rte.relid != pg_sys::InvalidOid
-                    && !rte.inh
-                    && rte.relkind as u8 == pg_sys::RELKIND_RELATION,
-                has_table_sample: !rte.tablesample.is_null(),
-            },
+            // SAFETY: root, query and RTE share the same planner lifetime.
+            unsafe { preflight_rte_facts(&*root, query, varno, rte) },
         )?;
     }
     Ok(())
@@ -1812,18 +2637,42 @@ pub(super) unsafe fn extract_input(
         has_distinct: !query.distinctClause.is_null(),
         has_grouping_sets: !query.groupingSets.is_null(),
         has_group_distinct: query.groupDistinct,
-        has_having: !query.havingQual.is_null(),
+        // The neutral spec describes only the GPU aggregate. PostgreSQL owns
+        // the post-aggregate HAVING expression and its evaluation semantics.
+        has_having: false,
         has_set_operations: !query.setOperations.is_null(),
         has_row_marks: !query.rowMarks.is_null(),
     };
     super::builder::reject_modifiers(modifiers)?;
 
+    // SAFETY: the internal list is allocated in this planner's memory context.
+    let targets = unsafe { aggregate_scan_target_list(query) }?;
+    // SAFETY: both expressions and target list belong to this live Query.
+    if !query.havingQual.is_null()
+        && unsafe {
+            pg_sys::contain_volatile_functions(query.havingQual)
+                || unsupported_having_input(query.havingQual, targets.cast())
+        }
+    {
+        return Err(ShapeDecline::Having);
+    }
+
     // SAFETY: all adapters inspect the same still-live planner Query.
     let groups = unsafe { group_keys(query) }?;
     // SAFETY: inventory pointers were collected synchronously from query.
-    let (projections, aggregates) = unsafe { projections_and_aggregates(query, &inventory) }?;
+    let (projections, aggregates) =
+        unsafe { projections_and_aggregates(query, &inventory, targets) }?;
+    let dense_where = aggregates.iter().any(|aggregate| {
+        aggregate.expression == MeasureExpr::CountStar
+            || matches!(aggregate.expression, MeasureExpr::Bytecode { .. })
+            || matches!(aggregate.expression, MeasureExpr::Column(column)
+            if matches!(column.type_oid, 20 | 21 | 23 | 1700))
+            || matches!(aggregate.expression, MeasureExpr::Binary { lhs, rhs, .. }
+                if lhs.type_oid == 23 && rhs.type_oid == 23)
+    });
     // SAFETY: inventory pointers were collected synchronously from query.
-    let (joins, relation_filters) = unsafe { joins_and_filters(query, &inventory) }?;
+    let (joins, relation_filters) =
+        unsafe { joins_and_filters(root, query, &inventory, dense_where) }?;
     // SAFETY: root/query/inventory all belong to this planner invocation.
     let relations = unsafe { relation_shapes(root_ref, query, &inventory) }?;
     if output_rel.is_null() || estimated_output_rows == 0 {
@@ -1845,6 +2694,66 @@ pub(super) unsafe fn extract_input(
 #[cfg(test)]
 mod pure_tests {
     use super::*;
+
+    #[test]
+    fn dense_cardinalities_are_rounded_and_validated_individually() {
+        assert_eq!(checked_cardinalities([]), Some(vec![]));
+        assert_eq!(checked_cardinalities([10.0, 10.0, 10.0]), Some(vec![10; 3]));
+        assert_eq!(checked_cardinalities([0.0, 2.1]), Some(vec![1, 3]));
+        for invalid in [f64::NAN, f64::INFINITY, -1.0, u64::MAX as f64] {
+            assert_eq!(checked_cardinalities([invalid]), None);
+        }
+    }
+
+    #[test]
+    fn filtered_star_count_uses_the_null_rejecting_predicate_input_only() {
+        let input = test_column(1).column;
+        let filter = FilterSpec::Ranges {
+            input,
+            ranges: vec![int4_range(-10, 10)],
+        };
+        for ranges in [vec![], vec![int4_range(-10, 10)]] {
+            assert_eq!(
+                lower_filtered_count(
+                    MeasureExpr::CountStar,
+                    AggregateKind::Count,
+                    &FilterSpec::NullOrRanges { input, ranges }
+                ),
+                MeasureExpr::CountStar
+            );
+        }
+        assert_eq!(
+            lower_filtered_count(MeasureExpr::CountStar, AggregateKind::Count, &filter),
+            MeasureExpr::Column(input)
+        );
+        assert_eq!(
+            lower_filtered_count(
+                MeasureExpr::CountStar,
+                AggregateKind::Count,
+                &FilterSpec::None
+            ),
+            MeasureExpr::CountStar
+        );
+        assert_eq!(
+            lower_filtered_count(
+                MeasureExpr::Column(test_column(2).column),
+                AggregateKind::Count,
+                &filter
+            ),
+            MeasureExpr::Column(test_column(2).column)
+        );
+        assert_eq!(
+            lower_filtered_count(
+                MeasureExpr::CountStar,
+                AggregateKind::Count,
+                &FilterSpec::Ranges {
+                    input,
+                    ranges: vec![]
+                }
+            ),
+            MeasureExpr::CountStar
+        );
+    }
 
     fn test_column(attno: i32) -> PlannerColumn {
         PlannerColumn {

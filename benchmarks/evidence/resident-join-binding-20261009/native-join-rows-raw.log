@@ -1,0 +1,3 @@
+PGACCEL_TEST_START name=test_join_rows
+resident join rows: 6509 passed, 0 failed
+PGACCEL_TEST_RESULT name=test_join_rows exit_code=0 result=PASS raw_lines=1 body_sha256=37e1ab438a6ffc56e8eadbbd0782929b70090a9549388d431295fa0fdecaf234 binding_sha256=9281a5773b74827593d89fd166c212a9a0b1835afd27b92020075ce8544246f9

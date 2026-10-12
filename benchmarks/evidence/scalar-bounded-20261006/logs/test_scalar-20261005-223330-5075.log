@@ -1,0 +1,4 @@
+PGACCEL_TEST_START name=test_scalar
+Full CFG proof: 108 valid, 7 invalid programs passed
+SPG1: 759 host/device cases passed (108 shared Rust oracle cases); no SQL admission
+PGACCEL_TEST_RESULT name=test_scalar exit_code=0 result=PASS raw_lines=2 body_sha256=74e878fad664568a2ea26022f3d517c8ce41b847fcbba1381e75478e69aa52f8 binding_sha256=ffe8f06da6aa170f17357fc84b476ec04630251bba351c1440a5623c2a345191

@@ -1,0 +1,12 @@
+=== 124_bigint_numeric_aggregates ===
+SET
+SET
+SELECT 1000017
+ANALYZE
+psql:sql/tests/124_bigint_numeric_aggregates.sql:73: FATAL:  terminating connection due to administrator command
+CONTEXT:  SQL statement "CREATE TEMP TABLE _bigint_actual AS SELECT sum(v) s,avg(v) a,count(v) c,count(*) n FROM _bigint_agg"
+PL/pgSQL function inline_code_block line 36 at EXECUTE
+psql:sql/tests/124_bigint_numeric_aggregates.sql:73: server closed the connection unexpectedly
+	This probably means the server terminated abnormally
+	before or while processing the request.
+psql:sql/tests/124_bigint_numeric_aggregates.sql:73: error: connection to server was lost

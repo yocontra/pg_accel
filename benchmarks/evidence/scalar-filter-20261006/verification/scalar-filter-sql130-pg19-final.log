@@ -1,0 +1,7 @@
+=== 130_scalar_aggregate_filters ===
+SET
+SET
+SELECT 250017
+ANALYZE
+psql:sql/tests/130_scalar_aggregate_filters.sql:101: ERROR:  130 independent FILTER not dispatched: SELECT g,sum(a) FILTER (WHERE a>b) s,count(*) FILTER (WHERE a>b) c FROM _scalar_filter WHERE p GROUP BY g / HashAggregate (actual rows=6.00 loops=1)  Group Key: g  Batches: 1  Memory Usage: 32kB  Buffers: local read=1792  ->  Seq Scan on _scalar_filter (actual rows=78437.00 loops=1)        Filter: p        Rows Removed by Filter: 171580        Buffers: local read=1792Planning:  Buffers: shared hit=127Planning Time: 0.365 msExecution Time: 18.831 ms
+CONTEXT:  PL/pgSQL function inline_code_block line 81 at RAISE

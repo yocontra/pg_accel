@@ -1,0 +1,50 @@
+BEGIN
+SELECT 250000
+COMMIT
+ANALYZE
+SET
+SET
+SET
+SET
+ pg_accel_pin 
+--------------
+       250000
+(1 row)
+
+                                                     QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
+ Finalize GroupAggregate  (cost=4559.50..4567.82 rows=32 width=68)
+   Group Key: region
+   ->  Gather Merge  (cost=4559.50..4563.50 rows=224 width=68)
+         Workers Planned: 7
+         ->  Sort  (cost=4559.38..4559.46 rows=32 width=68)
+               Sort Key: region
+               ->  Partial HashAggregate  (cost=4558.26..4558.58 rows=32 width=68)
+                     Group Key: region
+                     ->  Parallel Seq Scan on _pgaccel_case_probe_20261006  (cost=0.00..1701.14 rows=35714 width=12)
+(9 rows)
+
+ pg_accel_last_planner_rejection_reason 
+----------------------------------------
+ no_gpu_resident_pipeline
+(1 row)
+
+                                                     QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
+ Finalize GroupAggregate  (cost=3666.65..3674.97 rows=32 width=68)
+   Group Key: region
+   ->  Gather Merge  (cost=3666.65..3670.65 rows=224 width=68)
+         Workers Planned: 7
+         ->  Sort  (cost=3666.53..3666.61 rows=32 width=68)
+               Sort Key: region
+               ->  Partial HashAggregate  (cost=3665.41..3665.73 rows=32 width=68)
+                     Group Key: region
+                     ->  Parallel Seq Scan on _pgaccel_case_probe_20261006  (cost=0.00..1701.14 rows=35714 width=12)
+(9 rows)
+
+ pg_accel_last_planner_rejection_reason 
+----------------------------------------
+ no_gpu_resident_pipeline
+(1 row)
+
+DROP TABLE

@@ -1,0 +1,30 @@
+=== 109_text_residency_interning ===
+SET
+SET
+SET
+CREATE TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+INSERT 0 300000
+ANALYZE
+DO
+PGACCEL_ASSERT_OK:109_text_residency_interning.assert_001
+DO
+PGACCEL_ASSERT_OK:109_text_residency_interning.assert_002
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ f
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:109_text_residency_interning

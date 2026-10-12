@@ -1,0 +1,12 @@
+=== 118_spatial_numeric_rollups ===
+SET
+SET
+SELECT 1000017
+ANALYZE
+SELECT 1
+DO
+PGACCEL_ASSERT_OK:118_spatial_numeric_rollups.assert_001
+SET
+psql:sql/tests/118_spatial_numeric_rollups.sql:139: ERROR:  pg_accel: generic aggregate dispatch failed (spatial resident borrow failed: GeometryShapeChanged); refusing CPU fallback
+CONTEXT:  SQL statement "CREATE TEMP TABLE _geo_actual AS EXECUTE _geo_numeric_prepared"
+PL/pgSQL function inline_code_block line 33 at EXECUTE

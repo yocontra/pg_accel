@@ -1,0 +1,37 @@
+=== 133_where_qualifier_order ===
+SET
+SET
+SELECT 1000017
+ANALYZE
+ pg_accel_pin 
+--------------
+      1000017
+(1 row)
+
+psql:sql/tests/133_where_qualifier_order.sql:55: NOTICE:  133 qualifier-order selected 9 of 9 shapes
+DO
+PGACCEL_ASSERT_OK:133_where_qualifier_order.assert_001
+UPDATE 1000017
+ANALYZE
+ pg_accel_refresh 
+------------------
+          1000017
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:133_where_qualifier_order.assert_002
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ t
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:133_where_qualifier_order

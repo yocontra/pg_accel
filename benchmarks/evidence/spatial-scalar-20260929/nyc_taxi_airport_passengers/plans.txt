@@ -1,0 +1,97 @@
+=== pg_accel benchmark plans - captured once per workload/scale ===
+
+=== nyc_taxi_airport_passengers @ rows=1000000 ===
+Custom Scan (GpuAccelAgg)  (cost=5.00..862365.54 rows=2 width=60) (actual time=5.507..5.509 rows=2.00 loops=1)
+  Output: vendor_id, (count(*)), (sum(passenger_count)), (avg(passenger_count)), (count(passenger_count))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_integer
+  GPU Dispatched Physical Kernel Mode: parallel_dense_integer
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: invalid_dense_integer_with_counts_specialization
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=5000000 ephemeral_bytes=5000000 construction_time_us=1417 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=102 ephemeral_build_launches=102 consumer_launches=2 budget_headroom_bytes=8453934568
+  GPU Descriptor Group Keys: k0:fact(2261196.2:type=23) type=23 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(2261196.3:type=23) -> value.sum; value.avg; value.count; m1:count_star -> value.count
+  GPU Descriptor Filter: fact=spatial(predicate=intersects, left=column(2261196.4:type=107033, kind=geometry, typmod=1107460, srid=4326), right=constant(kind=geometry, typmod=-1, srid=4326, bytes=35888), distance=false); measures=[m0=none; m1=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot2:aggregate[m0].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot3:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false; slot4:aggregate[m1].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=2261196 generation=1 global=1 relfilenode=2261196
+  GPU Descriptor Bytes: raw=136000024 derived=5000000 artifact=5000000 total=141000024
+  GPU Resident Stage Mask: 18441
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 1000000
+  Batches: 1
+  Rows Per Batch: 1000000.000
+  Dispatch Time: 5.109 ms
+  Avg Dispatch Time Per Batch: 5.109 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 214.754 ms
+  Buffers: shared hit=51
+Planning:
+  Buffers: shared hit=403
+Planning Time: 2.374 ms
+Execution Time: 221.095 ms
+
+=== nyc_taxi_airport_passengers @ rows=12748986 ===
+Custom Scan (GpuAccelAgg)  (cost=5.00..10994067.97 rows=2 width=60) (actual time=28.260..28.262 rows=2.00 loops=1)
+  Output: vendor_id, (count(*)), (sum(passenger_count)), (avg(passenger_count)), (count(passenger_count))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_integer
+  GPU Dispatched Physical Kernel Mode: parallel_dense_integer
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 14
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: invalid_dense_integer_with_counts_specialization
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=63744930 ephemeral_bytes=63744930 construction_time_us=18062 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=1275 ephemeral_build_launches=1275 consumer_launches=14 budget_headroom_bytes=6843323534
+  GPU Descriptor Group Keys: k0:fact(2261216.2:type=23) type=23 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(2261216.3:type=23) -> value.sum; value.avg; value.count; m1:count_star -> value.count
+  GPU Descriptor Filter: fact=spatial(predicate=intersects, left=column(2261216.4:type=107033, kind=geometry, typmod=1107460, srid=4326), right=constant(kind=geometry, typmod=-1, srid=4326, bytes=35888), distance=false); measures=[m0=none; m1=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot2:aggregate[m0].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot3:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false; slot4:aggregate[m1].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=2261216 generation=1 global=1 relfilenode=2261216
+  GPU Descriptor Bytes: raw=1746611058 derived=63744930 artifact=63744930 total=1810355988
+  GPU Resident Stage Mask: 18441
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 12748986
+  Batches: 14
+  Rows Per Batch: 910641.857
+  Dispatch Time: 26.544 ms
+  Avg Dispatch Time Per Batch: 1.896 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 2824.462 ms
+  Buffers: shared hit=51
+Planning:
+  Buffers: shared hit=403
+Planning Time: 2.516 ms
+Execution Time: 2853.495 ms

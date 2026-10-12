@@ -1,0 +1,24 @@
+=== 134_spatial_scalar_where ===
+SET
+SET
+SELECT 1000017
+ANALYZE
+SELECT 1
+psql:sql/tests/134_spatial_scalar_where.sql:75: NOTICE:  134 spatial WHERE selected 24 of 24 shapes
+DO
+PGACCEL_ASSERT_OK:134_spatial_scalar_where.assert_001
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ t
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:134_spatial_scalar_where

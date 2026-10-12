@@ -8,6 +8,8 @@
 
 pub mod agg;
 mod bounded;
+pub(crate) mod join;
+pub(crate) mod join_reduce;
 pub mod metrics;
 pub mod raster;
 pub mod result_drain;

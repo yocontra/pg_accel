@@ -966,12 +966,13 @@ static int8_t resident_segments_intersect(double a0x, double a0y, double a1x, do
 }
 
 static size_t resident_ring_start(const SpatialResidentGeometry& geometry, size_t ring) {
-  return static_cast<size_t>(geometry.view->ring_offsets[geometry.ring_begin + ring]);
+  return static_cast<size_t>(geometry.view->ring_offsets[geometry.ring_begin + ring] &
+                             ~PGACCEL_RESIDENT_GEOMETRY_RING_COMPONENT_START);
 }
 
 static size_t resident_ring_end(const SpatialResidentGeometry& geometry, size_t ring) {
   return ring + 1 < geometry.ring_end - geometry.ring_begin
-             ? static_cast<size_t>(geometry.view->ring_offsets[geometry.ring_begin + ring + 1])
+             ? resident_ring_start(geometry, ring + 1)
              : geometry.coordinate_end;
 }
 
@@ -995,14 +996,35 @@ static bool resident_polygon_algorithm_supported(const SpatialResidentGeometry& 
 
 /* Strict interior relation for one closed ring. Boundary/precision cases are
  * UNCERTAIN so a successful kernel never certifies a rounded boundary result. */
-static int8_t resident_point_ring(double px, double py, const double* coordinates, size_t begin,
-                                  size_t end) {
+static int8_t resident_point_ring(double px, double py, const SpatialResidentGeometry& polygon,
+                                  size_t begin, size_t end) {
+  const double* coordinates = polygon.view->coordinates;
+  const bool indexed = (polygon.view->flags & PGACCEL_RESIDENT_GEOMETRY_EDGE_INDEX) != 0;
+  constexpr size_t block_pairs = PGACCEL_RESIDENT_GEOMETRY_EDGE_BLOCK_PAIRS;
   bool inside = false;
   for (size_t index = begin; index + 1 < end; ++index) {
-    const double ax = coordinates[index * 2];
+    if (indexed && (index == begin || index % block_pairs == 0)) {
+      const size_t block = index / block_pairs;
+      const double* box = polygon.view->bboxes + (polygon.view->row_count + block) * 4;
+      // The ray points right. Boxes strictly above/below it, or wholly left
+      // of the point, cannot contribute a crossing or contain a boundary.
+      // Equality is never pruned; exact boundary semantics remain unchanged.
+      if (py < box[1] || py > box[3] || px > box[2]) {
+        const size_t next = (block + 1) * block_pairs;
+        index = next < end ? next - 1 : end - 1;
+        continue;
+      }
+    }
     const double ay = coordinates[index * 2 + 1];
-    const double bx = coordinates[(index + 1) * 2];
     const double by = coordinates[(index + 1) * 2 + 1];
+    // Validation has proved finite coordinates. An edge strictly above or
+    // below the query's horizontal ray cannot cross it or contain the point.
+    // Keep equality (including signed zero) on the exact boundary path.
+    // Test y first: most edges need neither x loads nor segment/orientation work.
+    if ((ay < py && by < py) || (ay > py && by > py))
+      continue;
+    const double ax = coordinates[index * 2];
+    const double bx = coordinates[(index + 1) * 2];
     const int8_t boundary = resident_point_segment(px, py, ax, ay, bx, by);
     if (boundary >= 0)
       return 0;
@@ -1017,28 +1039,57 @@ static int8_t resident_point_ring(double px, double py, const double* coordinate
   return inside ? 1 : -1;
 }
 
-static int8_t resident_point_polygon(double px, double py, const SpatialResidentGeometry& polygon) {
+static int8_t resident_point_single_polygon(double px, double py,
+                                            const SpatialResidentGeometry& polygon) {
   if (!resident_polygon_algorithm_supported(polygon))
     return 0;
   if (px < polygon.bbox[0] || px > polygon.bbox[2] || py < polygon.bbox[1] ||
       py > polygon.bbox[3]) {
     return -1;
   }
-  int8_t relation =
-      resident_point_ring(px, py, polygon.view->coordinates, resident_ring_start(polygon, 0),
-                          resident_ring_end(polygon, 0));
+  int8_t relation = resident_point_ring(px, py, polygon, resident_ring_start(polygon, 0),
+                                        resident_ring_end(polygon, 0));
   if (relation <= 0)
     return relation;
   for (size_t ring = 1; ring < polygon.ring_end - polygon.ring_begin; ++ring) {
-    relation =
-        resident_point_ring(px, py, polygon.view->coordinates, resident_ring_start(polygon, ring),
-                            resident_ring_end(polygon, ring));
+    relation = resident_point_ring(px, py, polygon, resident_ring_start(polygon, ring),
+                                   resident_ring_end(polygon, ring));
     if (relation == 0)
       return 0;
     if (relation > 0)
       return -1;
   }
   return 1;
+}
+
+static constexpr bool resident_polygonal(uint32_t type) {
+  return type == PGACCEL_RESIDENT_GEOMETRY_POLYGON ||
+         type == PGACCEL_RESIDENT_GEOMETRY_MULTIPOLYGON;
+}
+
+static int8_t resident_point_polygon(double px, double py, const SpatialResidentGeometry& polygon) {
+  if (polygon.row.geom_type != PGACCEL_RESIDENT_GEOMETRY_MULTIPOLYGON)
+    return resident_point_single_polygon(px, py, polygon);
+  bool uncertain = false;
+  for (size_t first = polygon.ring_begin; first < polygon.ring_end;) {
+    size_t end = first + 1;
+    while (end < polygon.ring_end &&
+           (polygon.view->ring_offsets[end] & PGACCEL_RESIDENT_GEOMETRY_RING_COMPONENT_START) == 0)
+      ++end;
+    SpatialResidentGeometry component = polygon;
+    component.row.geom_type = PGACCEL_RESIDENT_GEOMETRY_POLYGON;
+    component.ring_begin = first;
+    component.ring_end = end;
+    component.coordinate_begin = resident_ring_start(polygon, first - polygon.ring_begin);
+    component.coordinate_end = end < polygon.ring_end
+        ? resident_ring_start(polygon, end - polygon.ring_begin) : polygon.coordinate_end;
+    const int8_t relation = resident_point_single_polygon(px, py, component);
+    if (relation > 0)
+      return 1;
+    uncertain = uncertain || relation == 0;
+    first = end;
+  }
+  return uncertain ? 0 : -1;
 }
 
 static bool resident_bbox_disjoint(const SpatialResidentGeometry& left,
@@ -1191,8 +1242,8 @@ static constexpr bool resident_geometry_pair_matches(uint32_t left_type, uint32_
             right_type == PGACCEL_RESIDENT_GEOMETRY_POINT);
   } else if constexpr (Pair == SpatialResidentGeometryPair::PointPolygon) {
     return (left_type == PGACCEL_RESIDENT_GEOMETRY_POINT &&
-            right_type == PGACCEL_RESIDENT_GEOMETRY_POLYGON) ||
-           (left_type == PGACCEL_RESIDENT_GEOMETRY_POLYGON &&
+            resident_polygonal(right_type)) ||
+           (resident_polygonal(left_type) &&
             right_type == PGACCEL_RESIDENT_GEOMETRY_POINT);
   } else if constexpr (Pair == SpatialResidentGeometryPair::LineStringLineString) {
     return left_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING &&
@@ -1204,8 +1255,7 @@ static constexpr bool resident_geometry_pair_matches(uint32_t left_type, uint32_
             right_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING);
   } else {
     static_assert(Pair == SpatialResidentGeometryPair::PolygonPolygon);
-    return left_type == PGACCEL_RESIDENT_GEOMETRY_POLYGON &&
-           right_type == PGACCEL_RESIDENT_GEOMETRY_POLYGON;
+    return resident_polygonal(left_type) && resident_polygonal(right_type);
   }
 }
 
@@ -1301,8 +1351,7 @@ static constexpr bool resident_geometry_pair_family_matches(uint32_t left_type,
             right_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING);
   } else {
     static_assert(Family == SpatialResidentGeometryPairFamily::PolygonPair);
-    return left_type == PGACCEL_RESIDENT_GEOMETRY_POLYGON &&
-           right_type == PGACCEL_RESIDENT_GEOMETRY_POLYGON;
+    return resident_polygonal(left_type) && resident_polygonal(right_type);
   }
 }
 
@@ -1311,6 +1360,10 @@ static int8_t resident_intersects_family(const SpatialResidentGeometry& left,
                                          const SpatialResidentGeometry& right) {
   const uint32_t left_type = left.row.geom_type;
   const uint32_t right_type = right.row.geom_type;
+  if ((left_type == PGACCEL_RESIDENT_GEOMETRY_MULTIPOLYGON ||
+       right_type == PGACCEL_RESIDENT_GEOMETRY_MULTIPOLYGON) &&
+      left_type != PGACCEL_RESIDENT_GEOMETRY_POINT && right_type != PGACCEL_RESIDENT_GEOMETRY_POINT)
+    return 0; // Non-point collection topology still requires exact recheck.
   if constexpr (Family == SpatialResidentGeometryPairFamily::PointPairs) {
     if (resident_geometry_pair_matches<SpatialResidentGeometryPair::PointPoint>(left_type,
                                                                                 right_type)) {
@@ -1379,12 +1432,12 @@ static int8_t resident_line_contains_point(const SpatialResidentGeometry& line,
 
 static int8_t resident_polygon_contains(const SpatialResidentGeometry& polygon,
                                         const SpatialResidentGeometry& inner) {
-  if (!resident_polygon_algorithm_supported(polygon))
-    return 0;
   if (inner.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_POINT) {
     const double* point = inner.view->coordinates + inner.coordinate_begin * 2;
     return resident_point_polygon(point[0], point[1], polygon);
   }
+  if (!resident_polygon_algorithm_supported(polygon))
+    return 0;
   if (inner.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_POLYGON &&
       polygon.ring_end - polygon.ring_begin > 1) {
     return 0;
@@ -1657,6 +1710,10 @@ resident_metric_distance_family(const SpatialResidentGeometry& left,
                                 const SpatialResidentGeometry& right) {
   const uint32_t left_type = left.row.geom_type;
   const uint32_t right_type = right.row.geom_type;
+  if ((left_type == PGACCEL_RESIDENT_GEOMETRY_MULTIPOLYGON ||
+       right_type == PGACCEL_RESIDENT_GEOMETRY_MULTIPOLYGON) &&
+      left_type != PGACCEL_RESIDENT_GEOMETRY_POINT && right_type != PGACCEL_RESIDENT_GEOMETRY_POINT)
+    return {0.0, 1};
   if constexpr (Family == SpatialResidentGeometryPairFamily::PointPairs) {
     if (resident_geometry_pair_matches<SpatialResidentGeometryPair::PointPoint>(left_type,
                                                                                 right_type)) {
@@ -1816,9 +1873,9 @@ static bool resident_add_exact_span(sycl::queue& queue, const void* pointer, siz
 
 static bool resident_validate_view_pointers(const pgaccel_resident_geometry_view& view,
                                             sycl::queue& queue, SpatialResidentSpans* spans) {
-  if (view.abi_version != PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION || view.flags != 0 ||
-      view.row_count == 0 || spans == nullptr ||
-      view.row_count == std::numeric_limits<size_t>::max()) {
+  if (view.abi_version != PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION ||
+      (view.flags & ~PGACCEL_RESIDENT_GEOMETRY_EDGE_INDEX) != 0 || view.row_count == 0 ||
+      spans == nullptr || view.row_count == std::numeric_limits<size_t>::max()) {
     return false;
   }
   size_t coordinate_scalars = 0;
@@ -1826,6 +1883,22 @@ static bool resident_validate_view_pointers(const pgaccel_resident_geometry_view
   if (!spatial_checked_mul(view.coordinate_pair_count, size_t{2}, &coordinate_scalars) ||
       !spatial_checked_mul(view.row_count, size_t{4}, &bbox_scalars)) {
     return false;
+  }
+  if ((view.flags & PGACCEL_RESIDENT_GEOMETRY_EDGE_INDEX) != 0) {
+    constexpr size_t block_pairs = PGACCEL_RESIDENT_GEOMETRY_EDGE_BLOCK_PAIRS;
+    if (view.row_count != 1 || view.coordinate_pair_count <= block_pairs)
+      return false;
+    const size_t boxes =
+        view.coordinate_pair_count / block_pairs + (view.coordinate_pair_count % block_pairs != 0);
+    size_t index_scalars = 0;
+    size_t indexed_bytes = 0;
+    if (!spatial_checked_mul(boxes, size_t{4}, &index_scalars) ||
+        index_scalars > std::numeric_limits<size_t>::max() - bbox_scalars)
+      return false;
+    bbox_scalars += index_scalars;
+    if (!spatial_checked_mul(bbox_scalars, sizeof(double), &indexed_bytes) ||
+        view.bboxes_bytes != indexed_bytes)
+      return false;
   }
   if ((coordinate_scalars == 0) != (view.coordinates == nullptr) ||
       (view.ring_count == 0) != (view.ring_offsets == nullptr)) {
@@ -1882,8 +1955,33 @@ static bool resident_canonical_zero(double value) {
   return value == 0.0 && !sycl::signbit(value);
 }
 
+static bool resident_edge_box_contains(const double* box, double x, double y) {
+  return sycl::isfinite(box[0]) && sycl::isfinite(box[1]) &&
+         sycl::isfinite(box[2]) && sycl::isfinite(box[3]) &&
+         box[0] <= x && x <= box[2] && box[1] <= y && y <= box[3];
+}
+
+static bool resident_coordinate_valid(const pgaccel_resident_geometry_view& view,
+                                       size_t coordinate, const double* bbox) {
+  const double x = view.coordinates[coordinate * 2];
+  const double y = view.coordinates[coordinate * 2 + 1];
+  if (!sycl::isfinite(x) || !sycl::isfinite(y) || x < bbox[0] || x > bbox[2] ||
+      y < bbox[1] || y > bbox[3])
+    return false;
+  if ((view.flags & PGACCEL_RESIDENT_GEOMETRY_EDGE_INDEX) != 0) {
+    constexpr size_t block_pairs = PGACCEL_RESIDENT_GEOMETRY_EDGE_BLOCK_PAIRS;
+    const size_t block = coordinate / block_pairs;
+    const double* edge_box = view.bboxes + (view.row_count + block) * 4;
+    if (!resident_edge_box_contains(edge_box, x, y) ||
+        (coordinate != 0 && coordinate % block_pairs == 0 &&
+         !resident_edge_box_contains(edge_box - 4, x, y)))
+      return false;
+  }
+  return true;
+}
+
 static uint32_t resident_validate_geometry(const pgaccel_resident_geometry_view& view, size_t index,
-                                           uint64_t* referenced_bytes) {
+                                           uint64_t* referenced_bytes, bool validate_coordinates) {
   const uint8_t null_byte = view.nulls == nullptr ? 0 : view.nulls[index];
   const pgaccel_resident_geometry_row row = view.rows[index];
   const uint64_t begin_u64 = view.geometry_offsets[index];
@@ -1894,6 +1992,10 @@ static uint32_t resident_validate_geometry(const pgaccel_resident_geometry_view&
   const size_t begin = static_cast<size_t>(begin_u64);
   const size_t end = static_cast<size_t>(end_u64);
   const size_t coordinate_count = end - begin;
+  const bool indexed = (view.flags & PGACCEL_RESIDENT_GEOMETRY_EDGE_INDEX) != 0;
+  if (indexed &&
+      (!resident_polygonal(row.geom_type) || begin != 0 || end != view.coordinate_pair_count))
+    return SPATIAL_RESIDENT_FAILURE_GEOMETRY;
   const bool bbox_zero = resident_canonical_zero(bbox[0]) && resident_canonical_zero(bbox[1]) &&
                          resident_canonical_zero(bbox[2]) && resident_canonical_zero(bbox[3]);
   if (null_byte != 0) {
@@ -1907,7 +2009,7 @@ static uint32_t resident_validate_geometry(const pgaccel_resident_geometry_view&
   }
   if ((row.geom_type != PGACCEL_RESIDENT_GEOMETRY_POINT &&
        row.geom_type != PGACCEL_RESIDENT_GEOMETRY_LINESTRING &&
-       row.geom_type != PGACCEL_RESIDENT_GEOMETRY_POLYGON) ||
+       !resident_polygonal(row.geom_type)) ||
       row.srid < 0 || row.srid > 999'999 ||
       (row.flags & ~static_cast<uint32_t>(PGACCEL_RESIDENT_GEOMETRY_BBOX_VALID)) != 0) {
     return SPATIAL_RESIDENT_FAILURE_GEOMETRY;
@@ -1922,12 +2024,10 @@ static uint32_t resident_validate_geometry(const pgaccel_resident_geometry_view&
         bbox[0] > bbox[2] || bbox[1] > bbox[3]) {
       return SPATIAL_RESIDENT_FAILURE_GEOMETRY;
     }
-    for (size_t coordinate = begin; coordinate < end; ++coordinate) {
-      const double x = view.coordinates[coordinate * 2];
-      const double y = view.coordinates[coordinate * 2 + 1];
-      if (!sycl::isfinite(x) || !sycl::isfinite(y) || x < bbox[0] || x > bbox[2] || y < bbox[1] ||
-          y > bbox[3]) {
-        return SPATIAL_RESIDENT_FAILURE_GEOMETRY;
+    if (validate_coordinates) {
+      for (size_t coordinate = begin; coordinate < end; ++coordinate) {
+        if (!resident_coordinate_valid(view, coordinate, bbox))
+          return SPATIAL_RESIDENT_FAILURE_GEOMETRY;
       }
     }
   }
@@ -1937,21 +2037,25 @@ static uint32_t resident_validate_geometry(const pgaccel_resident_geometry_view&
   if (row.geom_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING && coordinate_count != 0 &&
       coordinate_count < 2)
     return SPATIAL_RESIDENT_FAILURE_GEOMETRY;
-  if (row.geom_type != PGACCEL_RESIDENT_GEOMETRY_POLYGON && row.ring_count != 0)
+  if (!resident_polygonal(row.geom_type) && row.ring_count != 0)
     return SPATIAL_RESIDENT_FAILURE_GEOMETRY;
 
   const uint64_t ring_end_u64 = row.first_ring + static_cast<uint64_t>(row.ring_count);
   if (ring_end_u64 < row.first_ring || ring_end_u64 > view.ring_count ||
-      (row.geom_type == PGACCEL_RESIDENT_GEOMETRY_POLYGON && coordinate_count != 0 &&
-       row.ring_count == 0)) {
+      (resident_polygonal(row.geom_type) && coordinate_count != 0 && row.ring_count == 0)) {
     return SPATIAL_RESIDENT_FAILURE_GEOMETRY;
   }
   if (row.ring_count != 0) {
     for (size_t ring = 0; ring < row.ring_count; ++ring) {
       const size_t global_ring = static_cast<size_t>(row.first_ring) + ring;
-      const uint64_t ring_begin = view.ring_offsets[global_ring];
+      const uint64_t tag = PGACCEL_RESIDENT_GEOMETRY_RING_COMPONENT_START;
+      const uint64_t encoded = view.ring_offsets[global_ring];
+      const bool multi = row.geom_type == PGACCEL_RESIDENT_GEOMETRY_MULTIPOLYGON;
+      if ((!multi && (encoded & tag) != 0) || (multi && ring == 0 && (encoded & tag) == 0))
+        return SPATIAL_RESIDENT_FAILURE_GEOMETRY;
+      const uint64_t ring_begin = encoded & ~tag;
       const uint64_t ring_end =
-          ring + 1 < row.ring_count ? view.ring_offsets[global_ring + 1] : end_u64;
+          ring + 1 < row.ring_count ? view.ring_offsets[global_ring + 1] & ~tag : end_u64;
       if ((ring == 0 && ring_begin != begin_u64) || ring_begin >= ring_end ||
           ring_begin < begin_u64 || ring_end > end_u64 || ring_end - ring_begin < 3) {
         return SPATIAL_RESIDENT_FAILURE_GEOMETRY;
@@ -1967,7 +2071,15 @@ static uint32_t resident_validate_geometry(const pgaccel_resident_geometry_view&
   const uint64_t ring_bytes = static_cast<uint64_t>(row.ring_count) * sizeof(uint64_t);
   if (bytes > std::numeric_limits<uint64_t>::max() - ring_bytes)
     return SPATIAL_RESIDENT_FAILURE_GEOMETRY;
-  *referenced_bytes = bytes + ring_bytes;
+  bytes += ring_bytes;
+  if (indexed) {
+    constexpr size_t block_pairs = PGACCEL_RESIDENT_GEOMETRY_EDGE_BLOCK_PAIRS;
+    const uint64_t boxes = coordinate_count / block_pairs + (coordinate_count % block_pairs != 0);
+    if (boxes > (std::numeric_limits<uint64_t>::max() - bytes) / (4 * sizeof(double)))
+      return SPATIAL_RESIDENT_FAILURE_GEOMETRY;
+    bytes += boxes * 4 * sizeof(double);
+  }
+  *referenced_bytes = bytes;
   return 0;
 }
 
@@ -2082,6 +2194,8 @@ class SpatialResidentIntersectsKernel;
 template <SpatialResidentGeometryPairFamily Family>
 class SpatialResidentMetricKernel;
 class SpatialResidentCompactKernel;
+class SpatialResidentCompactCountKernel;
+class SpatialResidentCompactPublishKernel;
 class SpatialResidentPatchKernel;
 
 struct SpatialResidentOutputContract {
@@ -2394,60 +2508,88 @@ pgaccel_spatial_eval_resident_launch(const pgaccel_spatial_resident_request* req
   uint32_t* failure_flags = workspace->failure_flags;
   auto* args = reinterpret_cast<SpatialResidentKernelArgs*>(control);
 
-  queue.parallel_for<SpatialResidentValidateKernel>(
-      sycl::range<1>(request->count), [=](sycl::id<1> id) {
-        const size_t output_index = id[0];
-        uint64_t left_bytes = 0;
-        uint64_t right_bytes = 0;
-        uint32_t failure = 0;
-        if (args->request.left.row_stride != 0 || output_index == 0) {
-          const size_t left_index =
-              args->request.left.first_row + output_index * args->request.left.row_stride;
-          failure |= resident_validate_geometry(args->request.left.view, left_index, &left_bytes);
-        }
-        if (args->request.right.row_stride != 0 || output_index == 0) {
-          const size_t right_index =
-              args->request.right.first_row + output_index * args->request.right.row_stride;
-          failure |=
-              resident_validate_geometry(args->request.right.view, right_index, &right_bytes);
-        }
-        if (output_index == 0 &&
-            (args->request.left.view.geometry_offsets[0] != 0 ||
-             args->request.left.view.geometry_offsets[args->request.left.view.row_count] !=
-                 args->request.left.view.coordinate_pair_count ||
-             args->request.right.view.geometry_offsets[0] != 0 ||
-             args->request.right.view.geometry_offsets[args->request.right.view.row_count] !=
-                 args->request.right.view.coordinate_pair_count)) {
-          failure |= SPATIAL_RESIDENT_FAILURE_GEOMETRY;
-        }
-        const size_t left_index =
-            args->request.left.first_row + output_index * args->request.left.row_stride;
-        const size_t right_index =
-            args->request.right.first_row + output_index * args->request.right.row_stride;
-        const uint8_t left_null = args->request.left.view.nulls == nullptr
-                                      ? 0
-                                      : args->request.left.view.nulls[left_index];
-        const uint8_t right_null = args->request.right.view.nulls == nullptr
-                                       ? 0
-                                       : args->request.right.view.nulls[right_index];
-        if (left_null == 0 && right_null == 0 &&
-            args->request.left.view.rows[left_index].srid !=
-                args->request.right.view.rows[right_index].srid) {
-          failure |= SPATIAL_RESIDENT_FAILURE_SRID;
-        }
-        if (failure != 0) {
-          sycl::atomic_ref<uint32_t, sycl::memory_order::relaxed, sycl::memory_scope::device,
-                           sycl::access::address_space::global_space>
-              flags(failure_flags[0]);
-          flags.fetch_or(failure);
-        }
-        if (left_bytes != 0)
-          resident_check_operand_budget(args, failure_flags, left_bytes, true,
-                                        args->request.left.row_stride);
-        if (right_bytes != 0)
-          resident_check_operand_budget(args, failure_flags, right_bytes, false,
-                                        args->request.right.row_stride);
-      })
+  queue
+      .parallel_for<SpatialResidentValidateKernel>(
+          sycl::range<1>(request->count),
+          [=](sycl::id<1> id) {
+            const size_t output_index = id[0];
+            uint64_t left_bytes = 0;
+            uint64_t right_bytes = 0;
+            uint32_t failure = 0;
+            if (args->request.left.row_stride != 0 || output_index == 0) {
+              const size_t left_index =
+                  args->request.left.first_row + output_index * args->request.left.row_stride;
+              failure |=
+                  resident_validate_geometry(args->request.left.view, left_index, &left_bytes,
+                                             args->request.left.row_stride != 0);
+            }
+            if (args->request.right.row_stride != 0 || output_index == 0) {
+              const size_t right_index =
+                  args->request.right.first_row + output_index * args->request.right.row_stride;
+              failure |=
+                  resident_validate_geometry(args->request.right.view, right_index, &right_bytes,
+                                             args->request.right.row_stride != 0);
+            }
+            // Constant operands are canonical one-row views. Their declared
+            // coordinate spans and pointers were checked on the host, so all
+            // validation items can safely share the scan without trusting row
+            // offsets or types that item zero is still validating. No result
+            // kernel starts until this whole validation kernel has completed.
+            if (args->request.left.row_stride == 0) {
+              for (size_t coordinate = output_index;
+                   coordinate < args->request.left.view.coordinate_pair_count;
+                   coordinate += args->request.count) {
+                if (!resident_coordinate_valid(args->request.left.view, coordinate,
+                                               args->request.left.view.bboxes))
+                  failure |= SPATIAL_RESIDENT_FAILURE_GEOMETRY;
+              }
+            }
+            if (args->request.right.row_stride == 0) {
+              for (size_t coordinate = output_index;
+                   coordinate < args->request.right.view.coordinate_pair_count;
+                   coordinate += args->request.count) {
+                if (!resident_coordinate_valid(args->request.right.view, coordinate,
+                                               args->request.right.view.bboxes))
+                  failure |= SPATIAL_RESIDENT_FAILURE_GEOMETRY;
+              }
+            }
+            if (output_index == 0 &&
+                (args->request.left.view.geometry_offsets[0] != 0 ||
+                 args->request.left.view.geometry_offsets[args->request.left.view.row_count] !=
+                     args->request.left.view.coordinate_pair_count ||
+                 args->request.right.view.geometry_offsets[0] != 0 ||
+                 args->request.right.view.geometry_offsets[args->request.right.view.row_count] !=
+                     args->request.right.view.coordinate_pair_count)) {
+              failure |= SPATIAL_RESIDENT_FAILURE_GEOMETRY;
+            }
+            const size_t left_index =
+                args->request.left.first_row + output_index * args->request.left.row_stride;
+            const size_t right_index =
+                args->request.right.first_row + output_index * args->request.right.row_stride;
+            const uint8_t left_null = args->request.left.view.nulls == nullptr
+                                          ? 0
+                                          : args->request.left.view.nulls[left_index];
+            const uint8_t right_null = args->request.right.view.nulls == nullptr
+                                           ? 0
+                                           : args->request.right.view.nulls[right_index];
+            if (left_null == 0 && right_null == 0 &&
+                args->request.left.view.rows[left_index].srid !=
+                    args->request.right.view.rows[right_index].srid) {
+              failure |= SPATIAL_RESIDENT_FAILURE_SRID;
+            }
+            if (failure != 0) {
+              sycl::atomic_ref<uint32_t, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                               sycl::access::address_space::global_space>
+                  flags(failure_flags[0]);
+              flags.fetch_or(failure);
+            }
+            if (left_bytes != 0)
+              resident_check_operand_budget(args, failure_flags, left_bytes, true,
+                                            args->request.left.row_stride);
+            if (right_bytes != 0)
+              resident_check_operand_budget(args, failure_flags, right_bytes, false,
+                                            args->request.right.row_stride);
+          })
       .wait_and_throw();
 
   /* g_queue is in-order: every validation chunk completes before any
@@ -2577,6 +2719,66 @@ pgaccel_spatial_recheck_compact_launch(const pgaccel_spatial_recheck_compact_req
   uint64_t* uncertain_indices = request->uncertain_indices;
   uint64_t* uncertain_count_out = request->uncertain_count;
   const size_t row_count = request->row_count;
+  // The evaluation request is no longer needed after its synchronous launch.
+  // Reuse that already charged, disjoint control allocation for tile counts.
+  // No output buffer is scratch: an invalid byte anywhere must leave ALL
+  // public outputs untouched. The in-order queue provides the global barrier
+  // between validation/counting and publication without a host readback.
+  constexpr size_t block_rows = 1024;
+  constexpr size_t max_blocks =
+      (SPATIAL_RESIDENT_MAX_CHUNK_ROWS + sizeof(uint32_t) - 1 + block_rows - 1) / block_rows;
+  static_assert(max_blocks * sizeof(uint32_t) <= PGACCEL_SPATIAL_CONTROL_BYTES);
+  static_assert(block_rows % sizeof(uint32_t) == 0,
+                "different tiles must never share a Metal subword-store word");
+  if (row_count > block_rows) {
+    // The ABI permits byte-aligned output subspans. Shorten the first tile
+    // for an unaligned start so every INTERNAL tile boundary is word-aligned.
+    const size_t mask_offset = reinterpret_cast<uintptr_t>(final_mask) % sizeof(uint32_t);
+    const size_t block_count = (row_count + mask_offset + block_rows - 1) / block_rows;
+    auto* block_counts = reinterpret_cast<uint32_t*>(workspace->control);
+    queue.parallel_for<SpatialResidentCompactCountKernel>(
+        sycl::range<1>(block_count), [=](sycl::id<1> id) {
+          if (resident_has_failure(failure_flags))
+            return;
+          const size_t begin = id[0] == 0 ? 0 : id[0] * block_rows - mask_offset;
+          const size_t limit = (id[0] + 1) * block_rows - mask_offset;
+          const size_t end = limit < row_count ? limit : row_count;
+          uint32_t count = 0;
+          for (size_t row = begin; row < end; ++row) {
+            const int8_t value = tri_state[row];
+            if (value != -1 && value != 0 && value != 1) {
+              resident_record_failure(failure_flags, SPATIAL_RESIDENT_FAILURE_TRISTATE);
+              return;
+            }
+            count += value == 0;
+          }
+          block_counts[id[0]] = count;
+        });
+    queue.parallel_for<SpatialResidentCompactPublishKernel>(
+        sycl::range<1>(block_count), [=](sycl::id<1> id) {
+          if (resident_has_failure(failure_flags))
+            return;
+          // At most 65 counts: prefix each tile in logical row order rather
+          // than reserving offsets atomically in scheduler-dependent order.
+          uint32_t offset = 0;
+          for (size_t block = 0; block < id[0]; ++block)
+            offset += block_counts[block];
+          if (id[0] + 1 == block_count)
+            *uncertain_count_out = offset + block_counts[id[0]];
+          const size_t begin = id[0] == 0 ? 0 : id[0] * block_rows - mask_offset;
+          const size_t limit = (id[0] + 1) * block_rows - mask_offset;
+          const size_t end = limit < row_count ? limit : row_count;
+          for (size_t row = begin; row < end; ++row) {
+            const int8_t value = tri_state[row];
+            final_mask[row] = value == 1 ? 1 : -1;
+            if (value == 0)
+              uncertain_indices[offset++] = static_cast<uint64_t>(row);
+          }
+        });
+    queue.wait_and_throw();
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  }
   queue.single_task<SpatialResidentCompactKernel>([=]() {
     if (resident_has_failure(failure_flags))
       return;

@@ -1,0 +1,27 @@
+=== 118_spatial_numeric_rollups ===
+SET
+SET
+SELECT 1000017
+ANALYZE
+SELECT 1
+DO
+PGACCEL_ASSERT_OK:118_spatial_numeric_rollups.assert_001
+SET
+DO
+PGACCEL_ASSERT_OK:118_spatial_numeric_rollups.assert_002
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ f
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:118_spatial_numeric_rollups

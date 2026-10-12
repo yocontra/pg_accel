@@ -85,6 +85,13 @@ pub(super) unsafe extern "C-unwind" fn explain_custom_scan(
             es,
         );
         explain_resident_boundary(strategy, resident_proof, es);
+        if strategy == GpuStrategy::Agg && !(*(*node).ss.ps.plan).qual.is_null() {
+            pg_sys::ExplainPropertyText(
+                c"GPU Post-Aggregate Filter".as_ptr(),
+                c"PostgreSQL HAVING".as_ptr(),
+                es,
+            );
+        }
 
         // Execution stats only with EXPLAIN ANALYZE.
         if (*es).analyze {
@@ -636,6 +643,7 @@ const fn binary_measure_op_label(op: BinaryMeasureOp) -> &'static str {
     match op {
         BinaryMeasureOp::Mul => "mul",
         BinaryMeasureOp::Sub => "sub",
+        BinaryMeasureOp::Add => "add",
     }
 }
 
@@ -659,7 +667,17 @@ const fn aggregate_kind_label(kind: AggregateKind) -> &'static str {
 
 fn filter_summary(filter: &FilterSpec) -> String {
     match filter {
+        FilterSpec::SpatialAnd { spatial, scalar } => format!(
+            "and({}, {})",
+            filter_summary(spatial),
+            filter_summary(scalar)
+        ),
         FilterSpec::None => "none".to_owned(),
+        FilterSpec::NullOrRanges { input, ranges } => format!(
+            "null_or_ranges(input={}, count={})",
+            column_summary(*input),
+            ranges.len()
+        ),
         FilterSpec::Ranges { input, ranges } => format!(
             "ranges(input={}, count={})",
             column_summary(*input),
@@ -728,6 +746,8 @@ const fn spatial_predicate_label(predicate: SpatialPredicateKind) -> &'static st
         SpatialPredicateKind::Touches => "touches",
         SpatialPredicateKind::Crosses => "crosses",
         SpatialPredicateKind::Overlaps => "overlaps",
+        SpatialPredicateKind::Covers => "covers",
+        SpatialPredicateKind::CoveredBy => "coveredby",
     }
 }
 
@@ -1222,6 +1242,8 @@ mod tests {
             (SpatialPredicateKind::Touches, "touches"),
             (SpatialPredicateKind::Crosses, "crosses"),
             (SpatialPredicateKind::Overlaps, "overlaps"),
+            (SpatialPredicateKind::Covers, "covers"),
+            (SpatialPredicateKind::CoveredBy, "coveredby"),
         ] {
             assert_eq!(spatial_predicate_label(predicate), label);
         }

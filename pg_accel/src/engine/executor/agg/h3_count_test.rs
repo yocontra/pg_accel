@@ -1,0 +1,1674 @@
+//! Live qualification of staged nullable hash counts and INT4 sums. No planner path is added.
+//! These tests require a real GPU and H3 installation; neither absence is a pass.
+
+#[pgrx::pg_schema]
+mod tests {
+    use super::super::{
+        DescriptorAggPlan, DescriptorArtifactPolicy, HashMeasureInput, INT8OID,
+        validate_internal_runtime_capability, validate_normal_descriptor_capability,
+    };
+    use crate::engine::spec::{
+        AggOutputProjection, AggOutputSlot, AggOutputSource, AggQuerySpec, AggregateKind,
+        AggregateOutput, AggregateSource, ColumnRef, FilterSpec, GroupKeyEncoding, GroupKeyRef,
+        GroupKeySource, MaskKind, MeasureExpr, MeasureSpec,
+    };
+    use crate::gpu::GroupedAggKernelMode;
+    use pgrx::pg_sys;
+    use pgrx::prelude::*;
+
+    fn fresh_snapshot<T>(operation: impl FnOnce() -> T) -> T {
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                // SAFETY: exactly one private snapshot is pushed below.
+                unsafe { pg_sys::PopActiveSnapshot() };
+            }
+        }
+        // SAFETY: live backend test with an active outer statement snapshot.
+        // SPI mutations advance the command ID, not the outer snapshot's copy.
+        unsafe {
+            pg_sys::PushCopiedSnapshot(pg_sys::GetActiveSnapshot());
+            pg_sys::UpdateActiveSnapshotCommandId();
+        }
+        let _guard = Guard;
+        operation()
+    }
+
+    fn plan(policy: DescriptorArtifactPolicy) -> DescriptorAggPlan {
+        plan_for(policy, false, false)
+    }
+
+    fn plan_for(
+        policy: DescriptorArtifactPolicy,
+        filtered: bool,
+        count_star: bool,
+    ) -> DescriptorAggPlan {
+        plan_for_measure(policy, filtered, count_star, false)
+    }
+
+    fn plan_for_measure(
+        policy: DescriptorArtifactPolicy,
+        filtered: bool,
+        count_star: bool,
+        sum: bool,
+    ) -> DescriptorAggPlan {
+        assert!(!sum || !count_star);
+        let outputs: &[AggregateKind] = if sum {
+            &[AggregateKind::Count, AggregateKind::Sum]
+        } else {
+            &[AggregateKind::Count]
+        };
+        plan_for_outputs(policy, filtered, count_star, outputs)
+    }
+
+    fn plan_for_outputs(
+        policy: DescriptorArtifactPolicy,
+        filtered: bool,
+        count_star: bool,
+        outputs: &[AggregateKind],
+    ) -> DescriptorAggPlan {
+        plan_for_key(policy, filtered, count_star, outputs, false)
+    }
+
+    fn plan_for_key(
+        policy: DescriptorArtifactPolicy,
+        filtered: bool,
+        count_star: bool,
+        outputs: &[AggregateKind],
+        raw_bigint: bool,
+    ) -> DescriptorAggPlan {
+        plan_for_predicates(policy, filtered, count_star, outputs, raw_bigint, None)
+    }
+
+    fn plan_for_predicates(
+        policy: DescriptorArtifactPolicy,
+        filtered: bool,
+        count_star: bool,
+        outputs: &[AggregateKind],
+        raw_bigint: bool,
+        where_column: Option<i32>,
+    ) -> DescriptorAggPlan {
+        let relid = Spi::get_one::<pg_sys::Oid>("SELECT 'hash_count_rows'::regclass::oid")
+            .expect("relation lookup")
+            .expect("fixture relation");
+        // SAFETY: catalog lookup on the live PostgreSQL backend thread. This
+        // proves the extension-owned H3 type/function and pass-by-value layout.
+        let key_type_oid = if raw_bigint {
+            let actual = Spi::get_one::<pg_sys::Oid>("SELECT atttypid FROM pg_attribute WHERE attrelid='hash_count_rows'::regclass AND attname='cell'")
+                .expect("BIGINT key catalog lookup").expect("key column");
+            assert!(matches!(
+                actual,
+                pg_sys::INT2OID | pg_sys::INT4OID | pg_sys::INT8OID
+            ));
+            actual.into()
+        } else {
+            // SAFETY: real backend catalog lookup, never a fabricated H3 OID.
+            unsafe { crate::engine::ffi::syscache::resolve_h3_catalog() }
+                .expect("canonical H3 installation required")
+                .type_oid
+                .into()
+        };
+        let value_oid = Spi::get_one::<pg_sys::Oid>(
+            "SELECT atttypid FROM pg_attribute WHERE attrelid='hash_count_rows'::regclass AND attname='v'",
+        )
+        .expect("measure type lookup")
+        .expect("measure type");
+        let cell = ColumnRef {
+            relation_oid: relid.into(),
+            attno: 1,
+            type_oid: key_type_oid,
+        };
+        let mut spec = AggQuerySpec {
+            fact_rel: relid.into(),
+            group_keys: vec![GroupKeyRef {
+                source: if raw_bigint {
+                    GroupKeySource::FactColumn(cell)
+                } else {
+                    GroupKeySource::H3CellToParent {
+                        cell,
+                        resolution: 0,
+                    }
+                },
+                type_oid: cell.type_oid,
+                collation_oid: 0,
+                encoding: GroupKeyEncoding::Hash,
+            }],
+            measures: vec![MeasureSpec {
+                expression: if count_star {
+                    MeasureExpr::CountStar
+                } else {
+                    MeasureExpr::Column(ColumnRef {
+                        attno: 2,
+                        type_oid: value_oid.into(),
+                        ..cell
+                    })
+                },
+                filter: if filtered {
+                    FilterSpec::Mask {
+                        input: ColumnRef {
+                            attno: 3,
+                            type_oid: pg_sys::BOOLOID.into(),
+                            ..cell
+                        },
+                        kind: MaskKind::Sql,
+                    }
+                } else {
+                    FilterSpec::None
+                },
+                outputs: vec![AggregateOutput {
+                    source: AggregateSource::Value,
+                    kind: AggregateKind::Count,
+                }],
+            }],
+            star_dims: vec![],
+            fact_filter: where_column.map_or(FilterSpec::None, |attno| FilterSpec::Mask {
+                input: ColumnRef {
+                    attno,
+                    type_oid: pg_sys::BOOLOID.into(),
+                    ..cell
+                },
+                kind: MaskKind::Sql,
+            }),
+            having: None,
+        };
+        let mut projection = AggOutputProjection {
+            slots: vec![
+                AggOutputSlot {
+                    source: AggOutputSource::GroupKey { key_index: 0 },
+                    source_type_oid: cell.type_oid,
+                    result_type_oid: cell.type_oid,
+                    result_typmod: -1,
+                    result_collation_oid: 0,
+                    nullable: true,
+                },
+                AggOutputSlot {
+                    source: AggOutputSource::Aggregate {
+                        measure_index: 0,
+                        source: AggregateSource::Value,
+                        kind: AggregateKind::Count,
+                    },
+                    source_type_oid: if count_star { 0 } else { value_oid.into() },
+                    result_type_oid: INT8OID,
+                    result_typmod: -1,
+                    result_collation_oid: 0,
+                    nullable: false,
+                },
+            ],
+        };
+        let count_slot = projection.slots[1];
+        if outputs != [AggregateKind::Count] {
+            assert!(
+                value_oid == pg_sys::INT2OID || value_oid == pg_sys::INT4OID,
+                "INT2/INT4 state source"
+            );
+            spec.measures[0].outputs = outputs
+                .iter()
+                .map(|kind| AggregateOutput {
+                    source: AggregateSource::Value,
+                    kind: *kind,
+                })
+                .collect();
+            projection.slots.truncate(1);
+            for kind in outputs {
+                let mut slot = count_slot;
+                slot.source = AggOutputSource::Aggregate {
+                    measure_index: 0,
+                    source: AggregateSource::Value,
+                    kind: *kind,
+                };
+                slot.result_type_oid = if *kind == AggregateKind::Avg {
+                    pg_sys::NUMERICOID.into()
+                } else if matches!(kind, AggregateKind::Min | AggregateKind::Max) {
+                    value_oid.into()
+                } else {
+                    INT8OID
+                };
+                slot.nullable = *kind != AggregateKind::Count;
+                projection.slots.push(slot);
+            }
+        }
+        spec.validate().expect("valid logical count/sum");
+        projection.validate(&spec).expect("valid output contract");
+        HashMeasureInput::from_spec(&spec).expect("typed count/filter contract");
+        // Reuse every H3 shape restriction. Only the measure's CountStar
+        // restriction is replaced by the typed HashMeasureInput proof above.
+        let mut star = spec.clone();
+        star.fact_filter = FilterSpec::None;
+        star.measures[0].expression = MeasureExpr::CountStar;
+        star.measures[0].filter = FilterSpec::None;
+        star.measures[0].outputs = vec![AggregateOutput {
+            source: AggregateSource::Value,
+            kind: AggregateKind::Count,
+        }];
+        let mut star_projection = projection.clone();
+        star_projection.slots.truncate(1);
+        star_projection.slots.push(count_slot);
+        star_projection.slots[1].source_type_oid = 0;
+        validate_internal_runtime_capability(&star, &star_projection).expect("canonical H3 shape");
+        if raw_bigint {
+            assert_ne!(
+                super::super::planned_descriptor_kernel_mode(&spec, false),
+                GroupedAggKernelMode::ParallelHash,
+                "normal SQL still selects its established dictionary route"
+            );
+        } else {
+            assert!(DescriptorAggPlan::new(spec.clone(), projection.clone()).is_err());
+            assert!(validate_normal_descriptor_capability(&spec, &projection).is_err());
+        }
+        let mut plan = DescriptorAggPlan::from_validated_spec(
+            spec,
+            projection,
+            GroupedAggKernelMode::ParallelHash,
+        )
+        .expect("catalog-validated staged plan");
+        plan.qualification_policy = Some(policy);
+        let residency =
+            fresh_snapshot(|| plan.ensure_artifact()).expect("real resident preparation");
+        let effective_policy = if where_column.is_some() {
+            DescriptorArtifactPolicy::EphemeralFused
+        } else {
+            policy
+        };
+        if filtered {
+            let rows = residency
+                .relations
+                .iter()
+                .find(|relation| relation.relid == relid)
+                .expect("fact row evidence")
+                .row_count;
+            let expected = match effective_policy {
+                DescriptorArtifactPolicy::CachedReusable => rows * 9,
+                DescriptorArtifactPolicy::EphemeralFused => 0,
+            };
+            assert_eq!(
+                residency.artifact_bytes, expected,
+                "cached parent+mask charge, no double execution charge"
+            );
+        }
+        assert_eq!(plan.artifact_policy.get(), effective_policy);
+        plan
+    }
+
+    fn native() -> Vec<(Option<i64>, i64)> {
+        native_for(false, false)
+    }
+
+    fn native_for(filtered: bool, count_star: bool) -> Vec<(Option<i64>, i64)> {
+        Spi::run("SET pg_accel.enabled=off").expect("native oracle arm");
+        let mut rows = Spi::connect(|client| {
+            client
+                .select(
+                    &format!("SELECT h3_cell_to_parent(cell,0)::bigint, count({}) {} FROM hash_count_rows GROUP BY 1",
+                        if count_star { "*" } else { "v" },
+                        if filtered { "FILTER (WHERE p)" } else { "" }),
+                    None,
+                    &[],
+                )
+                .expect("PostgreSQL H3 count oracle")
+                .map(|row| (row.get(1).expect("key"), row.get(2).expect("count").expect("COUNT is never NULL")))
+                .collect::<Vec<_>>()
+        });
+        Spi::run("SET pg_accel.enabled=on").expect("staged execution arm");
+        rows.sort();
+        rows
+    }
+
+    fn rolled_back(operation: impl FnOnce()) {
+        // SAFETY: main backend thread, mirroring PL/pgSQL's internal
+        // subtransaction owner/context restoration. The body retains only
+        // Rust/device-owned plan state, not aborted PostgreSQL allocations.
+        unsafe {
+            let context = pg_sys::CurrentMemoryContext;
+            let owner = pg_sys::CurrentResourceOwner;
+            pg_sys::BeginInternalSubTransaction(std::ptr::null());
+            pg_sys::MemoryContextSwitchTo(context);
+            operation();
+            pg_sys::RollbackAndReleaseCurrentSubTransaction();
+            pg_sys::MemoryContextSwitchTo(context);
+            pg_sys::CurrentResourceOwner = owner;
+        }
+    }
+
+    fn execute(plan: &DescriptorAggPlan, expect_rebuild: bool) -> Vec<(Option<i64>, i64)> {
+        execute_measures(plan, expect_rebuild)
+            .into_iter()
+            .map(|(key, count, sum)| {
+                assert!(sum.is_none());
+                (key, count)
+            })
+            .collect()
+    }
+
+    fn execute_measures(
+        plan: &DescriptorAggPlan,
+        expect_rebuild: bool,
+    ) -> Vec<(Option<i64>, i64, Option<i64>)> {
+        execute_projected(plan, expect_rebuild, |slot| {
+            // SAFETY: execute_projected initialized the catalog-proved COUNT,
+            // optional SUM and key Datums. This wrapper uses only these shapes.
+            unsafe {
+                assert!(!*(*slot).tts_isnull.add(1), "COUNT is never NULL");
+                let key = (!*(*slot).tts_isnull).then(|| (*(*slot).tts_values).value() as i64);
+                let count = (*(*slot).tts_values.add(1)).value() as i64;
+                let sum = (plan.projection.slots.len() == 3 && !*(*slot).tts_isnull.add(2))
+                    .then(|| (*(*slot).tts_values.add(2)).value() as i64);
+                (key, count, sum)
+            }
+        })
+    }
+
+    /// # Safety
+    /// The live slot must contain an INT64-layout key followed by the declared
+    /// integer aggregate outputs; all Datums must remain live during conversion.
+    unsafe fn read_integer_states(
+        slot: *mut pg_sys::TupleTableSlot,
+        outputs: &[AggregateKind],
+        smallint: bool,
+    ) -> (Option<i64>, Vec<Option<String>>) {
+        use pgrx::{AnyNumeric, FromDatum};
+        // SAFETY: caller supplies the exact initialized slot described above.
+        unsafe {
+            let key = (!*(*slot).tts_isnull).then(|| (*(*slot).tts_values).value() as i64);
+            let values = outputs
+                .iter()
+                .enumerate()
+                .map(|(index, kind)| {
+                    let is_null = *(*slot).tts_isnull.add(index + 1);
+                    let datum = *(*slot).tts_values.add(index + 1);
+                    if *kind == AggregateKind::Count {
+                        assert!(!is_null);
+                    }
+                    match kind {
+                        AggregateKind::Avg => {
+                            AnyNumeric::from_datum(datum, is_null).map(|value| value.to_string())
+                        }
+                        AggregateKind::Min | AggregateKind::Max if smallint => {
+                            i16::from_datum(datum, is_null).map(|value| value.to_string())
+                        }
+                        AggregateKind::Min | AggregateKind::Max => {
+                            i32::from_datum(datum, is_null).map(|value| value.to_string())
+                        }
+                        AggregateKind::Count | AggregateKind::Sum => {
+                            i64::from_datum(datum, is_null).map(|value| value.to_string())
+                        }
+                        AggregateKind::StddevSamp => unreachable!("integer fixture output"),
+                    }
+                })
+                .collect();
+            (key, values)
+        }
+    }
+
+    fn execute_projected<T: Ord>(
+        plan: &DescriptorAggPlan,
+        expect_rebuild: bool,
+        mut read: impl FnMut(*mut pg_sys::TupleTableSlot) -> T,
+    ) -> Vec<T> {
+        fresh_snapshot(|| {
+            let mut result = plan.execute_prepared().expect("real hash dispatch");
+            assert_eq!(result.kernel_mode, GroupedAggKernelMode::ParallelHash);
+            assert_eq!(result.planned_batches, result.batches_executed);
+            if result.fact_rows != 0 {
+                assert!(
+                    result.physical_mode_calls > 0,
+                    "nonempty input must dispatch"
+                );
+            }
+            assert_eq!(
+                result.residency.is_some(),
+                expect_rebuild,
+                "generation revalidation"
+            );
+            assert_eq!(
+                plan.artifact_policy.get(),
+                if super::super::hash_where_filter(&plan.spec)
+                    .expect("WHERE shape")
+                    .is_some()
+                {
+                    DescriptorArtifactPolicy::EphemeralFused
+                } else {
+                    plan.qualification_policy.expect("test policy")
+                }
+            );
+            // SAFETY: backend thread; the catalog-validated projection has one
+            // H3 key and typed aggregate outputs. All attributes are set.
+            let (desc, slot) = unsafe {
+                let desc = pg_sys::CreateTemplateTupleDesc(
+                    i32::try_from(plan.projection.slots.len()).expect("small projection"),
+                );
+                for (index, field) in plan.projection.slots.iter().enumerate() {
+                    pg_sys::TupleDescInitEntry(
+                        desc,
+                        (index + 1) as i16,
+                        c"value".as_ptr(),
+                        field.result_type_oid.into(),
+                        -1,
+                        0,
+                    );
+                }
+                (
+                    desc,
+                    pg_sys::MakeSingleTupleTableSlot(desc, &raw const pg_sys::TTSOpsVirtual),
+                )
+            };
+            let mut rows = Vec::new();
+            // SAFETY: next fills this live slot with exactly the proved attributes.
+            while !unsafe { result.output.next(slot) }.is_null() {
+                rows.push(read(slot));
+            }
+            // SAFETY: these test-owned objects are no longer used. The template
+            // descriptor is unrefcounted, so slot release does not free it.
+            unsafe {
+                pg_sys::ExecDropSingleTupleTableSlot(slot);
+                pg_sys::FreeTupleDesc(desc);
+            }
+            rows.sort();
+            rows
+        })
+    }
+
+    #[pg_test]
+    fn pg_raw_hash_budget_preflight_denies_before_dispatch_and_reuses_charges() {
+        use super::super::{EphemeralDescriptorArtifact, build_fused_hash_descriptor};
+        use crate::engine::residency::{
+            ExecutionMemoryCharge, resident_live_bytes, with_ephemeral_artifact_inputs,
+        };
+        Spi::run("SET pg_accel.auto_load=on; SET pg_accel.enabled=on").expect("hash memory setup");
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT gpu_available FROM pg_accel_device_info()")
+                .expect("device probe"),
+            Some(true),
+            "live memory qualification requires a GPU"
+        );
+        Spi::run("CREATE TEMP TABLE hash_count_rows(cell bigint, v integer, p boolean); \
+            INSERT INTO hash_count_rows SELECT (i%17)::bigint,i,true FROM generate_series(1,10000) s(i)")
+            .expect("bounded memory fixture");
+        let plan = plan_for_key(
+            DescriptorArtifactPolicy::EphemeralFused,
+            false,
+            true,
+            &[AggregateKind::Count],
+            true,
+        );
+        crate::gpu::cleanup_grouped_allocation_pools();
+        let baseline = resident_live_bytes();
+        let budget = crate::engine::gucs::resident_memory_budget_bytes();
+        let required = {
+            let owner = plan.ephemeral_artifact.borrow();
+            let Some(EphemeralDescriptorArtifact::Hash(owner)) = owner.as_ref() else {
+                panic!("raw owner");
+            };
+            let key = super::super::raw_hash_group(&plan.spec).expect("raw key");
+            with_ephemeral_artifact_inputs(
+                plan.spec.fact_rel.into(),
+                owner,
+                &plan.dispatch_columns,
+                |inputs| {
+                    let bound = build_fused_hash_descriptor(
+                        inputs.artifact,
+                        &plan.dispatch_columns,
+                        &inputs.columns,
+                        key,
+                        &mut || false,
+                    )
+                    .expect("borrowed memory-query descriptor");
+                    // SAFETY: every actual resident pointer remains pinned for this
+                    // metadata-only callback; no execution owner escapes it.
+                    let native =
+                        unsafe { crate::gpu::ResolvedGroupedAggPlan::from_abi(bound.desc) }
+                            .expect("native shape");
+                    native.hash_memory_requirements().expect("exact footprint")
+                },
+            )
+            .expect("current dependency borrow")
+        };
+        assert_eq!(
+            resident_live_bytes(),
+            baseline,
+            "forecast itself is uncharged"
+        );
+        let held = ExecutionMemoryCharge::reserve(
+            budget - baseline - required.total_bytes as u64 + 1,
+            budget,
+        )
+        .expect("leave one byte short of combined footprint");
+        let before = crate::gpu::gpu_exec_count();
+        let charged = resident_live_bytes();
+        assert!(fresh_snapshot(|| plan.execute_prepared()).is_err());
+        assert_eq!(
+            crate::gpu::gpu_exec_count(),
+            before,
+            "preflight must precede device work"
+        );
+        assert_eq!(
+            resident_live_bytes(),
+            charged,
+            "rejection allocates no output/workspace"
+        );
+        drop(held);
+        let expected = execute(&plan, false);
+        assert_eq!(expected.len(), 17);
+        assert!(
+            resident_live_bytes() > baseline,
+            "pooled workspace/output remain charged"
+        );
+        assert_eq!(execute(&plan, false), expected); // warm the learned-capacity shape
+        let warmed = resident_live_bytes();
+        assert_eq!(execute(&plan, false), expected);
+        assert_eq!(
+            resident_live_bytes(),
+            warmed,
+            "pool checkout never charges twice"
+        );
+        crate::gpu::cleanup_grouped_allocation_pools();
+        assert_eq!(
+            resident_live_bytes(),
+            baseline,
+            "idle pool reclamation releases exact charges"
+        );
+        drop(plan);
+        Spi::run("SELECT pg_accel_evict('hash_count_rows'::regclass); DROP TABLE hash_count_rows")
+            .expect("memory fixture cleanup");
+    }
+
+    #[pg_test]
+    fn pg_raw_hash_many_rows_bounded_capacity_learning_and_failure() {
+        use super::super::{DescriptorAggExecutionError, EphemeralDescriptorArtifact};
+        Spi::run("SET pg_accel.auto_load=on; SET pg_accel.enabled=on")
+            .expect("bounded raw hash setup");
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT gpu_available FROM pg_accel_device_info()")
+                .expect("device probe"),
+            Some(true),
+            "bounded hash qualification requires a GPU"
+        );
+        Spi::run(
+            "CREATE TEMP TABLE hash_count_rows(cell bigint, v integer, p boolean); \
+            INSERT INTO hash_count_rows SELECT CASE WHEN i%8=0 THEN NULL ELSE (i%8)::bigint END, \
+            CASE WHEN i%8=3 THEN NULL WHEN i%2=0 THEN 2147483647 ELSE (-2147483647-1) END, \
+            CASE WHEN i%11=0 THEN NULL ELSE i%4<>0 END FROM generate_series(1,1000017) s(i)",
+        )
+        .expect("multi-launch rows with eight keys");
+        let mut plan = plan_for_key(
+            DescriptorArtifactPolicy::EphemeralFused,
+            true,
+            false,
+            &[AggregateKind::Count, AggregateKind::Sum],
+            true,
+        );
+        let capacity = |plan: &DescriptorAggPlan| {
+            let owner = plan.ephemeral_artifact.borrow();
+            let Some(EphemeralDescriptorArtifact::Hash(artifact)) = owner.as_ref() else {
+                panic!("query-owned raw hash metadata");
+            };
+            artifact.artifact().group_capacity.get()
+        };
+        let native = || {
+            Spi::run("SET pg_accel.enabled=off").expect("native oracle");
+            let mut rows = Spi::connect(|client| {
+                client.select(
+                "SELECT cell, count(v) FILTER (WHERE p), sum(v) FILTER (WHERE p) FROM hash_count_rows GROUP BY cell", None, &[])
+                .expect("native bounded rollup").map(|row| (row.get::<i64>(1).expect("key"), row.get::<i64>(2).expect("count").expect("non-NULL count"), row.get::<i64>(3).expect("sum")))
+                .collect::<Vec<_>>()
+            });
+            Spi::run("SET pg_accel.enabled=on").expect("staged raw arm");
+            rows.sort();
+            rows
+        };
+        plan.max_groups = 16;
+        fresh_snapshot(|| plan.ensure_artifact())
+            .expect("rows exceed group budget, not native row limit");
+        assert_eq!(capacity(&plan), 16);
+        let expected = native();
+        assert_eq!(expected.len(), 8);
+        assert!(
+            expected
+                .iter()
+                .any(|(_, count, sum)| *count == 0 && sum.is_none())
+        );
+        let mut services = 0;
+        let cancelled = fresh_snapshot(|| {
+            pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+                let _ = plan
+                    .execute_hash_once_with_service(&mut || false, || {
+                        services += 1;
+                        if services == 2 {
+                            assert_eq!(
+                                capacity(&plan),
+                                8,
+                                "completed kernel proposed a learned bound"
+                            );
+                            assert!(plan.ephemeral_artifact.try_borrow_mut().is_ok());
+                            // SAFETY: inject cancellation on the backend thread only
+                            // after all resident/metadata borrows have unwound.
+                            unsafe {
+                                std::ptr::write_volatile(&raw mut pg_sys::QueryCancelPending, 1);
+                                std::ptr::write_volatile(&raw mut pg_sys::InterruptPending, 1);
+                            }
+                        }
+                        crate::engine::executor::bounded::capture_postgres_interrupt()
+                            .map_or(Ok(()), |error| Err(Box::new(error)))
+                    })
+                    .expect("resident dispatch");
+                false
+            }))
+            .catch_when(PgSqlErrorCode::ERRCODE_QUERY_CANCELED, |_| true)
+            .execute()
+        });
+        assert!(cancelled);
+        assert_eq!(services, 2);
+        assert_eq!(
+            capacity(&plan),
+            16,
+            "late fatal service rolls back learning"
+        );
+        assert_eq!(execute_measures(&plan, false), expected);
+        assert_eq!(
+            capacity(&plan),
+            8,
+            "learned only after complete compact validation"
+        );
+        assert_eq!(execute_measures(&plan, false), expected);
+        assert_eq!(capacity(&plan), 8);
+
+        plan.max_groups = 4;
+        fresh_snapshot(|| plan.ensure_artifact()).expect("bounded attempt metadata");
+        let error = fresh_snapshot(|| plan.execute_prepared())
+            .err()
+            .expect("too many distinct keys must fail");
+        assert!(
+            matches!(error, DescriptorAggExecutionError::ExternalRoutineException(ref message) if message.contains("unsupported")),
+            "native capacity rejection, not a partial result"
+        );
+        assert_eq!(
+            capacity(&plan),
+            4,
+            "failed execution cannot teach a cardinality"
+        );
+        plan.max_groups = 16;
+        fresh_snapshot(|| plan.ensure_artifact()).expect("fresh capacity retry");
+        assert_eq!(capacity(&plan), 16);
+        assert_eq!(execute_measures(&plan, false), expected);
+        assert_eq!(capacity(&plan), 8);
+
+        Spi::run("INSERT INTO hash_count_rows VALUES ('-9223372036854775808',7,true)")
+            .expect("new key invalidates the learned bound");
+        assert_eq!(execute_measures(&plan, true), native());
+        assert_eq!(
+            capacity(&plan),
+            9,
+            "new generation can grow beyond the old learned count"
+        );
+        rolled_back(|| {
+            Spi::run("UPDATE hash_count_rows SET cell=NULL")
+                .expect("collapse keys in a subtransaction");
+            assert_eq!(execute_measures(&plan, true), native());
+            assert_eq!(capacity(&plan), 1);
+        });
+        assert_eq!(execute_measures(&plan, true), native());
+        assert_eq!(
+            capacity(&plan),
+            9,
+            "rollback cannot retain the collapsed generation's bound"
+        );
+        Spi::run("TRUNCATE hash_count_rows").expect("empty new generation");
+        assert!(execute_measures(&plan, true).is_empty());
+        assert_eq!(capacity(&plan), 1);
+        drop(plan);
+        Spi::run("SELECT pg_accel_evict('hash_count_rows'::regclass); DROP TABLE hash_count_rows")
+            .expect("bounded fixture cleanup");
+    }
+
+    #[pg_test]
+    fn pg_raw_narrow_integer_hash_keys_without_dictionary() {
+        use pgrx::FromDatum;
+        Spi::run("SET pg_accel.auto_load=on; SET pg_accel.enabled=on").expect("raw hash setup");
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT gpu_available FROM pg_accel_device_info()")
+                .expect("device probe"),
+            Some(true),
+            "hash qualification requires a GPU"
+        );
+        for (key_type, minimum, maximum) in [
+            ("smallint", i32::from(i16::MIN), i32::from(i16::MAX)),
+            ("integer", i32::MIN, i32::MAX),
+        ] {
+            Spi::run(&format!("CREATE TEMP TABLE hash_count_rows(cell {key_type}, v integer, p boolean); \
+                INSERT INTO hash_count_rows SELECT i-8193, CASE WHEN i%7=0 THEN NULL ELSE i-9000 END, \
+                CASE WHEN i%11=0 THEN NULL ELSE i%3<>0 END FROM generate_series(1,16385) s(i) \
+                CROSS JOIN generate_series(1,3) copies; \
+                INSERT INTO hash_count_rows VALUES (NULL,NULL,true),(NULL,7,true), \
+                ({minimum},NULL,true),({maximum},13,false)"))
+                .expect("typed raw key fixture");
+            for count_star in [false, true] {
+                let outputs = if count_star {
+                    vec![AggregateKind::Count]
+                } else {
+                    vec![
+                        AggregateKind::Min,
+                        AggregateKind::Avg,
+                        AggregateKind::Max,
+                        AggregateKind::Sum,
+                        AggregateKind::Count,
+                    ]
+                };
+                for filtered in [false, true] {
+                    let plan = plan_for_key(
+                        DescriptorArtifactPolicy::EphemeralFused,
+                        filtered,
+                        count_star,
+                        &outputs,
+                        true,
+                    );
+                    let read = |slot: *mut pg_sys::TupleTableSlot| {
+                        // SAFETY: execute_projected supplies this plan's live typed slot.
+                        unsafe {
+                            let (_, states) = read_integer_states(slot, &outputs, false);
+                            let datum = *(*slot).tts_values;
+                            let is_null = *(*slot).tts_isnull;
+                            let key = if key_type == "smallint" {
+                                i16::from_datum(datum, is_null).map(i64::from)
+                            } else {
+                                i32::from_datum(datum, is_null).map(i64::from)
+                            };
+                            (key, states)
+                        }
+                    };
+                    let native = || {
+                        Spi::run("SET pg_accel.enabled=off").expect("native oracle");
+                        let filter = if filtered { " FILTER (WHERE p)" } else { "" };
+                        let functions = if count_star {
+                            vec!["count(*)"]
+                        } else {
+                            vec!["min(v)", "avg(v)", "max(v)", "sum(v)", "count(v)"]
+                        };
+                        let columns = functions
+                            .iter()
+                            .map(|function| format!("({function}{filter})::text"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let mut rows = Spi::connect(|client| {
+                            client.select(
+                            &format!("SELECT cell::bigint, {columns} FROM hash_count_rows GROUP BY cell"),
+                            None, &[]).expect("native integer rollup").map(|row| (
+                                row.get::<i64>(1).expect("key"),
+                                (2..outputs.len()+2).map(|index| row.get::<String>(index).expect("state"))
+                                    .collect::<Vec<_>>()
+                            )).collect::<Vec<_>>()
+                        });
+                        Spi::run("SET pg_accel.enabled=on").expect("staged arm");
+                        rows.sort();
+                        rows
+                    };
+                    let expected = native();
+                    assert_eq!(expected.len(), 16388);
+                    assert_eq!(execute_projected(&plan, false, read), expected);
+                    assert_eq!(execute_projected(&plan, false, read), expected);
+                    rolled_back(|| {
+                        Spi::run("UPDATE hash_count_rows SET cell=-cell WHERE cell BETWEEN -8192 AND 8192")
+                            .expect("typed key mutation");
+                        assert_eq!(execute_projected(&plan, true, read), native());
+                        Spi::run("UPDATE hash_count_rows SET cell=NULL, v=NULL, p=NULL")
+                            .expect("all NULL keys, values and masks");
+                        assert_eq!(execute_projected(&plan, true, read), native());
+                        Spi::run("TRUNCATE hash_count_rows").expect("empty relation");
+                        assert!(execute_projected(&plan, true, read).is_empty());
+                    });
+                    assert_eq!(execute_projected(&plan, true, read), expected);
+                }
+            }
+            Spi::run(
+                "SELECT pg_accel_evict('hash_count_rows'::regclass); DROP TABLE hash_count_rows",
+            )
+            .expect("typed fixture cleanup");
+        }
+    }
+
+    #[pg_test]
+    fn pg_hash_where_materialization_invalidation_empty_learning_and_cancellation() {
+        Spi::run("SET pg_accel.auto_load=on; SET pg_accel.enabled=on").expect("WHERE setup");
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT gpu_available FROM pg_accel_device_info()")
+                .expect("device probe"),
+            Some(true),
+            "WHERE qualification requires a GPU"
+        );
+        Spi::run(
+            "CREATE TEMP TABLE hash_count_rows(cell bigint, v integer, p boolean, w boolean); \
+            INSERT INTO hash_count_rows SELECT CASE WHEN i%8=0 THEN NULL ELSE (i%8)::bigint END, \
+            CASE WHEN i%8=1 THEN NULL WHEN i%2=0 THEN 2147483647 ELSE (-2147483647-1) END, \
+            CASE WHEN i%11=0 THEN NULL ELSE i%8<>3 END, \
+            CASE WHEN i%13=0 THEN NULL ELSE i%8<>2 END FROM generate_series(1,65537) s(i)",
+        )
+        .expect("independent nullable WHERE/FILTER across two conversion chunks");
+        for (filtered, where_column) in [(false, 4), (true, 4), (true, 3)] {
+            let where_name = if where_column == 3 { "p" } else { "w" };
+            let independent_filter = filtered && where_column != 3;
+            for star in [false, true] {
+                let outputs = if star {
+                    vec![AggregateKind::Count]
+                } else {
+                    vec![AggregateKind::Count, AggregateKind::Sum]
+                };
+                let plan = plan_for_predicates(
+                    DescriptorArtifactPolicy::EphemeralFused,
+                    filtered,
+                    star,
+                    &outputs,
+                    true,
+                    Some(where_column),
+                );
+                let native = || {
+                    Spi::run("SET pg_accel.enabled=off").expect("native WHERE oracle");
+                    let filter = if filtered { "FILTER (WHERE p)" } else { "" };
+                    let argument = if star { "*" } else { "v" };
+                    let sum = if star {
+                        "NULL::bigint".to_owned()
+                    } else {
+                        format!("sum(v) {filter}")
+                    };
+                    let mut rows = Spi::connect(|client| {
+                        client.select(&format!(
+                        "SELECT cell,count({argument}) {filter},{sum} FROM hash_count_rows WHERE {where_name} GROUP BY cell"
+                    ), None, &[]).expect("native WHERE/FILTER result").map(|row| (
+                        row.get::<i64>(1).expect("key"),
+                        row.get::<i64>(2).expect("count").expect("COUNT non-NULL"),
+                        row.get::<i64>(3).expect("sum"),
+                    )).collect::<Vec<_>>()
+                    });
+                    Spi::run("SET pg_accel.enabled=on").expect("staged WHERE arm");
+                    rows.sort();
+                    rows
+                };
+                let expected = native();
+                assert!(
+                    !expected
+                        .iter()
+                        .any(|row| row.0 == Some(if where_column == 3 { 3 } else { 2 })),
+                    "WHERE removes groups"
+                );
+                assert_eq!(execute_measures(&plan, false), expected);
+                assert_eq!(execute_measures(&plan, false), expected);
+                check_fused_interrupts(
+                    &plan,
+                    if independent_filter { 10 } else { 6 },
+                    if independent_filter { 5 } else { 3 },
+                    || assert_eq!(execute_measures(&plan, false), expected),
+                );
+                rolled_back(|| {
+                    Spi::run(&format!("UPDATE hash_count_rows SET {where_name}=false"))
+                        .expect("reject all rows");
+                    assert!(execute_measures(&plan, true).is_empty());
+                    assert!(execute_measures(&plan, false).is_empty());
+                    let owner = plan.ephemeral_artifact.borrow();
+                    let Some(super::super::EphemeralDescriptorArtifact::Hash(artifact)) =
+                        owner.as_ref()
+                    else {
+                        panic!("raw WHERE has query-owned metadata");
+                    };
+                    assert_eq!(
+                        artifact.artifact().group_capacity.get(),
+                        1,
+                        "learned empty capacity"
+                    );
+                });
+                assert_eq!(
+                    execute_measures(&plan, true),
+                    expected,
+                    "rollback forgets empty bound"
+                );
+                rolled_back(|| {
+                    Spi::run("UPDATE hash_count_rows SET w=true,p=false")
+                        .expect("predicate-only DML");
+                    assert_eq!(execute_measures(&plan, true), native());
+                });
+                assert_eq!(execute_measures(&plan, true), expected);
+            }
+        }
+        Spi::run("SELECT pg_accel_evict('hash_count_rows'::regclass); DROP TABLE hash_count_rows")
+            .expect("WHERE cleanup");
+    }
+
+    #[pg_test]
+    fn pg_h3_where_forces_key_evaluation_after_rejection() {
+        Spi::run(
+            "CREATE EXTENSION IF NOT EXISTS h3; SET pg_accel.auto_load=on; SET pg_accel.enabled=on",
+        )
+        .expect("H3 WHERE setup");
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT gpu_available FROM pg_accel_device_info()")
+                .expect("device probe"),
+            Some(true),
+            "H3 WHERE requires a GPU"
+        );
+        Spi::run(
+            "CREATE TEMP TABLE hash_count_rows(cell h3index,v integer,p boolean,w boolean); \
+            INSERT INTO hash_count_rows VALUES ('8001fffffffffff',1,true,true), \
+            ('8003fffffffffff',2,false,false),(NULL,3,true,true),('8001fffffffffff',4,NULL,NULL)",
+        )
+        .expect("nullable H3 WHERE fixture");
+        let plan = plan_for_predicates(
+            DescriptorArtifactPolicy::CachedReusable,
+            false,
+            true,
+            &[AggregateKind::Count],
+            false,
+            Some(4),
+        );
+        assert_eq!(
+            plan.artifact_policy_evidence
+                .get()
+                .expect("policy evidence")
+                .reason,
+            super::super::ArtifactPolicyReason::PredicateOrder
+        );
+        let native = || {
+            Spi::run("SET pg_accel.enabled=off").expect("native H3 WHERE");
+            let mut rows = Spi::connect(|client| {
+                client.select(
+                "SELECT h3_cell_to_parent(cell,0)::bigint,count(*) FROM hash_count_rows WHERE w GROUP BY 1", None, &[])
+                .expect("native H3 WHERE result").map(|row| (row.get::<i64>(1).expect("key"),
+                    row.get::<i64>(2).expect("count").expect("non-NULL count"))).collect::<Vec<_>>()
+            });
+            Spi::run("SET pg_accel.enabled=on").expect("staged arm");
+            rows.sort();
+            rows
+        };
+        assert_eq!(execute(&plan, false), native());
+        Spi::run("UPDATE hash_count_rows SET w=true").expect("WHERE-only H3 invalidation");
+        assert_eq!(execute(&plan, true), native());
+        Spi::run("TRUNCATE hash_count_rows").expect("empty H3 input");
+        assert!(execute(&plan, true).is_empty());
+        Spi::run("SELECT pg_accel_evict('hash_count_rows'::regclass); DROP TABLE hash_count_rows")
+            .expect("H3 WHERE cleanup");
+    }
+
+    #[pg_test]
+    fn pg_raw_bigint_hash_rollups_without_dictionary_or_h3() {
+        Spi::run("SET pg_accel.auto_load=on; SET pg_accel.enabled=on").expect("raw hash setup");
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT gpu_available FROM pg_accel_device_info()")
+                .expect("device probe"),
+            Some(true),
+            "raw hash qualification requires a GPU"
+        );
+        // 16,385 non-NULL groups cross the native parallel compact-sort boundary.
+        // Signed extremes and NULL have separate groups; no H3 extension is used.
+        for (value_type, minimum, maximum) in [
+            ("integer", i32::MIN, i32::MAX),
+            ("smallint", i32::from(i16::MIN), i32::from(i16::MAX)),
+        ] {
+            Spi::run(&format!("CREATE TEMP TABLE hash_count_rows(cell bigint, v {value_type}, p boolean); \
+            INSERT INTO hash_count_rows SELECT i::bigint-8193, CASE WHEN i%7=0 THEN NULL WHEN i%2=0 THEN {maximum} ELSE {minimum} END, \
+            CASE WHEN i%11=0 THEN NULL ELSE i%3<>0 END FROM generate_series(1,16385) s(i) CROSS JOIN generate_series(1,3) copies; \
+            INSERT INTO hash_count_rows VALUES (NULL,NULL,true),(NULL,7,true), \
+            ('9223372036854775807',11,true),('-9223372036854775808',-13,true)"))
+            .expect("high-cardinality raw BIGINT fixture");
+            for filtered in [false, true] {
+                let outputs = [AggregateKind::Count, AggregateKind::Sum];
+                let plan = plan_for_key(
+                    DescriptorArtifactPolicy::EphemeralFused,
+                    filtered,
+                    false,
+                    &outputs,
+                    true,
+                );
+                assert!(matches!(
+                    plan.artifact_kind,
+                    super::super::DescriptorArtifactKind::RawHash { .. }
+                ));
+                let native = || {
+                    Spi::run("SET pg_accel.enabled=off").expect("native oracle");
+                    let filter = if filtered { "FILTER (WHERE p)" } else { "" };
+                    let mut rows = Spi::connect(|client| {
+                        client.select(
+                    &format!("SELECT cell, count(v) {filter}, sum(v) {filter} FROM hash_count_rows GROUP BY cell"), None, &[])
+                    .expect("native BIGINT rollup").map(|row| (
+                        row.get::<i64>(1).expect("key"), row.get::<i64>(2).expect("count").expect("non-NULL count"), row.get::<i64>(3).expect("sum")))
+                    .collect::<Vec<_>>()
+                    });
+                    Spi::run("SET pg_accel.enabled=on").expect("staged raw arm");
+                    rows.sort();
+                    rows
+                };
+                let expected = native();
+                assert_eq!(expected.len(), 16388);
+                assert_eq!(execute_measures(&plan, false), expected);
+                assert_eq!(execute_measures(&plan, false), expected);
+                rolled_back(|| {
+                    Spi::run(
+                        "UPDATE hash_count_rows SET cell=-cell WHERE cell BETWEEN -8192 AND 8192",
+                    )
+                    .expect("raw key mutation");
+                    assert_eq!(execute_measures(&plan, true), native());
+                });
+                assert_eq!(execute_measures(&plan, true), expected);
+                // Exercise the same cleanup-before-service interrupt boundary as
+                // fused H3, without needing an H3 transform or extension identity.
+                let mask_calls = if filtered {
+                    (3 * 16385 + 4_usize).div_ceil(crate::gpu::SQL_BOOL_MASK_CHUNK_ROWS)
+                } else {
+                    0
+                };
+                check_fused_interrupts(
+                    &plan,
+                    if filtered { mask_calls + 4 } else { 3 },
+                    mask_calls + 1,
+                    || assert_eq!(execute_measures(&plan, false), expected),
+                );
+                drop(plan);
+                let outputs = [
+                    AggregateKind::Max,
+                    AggregateKind::Sum,
+                    AggregateKind::Min,
+                    AggregateKind::Avg,
+                    AggregateKind::Count,
+                ];
+                let plan = plan_for_key(
+                    DescriptorArtifactPolicy::EphemeralFused,
+                    filtered,
+                    false,
+                    &outputs,
+                    true,
+                );
+                let read = |slot| {
+                    // SAFETY: execute_projected uses this plan's exact tuple descriptor.
+                    unsafe { read_integer_states(slot, &outputs, value_type == "smallint") }
+                };
+                let native = || {
+                    Spi::run("SET pg_accel.enabled=off").expect("native extrema oracle");
+                    let filter = if filtered { "FILTER (WHERE p)" } else { "" };
+                    let columns = ["max", "sum", "min", "avg", "count"]
+                        .map(|function| format!("({function}(v) {filter})::text"))
+                        .join(", ");
+                    let mut rows = Spi::connect(|client| {
+                        client
+                            .select(
+                                &format!(
+                                    "SELECT cell, {columns} FROM hash_count_rows GROUP BY cell"
+                                ),
+                                None,
+                                &[],
+                            )
+                            .expect("native extrema states")
+                            .map(|row| {
+                                (
+                                    row.get::<i64>(1).expect("key"),
+                                    (2..=6)
+                                        .map(|index| row.get::<String>(index).expect("state text"))
+                                        .collect::<Vec<_>>(),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    });
+                    Spi::run("SET pg_accel.enabled=on").expect("staged extrema arm");
+                    rows.sort();
+                    rows
+                };
+                let expected = native();
+                assert_eq!(expected.len(), 16388);
+                assert_eq!(execute_projected(&plan, false, read), expected);
+                assert_eq!(execute_projected(&plan, false, read), expected);
+                rolled_back(|| {
+                    Spi::run("UPDATE hash_count_rows SET v=NULL WHERE cell%3=0")
+                        .expect("extrema NULL transition");
+                    assert_eq!(execute_projected(&plan, true, read), native());
+                });
+                assert_eq!(execute_projected(&plan, true, read), expected);
+                check_fused_interrupts(
+                    &plan,
+                    if filtered { mask_calls + 4 } else { 3 },
+                    mask_calls + 1,
+                    || assert_eq!(execute_projected(&plan, false, read), expected),
+                );
+                drop(plan);
+            }
+            Spi::run(
+                "SELECT pg_accel_evict('hash_count_rows'::regclass); DROP TABLE hash_count_rows",
+            )
+            .expect("raw fixture cleanup");
+        }
+    }
+
+    #[pg_test]
+    fn pg_h3_integer_aggregate_subsets_and_exact_numeric_average() {
+        Spi::run(
+            "CREATE EXTENSION IF NOT EXISTS h3; SET pg_accel.auto_load=on; SET pg_accel.enabled=on",
+        )
+        .expect("H3 AVG qualification setup");
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT gpu_available FROM pg_accel_device_info()")
+                .expect("device probe"),
+            Some(true),
+            "live AVG qualification requires a GPU"
+        );
+        for policy in [
+            DescriptorArtifactPolicy::CachedReusable,
+            DescriptorArtifactPolicy::EphemeralFused,
+        ] {
+            for (value_type, minimum, maximum) in [
+                ("integer", i32::MIN, i32::MAX),
+                ("smallint", i32::from(i16::MIN), i32::from(i16::MAX)),
+            ] {
+                Spi::run(&format!("CREATE TEMP TABLE hash_count_rows(cell h3index, v {value_type}, p boolean); \
+                INSERT INTO hash_count_rows \
+                WITH seeds AS (SELECT array_agg(h3_cell_to_center_child(cell,15) ORDER BY cell) cells FROM h3_get_res_0_cells() c(cell)) \
+                SELECT CASE WHEN k=0 THEN NULL ELSE cells[k] END, v, p FROM seeds CROSS JOIN \
+                (VALUES (1,{maximum},true),(1,{maximum},true),(1,{minimum},true),(1,NULL,true), \
+                (2,NULL,true),(2,NULL,false),(3,0,true),(3,0,true),(3,1,true), \
+                (3,{maximum},false),(3,{minimum},NULL),(0,-1,true),(0,0,true),(0,0,true)) rows(k,v,p)"))
+                .expect("exact average and NULL fixture");
+                for filtered in [false, true] {
+                    for mask in 1..32 {
+                        let outputs = [
+                            AggregateKind::Sum,
+                            AggregateKind::Avg,
+                            AggregateKind::Count,
+                            AggregateKind::Min,
+                            AggregateKind::Max,
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        .filter(|(index, _)| mask & (1 << index) != 0)
+                        .map(|(_, kind)| kind)
+                        .collect::<Vec<_>>();
+                        let plan = plan_for_outputs(policy, filtered, false, &outputs);
+                        let read = |slot: *mut pg_sys::TupleTableSlot| {
+                            // SAFETY: execute_projected initializes this exact typed slot.
+                            unsafe { read_integer_states(slot, &outputs, value_type == "smallint") }
+                        };
+                        let native = || {
+                            let filter = if filtered { "FILTER (WHERE p)" } else { "" };
+                            let columns = outputs
+                                .iter()
+                                .map(|kind| {
+                                    let function = match kind {
+                                        AggregateKind::Sum => "sum",
+                                        AggregateKind::Avg => "avg",
+                                        AggregateKind::Count => "count",
+                                        AggregateKind::Min => "min",
+                                        AggregateKind::Max => "max",
+                                        AggregateKind::StddevSamp => unreachable!(),
+                                    };
+                                    format!("({function}(v) {filter})::text")
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            Spi::run("SET pg_accel.enabled=off").expect("native oracle arm");
+                            let mut rows = Spi::connect(|client| {
+                                client.select(
+                            &format!("SELECT h3_cell_to_parent(cell,0)::bigint, {columns} FROM hash_count_rows GROUP BY 1"), None, &[])
+                            .expect("PostgreSQL exact integer aggregates")
+                            .map(|row| (row.get::<i64>(1).expect("key"), (0..outputs.len()).map(|index| row.get::<String>(index + 2).expect("aggregate text")).collect::<Vec<_>>()))
+                            .collect::<Vec<_>>()
+                            });
+                            Spi::run("SET pg_accel.enabled=on").expect("staged arm");
+                            rows.sort();
+                            rows
+                        };
+                        let expected = native();
+                        assert_eq!(expected.len(), 4);
+                        if outputs.contains(&AggregateKind::Avg) {
+                            assert!(
+                                expected.iter().any(|(_, values)| values
+                                    .iter()
+                                    .flatten()
+                                    .any(|value| value == "-0.33333333333333333333")),
+                                "negative repeating average oracle"
+                            );
+                            if filtered {
+                                assert!(
+                                    expected.iter().any(|(_, values)| values
+                                        .iter()
+                                        .flatten()
+                                        .any(|value| value == "0.33333333333333333333")),
+                                    "positive repeating average oracle"
+                                );
+                            }
+                        }
+                        assert_eq!(execute_projected(&plan, false, read), expected);
+                        assert_eq!(execute_projected(&plan, false, read), expected);
+                        rolled_back(|| {
+                            Spi::run("UPDATE hash_count_rows SET v=NULL")
+                                .expect("all-NULL mutation");
+                            assert_eq!(execute_projected(&plan, true, read), native());
+                        });
+                        assert_eq!(execute_projected(&plan, true, read), expected);
+                        drop(plan);
+                    }
+                }
+                Spi::run(
+                "SELECT pg_accel_evict('hash_count_rows'::regclass); DROP TABLE hash_count_rows",
+            )
+            .expect("release average fixture");
+            }
+        }
+    }
+
+    #[pg_test]
+    fn pg_h3_int4_sum_count_materialization_and_currentness() {
+        Spi::run(
+            "CREATE EXTENSION IF NOT EXISTS h3; SET pg_accel.auto_load=on; SET pg_accel.enabled=on",
+        )
+        .expect("H3 SUM qualification setup");
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT gpu_available FROM pg_accel_device_info()")
+                .expect("device probe"),
+            Some(true),
+            "live SUM qualification requires a GPU"
+        );
+        let native = |filtered: bool| {
+            Spi::run("SET pg_accel.enabled=off").expect("native oracle arm");
+            let filter = if filtered { "FILTER (WHERE p)" } else { "" };
+            let mut rows = Spi::connect(|client| {
+                client.select(
+                &format!("SELECT h3_cell_to_parent(cell,0)::bigint, count(v) {filter}, sum(v) {filter} FROM hash_count_rows GROUP BY 1"),
+                None, &[]).expect("native PostgreSQL SUM/COUNT oracle")
+                .map(|row| (row.get::<i64>(1).expect("key"), row.get::<i64>(2).expect("count").expect("non-NULL count"), row.get::<i64>(3).expect("nullable sum")))
+                .collect::<Vec<_>>()
+            });
+            Spi::run("SET pg_accel.enabled=on").expect("staged execution arm");
+            rows.sort();
+            rows
+        };
+        for policy in [
+            DescriptorArtifactPolicy::CachedReusable,
+            DescriptorArtifactPolicy::EphemeralFused,
+        ] {
+            for filtered in [false, true] {
+                Spi::run("CREATE TEMP TABLE hash_count_rows(cell h3index, v integer, p boolean); \
+                    INSERT INTO hash_count_rows \
+                    WITH seeds AS (SELECT array_agg(h3_cell_to_center_child(cell,15) ORDER BY cell) cells FROM h3_get_res_0_cells() c(cell)) \
+                    SELECT CASE WHEN i%5=0 THEN NULL ELSE cells[1+i%3] END, \
+                    CASE WHEN i%3=0 OR i%7=0 THEN NULL WHEN i%2=0 THEN 2147483647 ELSE (-2147483647-1) END, \
+                    CASE WHEN i%11=0 THEN NULL ELSE i%3<>1 END \
+                    FROM generate_series(1,65537) s(i) CROSS JOIN seeds")
+                    .expect("multi-chunk nullable sum fixture");
+                let plan = plan_for_measure(policy, filtered, false, true);
+                let expected = native(filtered);
+                assert_eq!(expected.len(), 4);
+                assert!(
+                    expected
+                        .iter()
+                        .any(|(_, count, sum)| *count == 0 && sum.is_none())
+                );
+                assert_eq!(execute_measures(&plan, false), expected);
+                assert_eq!(execute_measures(&plan, false), expected);
+                rolled_back(|| {
+                    Spi::run("UPDATE hash_count_rows SET v=NULL, p=false")
+                        .expect("uncommitted measure/predicate mutation");
+                    let rejected = native(filtered);
+                    assert!(
+                        rejected
+                            .iter()
+                            .all(|(_, count, sum)| *count == 0 && sum.is_none())
+                    );
+                    assert_eq!(execute_measures(&plan, true), rejected);
+                });
+                assert_eq!(execute_measures(&plan, true), expected);
+                Spi::run("UPDATE hash_count_rows SET v=(-2147483647-1), p=true")
+                    .expect("negative extreme update");
+                assert_eq!(execute_measures(&plan, true), native(filtered));
+                Spi::run("TRUNCATE hash_count_rows").expect("empty relation generation");
+                assert!(execute_measures(&plan, true).is_empty());
+                drop(plan);
+                Spi::run("SELECT pg_accel_evict('hash_count_rows'::regclass); DROP TABLE hash_count_rows")
+                    .expect("release fixture residency");
+            }
+        }
+    }
+
+    #[pg_test]
+    fn pg_h3_filtered_counts_resident_predicate_currentness() {
+        Spi::run(
+            "CREATE EXTENSION IF NOT EXISTS h3; SET pg_accel.auto_load=on; SET pg_accel.enabled=on",
+        )
+        .expect("H3 filtered qualification setup");
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT gpu_available FROM pg_accel_device_info()")
+                .expect("device probe"),
+            Some(true),
+            "live FILTER qualification requires a GPU"
+        );
+        for policy in [
+            DescriptorArtifactPolicy::CachedReusable,
+            DescriptorArtifactPolicy::EphemeralFused,
+        ] {
+            for count_star in [false, true] {
+                Spi::run("CREATE TEMP TABLE hash_count_rows(cell h3index, v integer, p boolean); \
+                    INSERT INTO hash_count_rows \
+                    WITH seeds AS (SELECT array_agg(h3_cell_to_center_child(cell,15) ORDER BY cell) cells FROM h3_get_res_0_cells() c(cell)) \
+                    SELECT CASE WHEN i%5=0 THEN NULL ELSE cells[1+i%3] END, \
+                    CASE WHEN i%7=0 THEN NULL ELSE i END, \
+                    CASE WHEN i%11=0 THEN NULL ELSE i%3<>0 END \
+                    FROM generate_series(1,65537) s(i) CROSS JOIN seeds").expect("multi-chunk nullable predicate");
+                let plan = plan_for(policy, true, count_star);
+                let expected = native_for(true, count_star);
+                assert_eq!(expected.len(), 4);
+                assert!(expected.iter().any(|(key, n)| key.is_some() && *n == 0));
+                assert_eq!(execute(&plan, false), expected);
+                let before = crate::gpu::gpu_exec_count();
+                assert_eq!(execute(&plan, false), expected);
+                let expected_calls = match policy {
+                    DescriptorArtifactPolicy::CachedReusable => 1,
+                    DescriptorArtifactPolicy::EphemeralFused => 3,
+                };
+                assert_eq!(
+                    crate::gpu::gpu_exec_count() - before,
+                    expected_calls,
+                    "warm cached dispatch must not rebuild the two-chunk mask; fused dispatch still does"
+                );
+                if policy == DescriptorArtifactPolicy::CachedReusable {
+                    check_cached_preparation_interrupts(&plan, &expected);
+                } else {
+                    check_fused_execution_interrupts(&plan, &expected);
+                }
+                rolled_back(|| {
+                    Spi::run("UPDATE hash_count_rows SET p=false")
+                        .expect("predicate-only uncommitted change");
+                    let rejected = native_for(true, count_star);
+                    assert!(rejected.iter().all(|(_, n)| *n == 0));
+                    assert_eq!(execute(&plan, true), rejected);
+                });
+                assert_eq!(
+                    execute(&plan, true),
+                    expected,
+                    "rollback of resident predicate"
+                );
+                for mutation in [
+                    "UPDATE hash_count_rows SET p=NULL",
+                    "UPDATE hash_count_rows SET p=true",
+                    "UPDATE hash_count_rows SET v=NULL",
+                    "TRUNCATE hash_count_rows",
+                    "INSERT INTO hash_count_rows VALUES (NULL,7,true)",
+                ] {
+                    Spi::run(mutation).expect("filter lifecycle mutation");
+                    let expected = native_for(true, count_star);
+                    assert_eq!(execute(&plan, true), expected);
+                    assert_eq!(execute(&plan, false), expected);
+                }
+                drop(plan);
+                Spi::run("SELECT pg_accel_evict('hash_count_rows'::regclass); DROP TABLE hash_count_rows").expect("fixture cleanup");
+            }
+        }
+    }
+
+    fn check_fused_execution_interrupts(plan: &DescriptorAggPlan, expected: &[(Option<i64>, i64)]) {
+        let masks = 65_537_usize.div_ceil(crate::gpu::SQL_BOOL_MASK_CHUNK_ROWS);
+        check_fused_interrupts(plan, masks + 4, masks + 1, || {
+            assert_eq!(execute(plan, false), expected);
+        });
+    }
+
+    fn check_fused_interrupts(
+        plan: &DescriptorAggPlan,
+        total_polls: usize,
+        calls_per_attempt: usize,
+        retry: impl Fn(),
+    ) {
+        use crate::engine::executor::bounded::postgres_interrupt_pending;
+        use crate::engine::residency::resident_live_bytes;
+
+        // Pre-allocation, each mask chunk, mask completion, pre-grouped and
+        // post-grouped boundaries. The warmed fixture already owns any pooled
+        // workspace, so every failed attempt must return to this exact charge.
+        let baseline = resident_live_bytes();
+        for stop in 1..=total_polls {
+            let mut polls = 0;
+            let cancelled = fresh_snapshot(|| {
+                pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+                    let _ = plan
+                        .execute_prepared_with_poll(|| {
+                            polls += 1;
+                            if polls == stop {
+                                // SAFETY: test-only flags on the backend main thread;
+                                // no PG calls while device/residency owners are live.
+                                unsafe {
+                                    std::ptr::write_volatile(
+                                        &raw mut pg_sys::QueryCancelPending,
+                                        1,
+                                    );
+                                    std::ptr::write_volatile(&raw mut pg_sys::InterruptPending, 1);
+                                }
+                            }
+                            postgres_interrupt_pending()
+                        })
+                        .expect("fused attempt before cancellation");
+                    false
+                }))
+                .catch_when(PgSqlErrorCode::ERRCODE_QUERY_CANCELED, |caught| {
+                    let message = match caught {
+                        pg_sys::panic::CaughtError::PostgresError(report)
+                        | pg_sys::panic::CaughtError::ErrorReport(report) => {
+                            report.message().to_owned()
+                        }
+                        pg_sys::panic::CaughtError::RustPanic { ereport, .. } => {
+                            ereport.message().to_owned()
+                        }
+                    };
+                    assert_eq!(message, "canceling statement due to user request");
+                    assert_eq!(
+                        resident_live_bytes(),
+                        baseline,
+                        "mask/output charges released before rethrow"
+                    );
+                    true
+                })
+                .execute()
+            });
+            assert!(cancelled);
+            assert!(
+                plan.ephemeral_artifact.try_borrow_mut().is_ok(),
+                "ephemeral guard released before retry"
+            );
+            assert_eq!(polls, stop);
+            retry();
+            assert_eq!(resident_live_bytes(), baseline);
+        }
+        let mut polls = 0;
+        let before = crate::gpu::gpu_exec_count();
+        let dispatch = fresh_snapshot(|| {
+            plan.execute_prepared_with_poll(|| {
+                polls += 1;
+                if polls == total_polls {
+                    // SAFETY: a signal-only benign wakeup, not query cancellation.
+                    unsafe { std::ptr::write_volatile(&raw mut pg_sys::InterruptPending, 1) };
+                }
+                postgres_interrupt_pending()
+            })
+        })
+        .expect("benign interrupt discards first output and retries");
+        assert_eq!(polls, total_polls * 2);
+        assert_eq!(
+            crate::gpu::gpu_exec_count() - before,
+            (calls_per_attempt * 2) as u64,
+            "mask conversions plus one grouped call per attempt"
+        );
+        drop(dispatch);
+        assert_eq!(resident_live_bytes(), baseline);
+        retry();
+    }
+
+    fn check_cached_preparation_interrupts(
+        plan: &DescriptorAggPlan,
+        expected: &[(Option<i64>, i64)],
+    ) {
+        use super::super::DescriptorArtifactKind;
+        use crate::engine::executor::bounded::postgres_interrupt_pending;
+        use crate::engine::residency::resident_live_bytes;
+
+        let DescriptorArtifactKind::H3Parent { max_chunk_rows, .. } = plan.artifact_kind else {
+            panic!("cached H3 fixture required");
+        };
+        let parent_calls = 65_537_usize.div_ceil(max_chunk_rows);
+        let mask_calls = 65_537_usize.div_ceil(crate::gpu::SQL_BOOL_MASK_CHUNK_ROWS);
+        let total_polls = parent_calls + 1 + mask_calls + 1;
+        // Every parent boundary, the parent-to-mask transition, both mask
+        // chunks and the final pre-publication boundary must be cancellable.
+        for stop in 1..=total_polls {
+            Spi::run("SELECT pg_accel_refresh('hash_count_rows'::regclass)")
+                .expect("invalidate artifact and reload raw inputs");
+            let baseline = resident_live_bytes();
+            let mut polls = 0;
+            let cancelled = fresh_snapshot(|| {
+                pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+                    let _ = plan
+                        .ensure_artifact_with_poll(|| {
+                            polls += 1;
+                            if polls == stop {
+                                // SAFETY: backend-main-thread test signal injection.
+                                // Only flags are written under the store borrow;
+                                // production delivers the original PG error outside it.
+                                unsafe {
+                                    std::ptr::write_volatile(
+                                        &raw mut pg_sys::QueryCancelPending,
+                                        1,
+                                    );
+                                    std::ptr::write_volatile(&raw mut pg_sys::InterruptPending, 1);
+                                }
+                            }
+                            postgres_interrupt_pending()
+                        })
+                        .expect("preparation before cancellation");
+                    false
+                }))
+                .catch_when(PgSqlErrorCode::ERRCODE_QUERY_CANCELED, |caught| {
+                    let message = match caught {
+                        pg_sys::panic::CaughtError::PostgresError(report)
+                        | pg_sys::panic::CaughtError::ErrorReport(report) => {
+                            report.message().to_owned()
+                        }
+                        pg_sys::panic::CaughtError::RustPanic { ereport, .. } => {
+                            ereport.message().to_owned()
+                        }
+                    };
+                    assert_eq!(message, "canceling statement due to user request");
+                    assert_eq!(
+                        resident_live_bytes(),
+                        baseline,
+                        "unpublished lanes and charge dropped before rethrow"
+                    );
+                    true
+                })
+                .execute()
+            });
+            assert!(cancelled);
+            assert_eq!(polls, stop);
+            fresh_snapshot(|| plan.ensure_artifact()).expect("retry after real PG cancellation");
+            assert_eq!(execute(plan, false), expected);
+        }
+
+        Spi::run("SELECT pg_accel_refresh('hash_count_rows'::regclass)")
+            .expect("invalidate before benign interrupt");
+        let mut polls = 0;
+        let report = fresh_snapshot(|| {
+            plan.ensure_artifact_with_poll(|| {
+                polls += 1;
+                if polls == total_polls {
+                    // SAFETY: benign signal-only wakeup on the backend thread.
+                    unsafe { std::ptr::write_volatile(&raw mut pg_sys::InterruptPending, 1) };
+                }
+                postgres_interrupt_pending()
+            })
+        })
+        .expect("benign interrupt retries instead of fabricating cancellation");
+        assert_eq!(polls, 2 * total_polls);
+        assert_eq!(report.artifact_bytes, 9 * 65_537);
+        assert_eq!(execute(plan, false), expected);
+    }
+
+    #[pg_test]
+    fn pg_h3_nullable_hash_count_resident_currentness_and_materialization() {
+        Spi::run(
+            "CREATE EXTENSION IF NOT EXISTS h3; SET pg_accel.auto_load=on; SET pg_accel.enabled=on",
+        )
+        .expect("H3 qualification setup");
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT gpu_available FROM pg_accel_device_info()")
+                .expect("device probe"),
+            Some(true),
+            "live hash qualification requires a GPU; absence is not a pass"
+        );
+        for (sql_type, value) in [
+            ("boolean", "false"),
+            ("smallint", "-32768"),
+            ("integer", "-2147483648"),
+            ("bigint", "-9223372036854775808"),
+            ("real", "'NaN'"),
+            ("double precision", "'Infinity'"),
+            ("date", "'-infinity'"),
+            ("timestamp", "'infinity'"),
+            ("timestamptz", "'-infinity'"),
+        ] {
+            // Cast the complete signed expression: -32768::smallint casts
+            // positive 32768 before negation and fails before fixture loading.
+            let typed_value = format!("({value})::{sql_type}");
+            if let Ok(expected) = value.parse::<i64>() {
+                assert_eq!(
+                    Spi::get_one::<i64>(&format!("SELECT ({typed_value})::bigint"))
+                        .expect("exact typed integer boundary"),
+                    Some(expected)
+                );
+            }
+            for policy in [
+                DescriptorArtifactPolicy::CachedReusable,
+                DescriptorArtifactPolicy::EphemeralFused,
+            ] {
+                Spi::run(&format!(
+                    "CREATE TEMP TABLE hash_count_rows(cell h3index, v {sql_type}); \
+                     INSERT INTO hash_count_rows \
+                     WITH seeds AS (SELECT array_agg(h3_cell_to_center_child(cell,15) ORDER BY cell) cells FROM h3_get_res_0_cells() c(cell)) \
+                     SELECT CASE WHEN i%5=0 THEN NULL ELSE cells[1+i%3] END, \
+                     CASE WHEN i%3=0 OR i%7=0 THEN NULL ELSE {typed_value} END \
+                     FROM generate_series(1,4097) s(i) CROSS JOIN seeds"
+                )).expect("typed nullable fixture");
+                let plan = plan(policy);
+                let expected = native();
+                assert_eq!(expected.len(), 4, "three base cells plus NULL key");
+                assert!(expected.iter().any(|(key, n)| key.is_some() && *n == 0));
+                assert_eq!(
+                    execute(&plan, false),
+                    expected,
+                    "{sql_type} {policy:?} cold"
+                );
+                assert_eq!(
+                    execute(&plan, false),
+                    expected,
+                    "{sql_type} {policy:?} warm"
+                );
+                rolled_back(|| {
+                    Spi::run("UPDATE hash_count_rows SET cell=NULL,v=NULL")
+                        .expect("uncommitted mutation");
+                    let uncommitted = native();
+                    assert_eq!(uncommitted, vec![(None, 0)]);
+                    assert_eq!(execute(&plan, true), uncommitted);
+                    assert_eq!(execute(&plan, false), uncommitted);
+                });
+                // The device cache now contains rows loaded inside the aborted
+                // scope. It must rebuild even though the outer table is restored.
+                assert_eq!(execute(&plan, true), expected, "rollback of loaded rows");
+                assert_eq!(execute(&plan, false), expected, "warm after rollback");
+                let nonnull = format!("UPDATE hash_count_rows SET v={typed_value}");
+                for mutation in [
+                    "UPDATE hash_count_rows SET v=NULL",
+                    nonnull.as_str(),
+                    "UPDATE hash_count_rows SET cell=NULL",
+                    "TRUNCATE hash_count_rows",
+                    "INSERT INTO hash_count_rows VALUES (NULL,NULL)",
+                ] {
+                    Spi::run(mutation).expect("DML/rollback fixture");
+                    let expected = native();
+                    assert_eq!(
+                        execute(&plan, true),
+                        expected,
+                        "{sql_type} {policy:?}: {mutation}"
+                    );
+                    assert_eq!(execute(&plan, false), expected, "warm after mutation");
+                }
+                drop(plan);
+                Spi::run("SELECT pg_accel_evict('hash_count_rows'::regclass); DROP TABLE hash_count_rows")
+                    .expect("release resident fixture");
+            }
+        }
+    }
+}

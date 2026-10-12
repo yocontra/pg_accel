@@ -1,0 +1,7 @@
+=== 132_scalar_where ===
+SET
+SET
+SELECT 250017
+ANALYZE
+psql:sql/tests/132_scalar_where.sql:65: ERROR:  132 WHERE not selected/dispatched: SELECT sum(a) s,avg(a) av,count(a) c,min(a) lo,max(a) hi,count(*) n FROM _scalar_where WHERE CASE WHEN flag THEN a>b ELSE a IS NULL END / generic_cost_not_competitive / Aggregate (actual rows=1.00 loops=1)  Buffers: local read=2112  ->  Seq Scan on _scalar_where (actual rows=60906.00 loops=1)        Filter: CASE WHEN flag THEN (a > b) ELSE (a IS NULL) END        Rows Removed by Filter: 189111        Buffers: local read=2112Planning:  Buffers: shared hit=72Planning Time: 0.285 msExecution Time: 16.203 ms
+CONTEXT:  PL/pgSQL function inline_code_block line 42 at RAISE

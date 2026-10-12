@@ -1,0 +1,99 @@
+[artifacts] writing benchmark artifacts to benchmarks/evidence/scalar-filter-20261006/spatial_grouped_scalar_filter
+[diagnostics] RUST_BACKTRACE=1 (set-by-runner)
+[setup] installing extensions: pg_accel, postgis
+[setup] pg_accel: ok
+[setup] postgis: ok
+[detect] installed extensions: plpgsql, h3, postgis, postgis_raster, h3_postgis, pg_accel
+[provenance] pg_accel extension provenance accepted
+
+[scale] spatial_grouped_scalar_filter @ 1M rows
+[setup] spatial_grouped_scalar_filter -- seed 42 (setseed=0.000042), 1000000 rows
+[quiescence] setup checkpoint completed at 2026-10-06 01:37:51.518019-07 (wal_lsn=548/C15D8FA8)
+[spatial_grouped_scalar_filter] warmup 1/10 [warm]: accel=125.93ms  parallel=77.69ms
+[spatial_grouped_scalar_filter] warmup 2/10 [warm]: accel=4.64ms  parallel=65.87ms
+[spatial_grouped_scalar_filter] warmup 3/10 [warm]: accel=4.76ms  parallel=66.00ms
+[spatial_grouped_scalar_filter] warmup 4/10 [warm]: accel=5.40ms  parallel=66.40ms
+[spatial_grouped_scalar_filter] warmup 5/10 [warm]: accel=4.61ms  parallel=66.69ms
+[spatial_grouped_scalar_filter] warmup 6/10 [warm]: accel=5.81ms  parallel=65.59ms
+[spatial_grouped_scalar_filter] warmup 7/10 [warm]: accel=5.14ms  parallel=68.76ms
+[spatial_grouped_scalar_filter] warmup 8/10 [warm]: accel=4.42ms  parallel=68.55ms
+[spatial_grouped_scalar_filter] warmup 9/10 [warm]: accel=4.58ms  parallel=66.88ms
+[spatial_grouped_scalar_filter] warmup 10/10 [warm]: accel=4.89ms  parallel=70.94ms
+[spatial_grouped_scalar_filter] bench 1/30 [warm]: accel=3.89ms  parallel=65.30ms
+[spatial_grouped_scalar_filter] bench 2/30 [warm]: accel=4.69ms  parallel=67.16ms
+[spatial_grouped_scalar_filter] bench 3/30 [warm]: accel=3.99ms  parallel=66.77ms
+[spatial_grouped_scalar_filter] bench 4/30 [warm]: accel=5.64ms  parallel=63.55ms
+[spatial_grouped_scalar_filter] bench 5/30 [warm]: accel=4.66ms  parallel=63.79ms
+[spatial_grouped_scalar_filter] bench 6/30 [warm]: accel=4.62ms  parallel=66.27ms
+[spatial_grouped_scalar_filter] bench 7/30 [warm]: accel=4.87ms  parallel=73.19ms
+[spatial_grouped_scalar_filter] bench 8/30 [warm]: accel=4.71ms  parallel=73.25ms
+[spatial_grouped_scalar_filter] bench 9/30 [warm]: accel=7.35ms  parallel=97.90ms
+[spatial_grouped_scalar_filter] bench 10/30 [warm]: accel=4.66ms  parallel=67.52ms
+[spatial_grouped_scalar_filter] bench 11/30 [warm]: accel=5.26ms  parallel=66.43ms
+[spatial_grouped_scalar_filter] bench 12/30 [warm]: accel=4.86ms  parallel=69.40ms
+[spatial_grouped_scalar_filter] bench 13/30 [warm]: accel=4.76ms  parallel=71.09ms
+[spatial_grouped_scalar_filter] bench 14/30 [warm]: accel=5.01ms  parallel=64.59ms
+[spatial_grouped_scalar_filter] bench 15/30 [warm]: accel=5.25ms  parallel=65.36ms
+[spatial_grouped_scalar_filter] bench 16/30 [warm]: accel=3.92ms  parallel=65.68ms
+[spatial_grouped_scalar_filter] bench 17/30 [warm]: accel=4.59ms  parallel=72.11ms
+[spatial_grouped_scalar_filter] bench 18/30 [warm]: accel=5.21ms  parallel=69.37ms
+[spatial_grouped_scalar_filter] bench 19/30 [warm]: accel=5.48ms  parallel=69.97ms
+[spatial_grouped_scalar_filter] bench 20/30 [warm]: accel=4.70ms  parallel=64.85ms
+[spatial_grouped_scalar_filter] bench 21/30 [warm]: accel=5.11ms  parallel=65.25ms
+[spatial_grouped_scalar_filter] bench 22/30 [warm]: accel=5.69ms  parallel=67.86ms
+[spatial_grouped_scalar_filter] bench 23/30 [warm]: accel=4.37ms  parallel=61.55ms
+[spatial_grouped_scalar_filter] bench 24/30 [warm]: accel=5.19ms  parallel=65.39ms
+[spatial_grouped_scalar_filter] bench 25/30 [warm]: accel=4.66ms  parallel=65.51ms
+[spatial_grouped_scalar_filter] bench 26/30 [warm]: accel=5.07ms  parallel=61.33ms
+[spatial_grouped_scalar_filter] bench 27/30 [warm]: accel=5.90ms  parallel=62.97ms
+[spatial_grouped_scalar_filter] bench 28/30 [warm]: accel=6.26ms  parallel=67.16ms
+[spatial_grouped_scalar_filter] bench 29/30 [warm]: accel=4.95ms  parallel=72.09ms
+[spatial_grouped_scalar_filter] bench 30/30 [warm]: accel=5.87ms  parallel=71.71ms
+[quiescence] checkpointer counters remained unchanged through 2026-10-06 01:37:55.361334-07
+[cleanup] spatial_grouped_scalar_filter -- tables dropped
+
+[scale] spatial_grouped_scalar_filter @ 2M rows
+[setup] spatial_grouped_scalar_filter -- seed 42 (setseed=0.000042), 2000000 rows
+[quiescence] setup checkpoint completed at 2026-10-06 01:38:00.003574-07 (wal_lsn=548/CCCEB398)
+[spatial_grouped_scalar_filter] warmup 1/10 [warm]: accel=191.65ms  parallel=121.26ms
+[spatial_grouped_scalar_filter] warmup 2/10 [warm]: accel=6.90ms  parallel=113.08ms
+[spatial_grouped_scalar_filter] warmup 3/10 [warm]: accel=7.41ms  parallel=108.75ms
+[spatial_grouped_scalar_filter] warmup 4/10 [warm]: accel=7.20ms  parallel=113.01ms
+[spatial_grouped_scalar_filter] warmup 5/10 [warm]: accel=8.22ms  parallel=117.64ms
+[spatial_grouped_scalar_filter] warmup 6/10 [warm]: accel=8.51ms  parallel=117.87ms
+[spatial_grouped_scalar_filter] warmup 7/10 [warm]: accel=6.80ms  parallel=109.78ms
+[spatial_grouped_scalar_filter] warmup 8/10 [warm]: accel=9.98ms  parallel=110.63ms
+[spatial_grouped_scalar_filter] warmup 9/10 [warm]: accel=7.01ms  parallel=119.18ms
+[spatial_grouped_scalar_filter] warmup 10/10 [warm]: accel=7.85ms  parallel=117.43ms
+[spatial_grouped_scalar_filter] bench 1/30 [warm]: accel=6.47ms  parallel=138.85ms
+[spatial_grouped_scalar_filter] bench 2/30 [warm]: accel=7.28ms  parallel=131.29ms
+[spatial_grouped_scalar_filter] bench 3/30 [warm]: accel=7.23ms  parallel=132.53ms
+[spatial_grouped_scalar_filter] bench 4/30 [warm]: accel=7.15ms  parallel=133.45ms
+[spatial_grouped_scalar_filter] bench 5/30 [warm]: accel=6.75ms  parallel=126.60ms
+[spatial_grouped_scalar_filter] bench 6/30 [warm]: accel=6.21ms  parallel=137.67ms
+[spatial_grouped_scalar_filter] bench 7/30 [warm]: accel=5.47ms  parallel=124.77ms
+[spatial_grouped_scalar_filter] bench 8/30 [warm]: accel=6.23ms  parallel=133.95ms
+[spatial_grouped_scalar_filter] bench 9/30 [warm]: accel=6.42ms  parallel=115.21ms
+[spatial_grouped_scalar_filter] bench 10/30 [warm]: accel=8.70ms  parallel=111.83ms
+[spatial_grouped_scalar_filter] bench 11/30 [warm]: accel=8.22ms  parallel=112.98ms
+[spatial_grouped_scalar_filter] bench 12/30 [warm]: accel=5.96ms  parallel=111.41ms
+[spatial_grouped_scalar_filter] bench 13/30 [warm]: accel=8.98ms  parallel=112.04ms
+[spatial_grouped_scalar_filter] bench 14/30 [warm]: accel=7.82ms  parallel=116.09ms
+[spatial_grouped_scalar_filter] bench 15/30 [warm]: accel=6.14ms  parallel=124.77ms
+[spatial_grouped_scalar_filter] bench 16/30 [warm]: accel=5.32ms  parallel=113.19ms
+[spatial_grouped_scalar_filter] bench 17/30 [warm]: accel=6.08ms  parallel=113.43ms
+[spatial_grouped_scalar_filter] bench 18/30 [warm]: accel=5.57ms  parallel=114.46ms
+[spatial_grouped_scalar_filter] bench 19/30 [warm]: accel=7.71ms  parallel=113.15ms
+[spatial_grouped_scalar_filter] bench 20/30 [warm]: accel=7.40ms  parallel=111.34ms
+[spatial_grouped_scalar_filter] bench 21/30 [warm]: accel=5.49ms  parallel=122.45ms
+[spatial_grouped_scalar_filter] bench 22/30 [warm]: accel=6.96ms  parallel=137.67ms
+[spatial_grouped_scalar_filter] bench 23/30 [warm]: accel=6.44ms  parallel=117.72ms
+[spatial_grouped_scalar_filter] bench 24/30 [warm]: accel=5.21ms  parallel=117.61ms
+[spatial_grouped_scalar_filter] bench 25/30 [warm]: accel=7.50ms  parallel=118.45ms
+[spatial_grouped_scalar_filter] bench 26/30 [warm]: accel=9.27ms  parallel=118.01ms
+[spatial_grouped_scalar_filter] bench 27/30 [warm]: accel=5.95ms  parallel=130.16ms
+[spatial_grouped_scalar_filter] bench 28/30 [warm]: accel=6.17ms  parallel=119.38ms
+[spatial_grouped_scalar_filter] bench 29/30 [warm]: accel=9.37ms  parallel=112.23ms
+[spatial_grouped_scalar_filter] bench 30/30 [warm]: accel=5.50ms  parallel=108.75ms
+[quiescence] checkpointer counters remained unchanged through 2026-10-06 01:38:06.672346-07
+[cleanup] spatial_grouped_scalar_filter -- tables dropped

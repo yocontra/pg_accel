@@ -1,0 +1,95 @@
+=== pg_accel benchmark plans - captured once per workload/scale ===
+
+=== global_boolean_filtered_integer @ rows=250000 ===
+Custom Scan (GpuAccelAgg)  (cost=5.00..755.03 rows=1 width=128) (actual time=21.701..21.703 rows=1.00 loops=1)
+  Output: (sum(amount) FILTER (WHERE (((amount >= 1000) AND (amount <= 3000)) OR (amount = ANY ('{7,11,NULL}'::integer[]))))), (avg(amount) FILTER (WHERE (((amount >= 1000) AND (amount <= 3000)) OR (amount = ANY ('{7,11,NULL}'::integer[]))))), (sum(amount) FILTER (WHERE ((amount < '-1000'::integer) OR (amount > 1000)))), (avg(amount) FILTER (WHERE ((amount < '-1000'::integer) OR (amount > 1000)))), (sum(units) FILTER (WHERE (amount = ANY ('{-5000,0,5000,NULL}'::integer[])))), (avg(units) FILTER (WHERE (amount = ANY ('{-5000,0,5000,NULL}'::integer[])))), (count(*))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_integer
+  GPU Dispatched Physical Kernel Mode: parallel_dense_integer
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_ungrouped_aggregate
+  GPU Descriptor Specialization: dense_filtered_integer_sum_avg_plain
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: ephemeral_fused reason=zero_retained_bytes construction_bytes=0 ephemeral_bytes=0 construction_time_us=1 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=0 ephemeral_build_launches=0 consumer_launches=1 budget_headroom_bytes=8587434592
+  GPU Descriptor Group Keys: none
+  GPU Descriptor Aggregates: m0:column(2222065.4:type=23) -> value.sum; value.avg; m1:column(2222065.4:type=23) -> value.sum; value.avg; m2:column(2222065.5:type=21) -> value.sum; value.avg; m3:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=ranges(input=2222065.4:type=23, count=3); m1=ranges(input=2222065.4:type=23, count=2); m2=ranges(input=2222065.4:type=23, count=3); m3=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot2:aggregate[m1].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot3:aggregate[m1].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot4:aggregate[m2].value.sum source_type=21 result_type=20 typmod=-1 collation=0 nullable=true; slot5:aggregate[m2].value.avg source_type=21 result_type=1700 typmod=-1 collation=0 nullable=true; slot6:aggregate[m3].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=2222065 generation=1 global=1 relfilenode=2222065
+  GPU Descriptor Bytes: raw=2500000 derived=0 artifact=0 total=2500000
+  GPU Resident Stage Mask: 16395
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 250000
+  Batches: 1
+  Rows Per Batch: 250000.000
+  Dispatch Time: 21.115 ms
+  Avg Dispatch Time Per Batch: 21.115 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 0.007 ms
+Planning:
+  Buffers: shared hit=328
+Planning Time: 0.571 ms
+Execution Time: 21.834 ms
+
+=== global_boolean_filtered_integer @ rows=1000000 ===
+Custom Scan (GpuAccelAgg)  (cost=5.00..3005.03 rows=1 width=128) (actual time=24.177..24.178 rows=1.00 loops=1)
+  Output: (sum(amount) FILTER (WHERE (((amount >= 1000) AND (amount <= 3000)) OR (amount = ANY ('{7,11,NULL}'::integer[]))))), (avg(amount) FILTER (WHERE (((amount >= 1000) AND (amount <= 3000)) OR (amount = ANY ('{7,11,NULL}'::integer[]))))), (sum(amount) FILTER (WHERE ((amount < '-1000'::integer) OR (amount > 1000)))), (avg(amount) FILTER (WHERE ((amount < '-1000'::integer) OR (amount > 1000)))), (sum(units) FILTER (WHERE (amount = ANY ('{-5000,0,5000,NULL}'::integer[])))), (avg(units) FILTER (WHERE (amount = ANY ('{-5000,0,5000,NULL}'::integer[])))), (count(*))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_integer
+  GPU Dispatched Physical Kernel Mode: parallel_dense_integer
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_ungrouped_aggregate
+  GPU Descriptor Specialization: dense_filtered_integer_sum_avg_plain
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: ephemeral_fused reason=zero_retained_bytes construction_bytes=0 ephemeral_bytes=0 construction_time_us=1 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=0 ephemeral_build_launches=0 consumer_launches=1 budget_headroom_bytes=8579934592
+  GPU Descriptor Group Keys: none
+  GPU Descriptor Aggregates: m0:column(2222081.4:type=23) -> value.sum; value.avg; m1:column(2222081.4:type=23) -> value.sum; value.avg; m2:column(2222081.5:type=21) -> value.sum; value.avg; m3:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=ranges(input=2222081.4:type=23, count=3); m1=ranges(input=2222081.4:type=23, count=2); m2=ranges(input=2222081.4:type=23, count=3); m3=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot2:aggregate[m1].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot3:aggregate[m1].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot4:aggregate[m2].value.sum source_type=21 result_type=20 typmod=-1 collation=0 nullable=true; slot5:aggregate[m2].value.avg source_type=21 result_type=1700 typmod=-1 collation=0 nullable=true; slot6:aggregate[m3].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=2222081 generation=1 global=1 relfilenode=2222081
+  GPU Descriptor Bytes: raw=10000000 derived=0 artifact=0 total=10000000
+  GPU Resident Stage Mask: 16395
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 1000000
+  Batches: 1
+  Rows Per Batch: 1000000.000
+  Dispatch Time: 23.354 ms
+  Avg Dispatch Time Per Batch: 23.354 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 0.007 ms
+Planning:
+  Buffers: shared hit=328
+Planning Time: 0.589 ms
+Execution Time: 24.325 ms

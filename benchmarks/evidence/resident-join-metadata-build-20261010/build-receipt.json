@@ -1,0 +1,151 @@
+{
+  "schema_version": 1,
+  "compiler": "/usr/bin/c++",
+  "compiler_sha256": "12bed4523661307059b879b9b54e77a73176e9d27d27a0e40363271d8f0668ba",
+  "compiler_version": "Apple clang version 21.0.0 (clang-2100.1.1.101)\nTarget: arm64-apple-darwin25.4.0\nThread model: posix\nInstalledDir: /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin\n",
+  "working_directory": "/Users/contra/Projects/pg_accel/pgaccel-kernels/build",
+  "flags": [
+    "-fPIC",
+    "-ffast-math",
+    "-I/Users/contra/Projects/pg_accel/pgaccel-kernels/include",
+    "-O3",
+    "-DNDEBUG"
+  ],
+  "profile": [
+    "-Werror=return-type",
+    "-Werror=vla",
+    "-Wsystem-headers"
+  ],
+  "source": "/Users/contra/Projects/pg_accel/pgaccel-kernels/src/join_rows_layout.cpp",
+  "source_sha256": "2d9dbab1728988e39493e0fd5d576e665d8884350661fcabeb810ff851ed032c",
+  "preprocessed_sha256": "c4df55689799586bfe269470ab2df573f9c0f8068fd28635aa9801a0d459ce26",
+  "headers": {
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/Availability.h": "d39d74d343b5f3dc147525c5f4ba99c1ae9133bccc57eb6205a74d0ba99d92cb",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/AvailabilityInternal.h": "8161a109696d0e1111daa2f04b71e385d2510d2e83c47b8ce4d0a20b809085d0",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/AvailabilityInternalLegacy.h": "4c15ffce0467946a20beaa2eb25eba2cbe1788c620aaeb2516c39436a88fe276",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/AvailabilityVersions.h": "6dbadbee42ea5232d72416dd7f2d3e7c5de5b2015a395375aa06d7b966328738",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/_bounds.h": "3d9f049f5fac54421170fa34a845b244dce7b83a3c68ddd589909df759854700",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/_string.h": "18ce21b76c6876087aae9053dcdb81182adbdb0405afc82f36d8edc000c06b3a",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/_strings.h": "76b984c39538b145bcb8a930538e07ce446e9d4ace00916d6110c775151d800e",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/_types/_intmax_t.h": "215f90a4efdca4991735be55a1ff701964dde07d8b4a8382ec8ed41ecbf5f115",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/_types/_uint16_t.h": "adf29323b0ecb87cbc43ac3ff25c096de7a214ceb90007c2828616151c66ad37",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/_types/_uint32_t.h": "951131475ec815813c8ff40d5e875029cd968334fd3a42d5a65fbe7851d1718c",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/_types/_uint64_t.h": "a5692cddb9c42d1b55ebcd6fa445b212c4b0c46db4583aaf3293ed6386d3d0d6",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/_types/_uint8_t.h": "0a5c0353c8410f5e502db7971d987ac83a9ec3148905f10984c78152f541de68",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/_types/_uintmax_t.h": "0b154b16a3945edff78f00321d90a662d522e197c08e7de3b68f0ea44ae0d042",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/_types.h": "532c4b0f11274f6b10875db65e154e6cedaa20fdd189f5f40a8780c9a4c39449",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/arm/_types.h": "4f0bde85f9a41cc7d30fff22ebd7e8f4eb206a55a926eda012a2e7481e3524fa",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/arm/types.h": "b9eccd5a3feb3a62e22e42936656c8822e7e3e8708d759b1512deee05f682f0d",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__config": "10c378256384ce1aa0372d8078411d94b83ea0f30a31155e0001bbe7256f29a0",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__config_site": "3b87ec60041254131ffb9c601127fecbf4c0f14613230683b2dcd0727968a808",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__configuration/abi.h": "dca8f40f028a62571cdf2b17f9539a63dee69781a5fa6d7e9bf70a08243b0185",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__configuration/availability.h": "2ba23c070e7ab53316b8c074d343884417a927795e3fb7ddee407b9747a3e2e1",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__configuration/compiler.h": "62a3ea3c9b59e5d463d9ea07a1925b5a1adfccf40ed1de5f1caf2df48da67419",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__configuration/experimental.h": "a1418ec4ef43d91312e7756e1e6febef130cd6bb09938948ecc613f45be06fc2",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__configuration/hardening.h": "9759cbf013585a210d6d55be10828cd37c0ec17662c9877d8a48c2880f5d1045",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__configuration/language.h": "5ed01fa1a4c2470b977a5f3412fb9da2534fa1137179701435c4d996fd2f7d54",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__configuration/platform.h": "efc95e88b9724b38387256a7b8b889f6fbb3b854f31edc5571bef2cdbf1ba1dc",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/stdbool.h": "802dba16f0aa1b816e6483b3beeb487d82838b3c9ce450e2bafec1868d5fbb7c",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/stddef.h": "31d900d6916b90696290f7191b6135d397e1a0fc6f3218b408b9f2abd87ffa48",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/stdint.h": "363f93b9553367a0a618f2cfc5d7dafe86c6da56b6a3f607339fbb1bd6f1b262",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/string.h": "9e6f3b3d0a59f913f6a193b8689d3f77e7b23418dc124cfdeb8028eb7c1a5dfe",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/machine/_types.h": "f27264f8fdec9f164b4fc2b556f666ed7c5c0e5b88fd9f23db0b731ffa6cf864",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/machine/types.h": "76e7c59451d996fe674a6fc7e518366609a95875c9b9aec9fd590a3ac138dddd",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/stdint.h": "9d070aad02d9f2ba1f2248d093b4194b62cf8d363778c737d1110f4736e5ed3c",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/string.h": "4b1b9c05bfe370d423d7a6bf9e74b189bcc7f59c1cd97f23d6d94f2f3df6a4bc",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/_posix_availability.h": "452bff9ae32655a49b65802e29b21c67a546be1446553f908ef9850a694746bd",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/_pthread/_pthread_types.h": "741433612525badf767d48b1924d4c7ba564ccc5c1bab5cb7045c238850fa86b",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/_symbol_aliasing.h": "4f4d5078589b64b735007e08840b4c4c487219ff543d2022c69f5e9ec25c3b9a",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/_types/_int16_t.h": "e40d40ad59c6dc98577b2c7cfdba1121ebfee17b29e093cbd10b7936df496d8e",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/_types/_int32_t.h": "77127195e57f1690402377ddd72e3dcda684ddf591346f08ef4772dddcbbc281",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/_types/_int64_t.h": "a2427b34e5e83996bd28d83cec920cf3b82a366af90e767234557bd11fa33a18",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/_types/_int8_t.h": "607f6beede0251eb801e763493df26fd45d46eb951e4ff9cac17f1ac951b8cc0",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/_types/_intptr_t.h": "b2a7ba9b9b2d357d75e59114874658f893b23ea6d1357815b027d8189075daba",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/_types/_null.h": "3e021525d2a711070e9c78ea2791e020ef6105c51121d8496d617f89a83d2f92",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/_types/_size_t.h": "3e1bcf6c23ad00e0fe2b5a4683e687299baf51cf26b0a4ebc73db6140378acc2",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/_types/_ssize_t.h": "58eb3bdea24b27e6b5fb45e203e476faf2510b5c0aa81a0b45c17b528aa9c192",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/_types/_u_int16_t.h": "9dabbd8280c28416a5ba115355678d2540588df1a7251bd9b4a13e30c309a71b",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/_types/_u_int32_t.h": "196cba7a865c086bba457758d3b2605a4c1299c54a758366b7d420a585895f1d",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/_types/_u_int64_t.h": "d096eee54a5acc2c3cd5cf71256d69198ada8f8d82cdb0a717bc8ed65650ad93",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/_types/_u_int8_t.h": "7505dbbdf3ecca2b8e585871ad81c0e67a3cb63c97c47abe73fe262e071a3ebb",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/_types/_uintptr_t.h": "f435cf25e4f06dace9c1884c066392bafd204c6d71f16696e71acde5912bc81f",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/_types.h": "863c4f07045775002b63b7e616742d9f746e4a02da4441442d8fe1138bbd0ff9",
+    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/cdefs.h": "ac1a889ee7e6f3025e01be9981d26751489b9e63e926035201cae07ab9e6576f",
+    "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/include/__stddef_header_macro.h": "4cf46e8fbb809df048eecbbd63686fa741da27afa8db4245bd1f61c1fb1611dc",
+    "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/include/__stddef_max_align_t.h": "3c1e4de47f4f06b35e2c5890d670052e84f716760505ff51b022fc8b21a9400f",
+    "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/include/__stddef_null.h": "b1d71b08563ab3d2c22a1e4f8ddf4d9a1111c89e9404b859a45c307e8ebc6c69",
+    "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/include/__stddef_nullptr_t.h": "898b4465c5d3040d27e760e82983a751b1b0cae23ba280b18a1b81451841f9eb",
+    "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/include/__stddef_offsetof.h": "e5f0f4ff8ff5fc6a1cc8b535f5065f1728eadd2bf1e1401f021f803ec7b4222f",
+    "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/include/__stddef_ptrdiff_t.h": "b4178a57f3711b7013cba747a72a2f178c29fa9364e77d75b2159754072ced43",
+    "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/include/__stddef_size_t.h": "d86ddc0238da09b385846ebef814ffc50a44e40cf85d4e3793f485952b7e73ad",
+    "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/include/__stddef_wchar_t.h": "1900d4998aef3698b06399ed686db0c21e26509b08638a25734fb97ae89b1001",
+    "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/include/ptrcheck.h": "ac60d1e96ac17d789d1879b968d391dfbfa222f12213ba95f14592453eebe338",
+    "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/include/stdbool.h": "48655faf4ebd4ca0af26a1ee8e3e16f8dc68385c9cd550ffb3629320681305b3",
+    "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/include/stddef.h": "e8d92dad1b380f2f2130fd7aa446bcb4fc923f7062a41c7c35beb4913093a8f5",
+    "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/include/stdint.h": "f43783466c93f77a6464274ebf18f9e4cc46f0d90770ddee2993c6cf39f7514f",
+    "/Users/contra/Projects/pg_accel/pgaccel-kernels/include/pgaccel_ffi.h": "f6115d0355dde9ada5c06d18bf99278036a00d3bc69f9c979b69bd31ad094cf9",
+    "/Users/contra/Projects/pg_accel/pgaccel-kernels/include/pgaccel_join_rows.h": "c74b8bc7b76c90772ad67e4ea458ac08f3aa8b967f8bcd2e9ac13dc3675ae3cf",
+    "/Users/contra/Projects/pg_accel/pgaccel-kernels/src/join_rows_layout.cpp": "2d9dbab1728988e39493e0fd5d576e665d8884350661fcabeb810ff851ed032c",
+    "/Users/contra/Projects/pg_accel/pgaccel-kernels/src/join_rows_layout.hpp": "fd672d10e8901c8f97d3dfa1f88ec933fc2d1c1b39728e93309583cb5af6aa8d"
+  },
+  "roots": {
+    "pgaccel_join_rows_workspace_bytes": [
+      "pgaccel_join_rows_request"
+    ],
+    "pgaccel_join_rows_controlled_workspace_bytes": [
+      "pgaccel_join_rows_request",
+      "pgaccel_join_control"
+    ]
+  },
+  "driver_sha256": "5412f3d932d50ea282c3b67682b47a6c9f969a6c8ba4e335c55798e938d1f28e",
+  "verifier_sha256": "67c17747ae4f50fcbce84ad4851f0a841ff25ad295fdc7881077852cbeec121a",
+  "object": "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/CMakeFiles/pgaccel_metadata.dir/Release/join_rows_layout.cpp.o",
+  "object_sha256": "7409cf40ac5a10a7da7d4ee135e23e13638ba6c96073b60d817f77fddebec295",
+  "proofs": [
+    {
+      "name": "pgaccel_join_rows_workspace_bytes",
+      "ok": true,
+      "detail": "bounded typed metadata effects",
+      "functions": [
+        "aligned",
+        "layout_for",
+        "overlaps",
+        "pgaccel_join_rows_workspace_bytes",
+        "query_key_aliases",
+        "reserve",
+        "span",
+        "valid_key"
+      ],
+      "loop_bounds": [
+        4,
+        32,
+        4,
+        4
+      ]
+    },
+    {
+      "name": "pgaccel_join_rows_controlled_workspace_bytes",
+      "ok": true,
+      "detail": "bounded typed metadata effects",
+      "functions": [
+        "aligned",
+        "control_contract",
+        "controlled_layout",
+        "controlled_query_aliases",
+        "layout_for",
+        "overlaps",
+        "pgaccel_join_rows_controlled_workspace_bytes",
+        "query_key_aliases",
+        "reserve",
+        "span",
+        "valid_key"
+      ],
+      "loop_bounds": [
+        4,
+        32,
+        4,
+        4
+      ]
+    }
+  ]
+}

@@ -1,0 +1,73 @@
+[32m[1m       Using[0m[39m [37m[1mCliArgument("pg18")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/bin/pg_config[39m
+CARGO_TARGET_DIR="/Users/contra/Projects/pg_accel/target" PGRX_ALL_FEATURES="false" PGRX_BUILD_PROFILE="dev" PGRX_FEATURES="pg18 pg_test" PGRX_MANIFEST_PATH="/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" PGRX_NO_DEFAULT_FEATURES="true" PGRX_NO_SCHEMA="false" "/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "test" "--manifest-path" "/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" "--features" "pg18 pg_test" "--no-default-features" "pg_resident_join_occurrence_binding_and_invalidation"
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.98s
+     Running unittests src/lib.rs (target/debug/deps/pg_accel-ed206a68dc782b00)
+
+running 1 test
+[32m[1m       Using[0m[39m [37m[1mPgConfig("pg18")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/bin/pg_config[39m
+[32m[1m    Building[0m[39m extension with features [36mpg18 pg_test[39m
+[32m[1m     Running[0m[39m command [36m"/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "rustc" "--lib" "--manifest-path" "/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" "--features" "pg18 pg_test" "--no-default-features" "--message-format=json-render-diagnostics"[39m
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.51s
+[32m[1m  Installing[0m[39m extension
+[32m[1m     Copying[0m[39m control file to [36m.pgaccel/postgres/install/18.4/share/extension/pg_accel.control[39m
+[32m[1m     Copying[0m[39m shared library to [36m.pgaccel/postgres/install/18.4/lib/pg_accel.dylib[39m
+[32m[1m  Discovered[0m[39m [36m[1m324[0m[39m SQL entities: [36m[1m26[0m[39m schemas ([36m[1m3[0m[39m unique), [36m[1m296[0m[39m functions, [36m[1m0[0m[39m types, [36m[1m0[0m[39m enums, [36m[1m1[0m[39m sqls, [36m[1m0[0m[39m ords, [36m[1m0[0m[39m hashes, [36m[1m0[0m[39m aggregates, [36m[1m1[0m[39m triggers
+[32m[1m     Writing[0m[39m SQL entities to /Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/share/extension/pg_accel--1.0.0-rc1.sql
+[32m[1m    Finished[0m[39m installing pg_accel
+test tests::join_rows::tests::pg_pg_resident_join_occurrence_binding_and_invalidation ... FAILED
+
+failures:
+
+---- tests::join_rows::tests::pg_pg_resident_join_occurrence_binding_and_invalidation stdout ----
+[32m[1m     Running[0m[39m cd "/Users/contra/Projects/pg_accel/target/test-pgdata" && "/Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/bin/initdb" "--locale=C" "--lc-ctype=UTF-8" "-D" "/Users/contra/Projects/pg_accel/target/test-pgdata/18-91071"
+[32m[1m    Finished[0m[39m initializing database
+[32m[1m    Starting[0m[39m test Postgres on port [36m[1m59626[0m[39m
+[36m[2026-10-09 19:52:35.207 MST] [91173] [6ac9a872.16425]: LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)[39m
+[36m[2026-10-09 19:52:35.208 MST] [91173] [6ac9a872.16425]: LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query[39m
+[36m[2026-10-09 19:52:35.211 MST] [91173] [6ac9a872.16425]: LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit[39m
+[36m[2026-10-09 19:52:35.213 MST] [91173] [6ac9a872.16425]: LOG:  listening on IPv6 address "::1", port 59626[39m
+[36m[2026-10-09 19:52:35.213 MST] [91173] [6ac9a872.16425]: LOG:  listening on IPv4 address "127.0.0.1", port 59626[39m
+[36m[2026-10-09 19:52:35.214 MST] [91173] [6ac9a872.16425]: LOG:  listening on Unix socket "/tmp/pgrx-test-sockets-18-91071/.s.PGSQL.59626"[39m
+[36m[2026-10-09 19:52:35.219 MST] [91186] [6ac9a873.16432]: LOG:  database system was shut down at 2026-10-09 19:52:34 MST[39m
+[32m[1m    Creating[0m[39m database [36m[1mpgrx_tests[0m[39m
+
+thread 'tests::join_rows::tests::pg_pg_resident_join_occurrence_binding_and_invalidation' (1193756) panicked at /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-tests-0.19.1/src/framework.rs:195:9:
+
+
+Postgres Messages:
+[37m[2m[2026-10-09 19:52:35.207 MST] [91173] [6ac9a872.16425]: LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+[2026-10-09 19:52:35.208 MST] [91173] [6ac9a872.16425]: LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+[2026-10-09 19:52:35.211 MST] [91173] [6ac9a872.16425]: LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+[2026-10-09 19:52:35.213 MST] [91173] [6ac9a872.16425]: LOG:  listening on IPv6 address "::1", port 59626
+[2026-10-09 19:52:35.213 MST] [91173] [6ac9a872.16425]: LOG:  listening on IPv4 address "127.0.0.1", port 59626
+[2026-10-09 19:52:35.214 MST] [91173] [6ac9a872.16425]: LOG:  listening on Unix socket "/tmp/pgrx-test-sockets-18-91071/.s.PGSQL.59626"
+[2026-10-09 19:52:35.222 MST] [91173] [6ac9a872.16425]: LOG:  database system is ready to accept connections
+[0m[39m
+
+Test Function Messages:
+[36m[2026-10-09 19:52:35.583 MST] [91201] [6ac9a873.16441]: LOG:  statement: START TRANSACTION
+[2026-10-09 19:52:35.583 MST] [91201] [6ac9a873.16441]: LOG:  statement: SELECT "tests"."pg_resident_join_occurrence_binding_and_invalidation"();
+[2026-10-09 19:52:43.806 MST] [91201] [6ac9a873.16441]: ERROR:  assertion `left == right` failed
+[2026-10-09 19:52:43.806 MST] [91201] [6ac9a873.16441]: STATEMENT:  SELECT "tests"."pg_resident_join_occurrence_binding_and_invalidation"();
+[2026-10-09 19:52:43.806 MST] [91201] [6ac9a873.16441]: LOG:  statement: ROLLBACK
+[39m
+
+Client Error:
+[31m[1massertion `left == right` failed
+  left: []
+ right: [[None, Some(10), None, Some(1), None, None], [None, Some(11), None, None, None, None], [None, Some(12), None, Some(0), None, None], [None, Some(13), None, Some(1), None, None], [None, Some(14), None, Some(0), None, None]][0m[39m
+postgres location: [37m[2mjoin_rows.rs:592[0m[39m
+rust location: [33m<unknown>[39m
+
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::join_rows::tests::pg_pg_resident_join_occurrence_binding_and_invalidation
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1736 filtered out; finished in 17.05s
+
+error: test failed, to rerun pass `--lib`

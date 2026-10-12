@@ -1,0 +1,26 @@
+=== 122_spatial_scalar_conjunction ===
+SET
+SET
+SELECT 1000017
+ANALYZE
+SELECT 1
+DO
+PGACCEL_ASSERT_OK:122_spatial_scalar_conjunction.assert_001
+DO
+PGACCEL_ASSERT_OK:122_spatial_scalar_conjunction.assert_002
+SET
+DO
+DO
+PGACCEL_ASSERT_OK:122_spatial_scalar_conjunction.assert_003
+DEALLOCATE
+ pg_accel_evict 
+----------------
+ f
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:122_spatial_scalar_conjunction

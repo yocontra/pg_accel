@@ -1,0 +1,28 @@
+{
+  "workload": "grouped_computed_integer",
+  "rows": 1000000,
+  "seed": 42,
+  "iterations": 10,
+  "warmup": 5,
+  "timing_mode": "raw",
+  "cache_mode": "warm",
+  "realistic_gucs": false,
+  "skip_guc_verify": false,
+  "capture_plans": true,
+  "capture_planner_stages": false,
+  "native_parity_pairing": false,
+  "backend_pid": 34094,
+  "backend_pid_error": null,
+  "setup_sql": [
+    "DROP TABLE IF EXISTS bench_computed_sales",
+    "CREATE TABLE bench_computed_sales (region int4, price int4, adjustment int4)",
+    "INSERT INTO bench_computed_sales SELECT CASE WHEN i%97=0 THEN NULL ELSE i%32 END, CASE WHEN i%11=0 THEN NULL ELSE i%1001-500 END, CASE WHEN i%13=0 THEN NULL ELSE i%101-50 END FROM generate_series(1,1000000) s(i)",
+    "ANALYZE bench_computed_sales"
+  ],
+  "pre_query_sql": [],
+  "accel_query_sql": "SELECT region,sum(price*adjustment) revenue,avg(price-adjustment) net, min(price+adjustment) lo,max(price+adjustment) hi,count(*) n FROM bench_computed_sales GROUP BY region",
+  "baseline_query_sql": "SELECT region,sum(price*adjustment) revenue,avg(price-adjustment) net, min(price+adjustment) lo,max(price+adjustment) hi,count(*) n FROM bench_computed_sales GROUP BY region",
+  "explain_sql": "EXPLAIN (VERBOSE, COSTS OFF) SELECT region,sum(price*adjustment) revenue,avg(price-adjustment) net, min(price+adjustment) lo,max(price+adjustment) hi,count(*) n FROM bench_computed_sales GROUP BY region",
+  "explain": "Finalize GroupAggregate\n  Output: region, sum((price * adjustment)), avg((price - adjustment)), min((price + adjustment)), max((price + adjustment)), count(*)\n  Group Key: bench_computed_sales.region\n  ->  Gather Merge\n        Output: region, (PARTIAL sum((price * adjustment))), (PARTIAL avg((price - adjustment))), (PARTIAL min((price + adjustment))), (PARTIAL max((price + adjustment))), (PARTIAL count(*))\n        Workers Planned: 8\n        ->  Sort\n              Output: region, (PARTIAL sum((price * adjustment))), (PARTIAL avg((price - adjustment))), (PARTIAL min((price + adjustment))), (PARTIAL max((price + adjustment))), (PARTIAL count(*))\n              Sort Key: bench_computed_sales.region\n              ->  Partial HashAggregate\n                    Output: region, PARTIAL sum((price * adjustment)), PARTIAL avg((price - adjustment)), PARTIAL min((price + adjustment)), PARTIAL max((price + adjustment)), PARTIAL count(*)\n                    Group Key: bench_computed_sales.region\n                    ->  Parallel Seq Scan on public.bench_computed_sales\n                          Output: region, price, adjustment\n",
+  "explain_error": null
+}

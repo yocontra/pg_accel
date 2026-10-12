@@ -12,13 +12,15 @@ const POSTGIS_GEOMETRY_TYPE_NAME: &str = "geometry";
 const POSTGIS_LANGUAGE_NAME: &str = "c";
 const POSTGIS_LIBRARY_NAME: &str = "$libdir/postgis-3";
 const POSTGIS_SUPPORT_FUNCTION_NAME: &str = "postgis_index_supportfn";
-const POSTGIS_FINGERPRINT_VERSION: u32 = 1;
+const POSTGIS_FINGERPRINT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PostgisSpatialFunction {
     Intersects,
     Contains,
     Within,
+    Covers,
+    CoveredBy,
     DWithin,
     Distance,
 }
@@ -32,6 +34,8 @@ pub struct PostgisCatalogIdentity {
     pub intersects_fn_oid: pg_sys::Oid,
     pub contains_fn_oid: pg_sys::Oid,
     pub within_fn_oid: pg_sys::Oid,
+    pub covers_fn_oid: pg_sys::Oid,
+    pub coveredby_fn_oid: pg_sys::Oid,
     pub dwithin_fn_oid: pg_sys::Oid,
     pub distance_fn_oid: pg_sys::Oid,
     pub is_valid_fn_oid: pg_sys::Oid,
@@ -47,6 +51,10 @@ impl PostgisCatalogIdentity {
             Some(PostgisSpatialFunction::Contains)
         } else if oid == self.within_fn_oid {
             Some(PostgisSpatialFunction::Within)
+        } else if oid == self.covers_fn_oid {
+            Some(PostgisSpatialFunction::Covers)
+        } else if oid == self.coveredby_fn_oid {
+            Some(PostgisSpatialFunction::CoveredBy)
         } else if oid == self.dwithin_fn_oid {
             Some(PostgisSpatialFunction::DWithin)
         } else if oid == self.distance_fn_oid {
@@ -494,6 +502,11 @@ pub unsafe fn resolve_postgis_catalog() -> Result<PostgisCatalogIdentity, String
     let contains_fn_oid = unsafe { find_exact_function(schema_oid, "st_contains", &binary_args)? };
     // SAFETY: the exact binary geometry signature is backed by validated catalog OIDs.
     let within_fn_oid = unsafe { find_exact_function(schema_oid, "st_within", &binary_args)? };
+    // SAFETY: the exact binary geometry signature is backed by validated catalog OIDs.
+    let covers_fn_oid = unsafe { find_exact_function(schema_oid, "st_covers", &binary_args)? };
+    // SAFETY: the exact binary geometry signature is backed by validated catalog OIDs.
+    let coveredby_fn_oid =
+        unsafe { find_exact_function(schema_oid, "st_coveredby", &binary_args)? };
     let dwithin_args = [geometry_type_oid, geometry_type_oid, pg_sys::FLOAT8OID];
     // SAFETY: the exact geometry, geometry, float8 signature uses validated OIDs.
     let dwithin_fn_oid = unsafe { find_exact_function(schema_oid, "st_dwithin", &dwithin_args)? };
@@ -543,6 +556,26 @@ pub unsafe fn resolve_postgis_catalog() -> Result<PostgisCatalogIdentity, String
             ),
         ),
         (
+            covers_fn_oid,
+            postgis_contract(
+                "st_covers",
+                "covers",
+                &binary_args,
+                pg_sys::BOOLOID,
+                support_fn_oid,
+            ),
+        ),
+        (
+            coveredby_fn_oid,
+            postgis_contract(
+                "st_coveredby",
+                "coveredby",
+                &binary_args,
+                pg_sys::BOOLOID,
+                support_fn_oid,
+            ),
+        ),
+        (
             distance_fn_oid,
             postgis_contract(
                 "st_distance",
@@ -587,6 +620,8 @@ pub unsafe fn resolve_postgis_catalog() -> Result<PostgisCatalogIdentity, String
         intersects_fn_oid,
         contains_fn_oid,
         within_fn_oid,
+        covers_fn_oid,
+        coveredby_fn_oid,
         dwithin_fn_oid,
         distance_fn_oid,
         is_valid_fn_oid,
@@ -791,6 +826,8 @@ mod postgis_tests {
             intersects_fn_oid: oid(10),
             contains_fn_oid: oid(11),
             within_fn_oid: oid(12),
+            covers_fn_oid: oid(16),
+            coveredby_fn_oid: oid(17),
             dwithin_fn_oid: oid(13),
             distance_fn_oid: oid(14),
             is_valid_fn_oid: oid(15),
@@ -809,6 +846,14 @@ mod postgis_tests {
             Some(PostgisSpatialFunction::Distance)
         );
         assert_eq!(catalog.classify_function(oid(15)), None);
+        assert_eq!(
+            catalog.classify_function(oid(16)),
+            Some(PostgisSpatialFunction::Covers)
+        );
+        assert_eq!(
+            catalog.classify_function(oid(17)),
+            Some(PostgisSpatialFunction::CoveredBy)
+        );
         assert_eq!(catalog.classify_function(oid(99)), None);
     }
 }

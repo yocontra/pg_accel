@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "workload": "global_scalar_program",
+  "rows": 1000000,
+  "status": "pass",
+  "order_sensitive": false,
+  "accel_rows": 1,
+  "baseline_rows": 1,
+  "accel_minus_baseline_count": 0,
+  "baseline_minus_accel_count": 0,
+  "sample_limit": 20,
+  "accel_minus_baseline_samples": [],
+  "baseline_minus_accel_samples": [],
+  "accel_query_sql": "SELECT sum(CASE WHEN adjustment IS NULL THEN price WHEN price>0 THEN (price+adjustment)*(price-adjustment) ELSE COALESCE(price,0)-adjustment END) total,avg(CASE WHEN adjustment IS NULL THEN price WHEN price>0 THEN (price+adjustment)*(price-adjustment) ELSE COALESCE(price,0)-adjustment END) mean,count(CASE WHEN adjustment IS NULL THEN price WHEN price>0 THEN (price+adjustment)*(price-adjustment) ELSE COALESCE(price,0)-adjustment END) present,min(CASE WHEN adjustment IS NULL THEN price WHEN price>0 THEN (price+adjustment)*(price-adjustment) ELSE COALESCE(price,0)-adjustment END) lo,max(CASE WHEN adjustment IS NULL THEN price WHEN price>0 THEN (price+adjustment)*(price-adjustment) ELSE COALESCE(price,0)-adjustment END) hi,count(*) n FROM bench_scalar_sales",
+  "baseline_query_sql": "SELECT sum(CASE WHEN adjustment IS NULL THEN price WHEN price>0 THEN (price+adjustment)*(price-adjustment) ELSE COALESCE(price,0)-adjustment END) total,avg(CASE WHEN adjustment IS NULL THEN price WHEN price>0 THEN (price+adjustment)*(price-adjustment) ELSE COALESCE(price,0)-adjustment END) mean,count(CASE WHEN adjustment IS NULL THEN price WHEN price>0 THEN (price+adjustment)*(price-adjustment) ELSE COALESCE(price,0)-adjustment END) present,min(CASE WHEN adjustment IS NULL THEN price WHEN price>0 THEN (price+adjustment)*(price-adjustment) ELSE COALESCE(price,0)-adjustment END) lo,max(CASE WHEN adjustment IS NULL THEN price WHEN price>0 THEN (price+adjustment)*(price-adjustment) ELSE COALESCE(price,0)-adjustment END) hi,count(*) n FROM bench_scalar_sales",
+  "error": null
+}

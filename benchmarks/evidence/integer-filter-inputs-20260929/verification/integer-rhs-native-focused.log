@@ -1,0 +1,7 @@
+Test project /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+    Start 19: test_grouped_agg
+1/1 Test #19: test_grouped_agg .................   Passed   31.25 sec
+
+100% tests passed out of 1
+
+Total Test time (real) =  31.26 sec

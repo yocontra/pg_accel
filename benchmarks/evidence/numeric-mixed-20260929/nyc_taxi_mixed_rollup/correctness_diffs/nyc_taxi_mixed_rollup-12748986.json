@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "workload": "nyc_taxi_mixed_rollup",
+  "rows": 12748986,
+  "status": "pass",
+  "order_sensitive": false,
+  "accel_rows": 2,
+  "baseline_rows": 2,
+  "accel_minus_baseline_count": 0,
+  "baseline_minus_accel_count": 0,
+  "sample_limit": 20,
+  "accel_minus_baseline_samples": [],
+  "baseline_minus_accel_samples": [],
+  "accel_query_sql": "SELECT vendor_id, count(*) AS n, sum(passenger_count) AS passengers, avg(passenger_count) AS mean_passengers, sum(fare_amount) AS fares, avg(trip_distance) AS mean_distance FROM bench_nyc_taxi GROUP BY 1",
+  "baseline_query_sql": "SELECT vendor_id, count(*) AS n, sum(passenger_count) AS passengers, avg(passenger_count) AS mean_passengers, sum(fare_amount) AS fares, avg(trip_distance) AS mean_distance FROM bench_nyc_taxi GROUP BY 1",
+  "error": null
+}

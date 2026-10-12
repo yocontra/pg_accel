@@ -34,12 +34,45 @@ pub const PGACCEL_GROUPED_AGG_KEY_FLAG_ALL_KNOWN: u32 = PGACCEL_GROUPED_AGG_KEY_
 pub const PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE: i32 = 0;
 pub const PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID: i32 = 1;
 pub const PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW: i32 = 2;
+pub const PGACCEL_GROUPED_AGG_DEVICE_ERROR_DIVISION_BY_ZERO: i32 = 3;
+pub const PGACCEL_GROUPED_AGG_DEVICE_ERROR_DATE_OUT_OF_RANGE: i32 = 4;
 
 pub const PGACCEL_GROUPED_AGG_MEASURE_COLUMN: i32 = 0;
 pub const PGACCEL_GROUPED_AGG_MEASURE_MUL: i32 = 1;
 pub const PGACCEL_GROUPED_AGG_MEASURE_SUB: i32 = 2;
 pub const PGACCEL_GROUPED_AGG_MEASURE_STATS_PAIR: i32 = 3;
 pub const PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR: i32 = 4;
+pub const PGACCEL_GROUPED_AGG_MEASURE_ADD: i32 = 5;
+pub const PGACCEL_GROUPED_AGG_MEASURE_SCALAR: i32 = 6;
+pub const PGACCEL_GROUPED_AGG_SCALAR_VIEW_V1: u32 = 2;
+pub const PGACCEL_SCALAR_VIEW_VERSION: u32 = 1;
+pub const PGACCEL_SCALAR_MAX_INPUTS: usize = 64;
+pub const PGACCEL_SCALAR_MAX_WORDS: usize = 579;
+pub const PGACCEL_GROUPED_AGG_MEASURE_FLAG_FILTER_INPUT: u32 = 1 << 0;
+
+/// Host metadata describing device-accessible BOOL/INT4 input lanes.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PgaccelScalarInput {
+    pub values: *const c_void,
+    pub nulls: *const u8,
+    pub physical_type: i32,
+    pub reserved: u32,
+}
+
+/// Borrowed host metadata, copied into descriptor workspace after native CFG
+/// and binding validation. No host pointers may reach the evaluating kernel.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PgaccelScalarView {
+    pub version: u32,
+    pub word_count: u32,
+    pub input_count: u32,
+    pub reserved: u32,
+    pub row_count: u64,
+    pub words: *const i32,
+    pub inputs: *const PgaccelScalarInput,
+}
 
 pub const PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT: i32 = 0;
 pub const PGACCEL_GROUPED_AGG_KEY_SOURCE_DIM0: i32 = 1;
@@ -50,9 +83,12 @@ pub const PGACCEL_GROUPED_AGG_KEY_SOURCE_DIM3: i32 = 4;
 pub const PGACCEL_GROUPED_AGG_FILTER_NONE: i32 = 0;
 pub const PGACCEL_GROUPED_AGG_FILTER_SQL: i32 = 1;
 pub const PGACCEL_GROUPED_AGG_FILTER_RECHECK: i32 = 2;
+pub const PGACCEL_GROUPED_AGG_FILTER_ACCEPT_NULL: u32 = 1 << 0;
 
 pub const PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE: i32 = 0;
 pub const PGACCEL_GROUPED_AGG_PRED_SOURCE_RHS: i32 = 1;
+/// SQL TRUE from a validated Boolean SCALAR measure, used only by WHERE.
+pub const PGACCEL_GROUPED_AGG_PRED_SOURCE_SCALAR: i32 = 2;
 
 pub const PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX: i32 = 0;
 pub const PGACCEL_GROUPED_AGG_GROUPING_HASH: i32 = 1;
@@ -63,6 +99,9 @@ pub const PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_HASH: i32 = 1;
 pub const PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_COUNT: i32 = 2;
 pub const PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_INTEGER: i32 = 3;
 pub const PGACCEL_GROUPED_AGG_KERNEL_MODE_SERIAL_GENERIC: i32 = 4;
+pub const PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_NUMERIC: i32 = 5;
+pub const PGACCEL_GROUPED_AGG_NUMERIC_PACKED_VIEW: u32 = 1;
+pub const PGACCEL_GROUPED_AGG_INT64_NUMERIC_STATE_BYTES: u32 = 40;
 
 pub const PGACCEL_GROUPED_AGG_ACCUM_I64: i32 = 1;
 pub const PGACCEL_GROUPED_AGG_ACCUM_F64: i32 = 2;
@@ -79,6 +118,40 @@ pub const PGACCEL_GROUPED_AGG_PHYSICAL_DATE: i32 = 6;
 pub const PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP: i32 = 7;
 pub const PGACCEL_GROUPED_AGG_PHYSICAL_NUMERIC: i32 = 8;
 pub const PGACCEL_GROUPED_AGG_PHYSICAL_INTERVAL: i32 = 9;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PgaccelNumericRow {
+    pub digit_offset: u64,
+    pub ndigits: u16,
+    pub weight: i16,
+    pub sign: u16,
+    pub dscale: u16,
+}
+
+/// Host-readable metadata; rows and digits refer to device-accessible buffers.
+/// Bounds describe the whole accumulation lifecycle, not just one batch.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PgaccelNumericView {
+    pub rows: *const PgaccelNumericRow,
+    pub digits: *const u16,
+    pub digit_count: u64,
+    pub row_count: u64,
+    pub min_weight: i32,
+    pub max_weight: i32,
+    pub max_ndigits: u32,
+    pub reserved: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PgaccelNumericSum {
+    pub weight: i32,
+    pub ndigits: u32,
+    pub sign: u32,
+    pub dscale: u32,
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -246,6 +319,42 @@ mod tests {
 
     #[test]
     fn grouped_agg_component_layouts_match_c_header() {
+        assert_eq!(size_of::<PgaccelScalarInput>(), 24);
+        assert_eq!(offset_of!(PgaccelScalarInput, values), 0);
+        assert_eq!(offset_of!(PgaccelScalarInput, nulls), 8);
+        assert_eq!(offset_of!(PgaccelScalarInput, physical_type), 16);
+        assert_eq!(offset_of!(PgaccelScalarInput, reserved), 20);
+        assert_eq!(size_of::<PgaccelScalarView>(), 40);
+        assert_eq!(offset_of!(PgaccelScalarView, version), 0);
+        assert_eq!(offset_of!(PgaccelScalarView, word_count), 4);
+        assert_eq!(offset_of!(PgaccelScalarView, input_count), 8);
+        assert_eq!(offset_of!(PgaccelScalarView, reserved), 12);
+        assert_eq!(offset_of!(PgaccelScalarView, row_count), 16);
+        assert_eq!(offset_of!(PgaccelScalarView, words), 24);
+        assert_eq!(offset_of!(PgaccelScalarView, inputs), 32);
+        assert_eq!(PGACCEL_GROUPED_AGG_FILTER_ACCEPT_NULL, 1);
+        assert_eq!(size_of::<PgaccelNumericRow>(), 16);
+        assert_eq!(offset_of!(PgaccelNumericRow, digit_offset), 0);
+        assert_eq!(offset_of!(PgaccelNumericRow, ndigits), 8);
+        assert_eq!(offset_of!(PgaccelNumericRow, weight), 10);
+        assert_eq!(offset_of!(PgaccelNumericRow, sign), 12);
+        assert_eq!(offset_of!(PgaccelNumericRow, dscale), 14);
+        assert_eq!(size_of::<PgaccelNumericView>(), 48);
+        assert_eq!(offset_of!(PgaccelNumericView, rows), 0);
+        assert_eq!(offset_of!(PgaccelNumericView, digits), 8);
+        assert_eq!(offset_of!(PgaccelNumericView, digit_count), 16);
+        assert_eq!(offset_of!(PgaccelNumericView, row_count), 24);
+        assert_eq!(offset_of!(PgaccelNumericView, min_weight), 32);
+        assert_eq!(offset_of!(PgaccelNumericView, max_weight), 36);
+        assert_eq!(offset_of!(PgaccelNumericView, max_ndigits), 40);
+        assert_eq!(offset_of!(PgaccelNumericView, reserved), 44);
+        assert_eq!(size_of::<PgaccelNumericSum>(), 16);
+        assert_eq!(offset_of!(PgaccelNumericSum, weight), 0);
+        assert_eq!(offset_of!(PgaccelNumericSum, ndigits), 4);
+        assert_eq!(offset_of!(PgaccelNumericSum, sign), 8);
+        assert_eq!(offset_of!(PgaccelNumericSum, dscale), 12);
+        assert_eq!(PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_NUMERIC, 5);
+        assert_eq!(PGACCEL_GROUPED_AGG_NUMERIC_PACKED_VIEW, 1);
         assert_eq!(size_of::<PgaccelGroupedAggKey>(), 56);
         assert_eq!(offset_of!(PgaccelGroupedAggKey, values), 0);
         assert_eq!(offset_of!(PgaccelGroupedAggKey, lookup_by_key), 24);
@@ -380,6 +489,8 @@ mod tests {
     fn grouped_agg_discriminants_match_c_header() {
         assert_eq!(PGACCEL_OLAP_ABI_VERSION, 1);
         assert_eq!(PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR, 4);
+        assert_eq!(PGACCEL_GROUPED_AGG_MEASURE_ADD, 5);
+        assert_eq!(PGACCEL_GROUPED_AGG_MEASURE_FLAG_FILTER_INPUT, 1);
         assert_eq!(PGACCEL_GROUPED_AGG_FILTER_RECHECK, 2);
         assert_eq!(PGACCEL_GROUPED_AGG_GROUPING_HASH, 1);
         assert_eq!(PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_HASH, 1);

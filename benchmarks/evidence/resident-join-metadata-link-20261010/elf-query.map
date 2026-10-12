@@ -1,0 +1,27 @@
+             VMA              LMA     Size Align Out     In      Symbol
+             1c8              1c8       48     8 .dynsym
+             1c8              1c8       48     8         <internal>:(.dynsym)
+             210              210       24     8 .gnu.hash
+             210              210       24     8         <internal>:(.gnu.hash)
+             234              234       20     4 .hash
+             234              234       20     4         <internal>:(.hash)
+             254              254       50     1 .dynstr
+             254              254       50     1         <internal>:(.dynstr)
+             2a8              2a8       5c     8 .eh_frame
+             2a8              2a8       58     1         .pgaccel/logs/metadata-link/elf-query.o:(.eh_frame+0x0)
+            1310             1310       5d    16 .text
+            1310             1310       5d    16         .pgaccel/logs/metadata-link/elf-query.o:(.text)
+            1310             1310       22     1                 pgaccel_join_rows_workspace_bytes
+            1340             1340       2d     1                 pgaccel_join_rows_controlled_workspace_bytes
+            2370             2370       70     8 .dynamic
+            2370             2370       70     8         <internal>:(.dynamic)
+            23e0             23e0      c20     1 .relro_padding
+            23e0             23e0        0     1         <internal>:(.relro_padding)
+               0                0       4d     1 .comment
+               0                0       4d     1         <internal>:(.comment)
+               0                0       78     8 .symtab
+               0                0       78     8         <internal>:(.symtab)
+               0                0       6c     1 .shstrtab
+               0                0       6c     1         <internal>:(.shstrtab)
+               0                0       67     1 .strtab
+               0                0       67     1         <internal>:(.strtab)

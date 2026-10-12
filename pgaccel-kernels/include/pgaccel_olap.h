@@ -16,12 +16,23 @@
 extern "C" {
 #endif
 
+/* Convert resident BOOL values plus optional NULL bytes into an exact SQL
+ * mask on-device. count <= 65536; all nonempty spans must be same-device USM,
+ * output must be four-byte aligned and disjoint from inputs. Zero count is a
+ * no-op. Output is TRUE/FALSE/UNCERTAIN, or 2 for a malformed evaluated BOOL/
+ * NULL byte. PGACCEL_OK means conversion completed, not that all rows are
+ * canonical: consumers MUST reject 2 (the grouped SQL FILTER does so before
+ * publication). NULL rows do not inspect their value payload. */
+pgaccel_status pgaccel_bool_sql_mask(const uint8_t* values, const uint8_t* nulls,
+                                    size_t count, int8_t* output);
+
 #define PGACCEL_OLAP_ABI_VERSION 1u
 
 #define PGACCEL_GROUPED_AGG_MAX_KEYS 3u
 #define PGACCEL_GROUPED_AGG_MAX_MEASURES 4u
 #define PGACCEL_GROUPED_AGG_MAX_DIMS 4u
 #define PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES 4u
+#define PGACCEL_GROUPED_AGG_FILTER_ACCEPT_NULL (1u << 0)
 
 #define PGACCEL_GROUPED_AGG_LANE_SUM (1u << 0)
 #define PGACCEL_GROUPED_AGG_LANE_MIN (1u << 1)
@@ -51,12 +62,19 @@ extern "C" {
 #define PGACCEL_GROUPED_AGG_KEY_FLAG_H3_PARENT (1u << 0)
 #define PGACCEL_GROUPED_AGG_KEY_FLAG_ALL_KNOWN PGACCEL_GROUPED_AGG_KEY_FLAG_H3_PARENT
 
+/* A NUMERIC/INT32 COLUMN or SCALAR may use its inactive rhs for an independent
+ * INT32 aggregate predicate. The matching filter must address that same slot's
+ * RHS. This is not an arithmetic operand and never contributes a value state. */
+#define PGACCEL_GROUPED_AGG_MEASURE_FLAG_FILTER_INPUT (1u << 0)
+
 /* Detailed device failures returned by grouped_agg_execute_ex. These refine
  * PGACCEL_ERROR only; other pgaccel_status values leave detail as NONE. */
 typedef enum {
   PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE = 0,
   PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID = 1,
   PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW = 2,
+  PGACCEL_GROUPED_AGG_DEVICE_ERROR_DIVISION_BY_ZERO = 3,
+  PGACCEL_GROUPED_AGG_DEVICE_ERROR_DATE_OUT_OF_RANGE = 4,
 } pgaccel_grouped_agg_device_error;
 
 typedef enum {
@@ -65,6 +83,8 @@ typedef enum {
   PGACCEL_GROUPED_AGG_MEASURE_SUB = 2,
   PGACCEL_GROUPED_AGG_MEASURE_STATS_PAIR = 3,
   PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR = 4,
+  PGACCEL_GROUPED_AGG_MEASURE_ADD = 5,
+  PGACCEL_GROUPED_AGG_MEASURE_SCALAR = 6,
 } pgaccel_grouped_agg_measure_op;
 
 typedef enum {
@@ -87,6 +107,8 @@ typedef enum {
 typedef enum {
   PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE = 0,
   PGACCEL_GROUPED_AGG_PRED_SOURCE_RHS = 1,
+  // SQL TRUE from a validated Boolean SCALAR measure; WHERE only.
+  PGACCEL_GROUPED_AGG_PRED_SOURCE_SCALAR = 2,
 } pgaccel_grouped_agg_pred_source;
 
 typedef enum {
@@ -107,11 +129,12 @@ typedef enum {
   PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_COUNT = 2,
   PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_INTEGER = 3,
   PGACCEL_GROUPED_AGG_KERNEL_MODE_SERIAL_GENERIC = 4,
+  PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_NUMERIC = 5,
 } pgaccel_grouped_agg_kernel_mode_kind;
 
-/* Dedicated accumulator-state kinds. NUMERIC and INTERVAL reserve their
- * Phase-9 state shapes now; implementations may return PGACCEL_UNSUPPORTED
- * until those kernels land without changing this layout. */
+/* Dedicated accumulator-state kinds. Numeric's packed representation is
+ * explicitly opted into below. Reserved/unsupported shapes return
+ * PGACCEL_UNSUPPORTED without changing existing descriptor layouts. */
 typedef enum {
   PGACCEL_GROUPED_AGG_ACCUM_I64 = 1,
   PGACCEL_GROUPED_AGG_ACCUM_F64 = 2,
@@ -120,7 +143,7 @@ typedef enum {
 } pgaccel_grouped_agg_accum_kind;
 
 /* Physical measure inputs deliberately use an OLAP-owned type domain rather
- * than pgaccel_val_tag. The latter cannot describe fixed-width NUMERIC limbs
+ * than pgaccel_val_tag. The latter cannot describe packed NUMERIC digits
  * or PostgreSQL interval states. INVALID is the canonical zeroed/unused view. */
 typedef enum {
   PGACCEL_GROUPED_AGG_PHYSICAL_INVALID = 0,
@@ -135,9 +158,50 @@ typedef enum {
   PGACCEL_GROUPED_AGG_PHYSICAL_INTERVAL = 9,
 } pgaccel_grouped_agg_physical_type;
 
+/* Explicit opt-in for the packed decimal view below. Legacy reserved NUMERIC
+ * views with flags=0 remain unsupported. Existing descriptor layouts do not
+ * change. The view itself is host-readable metadata borrowed for the call;
+ * its rows/digits and the measure's NULL sidecar are device-accessible USM.
+ * Only the GPU may inspect row headers/digits or perform numeric aggregation. */
+#define PGACCEL_GROUPED_AGG_NUMERIC_PACKED_VIEW 1u
+#define PGACCEL_GROUPED_AGG_INT64_NUMERIC_STATE_BYTES 40u
+typedef struct {
+  uint64_t digit_offset;
+  uint16_t ndigits;
+  int16_t weight;
+  uint16_t sign;
+  uint16_t dscale;
+} pgaccel_numeric_row;
+
+typedef struct {
+  const pgaccel_numeric_row* rows;
+  const uint16_t* digits;
+  uint64_t digit_count;
+  uint64_t row_count;
+  int32_t min_weight;
+  int32_t max_weight;
+  uint32_t max_ndigits;
+  uint32_t reserved;
+} pgaccel_numeric_view;
+
+/* One fixed-stride SUM result: header followed by native-endian u16 base-10000
+ * digits, most significant first. The stride is 16 + round_up_8(2 *
+ * (max_weight-min_weight+5)); four carry limbs allow exact cancellation before
+ * PostgreSQL's final numeric range check. ndigits=0 represents finite zero or
+ * a special; nonnull_count distinguishes SQL NULL. Sign tags match numeric_send
+ * (0, 0x4000, 0xc000, 0xd000, 0xf000). Inactive/all-NULL headers are zero. */
+typedef struct {
+  int32_t weight;
+  uint32_t ndigits;
+  uint32_t sign;
+  uint32_t dscale;
+} pgaccel_numeric_sum;
+
 /* One logical grouping key. FACT reads values for the current row. Dense
  * radix mode requires an INT32 dictionary/dense code column. Hash mode also
- * accepts INT64, including H3 indexes. DIM sources ignore values and use the
+ * accepts INT32 and INT64, including INT64 H3 indexes. Raw INT32 hash keys
+ * sign-extend to INT64 compact output; callers must supply an INT64 key-out
+ * lane for either integer input width. DIM sources ignore values and use the
  * key-owned lookup_by_key map, allowing multiple group attributes from the
  * same dimension.
  *
@@ -150,7 +214,10 @@ typedef enum {
  * code_min/cardinality but still groups NULL values together. When
  * KEY_FLAG_H3_PARENT is set, values is the raw h3index lane and `_pad0` is the
  * exact target parent resolution; validation, transform, grouping, and output
- * materialization all happen in the hash aggregate pipeline. */
+ * materialization all happen in the hash aggregate pipeline. The single-key
+ * hash path accepts an exact SQL WHERE mask before key/measure evaluation:
+ * rejected rows create no group and consume no group capacity. This differs
+ * from measure FILTER, which retains groups with zero contributions. */
 typedef struct {
   pgaccel_expr_usm_col values;
   const int32_t* lookup_by_key;
@@ -163,9 +230,12 @@ typedef struct {
 } pgaccel_grouped_agg_key;
 
 /* One physical measure input. element_bytes is the width of one value, not the
- * accumulator state. scale is zero for scalar types, the fixed-point decimal
- * scale for NUMERIC, and interval fractional precision for INTERVAL. flags is
- * zero in v1. nulls may be NULL, meaning every row is non-NULL. */
+ * accumulator state. With NUMERIC_PACKED_VIEW, values instead points to one
+ * host-readable pgaccel_numeric_view, element_bytes is sizeof that view, and
+ * scale is zero (each row carries its own scale). SCALAR_VIEW_V1 instead uses
+ * the explicitly versioned host metadata described below. Otherwise flags is zero;
+ * scale is zero for scalars and interval fractional precision for INTERVAL.
+ * nulls may be NULL, meaning every row is non-NULL. */
 typedef struct {
   const void* values;
   const uint8_t* nulls;
@@ -175,14 +245,60 @@ typedef struct {
   uint32_t flags;
 } pgaccel_grouped_agg_measure_col;
 
+/* Additive, explicitly versioned SPG1 input view. A SCALAR measure's value
+ * points to this HOST metadata, has flags=SCALAR_VIEW_V1, element_bytes=sizeof
+ * the view, nulls=NULL and scale=0. physical_type is the expression result
+ * (INT32, or BOOL for COUNT-only). Programs and input descriptors are host
+ * metadata borrowed through the synchronous call; only input values/nulls are
+ * device-accessible resident lanes. Native validation proves the entire typed
+ * program before copying metadata into sized descriptor workspace. No host
+ * row evaluation or intermediate result column is permitted. Chunk callers
+ * advance the input pointers and keep row_count as their accessible row bound,
+ * at least the current descriptor size (RESET/FINALIZE may consume zero rows).
+ * SCALAR accepts the existing dense integer lanes and FILTER_INPUT RHS.
+ * This native contract alone does not enable planner admission or Rust facade
+ * ownership. Hash/dimension/serial-generic scalar execution is unsupported. */
+#define PGACCEL_GROUPED_AGG_SCALAR_VIEW_V1 2u
+#define PGACCEL_SCALAR_VIEW_VERSION 1u
+#define PGACCEL_SCALAR_MAX_INPUTS 64u
+#define PGACCEL_SCALAR_MAX_WORDS 579u
+typedef struct {
+  const void* values;
+  const uint8_t* nulls;
+  int32_t physical_type;
+  uint32_t reserved;
+} pgaccel_scalar_input;
+
+typedef struct {
+  uint32_t version;
+  uint32_t word_count;
+  uint32_t input_count;
+  uint32_t reserved;
+  uint64_t row_count;
+  const int32_t* words;
+  const pgaccel_scalar_input* inputs;
+} pgaccel_scalar_view;
+
 /* One expression/accumulator slot. ABI v1 supports FLOAT64 -> F64 and
  * INT32/INT64 -> I64. A COLUMN slot projecting only COUNT also accepts BOOL,
  * FLOAT32, DATE, and TIMESTAMP because no numeric value state is consumed.
  * Integer expression results are checked at their input SQL width before any
  * aggregate lane consumes them, and I64 accumulator arithmetic is checked;
- * overflow returns PGACCEL_ERROR. NUMERIC/INTERVAL inputs are physically
- * representable now but may return UNSUPPORTED until their kernels land.
+ * overflow returns PGACCEL_ERROR. Packed NUMERIC supports dense COLUMN SUM
+ * and/or COUNT without dimensions, including mixed INT32/I64 COLUMN states,
+ * up to four value states with an
+ * optional final COUNT_STAR within that limit. Legacy NUMERIC and INTERVAL
+ * representations remain UNSUPPORTED. FILTER_INPUT permits independent exact
+ * INT32 aggregate filters through rhs; unflagged NUMERIC has no aggregate
+ * filter. Global WHERE accepts a SQL mask or up to four exact INT32 VALUE
+ * ranges, evaluated before grouping and aggregate filters. Selected-row
+ * output counts accepted rows; all input rows count toward lifecycle bounds.
  * COUNT_STAR has canonical zero value/rhs views.
+ * Packed NUMERIC COUNT-only uses state_bytes=8 and consumes only the NULL
+ * sidecar (after any predicate), with no decimal SUM lane or digit buckets.
+ * Mixed INT32 SUM lifecycles are bounded by INT64_MAX / 2^31 input rows so
+ * every possible signed sum prefix fits int64. Pure decimal/count-only
+ * lifecycles retain the INT64_MAX / 10000 bound.
  * accumulator_kind and state_bytes describe output and workspace state
  * independently of each input's physical width. */
 typedef struct {
@@ -202,13 +318,20 @@ typedef struct {
  * mask and the optional compare-constant term. Bounds and constants are
  * pgaccel_val so INT64 predicates never round through f64. Their tags must
  * match the referenced source column. ALWAYS_TRUE disables compare-constant.
- * When predicate_range_count is zero and the compare is ALWAYS_TRUE,
+ * FILTER_ACCEPT_NULL permits NULL values for an INT32 COLUMN predicate and
+ * requires ALWAYS_TRUE comparison. Its zero-range form is IS NULL; its ranges
+ * describe accepted non-NULL values. SQL masks still reject FALSE/UNKNOWN.
+ * For VALUE/RHS sources, when predicate_range_count is zero, flags is zero and compare is ALWAYS_TRUE,
  * predicate_source and predicate_measure_slot must both be canonical zero,
  * including when mask is non-NULL.
  *
  * The descriptor has one global where_filter and one independent filter per
- * measure. Bytecode and spatial programs are producer stages: they write mask
- * sidecars and are never embedded as pointers in this ABI. */
+ * measure. WHERE additionally accepts SCALAR source: predicate_measure_slot
+ * names an unfiltered Boolean SCALAR measure; range/compare/flag fields must
+ * be disabled. Its program is evaluated through the existing scalar view
+ * before group activity, accepting only SQL TRUE. A SQL mask may precede it.
+ * Spatial producers still supply mask sidecars; no filter field holds a
+ * program pointer. */
 typedef struct {
   int32_t kind;
   int32_t predicate_source;

@@ -1,0 +1,541 @@
+source: /Users/contra/.pgrx/19.log
+tail_bytes: 65536
+---
+2026-10-05 23:31:32.157 MST [40412] LOG:  database system is shut down
+2026-10-05 23:32:08.888 MST [62293] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-05 23:32:08.888 MST [62293] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-05 23:32:08.891 MST [62293] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-05 23:32:08.893 MST [62293] LOG:  listening on IPv6 address "::", port 28819
+2026-10-05 23:32:08.893 MST [62293] LOG:  listening on IPv4 address "0.0.0.0", port 28819
+2026-10-05 23:32:08.894 MST [62293] LOG:  listening on Unix socket "/Users/contra/.pgrx/.s.PGSQL.28819"
+2026-10-05 23:32:08.905 MST [62309] LOG:  database system was shut down at 2026-10-05 23:31:32 MST
+2026-10-05 23:32:08.912 MST [62293] LOG:  database system is ready to accept connections
+2026-10-05 23:33:38.925 MST [62293] LOG:  received fast shutdown request
+2026-10-05 23:33:38.926 MST [62293] LOG:  aborting any active transactions
+2026-10-05 23:33:38.933 MST [62293] LOG:  background worker "logical replication launcher" (PID 62312) exited with exit code 1
+2026-10-05 23:33:38.933 MST [62307] LOG:  shutting down
+2026-10-05 23:33:38.934 MST [62307] LOG:  checkpoint starting: shutdown fast
+2026-10-05 23:33:38.937 MST [62307] LOG:  checkpoint complete: shutdown fast: wrote 0 buffers (0.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.002 s, sync=0.001 s, total=0.005 s; sync files=2, longest=0.001 s, average=0.001 s; distance=0 kB, estimate=0 kB; lsn=1/33E6ABA0, redo lsn=1/33E6ABA0
+2026-10-05 23:33:38.942 MST [62293] LOG:  database system is shut down
+2026-10-05 23:34:02.657 MST [63707] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-05 23:34:02.657 MST [63707] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-05 23:34:02.660 MST [63707] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-05 23:34:02.661 MST [63707] LOG:  listening on IPv6 address "::", port 28819
+2026-10-05 23:34:02.661 MST [63707] LOG:  listening on IPv4 address "0.0.0.0", port 28819
+2026-10-05 23:34:02.662 MST [63707] LOG:  listening on Unix socket "/Users/contra/.pgrx/.s.PGSQL.28819"
+2026-10-05 23:34:02.671 MST [63712] LOG:  database system was shut down at 2026-10-05 23:33:38 MST
+2026-10-05 23:34:02.675 MST [63707] LOG:  database system is ready to accept connections
+2026-10-06T06:34:12.001894Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T06:34:12.071080Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T06:34:12.350924Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T06:34:12.443858Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T06:34:12.761994Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T06:34:12.852482Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T06:34:13.175364Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T06:34:13.675999Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T06:34:14.152315Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T06:34:14.674747Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T06:34:14.808168Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T06:34:15.264367Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T06:34:15.400574Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T06:34:15.812773Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T06:34:15.960149Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T06:34:16.391601Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T06:34:16.576022Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T06:34:17.055833Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T06:34:17.258428Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T06:35:08.792093Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T06:35:11.541766Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-05 23:39:02.677 MST [63710] LOG:  checkpoint starting: time
+2026-10-05 23:39:37.226 MST [63710] LOG:  checkpoint complete: time: wrote 336 buffers (2.1%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 1 recycled; write=34.544 s, sync=0.001 s, total=34.549 s; sync files=46, longest=0.001 s, average=0.001 s; distance=8736 kB, estimate=8736 kB; lsn=1/346F3010, redo lsn=1/346F2F78
+2026-10-06 00:05:47.189 MST [63707] LOG:  received fast shutdown request
+2026-10-06 00:05:47.190 MST [63707] LOG:  aborting any active transactions
+2026-10-06 00:05:47.192 MST [63707] LOG:  background worker "logical replication launcher" (PID 63715) exited with exit code 1
+2026-10-06 00:05:47.192 MST [63710] LOG:  shutting down
+2026-10-06 00:05:47.192 MST [63710] LOG:  checkpoint starting: shutdown fast
+2026-10-06 00:05:47.194 MST [63710] LOG:  checkpoint complete: shutdown fast: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.003 s; sync files=0, longest=0.000 s, average=0.000 s; distance=0 kB, estimate=7863 kB; lsn=1/346F30C8, redo lsn=1/346F30C8
+2026-10-06 00:05:47.199 MST [63707] LOG:  database system is shut down
+2026-10-06 00:07:09.670 MST [88334] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-06 00:07:09.670 MST [88334] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-06 00:07:09.672 MST [88334] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-06 00:07:09.673 MST [88334] LOG:  listening on IPv6 address "::", port 28819
+2026-10-06 00:07:09.674 MST [88334] LOG:  listening on IPv4 address "0.0.0.0", port 28819
+2026-10-06 00:07:09.674 MST [88334] LOG:  listening on Unix socket "/Users/contra/.pgrx/.s.PGSQL.28819"
+2026-10-06 00:07:09.680 MST [88339] LOG:  database system was shut down at 2026-10-06 00:05:47 MST
+2026-10-06 00:07:09.685 MST [88334] LOG:  database system is ready to accept connections
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.13733451349135859526.metalar.88783.16373822976886016143.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/2457796378833377408.17763344828527185436.metalar.88783.10629653386482101208.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10244442864516165838.56919237114968988.metalar.88783.1144354408169109758.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/7819755321666386692.17763344828527185436.metalar.88783.6312219262161244421.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/2574708908066720270.17022310835443073515.metalar.88783.18397273427175629896.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6229825781897181524.3477317034548476038.metalar.88783.5522671535243953623.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/3523093248116128384.17763344828527185436.metalar.88783.414183398488301720.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12585446269449508572.9361403780456363698.metalar.88783.7225002093773935868.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.5291688595012045394.metalar.88783.2431032951791954528.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/1568825256363117468.17763344828527185436.metalar.88783.14428009640256836277.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/9877590589045929008.17022310835443073515.metalar.88783.9631557454136472379.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/5966854446607974876.17022310835443073515.metalar.88783.1648095796080507088.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10244442864516165838.14218397375020260396.metalar.88783.17936032860786546639.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.14060863762432092072.metalar.88783.12483172561851803341.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/11221253920546634960.11397491147627020571.metalar.88783.4480883362264989075.tmp (kernels_added=1 skipped=0)
+2026-10-06T07:08:02.194612Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:08:02.270995Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:08:02.635690Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:08:02.734310Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:08:03.060613Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:08:03.164852Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:08:03.587378Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:08:04.961161Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:08:06.259179Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:08:07.770439Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:08:08.150416Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:08:09.306897Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:08:09.640401Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:08:10.916557Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:08:11.101304Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:08:12.028346Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:08:12.392492Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:08:13.459161Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:08:13.885284Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/9987852344331157594.17763344828527185436.metalar.90024.17984994982807618103.tmp (kernels_added=1 skipped=0)
+2026-10-06T07:09:04.885684Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:09:07.438663Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06 00:12:09.685 MST [88337] LOG:  checkpoint starting: time
+2026-10-06 00:12:44.453 MST [88337] LOG:  checkpoint complete: time: wrote 342 buffers (2.1%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=34.763 s, sync=0.004 s, total=34.769 s; sync files=47, longest=0.002 s, average=0.001 s; distance=8767 kB, estimate=8767 kB; lsn=1/34F83040, redo lsn=1/34F82FA8
+2026-10-06 00:27:45.106 MST [88334] LOG:  received fast shutdown request
+2026-10-06 00:27:45.107 MST [88334] LOG:  aborting any active transactions
+2026-10-06 00:27:45.111 MST [88334] LOG:  background worker "logical replication launcher" (PID 88342) exited with exit code 1
+2026-10-06 00:27:45.111 MST [88337] LOG:  shutting down
+2026-10-06 00:27:45.111 MST [88337] LOG:  checkpoint starting: shutdown fast
+2026-10-06 00:27:45.113 MST [88337] LOG:  checkpoint complete: shutdown fast: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.003 s; sync files=0, longest=0.000 s, average=0.000 s; distance=0 kB, estimate=7890 kB; lsn=1/34F830F8, redo lsn=1/34F830F8
+2026-10-06 00:27:45.118 MST [88334] LOG:  database system is shut down
+2026-10-06 00:28:06.516 MST [3048] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-06 00:28:06.516 MST [3048] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-06 00:28:06.519 MST [3048] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-06 00:28:06.520 MST [3048] LOG:  listening on IPv6 address "::", port 28819
+2026-10-06 00:28:06.520 MST [3048] LOG:  listening on IPv4 address "0.0.0.0", port 28819
+2026-10-06 00:28:06.520 MST [3048] LOG:  listening on Unix socket "/Users/contra/.pgrx/.s.PGSQL.28819"
+2026-10-06 00:28:06.528 MST [3055] LOG:  database system was shut down at 2026-10-06 00:27:45 MST
+2026-10-06 00:28:06.532 MST [3048] LOG:  database system is ready to accept connections
+2026-10-06T07:29:37.824148Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:29:37.886009Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:29:38.124705Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:29:38.197685Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:29:38.459083Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:29:38.539443Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:29:38.815735Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:29:39.203383Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:29:39.602657Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:29:40.077830Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:29:40.204601Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:29:40.601726Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:29:40.736729Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:29:41.135425Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:29:41.284143Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:29:41.688797Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:29:41.839069Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:29:42.282399Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:29:42.446797Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:30:35.356588Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:30:37.562616Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T07:30:39.849246Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06 00:33:06.575 MST [3053] LOG:  checkpoint starting: time
+2026-10-06 00:34:14.160 MST [3048] LOG:  received fast shutdown request
+2026-10-06 00:34:14.160 MST [3048] LOG:  aborting any active transactions
+2026-10-06 00:34:14.163 MST [3048] LOG:  background worker "logical replication launcher" (PID 3058) exited with exit code 1
+2026-10-06 00:34:14.180 MST [3053] LOG:  checkpoint complete: time: wrote 781 buffers (4.8%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 1 recycled; write=67.597 s, sync=0.007 s, total=67.605 s; sync files=49, longest=0.002 s, average=0.001 s; distance=11763 kB, estimate=11763 kB; lsn=1/35AFFE40, redo lsn=1/35AFFDA8
+2026-10-06 00:34:14.180 MST [3053] LOG:  shutting down
+2026-10-06 00:34:14.181 MST [3053] LOG:  checkpoint starting: shutdown fast
+2026-10-06 00:34:14.181 MST [3053] LOG:  checkpoint complete: shutdown fast: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.000 s, total=0.001 s; sync files=0, longest=0.000 s, average=0.000 s; distance=0 kB, estimate=10586 kB; lsn=1/35AFFEC0, redo lsn=1/35AFFEC0
+2026-10-06 00:34:14.186 MST [3048] LOG:  database system is shut down
+2026-10-06 00:34:36.247 MST [5924] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-06 00:34:36.247 MST [5924] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-06 00:34:36.250 MST [5924] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-06 00:34:36.252 MST [5924] LOG:  listening on IPv6 address "::", port 28819
+2026-10-06 00:34:36.252 MST [5924] LOG:  listening on IPv4 address "0.0.0.0", port 28819
+2026-10-06 00:34:36.252 MST [5924] LOG:  listening on Unix socket "/Users/contra/.pgrx/.s.PGSQL.28819"
+2026-10-06 00:34:36.258 MST [5929] LOG:  database system was shut down at 2026-10-06 00:34:14 MST
+2026-10-06 00:34:36.262 MST [5924] LOG:  database system is ready to accept connections
+2026-10-06 00:39:36.265 MST [5927] LOG:  checkpoint starting: time
+2026-10-06 00:39:36.275 MST [5927] LOG:  checkpoint complete: time: wrote 0 buffers (0.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.004 s, sync=0.001 s, total=0.010 s; sync files=2, longest=0.001 s, average=0.001 s; distance=0 kB, estimate=0 kB; lsn=1/35AFFFD8, redo lsn=1/35AFFF78
+2026-10-06 01:04:20.854 MST [5924] LOG:  received fast shutdown request
+2026-10-06 01:04:20.854 MST [5924] LOG:  aborting any active transactions
+2026-10-06 01:04:20.855 MST [5924] LOG:  background worker "logical replication launcher" (PID 5932) exited with exit code 1
+2026-10-06 01:04:20.855 MST [5927] LOG:  shutting down
+2026-10-06 01:04:20.856 MST [5927] LOG:  checkpoint starting: shutdown fast
+2026-10-06 01:04:20.857 MST [5927] LOG:  checkpoint complete: shutdown fast: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.002 s; sync files=0, longest=0.000 s, average=0.000 s; distance=0 kB, estimate=0 kB; lsn=1/35B000A8, redo lsn=1/35B000A8
+2026-10-06 01:04:20.861 MST [5924] LOG:  database system is shut down
+2026-10-06 01:05:05.017 MST [89328] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-06 01:05:05.017 MST [89328] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-06 01:05:05.019 MST [89328] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-06 01:05:05.020 MST [89328] LOG:  listening on IPv6 address "::", port 28819
+2026-10-06 01:05:05.021 MST [89328] LOG:  listening on IPv4 address "0.0.0.0", port 28819
+2026-10-06 01:05:05.021 MST [89328] LOG:  listening on Unix socket "/Users/contra/.pgrx/.s.PGSQL.28819"
+2026-10-06 01:05:05.027 MST [89334] LOG:  database system was shut down at 2026-10-06 01:04:20 MST
+2026-10-06 01:05:05.030 MST [89328] LOG:  database system is ready to accept connections
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.14255926802609517260.metalar.90294.7370440211485493122.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/2457796378833377408.10215334770476983190.metalar.90294.12540633946849586671.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10244442864516165838.8901940150423459350.metalar.90294.8984078558785025542.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/7819755321666386692.10215334770476983190.metalar.90294.14746779421293546903.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/2574708908066720270.10915416374239472737.metalar.90294.7572115759797113804.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6229825781897181524.5404835993527620876.metalar.90294.2783500722208533726.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/3523093248116128384.10215334770476983190.metalar.90294.1603856136979849467.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12585446269449508572.18062354790750427960.metalar.90294.16335263808192022047.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.3616362351419549656.metalar.90294.2113865878351137622.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/1568825256363117468.10215334770476983190.metalar.90294.1044025720383498841.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/9877590589045929008.10915416374239472737.metalar.90294.15418376548510655379.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/5966854446607974876.10915416374239472737.metalar.90294.1807677379363840742.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10244442864516165838.13695967415995036070.metalar.90294.16134607142642944870.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.13286188173999065634.metalar.90294.2733103160182269378.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/11221253920546634960.16531651105536306321.metalar.90294.9098027890854484898.tmp (kernels_added=1 skipped=0)
+2026-10-06T08:06:19.988197Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:06:20.047355Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:06:20.278542Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:06:20.346792Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:06:20.597948Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:06:20.676360Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:06:20.947637Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:06:21.319286Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:06:21.708802Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:06:22.125712Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:06:22.236905Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:06:22.577393Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:06:22.699028Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:06:23.062273Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:06:23.192831Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:06:23.572657Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:06:23.715719Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:06:24.118738Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:06:24.262519Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/9987852344331157594.10215334770476983190.metalar.90978.9430059851488802524.tmp (kernels_added=1 skipped=0)
+2026-10-06T08:07:13.357649Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:07:15.481447Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:07:17.598849Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06 01:10:05.031 MST [89332] LOG:  checkpoint starting: time
+2026-10-06 01:10:43.231 MST [89332] LOG:  checkpoint complete: time: wrote 375 buffers (2.3%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 1 recycled; write=38.185 s, sync=0.012 s, total=38.200 s; sync files=48, longest=0.005 s, average=0.001 s; distance=11940 kB, estimate=11940 kB; lsn=1/366A9520, redo lsn=1/366A9488
+2026-10-06 01:23:00.179 MST [89328] LOG:  received fast shutdown request
+2026-10-06 01:23:00.179 MST [89328] LOG:  aborting any active transactions
+2026-10-06 01:23:00.180 MST [89328] LOG:  background worker "logical replication launcher" (PID 89337) exited with exit code 1
+2026-10-06 01:23:00.180 MST [89332] LOG:  shutting down
+2026-10-06 01:23:00.181 MST [89332] LOG:  checkpoint starting: shutdown fast
+2026-10-06 01:23:00.181 MST [89332] LOG:  checkpoint complete: shutdown fast: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.002 s; sync files=0, longest=0.000 s, average=0.000 s; distance=0 kB, estimate=10746 kB; lsn=1/366A95D8, redo lsn=1/366A95D8
+2026-10-06 01:23:00.185 MST [89328] LOG:  database system is shut down
+2026-10-06 01:23:14.647 MST [2639] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-06 01:23:14.647 MST [2639] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-06 01:23:14.650 MST [2639] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-06 01:23:14.651 MST [2639] LOG:  listening on IPv6 address "::", port 28819
+2026-10-06 01:23:14.651 MST [2639] LOG:  listening on IPv4 address "0.0.0.0", port 28819
+2026-10-06 01:23:14.652 MST [2639] LOG:  listening on Unix socket "/Users/contra/.pgrx/.s.PGSQL.28819"
+2026-10-06 01:23:14.659 MST [2644] LOG:  database system was shut down at 2026-10-06 01:23:00 MST
+2026-10-06 01:23:14.661 MST [2639] LOG:  database system is ready to accept connections
+2026-10-06 01:24:12.597 MST [3585] ERROR:  130 independent FILTER not dispatched: SELECT g,sum(a) FILTER (WHERE p OR a>b) s,avg(b) FILTER (WHERE NOT p OR a<b) av,count(p) FILTER (WHERE a+b>0) c,count(*) n FROM _scalar_filter GROUP BY g / HashAggregate (actual rows=6.00 loops=1)  Group Key: g  Batches: 1  Memory Usage: 32kB  Buffers: local read=1792  ->  Seq Scan on _scalar_filter (actual rows=250017.00 loops=1)        Buffers: local read=1792Planning:  Buffers: shared hit=85Planning Time: 0.405 msExecution Time: 35.579 ms
+2026-10-06 01:24:12.597 MST [3585] CONTEXT:  PL/pgSQL function inline_code_block line 73 at RAISE
+2026-10-06 01:24:12.597 MST [3585] STATEMENT:  DO $$
+	DECLARE predicate text; keys text; expression text; query text; oracle text;
+	    plan text; line record; has_gpu bool; kernels bigint; selected integer := 0;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_scalar_filter'::regclass,ARRAY['id','g','h','k','a','b','p']);
+	    END IF;
+	    FOREACH predicate IN ARRAY ARRAY['a>b','p OR a>b',
+	        'CASE WHEN p THEN a>b ELSE b IS NULL END',
+	        '(a+b) IN (-7,0,7,NULL)','a IS NULL OR b IS NULL',
+	        'false','NULL::bool','true'] LOOP
+	      FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	        expression := '(a+1)*(b-2)';
+	        query := 'SELECT '||CASE WHEN keys='' THEN '' ELSE keys||',' END||
+	          format('sum(%1$s) FILTER (WHERE %2$s) s,avg(%1$s) FILTER (WHERE %2$s) av,
+	            count(%1$s) FILTER (WHERE %2$s) c,min(%1$s) FILTER (WHERE %2$s) lo,
+	            max(%1$s) FILTER (WHERE %2$s) hi,count(*) FILTER (WHERE %2$s) accepted,count(*) n',expression,predicate)||
+	          ' FROM _scalar_filter'||CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	        -- Independently widen the arithmetic result, with explicit CASE
+	        -- filtering instead of FILTER syntax. Predicate remains exact INT4.
+	        oracle := 'SELECT '||CASE WHEN keys='' THEN '' ELSE keys||',' END||
+	          format('sum(CASE WHEN %1$s THEN (a::numeric+1)*(b::numeric-2) END) s,
+	            avg(CASE WHEN %1$s THEN (a::numeric+1)*(b::numeric-2) END) av,
+	            count(CASE WHEN %1$s THEN a::numeric*b::numeric END) c,
+	            min(CASE WHEN %1$s THEN (a::numeric+1)*(b::numeric-2) END) lo,
+	            max(CASE WHEN %1$s THEN (a::numeric+1)*(b::numeric-2) END) hi,
+	            sum(CASE WHEN %1$s THEN 1 ELSE 0 END)::int8 accepted,count(*) n',predicate)||
+	          ' FROM _scalar_filter'||CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	        PERFORM set_config('pg_accel.enabled','off',false);
+	        EXECUTE 'CREATE TEMP TABLE _filter_expected AS '||query;
+	        EXECUTE 'CREATE TEMP TABLE _filter_oracle AS '||oracle;
+	        PERFORM set_config('pg_accel.enabled','on',false);
+	        kernels := pg_accel_kernel_executions();
+	        EXECUTE 'CREATE TEMP TABLE _filter_actual AS '||query;
+	        IF EXISTS ((SELECT * FROM _filter_expected EXCEPT ALL SELECT * FROM _filter_actual) UNION ALL
+	                   (SELECT * FROM _filter_actual EXCEPT ALL SELECT * FROM _filter_expected) UNION ALL
+	                   (SELECT * FROM _filter_oracle EXCEPT ALL SELECT * FROM _filter_actual) UNION ALL
+	                   (SELECT * FROM _filter_actual EXCEPT ALL SELECT * FROM _filter_oracle)) THEN
+	            RAISE EXCEPTION '130 filtered scalar parity/oracle mismatch: %',query;
+	        END IF;
+	        plan := '';
+	        FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP plan := plan||line."QUERY PLAN"; END LOOP;
+	        IF has_gpu AND (position('Custom Scan (GpuAccelAgg)' IN plan)=0 OR
+	            position('GPU Descriptor Specialization: dense_scalar_programs_' IN plan)=0 OR
+	            position('GPU Kernel Dispatched: true' IN plan)=0 OR pg_accel_kernel_executions()<=kernels) THEN
+	            RAISE EXCEPTION '130 scalar FILTER not selected/dispatched: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	        END IF;
+	        IF position('Custom Scan (GpuAccelAgg)' IN plan)>0 THEN selected := selected+1; END IF;
+	        DROP TABLE _filter_expected,_filter_actual,_filter_oracle;
+	      END LOOP;
+	    END LOOP;
+	    -- Independent programs, Boolean count, filtered star, and a WHERE mask.
+	    FOREACH query IN ARRAY ARRAY[
+	        'SELECT g,sum(a) FILTER (WHERE p OR a>b) s,avg(b) FILTER (WHERE NOT p OR a<b) av,count(p) FILTER (WHERE a+b>0) c,count(*) n FROM _scalar_filter GROUP BY g',
+	        'SELECT g,count(*) FILTER (WHERE p OR a>b) n FROM _scalar_filter GROUP BY g',
+	        'SELECT count(*) FILTER (WHERE p OR a>b) n FROM _scalar_filter',
+	        'SELECT g,sum(a) FILTER (WHERE a>b) s,count(*) FILTER (WHERE a>b) c FROM _scalar_filter WHERE p GROUP BY g',
+	        'SELECT g,sum(a) FILTER (WHERE p OR a>b) s FROM _scalar_filter GROUP BY g HAVING count(*)>0 ORDER BY s NULLS LAST LIMIT 3'
+	    ] LOOP
+	        PERFORM set_config('pg_accel.enabled','off',false);
+	        EXECUTE 'CREATE TEMP TABLE _filter_expected AS '||query;
+	        PERFORM set_config('pg_accel.enabled','on',false);
+	        kernels := pg_accel_kernel_executions();
+	        EXECUTE 'CREATE TEMP TABLE _filter_actual AS '||query;
+	        IF EXISTS ((SELECT * FROM _filter_expected EXCEPT ALL SELECT * FROM _filter_actual) UNION ALL
+	                   (SELECT * FROM _filter_actual EXCEPT ALL SELECT * FROM _filter_expected)) THEN
+	            RAISE EXCEPTION '130 independent FILTER mismatch: %',query;
+	        END IF;
+	        plan := '';
+	        FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP plan := plan||line."QUERY PLAN"; END LOOP;
+	        IF has_gpu AND (position('GPU Kernel Dispatched: true' IN plan)=0 OR pg_accel_kernel_executions()<=kernels) THEN
+	            RAISE EXCEPTION '130 independent FILTER not dispatched: % / %',query,plan;
+	        END IF;
+	        DROP TABLE _filter_expected,_filter_actual;
+	    END LOOP;
+	    RAISE NOTICE '130 scalar FILTER matrix selected % of 32 shapes, plus 5 compositions',selected;
+	END $$;
+2026-10-06 01:25:58.704 MST [6503] ERROR:  130 independent FILTER not dispatched: SELECT g,sum(a) FILTER (WHERE a>b) s,count(*) FILTER (WHERE a>b) c FROM _scalar_filter WHERE p GROUP BY g / HashAggregate (actual rows=6.00 loops=1)  Group Key: g  Batches: 1  Memory Usage: 32kB  Buffers: local read=1792  ->  Seq Scan on _scalar_filter (actual rows=78437.00 loops=1)        Filter: p        Rows Removed by Filter: 171580        Buffers: local read=1792Planning:  Buffers: shared hit=127Planning Time: 0.365 msExecution Time: 18.831 ms
+2026-10-06 01:25:58.704 MST [6503] CONTEXT:  PL/pgSQL function inline_code_block line 81 at RAISE
+2026-10-06 01:25:58.704 MST [6503] STATEMENT:  DO $$
+	DECLARE predicate text; keys text; expression text; query text; oracle text;
+	    plan text; line record; has_gpu bool; kernels bigint; selected integer := 0;
+	    composed integer := 0; cost_declines integer := 0;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_scalar_filter'::regclass,ARRAY['id','g','h','k','a','b','p']);
+	    END IF;
+	    FOREACH predicate IN ARRAY ARRAY['a>b','p OR a>b',
+	        'CASE WHEN p THEN a>b ELSE b IS NULL END',
+	        '(a+b) IN (-7,0,7,NULL)','a IS NULL OR b IS NULL',
+	        'false','NULL::bool','true'] LOOP
+	      FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	        expression := '(a+1)*(b-2)';
+	        query := 'SELECT '||CASE WHEN keys='' THEN '' ELSE keys||',' END||
+	          format('sum(%1$s) FILTER (WHERE %2$s) s,avg(%1$s) FILTER (WHERE %2$s) av,
+	            count(%1$s) FILTER (WHERE %2$s) c,min(%1$s) FILTER (WHERE %2$s) lo,
+	            max(%1$s) FILTER (WHERE %2$s) hi,count(*) FILTER (WHERE %2$s) accepted,count(*) n',expression,predicate)||
+	          ' FROM _scalar_filter'||CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	        -- Independently widen the arithmetic result, with explicit CASE
+	        -- filtering instead of FILTER syntax. Predicate remains exact INT4.
+	        oracle := 'SELECT '||CASE WHEN keys='' THEN '' ELSE keys||',' END||
+	          format('sum(CASE WHEN %1$s THEN (a::numeric+1)*(b::numeric-2) END) s,
+	            avg(CASE WHEN %1$s THEN (a::numeric+1)*(b::numeric-2) END) av,
+	            count(CASE WHEN %1$s THEN a::numeric*b::numeric END) c,
+	            min(CASE WHEN %1$s THEN (a::numeric+1)*(b::numeric-2) END) lo,
+	            max(CASE WHEN %1$s THEN (a::numeric+1)*(b::numeric-2) END) hi,
+	            sum(CASE WHEN %1$s THEN 1 ELSE 0 END)::int8 accepted,count(*) n',predicate)||
+	          ' FROM _scalar_filter'||CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	        PERFORM set_config('pg_accel.enabled','off',false);
+	        EXECUTE 'CREATE TEMP TABLE _filter_expected AS '||query;
+	        EXECUTE 'CREATE TEMP TABLE _filter_oracle AS '||oracle;
+	        PERFORM set_config('pg_accel.enabled','on',false);
+	        kernels := pg_accel_kernel_executions();
+	        EXECUTE 'CREATE TEMP TABLE _filter_actual AS '||query;
+	        IF EXISTS ((SELECT * FROM _filter_expected EXCEPT ALL SELECT * FROM _filter_actual) UNION ALL
+	                   (SELECT * FROM _filter_actual EXCEPT ALL SELECT * FROM _filter_expected) UNION ALL
+	                   (SELECT * FROM _filter_oracle EXCEPT ALL SELECT * FROM _filter_actual) UNION ALL
+	                   (SELECT * FROM _filter_actual EXCEPT ALL SELECT * FROM _filter_oracle)) THEN
+	            RAISE EXCEPTION '130 filtered scalar parity/oracle mismatch: %',query;
+	        END IF;
+	        plan := '';
+	        FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP plan := plan||line."QUERY PLAN"; END LOOP;
+	        IF has_gpu AND (position('Custom Scan (GpuAccelAgg)' IN plan)=0 OR
+	            position('GPU Descriptor Specialization: dense_scalar_programs_' IN plan)=0 OR
+	            position('GPU Kernel Dispatched: true' IN plan)=0 OR pg_accel_kernel_executions()<=kernels) THEN
+	            RAISE EXCEPTION '130 scalar FILTER not selected/dispatched: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	        END IF;
+	        IF position('Custom Scan (GpuAccelAgg)' IN plan)>0 THEN selected := selected+1; END IF;
+	        DROP TABLE _filter_expected,_filter_actual,_filter_oracle;
+	      END LOOP;
+	    END LOOP;
+	    -- Independent programs, Boolean count, filtered star, and a WHERE mask.
+	    FOREACH query IN ARRAY ARRAY[
+	        '/*cost_probe*/ SELECT g,sum(a) FILTER (WHERE p OR a>b) s,avg(b) FILTER (WHERE NOT p OR a<b) av,count(p) FILTER (WHERE a+b>0) c,count(*) n FROM _scalar_filter GROUP BY g',
+	        'SELECT g,count(*) FILTER (WHERE p OR a>b) n FROM _scalar_filter GROUP BY g',
+	        'SELECT count(*) FILTER (WHERE p OR a>b) n FROM _scalar_filter',
+	        'SELECT g,sum(a) FILTER (WHERE a>b) s,count(*) FILTER (WHERE a>b) c FROM _scalar_filter WHERE p GROUP BY g',
+	        'SELECT g,sum(a) FILTER (WHERE p OR a>b) s FROM _scalar_filter GROUP BY g HAVING count(*)>0 ORDER BY s NULLS LAST LIMIT 3'
+	    ] LOOP
+	        PERFORM set_config('pg_accel.enabled','off',false);
+	        EXECUTE 'CREATE TEMP TABLE _filter_expected AS '||query;
+	        PERFORM set_config('pg_accel.enabled','on',false);
+	        kernels := pg_accel_kernel_executions();
+	        EXECUTE 'CREATE TEMP TABLE _filter_actual AS '||query;
+	        IF EXISTS ((SELECT * FROM _filter_expected EXCEPT ALL SELECT * FROM _filter_actual) UNION ALL
+	                   (SELECT * FROM _filter_actual EXCEPT ALL SELECT * FROM _filter_expected)) THEN
+	            RAISE EXCEPTION '130 independent FILTER mismatch: %',query;
+	        END IF;
+	        plan := '';
+	        FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP plan := plan||line."QUERY PLAN"; END LOOP;
+	        IF has_gpu AND position('Custom Scan (GpuAccelAgg)' IN plan)=0 AND
+	           position('/*cost_probe*/' IN query)>0 AND
+	           pg_accel_last_planner_rejection_reason()='generic_cost_not_competitive' THEN
+	            -- Three independently complex programs can legitimately lose to
+	            -- native execution. Preserve this parity/cost-decline probe; the
+	            -- matrix and the other four compositions must still dispatch.
+	            cost_declines := cost_declines+1;
+	        ELSIF has_gpu AND (position('GPU Kernel Dispatched: true' IN plan)=0 OR pg_accel_kernel_executions()<=kernels) THEN
+	            RAISE EXCEPTION '130 independent FILTER not dispatched: % / %',query,plan;
+	        END IF;
+	        IF position('Custom Scan (GpuAccelAgg)' IN plan)>0 THEN composed := composed+1; END IF;
+	        DROP TABLE _filter_expected,_filter_actual;
+	    END LOOP;
+	    RAISE NOTICE '130 scalar FILTER matrix selected % of 32 shapes, % of 5 compositions (% explicit cost declines)',selected,composed,cost_declines;
+	END $$;
+2026-10-06 01:27:31.977 MST [8484] ERROR:  130 prepared FILTER lost selected plan: HashAggregate (actual rows=6.00 loops=1)  Group Key: g  Batches: 1  Memory Usage: 32kB  Buffers: local read=1792  ->  Seq Scan on _scalar_filter (actual rows=250017.00 loops=1)        Buffers: local read=1792Planning Time: 0.002 msExecution Time: 31.878 ms
+2026-10-06 01:27:31.977 MST [8484] CONTEXT:  PL/pgSQL function inline_code_block line 27 at RAISE
+2026-10-06 01:27:31.977 MST [8484] STATEMENT:  DO $$
+	DECLARE phase integer; plan text; line record; has_gpu bool;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    FOR phase IN 0..5 LOOP
+	        IF phase=1 THEN UPDATE _scalar_filter SET p=NOT p,a=999,g=id%31 WHERE id%19=0;
+	        ELSIF phase=2 THEN
+	            BEGIN UPDATE _scalar_filter SET p=false,a=-999,b=999,g=999; RAISE EXCEPTION USING ERRCODE='P0002';
+	            EXCEPTION WHEN no_data_found THEN NULL; END;
+	        ELSIF phase=3 THEN UPDATE _scalar_filter SET p=NULL,a=NULL,b=NULL;
+	        ELSIF phase=4 THEN DELETE FROM _scalar_filter;
+	        ELSIF phase=5 THEN INSERT INTO _scalar_filter VALUES(1,NULL,0,'x',7,3,true);
+	        END IF;
+	        PERFORM set_config('pg_accel.enabled','off',false);
+	        CREATE TEMP TABLE _filter_expected AS SELECT g,
+	            sum(b) FILTER (WHERE p OR a>b) s,count(*) FILTER (WHERE p OR a>b) c,
+	            count(*) n FROM _scalar_filter GROUP BY g;
+	        PERFORM set_config('pg_accel.enabled','on',false);
+	        CREATE TEMP TABLE _filter_actual AS EXECUTE _filter_prepared;
+	        IF EXISTS ((SELECT * FROM _filter_expected EXCEPT ALL SELECT * FROM _filter_actual) UNION ALL
+	                   (SELECT * FROM _filter_actual EXCEPT ALL SELECT * FROM _filter_expected)) THEN
+	            RAISE EXCEPTION '130 prepared filtered lifecycle mismatch at phase %',phase;
+	        END IF;
+	        plan := '';
+	        FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) EXECUTE _filter_prepared' LOOP plan := plan||line."QUERY PLAN"; END LOOP;
+	        IF has_gpu AND position('Custom Scan (GpuAccelAgg)' IN plan)=0 THEN
+	            RAISE EXCEPTION '130 prepared FILTER lost selected plan: %',plan;
+	        END IF;
+	        DROP TABLE _filter_expected,_filter_actual;
+	    END LOOP;
+	END $$;
+2026-10-06 01:28:14.663 MST [2642] LOG:  checkpoint starting: time
+2026-10-06 01:28:39.794 MST [2642] LOG:  checkpoint complete: time: wrote 247 buffers (1.5%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=25.127 s, sync=0.002 s, total=25.132 s; sync files=48, longest=0.001 s, average=0.001 s; distance=5344 kB, estimate=5344 kB; lsn=1/36CA4740, redo lsn=1/36BE1740
+2026-10-06T08:28:44.207891Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:28:44.278211Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:28:44.338550Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:28:44.340904Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15260600215326327182.10215334770476983190.metalar.8795.17335878540733706552.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16305509567563257642.8467503041903239717.metalar.8845.1760768777954032974.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/1447781458848051134.14877849908203228102.metalar.8845.4043817860087739796.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/9858275109316415098.14877849908203228102.metalar.8845.5875090342366137008.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.17896766250118927411.metalar.8845.9736075292483751326.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/18384041738596059486.10215334770476983190.metalar.8845.10876705941368641616.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.20525381718067809.metalar.8845.8861113876163420689.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/531930080529456404.16531651105536306321.metalar.9197.16402928839330446449.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15389087124731617784.13273174387058058875.metalar.9197.17318110944637168630.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/13600666649970294590.16531651105536306321.metalar.9197.13171792685771528864.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10244442864516165838.3732284335204227968.metalar.9197.3630189666273535454.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4342498713344542988.16531651105536306321.metalar.9197.15492488913286571160.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10244442864516165838.6079265459813079194.metalar.9197.17344204462358689079.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15389087124731617784.16907600181694484175.metalar.9197.866133583617845901.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10244442864516165838.11814100518777195888.metalar.9197.6176313838798869172.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/2873900909598178054.7227271944585437631.metalar.9197.492256574309667938.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/13491105312445094594.7227271944585437631.metalar.9197.16521290923712403729.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16305509567563257642.5288582077710315781.metalar.9197.11002462009011824910.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16305509567563257642.9419840433231917747.metalar.9197.12969506478727967913.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/11258058383228655916.7227271944585437631.metalar.9197.16590846808872528436.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12585446269449508572.12892653759458203310.metalar.9197.11713255661189064862.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/2071736797002919710.7227271944585437631.metalar.9197.13175656269230705636.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12585446269449508572.15383653271095989684.metalar.9197.1334129355638222060.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16305509567563257642.2014450910188132785.metalar.9197.15202920165201138612.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16305509567563257642.11483117918941220453.metalar.9197.7813181445360837246.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/8528202153872438530.10215334770476983190.metalar.9197.2442065185771446356.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/2993083400042206172.10215334770476983190.metalar.9197.12977849363472150322.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4124506427586101374.10215334770476983190.metalar.9197.15573015195113532171.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.6158765255005792397.metalar.9197.17551344847369405630.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/13926668519846110832.10215334770476983190.metalar.9197.16623075891197439780.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14064588806444736316.10215334770476983190.metalar.9197.9253570223360572976.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/17454483843409130078.10215334770476983190.metalar.9197.16823595678400109870.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4409775754999049994.10215334770476983190.metalar.9197.2118160938211824942.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/17360014406668687546.10215334770476983190.metalar.9197.9378809570492613194.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.203663254816315113.metalar.9197.10092281624508697721.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/13998301624069339470.10215334770476983190.metalar.9197.15059769154281746812.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.17542684069591721383.metalar.9197.981434008153424489.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/2120106600545249948.16531651105536306321.metalar.11725.2615924464156996366.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/5436284986568462560.10915416374239472737.metalar.11725.10743888543974922231.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10900195627355951314.10215334770476983190.metalar.11725.3358292023197372603.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15645957498266366212.14905477128264880459.metalar.11725.15160954868862341434.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/9620746525974980842.10215334770476983190.metalar.11725.8869613125038999040.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.13762056981715426786.metalar.11725.6618892989529104373.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/17815961567180993092.10215334770476983190.metalar.11725.14017506338666574359.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.6502098499987233705.metalar.11725.15143241540644235510.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.14905477128264880459.metalar.11725.5014466470369733844.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4463013947233864846.7227271944585437631.metalar.11725.1360387503667433758.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/9636036650450711250.10215334770476983190.metalar.11725.1481408474610962201.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.10892259567926929715.metalar.11725.4882509094624686510.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.12234259828425648333.metalar.11725.10804749422743833506.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10244442864516165838.3030528481641895040.metalar.13909.6017330755237370221.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12585446269449508572.12335021854363097518.metalar.13909.9074025514261790078.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/1263600541565060224.10215334770476983190.metalar.13909.11391603645003812589.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6993860855614079944.10215334770476983190.metalar.13909.15883487886494850358.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/1835781239313333478.6423678355370525267.metalar.13909.6336700276117098253.tmp (kernels_added=1 skipped=0)
+2026-10-06T08:31:59.144663Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:31:59.314672Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:31:59.480997Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:31:59.650277Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:31:59.815302Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:01.180795Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:01.370682Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:01.553452Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:01.743306Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:01.935336Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:03.488366Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:03.694683Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:03.900457Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:04.104039Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:04.318636Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:15.706828Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:15.764921Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:15.989124Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:16.055809Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:16.303981Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:16.379824Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:16.645964Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:17.009979Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:17.397352Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:17.813939Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:17.925234Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:18.265021Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:18.386123Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:18.747298Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:18.880475Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:19.259926Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:19.400443Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:19.822336Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:32:19.979655Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:33:09.379517Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:33:11.554387Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06T08:33:13.745110Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06 01:33:14.795 MST [2642] LOG:  checkpoint starting: time
+2026-10-06 01:34:56.874 MST [2642] LOG:  checkpoint complete: time: wrote 729 buffers (4.4%), wrote 2 SLRU buffers; 0 WAL file(s) added, 0 removed, 2 recycled; write=102.064 s, sync=0.015 s, total=102.080 s; sync files=54, longest=0.005 s, average=0.001 s; distance=31599 kB, estimate=31599 kB; lsn=1/38C48A30, redo lsn=1/38ABD5B8

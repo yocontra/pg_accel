@@ -1,0 +1,49 @@
+{
+  "assertion_count": 462,
+  "assertion_percent": 99.56709956709956,
+  "covered_assertions": 460,
+  "covered_units": 460,
+  "description": "Fixed-manifest SQL semantic assertion coverage.",
+  "errors": [
+    "117_numeric_aggregates.sql has 1 successful file completion markers",
+    "SQL logs contain 1 warning lines",
+    "SQL execution exited 1",
+    "not every manifest SQL file completed successfully"
+  ],
+  "execution": {
+    "exit_code": 1,
+    "stages_complete": true,
+    "status": "failed"
+  },
+  "generated_at_utc": "2026-10-12T22:31:00.374541+00:00",
+  "kind": "coverage-layer-summary",
+  "layer_id": "sql",
+  "manifest": {
+    "baseline_assertions": 306,
+    "baseline_files": 58,
+    "caught_exception_lines": [],
+    "completed_files": 99,
+    "declared_assertions": 462,
+    "declared_files": 100,
+    "duplicate_declaration_ids": [],
+    "duplicate_observation_ids": [],
+    "hash_drift_files": [],
+    "passed_test_files": 99,
+    "sha256": "dfcd1d10655fae660f5b94f2cd73169c4775b1015a4af2cc26efdb5c2ced6fcd",
+    "skip_lines": [],
+    "test_files": 100,
+    "unknown_observation_ids": [],
+    "valid": true,
+    "warning_lines": [
+      "117_numeric_aggregates.sql:6:psql:/Users/contra/Projects/pg_accel/sql/tests/117_numeric_aggregates.sql:88: WARNING:  pg_accel: grouped aggregate accumulate chunk dispatch returned after 5924664us (warning threshold 5000ms); cancellation and statement_timeout are observed only between synchronous calls"
+    ]
+  },
+  "metric_kind": "semantic_assertions",
+  "passed": false,
+  "percent": 99.56709956709956,
+  "schema_version": 2,
+  "threshold_percent": 90.0,
+  "total_units": 462,
+  "uncovered_assertions": 2,
+  "uncovered_units": 2
+}

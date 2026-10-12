@@ -1,0 +1,57 @@
+   Compiling bindgen v0.72.1
+   Compiling cee-scape v0.2.0
+   Compiling pgrx-bindgen v0.19.1
+   Compiling pgrx-pg-sys v0.19.1
+warning: pgrx-pg-sys@0.19.1: postgres v18 was compiled against an SDK Root which does not seem to exist on this machine (/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk). You may need to re-run `cargo pgrx init` and/or update your command line tools.
+error: failed to run custom build command for `pgrx-pg-sys v0.19.1`
+
+Caused by:
+  process didn't exit successfully: `/Users/contra/Projects/pg_accel/target/debug/build/pgrx-pg-sys-6ac6b16e6149ea66/build-script-bindgen` (exit status: 1)
+  --- stdout
+  cargo:rustc-check-cfg=cfg(docsrs)
+  cargo:rerun-if-env-changed=DOCS_RS
+  cargo:rerun-if-env-changed=PGRX_BUILD_VERBOSE
+  cargo:rerun-if-env-changed=PGRX_PG_CONFIG_PATH
+  cargo:rerun-if-env-changed=PGRX_PG_CONFIG_AS_ENV
+  cargo:rerun-if-env-changed=LLVM_CONFIG_PATH
+  cargo:rerun-if-env-changed=LIBCLANG_PATH
+  cargo:rerun-if-env-changed=LIBCLANG_STATIC_PATH
+  cargo:rerun-if-env-changed=BINDGEN_EXTRA_CLANG_ARGS
+  cargo:rerun-if-env-changed=BINDGEN_EXTRA_CLANG_ARGS_aarch64-apple-darwin
+  cargo:rerun-if-env-changed=BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_darwin
+  cargo:rerun-if-env-changed=PGRX_PG_SYS_GENERATE_BINDINGS_FOR_RELEASE
+  cargo:rerun-if-changed=include
+  cargo:rerun-if-changed=pgrx-cshim.c
+  cargo:rerun-if-changed=/Users/contra/.pgrx/config.toml
+  cargo:rerun-if-env-changed=PGRX_PG_SYS_GENERATE_BINDINGS_FOR_RELEASE
+  cargo:rerun-if-env-changed=PGRX_PG_SYS_GENERATE_BINDINGS_FOR_RELEASE
+  cargo:rerun-if-env-changed=PGRX_TARGET_INFO_PATH_PG18_aarch64-apple-darwin
+  cargo:rerun-if-env-changed=PGRX_TARGET_INFO_PATH_PG18
+  cargo:rerun-if-env-changed=PGRX_INCLUDEDIR_SERVER_PG18_aarch64-apple-darwin
+  cargo:rerun-if-env-changed=PGRX_INCLUDEDIR_SERVER_PG18
+  cargo:rerun-if-env-changed=PGRX_INCLUDEDIR_SERVER_aarch64-apple-darwin
+  cargo:rerun-if-env-changed=PGRX_INCLUDEDIR_SERVER
+  cargo:rerun-if-env-changed=PGRX_BINDGEN_NO_DETECT_INCLUDES_aarch64-apple-darwin
+  cargo:rerun-if-env-changed=PGRX_BINDGEN_NO_DETECT_INCLUDES
+  cargo:warning=postgres v18 was compiled against an SDK Root which does not seem to exist on this machine (/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk). You may need to re-run `cargo pgrx init` and/or update your command line tools.
+
+  --- stderr
+  build_paths=BuildPaths { manifest_dir: "/Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-pg-sys-0.19.1", out_dir: "/Users/contra/Projects/pg_accel/target/debug/build/pgrx-pg-sys-3043bd55e8df7bf0/out", src_dir: "/Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-pg-sys-0.19.1/src/include", shim_src: "/Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-pg-sys-0.19.1/pgrx-cshim.c", shim_dst: "/Users/contra/Projects/pg_accel/target/debug/build/pgrx-pg-sys-3043bd55e8df7bf0/out/pgrx-cshim.c" }
+  Generating bindings for pg18
+  pg_config --configure CLANG = None
+  pg_target_includes = ["/Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/include/server/"]
+  Bindgen found Apple clang version 21.0.0 (clang-2100.3.34.2)
+  found libclang at /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/libclang.dylib
+  Found include dirs ["/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/include"]
+  warning: no such sysroot directory: '/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk' [-Wmissing-sysroot]
+  /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/include/inttypes.h:24:15: fatal error: 'inttypes.h' file not found
+  clang diag: warning: no such sysroot directory: '/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk' [-Wmissing-sysroot]
+  Error: bindgen failed for pg18
+
+  Caused by:
+     0: Unable to generate bindings for pg18
+     1: clang diagnosed error: /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/include/inttypes.h:24:15: fatal error: 'inttypes.h' file not found
+
+
+  Location:
+      /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-bindgen-0.19.1/src/build.rs:798:10

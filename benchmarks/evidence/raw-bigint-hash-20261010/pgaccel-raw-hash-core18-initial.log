@@ -1,0 +1,25 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error[E0277]: the trait bound `descriptor::DescriptorAggExecutionError: From<&str>` is not satisfied
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:3104:77
+     |
+3104 |                     return Err("raw hash artifacts must remain query-owned".into());
+     |                                                                             ^^^^ unsatisfied trait bound
+     |
+help: the trait `From<&str>` is not implemented for `descriptor::DescriptorAggExecutionError`
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:2510:1
+     |
+2510 | pub(super) enum DescriptorAggExecutionError {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: `descriptor::DescriptorAggExecutionError` implements trait `From<T>`
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:2531:1
+     |
+2531 | impl From<String> for DescriptorAggExecutionError {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `From<std::string::String>`
+...
+2537 | impl From<ResidentLoadError> for DescriptorAggExecutionError {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `From<store::ResidentLoadError>`
+     = note: required for `&str` to implement `Into<descriptor::DescriptorAggExecutionError>`
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `pg_accel` (lib test) due to 1 previous error
+error: Recipe `test-standalone` failed with exit code 101

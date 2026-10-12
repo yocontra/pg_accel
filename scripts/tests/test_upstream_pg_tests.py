@@ -48,6 +48,23 @@ class UpstreamPostgresGateContractTests(unittest.TestCase):
         self.assertIn("just upstream-pg-tests", workflow)
         self.assertIn("upstream-postgresql-pg${{ matrix.pg }}", workflow)
 
+    def test_catalog_lifecycle_uses_an_owned_database_and_is_in_ci(self) -> None:
+        script = REPO_ROOT / "scripts" / "extension_catalog_integration.sh"
+        subprocess.run(["bash", "-n", str(script)], check=True)
+        source = script.read_text(encoding="utf-8")
+        self.assertIn('test_db="pg_accel_catalog_$$_$(date +%s)"', source)
+        self.assertIn('if [ "$created" = 1 ]', source)
+        self.assertIn('TEMPLATE template0', source)
+        self.assertNotIn('WITH (FORCE)', source)
+        fixture = (REPO_ROOT / "sql" / "extension_catalog_contract.sql").read_text(encoding="utf-8")
+        for marker in ("preload_only", "create_rollback", "installed", "drop_rollback", "drop_recreate"):
+            self.assertIn(f"PGACCEL_CATALOG_OK:{marker}", fixture)
+        self.assertIn("force_generic_plan", fixture)
+        self.assertIn("EXECUTE _catalog_prepared", fixture)
+        self.assertIn("parallel_dense_integer", fixture)
+        self.assertIn("extension-catalog-test", JUSTFILE.read_text(encoding="utf-8"))
+        self.assertIn("just extension-catalog-test", WORKFLOW.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

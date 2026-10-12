@@ -1,0 +1,14 @@
+Finalize GroupAggregate
+  Output: region, sum(COALESCE(price, adjustment, 0)), avg(COALESCE(price, adjustment, 0)), count(COALESCE(price, adjustment, 0)), min(COALESCE(price, adjustment, 0)), max(COALESCE(price, adjustment, 0)), count(*)
+  Group Key: bench_scalar_sales.region
+  ->  Gather Merge
+        Output: region, (PARTIAL sum(COALESCE(price, adjustment, 0))), (PARTIAL avg(COALESCE(price, adjustment, 0))), (PARTIAL count(COALESCE(price, adjustment, 0))), (PARTIAL min(COALESCE(price, adjustment, 0))), (PARTIAL max(COALESCE(price, adjustment, 0))), (PARTIAL count(*))
+        Workers Planned: 7
+        ->  Sort
+              Output: region, (PARTIAL sum(COALESCE(price, adjustment, 0))), (PARTIAL avg(COALESCE(price, adjustment, 0))), (PARTIAL count(COALESCE(price, adjustment, 0))), (PARTIAL min(COALESCE(price, adjustment, 0))), (PARTIAL max(COALESCE(price, adjustment, 0))), (PARTIAL count(*))
+              Sort Key: bench_scalar_sales.region
+              ->  Partial HashAggregate
+                    Output: region, PARTIAL sum(COALESCE(price, adjustment, 0)), PARTIAL avg(COALESCE(price, adjustment, 0)), PARTIAL count(COALESCE(price, adjustment, 0)), PARTIAL min(COALESCE(price, adjustment, 0)), PARTIAL max(COALESCE(price, adjustment, 0)), PARTIAL count(*)
+                    Group Key: bench_scalar_sales.region
+                    ->  Parallel Seq Scan on public.bench_scalar_sales
+                          Output: region, price, adjustment

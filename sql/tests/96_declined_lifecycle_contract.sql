@@ -156,14 +156,14 @@ ANALYZE _decline_scalar;
 PREPARE _decline_range_q AS
 SELECT g, sum(price * quantity) AS total, count(*) AS rows
 FROM _decline_scalar
-WHERE price >= 200 AND price <= 800 AND price >= 250
+WHERE price >= 200 AND price <= 800 AND quantity >= 3 AND abs(quantity)>=3
 GROUP BY g;
 PREPARE _decline_predicate_q AS
 SELECT count(*) AS rows
 FROM _decline_scalar
 WHERE score > 500::float4;
 PREPARE _decline_modifier_filter_q AS
-SELECT g, sum(price) FILTER (WHERE quantity > 0) AS total
+SELECT g, sum(price) FILTER (WHERE quantity::int8 > 0 AND price > 0) AS total
 FROM _decline_scalar GROUP BY g;
 PREPARE _decline_modifier_distinct_q AS
 SELECT g, count(DISTINCT price) AS distinct_prices
@@ -189,8 +189,10 @@ ORDER BY id;
 PREPARE _decline_bool_q AS
 SELECT flag, count(flag) AS observed_rows
 FROM _decline_scalar GROUP BY flag;
+-- Integer COUNT and INT2/INT4 extrema are supported; mixing INT8 MIN retains
+-- the adjacent unqualified state and exercises the same lifecycle decline.
 PREPARE _decline_int2_q AS
-SELECT g, count(short_value) AS observed_rows
+SELECT g, count(short_value) AS observed_rows, min(wide_value) AS minimum_value
 FROM _decline_scalar GROUP BY g;
 PREPARE _decline_int8_q AS
 SELECT g, count(wide_value) AS observed_rows
@@ -223,7 +225,7 @@ SET pg_accel.enabled = off;
 CREATE TEMP TABLE _decline_range_native AS
 SELECT g, sum(price * quantity) AS total, count(*) AS rows
 FROM _decline_scalar
-WHERE price >= 200 AND price <= 800 AND price >= 250
+WHERE price >= 200 AND price <= 800 AND quantity >= 3 AND abs(quantity)>=3
 GROUP BY g;
 SET pg_accel.enabled = on;
 SELECT pg_accel_reset_stats();
@@ -265,7 +267,7 @@ END $$;
 
 SET pg_accel.enabled = off;
 CREATE TEMP TABLE _decline_modifier_filter_native AS
-SELECT g, sum(price) FILTER (WHERE quantity > 0) AS total
+SELECT g, sum(price) FILTER (WHERE quantity::int8 > 0 AND price > 0) AS total
 FROM _decline_scalar GROUP BY g;
 CREATE TEMP TABLE _decline_modifier_distinct_native AS
 SELECT g, count(DISTINCT price) AS distinct_prices
@@ -759,7 +761,7 @@ END $$;
 
 SET pg_accel.enabled = off;
 CREATE TEMP TABLE _decline_int2_native AS
-SELECT g, count(short_value) AS observed_rows
+SELECT g, count(short_value) AS observed_rows, min(wide_value) AS minimum_value
 FROM _decline_scalar GROUP BY g;
 SET pg_accel.enabled = on;
 SELECT pg_accel_reset_stats();

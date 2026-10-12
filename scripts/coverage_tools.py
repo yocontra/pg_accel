@@ -41,6 +41,12 @@ SQL_SEMANTIC_MATRIX_DIMENSIONS = frozenset(
 SQL_SEMANTIC_MATRIX_REQUIRED_FAMILIES = frozenset(
     {
         "selected.grouped_agg_int4",
+        "selected.scalar_program_aggregates",
+        "selected.scalar_date_expressions",
+        "selected.scalar_where",
+        "selected.null_safe_scalar",
+        "selected.scalar_nullif_extrema",
+        "selected.pulled_up_reports",
         "selected.predicate_expression_int4",
         "selected.aggregate_filter_int4",
         "selected.range_intersection_expression_int4",
@@ -101,9 +107,9 @@ SQL_SEMANTIC_MATRIX_DECLINE_REASONS = {
     "decline.grouped_count_float_adjacent": "generic_serial_kernel_mode_unqualified",
     "decline.grouped_integer_sum_avg_adjacent": "generic_serial_kernel_mode_unqualified",
 }
-BASELINE_CPP_SOURCES = 16
-BASELINE_CPP_DEVICE_OBJECTS = 15
-BASELINE_CPP_TESTS = 32
+BASELINE_CPP_SOURCES = 18
+BASELINE_CPP_DEVICE_OBJECTS = 17
+BASELINE_CPP_TESTS = 36
 SQL_COVERAGE_KERNEL_TIMEOUT_MS = 60_000
 COVERAGE_HELPER_TEST_PATTERN = "test_coverage*.py"
 REQUIRED_COVERAGE_HELPER_TESTS = frozenset(
@@ -131,8 +137,11 @@ PINNED_CPP_EXECUTABLE_HEADERS = {
     "pgaccel-kernels/include/alloc_helper.h",
     "pgaccel-kernels/include/pgaccel_error.h",
     "pgaccel-kernels/include/pgaccel_queue.h",
+    "pgaccel-kernels/include/pgaccel_scalar.hpp",
     "pgaccel-kernels/src/h3_exact_device.hpp",
     "pgaccel-kernels/src/h3_float_device.hpp",
+    "pgaccel-kernels/src/join_rows_layout.hpp",
+    "pgaccel-kernels/include/pgaccel_raster_lookup.hpp",
 }
 EXPECTED_LAYERS = ("rust", "cpp", "sql")
 LINE_LAYERS = ("rust", "cpp")

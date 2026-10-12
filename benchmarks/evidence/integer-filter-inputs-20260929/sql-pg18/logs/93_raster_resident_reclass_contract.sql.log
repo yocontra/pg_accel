@@ -1,0 +1,87 @@
+=== 93_raster_resident_reclass_contract ===
+SET
+SET
+psql:/Users/contra/Projects/pg_accel/sql/tests/93_raster_resident_reclass_contract.sql:10: NOTICE:  table "_raster_reclass_input" does not exist, skipping
+DROP TABLE
+CREATE TABLE
+INSERT 0 10000
+ANALYZE
+SET
+SELECT 10000
+ pg_accel_pin 
+--------------
+        10000
+(1 row)
+
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 10000
+CREATE TABLE
+DO
+DO
+PGACCEL_ASSERT_OK:93_raster_resident_reclass_contract.assert_001
+psql:/Users/contra/Projects/pg_accel/sql/tests/93_raster_resident_reclass_contract.sql:134: NOTICE:  table "_raster_reclass_missing_input" does not exist, skipping
+DROP TABLE
+SELECT 1
+ pg_accel_pin 
+--------------
+            1
+(1 row)
+
+SET
+psql:/Users/contra/Projects/pg_accel/sql/tests/93_raster_resident_reclass_contract.sql:142: NOTICE:  Invalid argument for reclassargset. Invalid band index (must use 1-based) for reclassarg of index 0 . Returning original raster
+SELECT 1
+SET
+SELECT 1
+psql:/Users/contra/Projects/pg_accel/sql/tests/93_raster_resident_reclass_contract.sql:150: NOTICE:  Invalid argument for reclassargset. Invalid band index (must use 1-based) for reclassarg of index 0 . Returning original raster
+SELECT 1
+DO
+PGACCEL_ASSERT_OK:93_raster_resident_reclass_contract.assert_002
+CREATE TABLE
+SELECT 1
+psql:/Users/contra/Projects/pg_accel/sql/tests/93_raster_resident_reclass_contract.sql:217: NOTICE:  Invalid argument for reclassargset. Invalid expression of reclassexpr for reclassarg of index 0 . Returning original raster
+psql:/Users/contra/Projects/pg_accel/sql/tests/93_raster_resident_reclass_contract.sql:217: NOTICE:  Invalid argument for reclassargset. Invalid expression of reclassexpr for reclassarg of index 0 . Returning original raster
+psql:/Users/contra/Projects/pg_accel/sql/tests/93_raster_resident_reclass_contract.sql:217: NOTICE:  Invalid argument for reclassargset. Invalid expression of reclassexpr for reclassarg of index 0 . Returning original raster
+psql:/Users/contra/Projects/pg_accel/sql/tests/93_raster_resident_reclass_contract.sql:217: NOTICE:  Invalid argument for reclassargset. Invalid expression of reclassexpr for reclassarg of index 0 . Returning original raster
+psql:/Users/contra/Projects/pg_accel/sql/tests/93_raster_resident_reclass_contract.sql:217: NOTICE:  Invalid argument for reclassargset. Invalid expression of reclassexpr for reclassarg of index 0 . Returning original raster
+psql:/Users/contra/Projects/pg_accel/sql/tests/93_raster_resident_reclass_contract.sql:217: NOTICE:  Invalid argument for reclassargset. Invalid expression of reclassexpr for reclassarg of index 0 . Returning original raster
+psql:/Users/contra/Projects/pg_accel/sql/tests/93_raster_resident_reclass_contract.sql:217: NOTICE:  Invalid argument for reclassargset. Invalid expression of reclassexpr for reclassarg of index 0 . Returning original raster
+psql:/Users/contra/Projects/pg_accel/sql/tests/93_raster_resident_reclass_contract.sql:217: NOTICE:  Invalid argument for reclassargset. Invalid expression of reclassexpr for reclassarg of index 0 . Returning original raster
+psql:/Users/contra/Projects/pg_accel/sql/tests/93_raster_resident_reclass_contract.sql:217: NOTICE:  Invalid argument for reclassargset. Invalid expression of reclassexpr for reclassarg of index 0 . Returning original raster
+psql:/Users/contra/Projects/pg_accel/sql/tests/93_raster_resident_reclass_contract.sql:217: NOTICE:  Invalid argument for reclassargset. Invalid expression of reclassexpr for reclassarg of index 0 . Returning original raster
+psql:/Users/contra/Projects/pg_accel/sql/tests/93_raster_resident_reclass_contract.sql:217: NOTICE:  Invalid argument for reclassargset. Invalid expression of reclassexpr for reclassarg of index 0 . Returning original raster
+psql:/Users/contra/Projects/pg_accel/sql/tests/93_raster_resident_reclass_contract.sql:217: NOTICE:  Invalid argument for reclassargset. Invalid expression of reclassexpr for reclassarg of index 0 . Returning original raster
+psql:/Users/contra/Projects/pg_accel/sql/tests/93_raster_resident_reclass_contract.sql:217: NOTICE:  Invalid argument for reclassargset. Invalid expression of reclassexpr for reclassarg of index 0 . Returning original raster
+psql:/Users/contra/Projects/pg_accel/sql/tests/93_raster_resident_reclass_contract.sql:217: NOTICE:  Invalid argument for reclassargset. Invalid expression of reclassexpr for reclassarg of index 0 . Returning original raster
+psql:/Users/contra/Projects/pg_accel/sql/tests/93_raster_resident_reclass_contract.sql:217: NOTICE:  Invalid argument for reclassargset. Invalid expression of reclassexpr for reclassarg of index 0 . Returning original raster
+psql:/Users/contra/Projects/pg_accel/sql/tests/93_raster_resident_reclass_contract.sql:217: NOTICE:  Invalid argument for reclassargset. Invalid expression of reclassexpr for reclassarg of index 0 . Returning original raster
+DO
+DO
+PGACCEL_ASSERT_OK:93_raster_resident_reclass_contract.assert_003
+SET
+SELECT 1
+SELECT 10000
+SET
+SELECT 10000
+DO
+PGACCEL_ASSERT_OK:93_raster_resident_reclass_contract.assert_004
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+PGACCEL_FILE_OK:93_raster_resident_reclass_contract

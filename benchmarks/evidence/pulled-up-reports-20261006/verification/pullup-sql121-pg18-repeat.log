@@ -1,0 +1,8 @@
+=== 121_integer_where_aggregates ===
+SET
+SET
+SELECT 1000017
+ANALYZE
+psql:sql/tests/121_integer_where_aggregates.sql:71: ERROR:  pg_accel: generic aggregate dispatch failed (grouped chunk kernel failed: GPU grouped_agg kernel(grouped_agg_execute) failed with execution_failed); refusing CPU fallback
+CONTEXT:  SQL statement "CREATE TEMP TABLE _integer_where_actual AS SELECT g,count(*) n,sum(v) s,avg(v) a,count(v) c FROM _integer_where_agg WHERE b GROUP BY g"
+PL/pgSQL function inline_code_block line 38 at EXECUTE

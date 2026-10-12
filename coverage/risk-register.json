@@ -83,15 +83,21 @@
       "id": "cancellation",
       "description": "PostgreSQL cancellation remains a typed 57014 boundary, drops bounded device state once, preserves accounting, and leaves the backend reusable.",
       "sources": [
-        {"glob": "pg_accel/src/engine/executor/agg/descriptor.rs", "contains": "fn capture_postgres_interrupt"},
-        {"glob": "pg_accel/src/engine/executor/bounded.rs", "contains": "cleanup_before_rethrow"}
+        {"glob": "pg_accel/src/engine/executor/agg/descriptor.rs", "contains": "capture_postgres_interrupt()"},
+        {"glob": "pg_accel/src/engine/executor/bounded.rs", "contains": "fn capture_postgres_interrupt"},
+        {"glob": "pg_accel/src/engine/executor/bounded.rs", "contains": "fn postgres_interrupt_pending"},
+        {"glob": "pg_accel/src/engine/executor/join.rs", "contains": "fn execute_interruptible"}
       ],
       "tests": [
         {"path": "pg_accel/src/tests/phase2_cache.rs", "symbol": "test_bounded_dense_statement_timeout_is_exact_and_recoverable"},
-        {"path": "pg_accel/src/tests/phase6_spatial.rs", "symbol": "exact_recheck_preserves_cancellation_but_types_ordinary_errors"}
+        {"path": "pg_accel/src/tests/phase6_spatial.rs", "symbol": "exact_recheck_preserves_cancellation_but_types_ordinary_errors"},
+        {"path": "pg_accel/src/engine/executor/bounded.rs", "symbol": "captured_interrupt_drops_success_or_failure_owners_before_propagation"},
+        {"path": "pg_accel/src/engine/executor/bounded.rs", "symbol": "benign_interrupt_discards_partial_attempt_then_rebinds_and_retries"},
+        {"path": "pg_accel/src/tests/join_rows.rs", "symbol": "pg_resident_join_occurrence_binding_and_invalidation"}
       ],
       "coverage_anchors": [
-        {"layer": "rust", "path": "pg_accel/src/engine/executor/agg/descriptor.rs", "regex": "fn capture_postgres_interrupt\\("}
+        {"layer": "rust", "path": "pg_accel/src/engine/executor/bounded.rs", "regex": "fn capture_postgres_interrupt\\("},
+        {"layer": "rust", "path": "pg_accel/src/engine/executor/bounded.rs", "regex": "fn postgres_interrupt_pending\\("}
       ]
     },
     {
@@ -211,6 +217,7 @@
   "unsafe_rules": [
     {"glob": "pg_accel/src/adapters/**", "domain": "unsafe_ffi"},
     {"glob": "pg_accel/src/engine/columnar.rs", "domain": "lifetime_ownership"},
+    {"glob": "pg_accel/src/engine/executor/bounded.rs", "domain": "cancellation"},
     {"glob": "pg_accel/src/engine/executor/**", "domain": "executor_reset_drop"},
     {"glob": "pg_accel/src/engine/ffi/custom_scan/private_data*", "domain": "planner_private_data"},
     {"glob": "pg_accel/src/engine/ffi/custom_scan/**", "domain": "lifetime_ownership"},

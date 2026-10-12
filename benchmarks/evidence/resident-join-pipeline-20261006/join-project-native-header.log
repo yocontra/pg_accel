@@ -1,0 +1,7 @@
+Test project /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+    Start 26: test_join_rows
+1/1 Test #26: test_join_rows ...................   Passed   12.42 sec
+
+100% tests passed out of 1
+
+Total Test time (real) =  12.42 sec

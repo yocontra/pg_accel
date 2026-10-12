@@ -1,0 +1,179 @@
+{
+  "schema_version": 1,
+  "generated_unix_seconds": 1790726864,
+  "root": "benchmarks/evidence/integer-extrema-20260929/nyc_taxi_airport_passengers",
+  "entry_count": 34,
+  "total_size_bytes": 1110441,
+  "entries": [
+    {
+      "path": "README.md",
+      "size_bytes": 2167,
+      "modified_unix_seconds": 1790726813
+    },
+    {
+      "path": "benchmark_failure_ledger.json",
+      "size_bytes": 409,
+      "modified_unix_seconds": 1790726864
+    },
+    {
+      "path": "benchmark_failure_ledger.md",
+      "size_bytes": 748,
+      "modified_unix_seconds": 1790726864
+    },
+    {
+      "path": "correctness_diffs/nyc_taxi_airport_passengers-1000000.json",
+      "size_bytes": 156468,
+      "modified_unix_seconds": 1790726815
+    },
+    {
+      "path": "correctness_diffs/nyc_taxi_airport_passengers-12748986.json",
+      "size_bytes": 156469,
+      "modified_unix_seconds": 1790726840
+    },
+    {
+      "path": "crashes.json",
+      "size_bytes": 2,
+      "modified_unix_seconds": 1790726864
+    },
+    {
+      "path": "crashes.md",
+      "size_bytes": 45,
+      "modified_unix_seconds": 1790726864
+    },
+    {
+      "path": "fixture_manifests/nyc_taxi_airport_passengers-1000000.json",
+      "size_bytes": 3125,
+      "modified_unix_seconds": 1790726813
+    },
+    {
+      "path": "fixture_manifests/nyc_taxi_airport_passengers-12748986.json",
+      "size_bytes": 3125,
+      "modified_unix_seconds": 1790726817
+    },
+    {
+      "path": "guc_snapshot.json",
+      "size_bytes": 702,
+      "modified_unix_seconds": 1790726813
+    },
+    {
+      "path": "log_tails/run-complete/00-18.log.delta",
+      "size_bytes": 4051,
+      "modified_unix_seconds": 1790726864
+    },
+    {
+      "path": "log_tails/run-complete/00-18.log.tail",
+      "size_bytes": 65568,
+      "modified_unix_seconds": 1790726864
+    },
+    {
+      "path": "log_tails/run-complete/01-pg_accel_panic.log.delta",
+      "size_bytes": 203,
+      "modified_unix_seconds": 1790726864
+    },
+    {
+      "path": "log_tails/run-complete/01-pg_accel_panic.log.tail",
+      "size_bytes": 78,
+      "modified_unix_seconds": 1790726864
+    },
+    {
+      "path": "log_tails/run-complete/02-pg_accel_traces.jsonl.delta",
+      "size_bytes": 212,
+      "modified_unix_seconds": 1790726864
+    },
+    {
+      "path": "log_tails/run-complete/02-pg_accel_traces.jsonl.tail",
+      "size_bytes": 292,
+      "modified_unix_seconds": 1790726864
+    },
+    {
+      "path": "log_tails/run-complete/03-pg_accel_otel.jsonl.delta",
+      "size_bytes": 204,
+      "modified_unix_seconds": 1790726864
+    },
+    {
+      "path": "log_tails/run-complete/03-pg_accel_otel.jsonl.tail",
+      "size_bytes": 79,
+      "modified_unix_seconds": 1790726864
+    },
+    {
+      "path": "manifest.json",
+      "size_bytes": 1287,
+      "modified_unix_seconds": 1790726813
+    },
+    {
+      "path": "no_dispatch_audit.json",
+      "size_bytes": 324,
+      "modified_unix_seconds": 1790726864
+    },
+    {
+      "path": "no_dispatch_audit.md",
+      "size_bytes": 650,
+      "modified_unix_seconds": 1790726864
+    },
+    {
+      "path": "plan_snippets/nyc_taxi_airport_passengers-1000000.txt",
+      "size_bytes": 2023,
+      "modified_unix_seconds": 1790726815
+    },
+    {
+      "path": "plan_snippets/nyc_taxi_airport_passengers-12748986.txt",
+      "size_bytes": 2023,
+      "modified_unix_seconds": 1790726842
+    },
+    {
+      "path": "plans.txt",
+      "size_bytes": 6208,
+      "modified_unix_seconds": 1790726848
+    },
+    {
+      "path": "pre_risk_contexts/nyc_taxi_airport_passengers-1000000.json",
+      "size_bytes": 237340,
+      "modified_unix_seconds": 1790726814
+    },
+    {
+      "path": "pre_risk_contexts/nyc_taxi_airport_passengers-12748986.json",
+      "size_bytes": 237343,
+      "modified_unix_seconds": 1790726834
+    },
+    {
+      "path": "provenance.json",
+      "size_bytes": 3585,
+      "modified_unix_seconds": 1790726813
+    },
+    {
+      "path": "report.csv",
+      "size_bytes": 2043,
+      "modified_unix_seconds": 1790726864
+    },
+    {
+      "path": "report.json",
+      "size_bytes": 206749,
+      "modified_unix_seconds": 1790726864
+    },
+    {
+      "path": "report.md",
+      "size_bytes": 11865,
+      "modified_unix_seconds": 1790726864
+    },
+    {
+      "path": "resident_boundary_audit.json",
+      "size_bytes": 719,
+      "modified_unix_seconds": 1790726864
+    },
+    {
+      "path": "resident_boundary_audit.md",
+      "size_bytes": 974,
+      "modified_unix_seconds": 1790726864
+    },
+    {
+      "path": "resume_audit_manifest.json",
+      "size_bytes": 3170,
+      "modified_unix_seconds": 1790726864
+    },
+    {
+      "path": "rust_backtrace.txt",
+      "size_bytes": 191,
+      "modified_unix_seconds": 1790726813
+    }
+  ]
+}

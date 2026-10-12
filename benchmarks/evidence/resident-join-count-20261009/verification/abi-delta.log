@@ -1,0 +1,10 @@
+--- -	2026-10-09 21:44:01
++++ scripts/cpu_cheat_abi_manifest.txt	2026-10-09 21:39:43
+@@ -68,6 +68,7 @@
+ pgaccel_hash_join_free|void (pgaccel_hash_table *)
+ pgaccel_init|pgaccel_status ()
+ pgaccel_join_rows_controlled_workspace_bytes|pgaccel_status (const pgaccel_join_rows_request *, const pgaccel_join_control *, uint64_t *)
++pgaccel_join_rows_count_controlled|pgaccel_status (const pgaccel_join_rows_request *, const pgaccel_join_control *, void *, uint64_t, pgaccel_join_controlled_result *)
+ pgaccel_join_rows_execute|pgaccel_status (const pgaccel_join_rows_request *, void *, uint64_t, pgaccel_join_row_pair *, uint64_t, pgaccel_join_rows_result *)
+ pgaccel_join_rows_execute_controlled|pgaccel_status (const pgaccel_join_rows_request *, const pgaccel_join_control *, void *, uint64_t, pgaccel_join_row_pair *, uint64_t, pgaccel_join_controlled_result *)
+ pgaccel_join_rows_project|pgaccel_status (const pgaccel_join_project_request *, void *, uint64_t, pgaccel_join_project_result *)

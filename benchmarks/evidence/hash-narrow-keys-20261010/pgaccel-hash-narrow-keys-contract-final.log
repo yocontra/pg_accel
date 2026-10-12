@@ -1,0 +1,3 @@
+--- hash COUNT(column) metadata contracts (no device initialization) ---
+--- hash FILTER metadata contracts (protected row storage) ---
+hash metadata contracts: 2969 passed, 0 failed

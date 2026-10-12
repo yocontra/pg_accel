@@ -1,0 +1,17 @@
+PGACCEL_TEST_START name=test_host_api_contract
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+host API no-device contracts: 23 passed, 0 failed
+host API contracts: 191 passed, 0 failed
+PGACCEL_TEST_RESULT name=test_host_api_contract exit_code=0 result=PASS raw_lines=15 body_sha256=464a22bd3244f2e4520875dace2a94a8e6e8811df22173ff9175a0b8547a64ec binding_sha256=d6031fbe4bba590b4c5423c4b5bebd12543cd7355decefc469706e0ac34b1eb8

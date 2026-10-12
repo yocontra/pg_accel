@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "workload": "grouped_scalar_filter",
+  "rows": 1000000,
+  "status": "pass",
+  "order_sensitive": false,
+  "accel_rows": 33,
+  "baseline_rows": 33,
+  "accel_minus_baseline_count": 0,
+  "baseline_minus_accel_count": 0,
+  "sample_limit": 20,
+  "accel_minus_baseline_samples": [],
+  "baseline_minus_accel_samples": [],
+  "accel_query_sql": "SELECT region,sum(price) FILTER (WHERE price>adjustment OR adjustment IS NULL) total,avg(price) FILTER (WHERE price>adjustment OR adjustment IS NULL) mean,count(price) FILTER (WHERE price>adjustment OR adjustment IS NULL) present,min(price) FILTER (WHERE price>adjustment OR adjustment IS NULL) lo,max(price) FILTER (WHERE price>adjustment OR adjustment IS NULL) hi,count(*) n FROM bench_scalar_sales GROUP BY region",
+  "baseline_query_sql": "SELECT region,sum(price) FILTER (WHERE price>adjustment OR adjustment IS NULL) total,avg(price) FILTER (WHERE price>adjustment OR adjustment IS NULL) mean,count(price) FILTER (WHERE price>adjustment OR adjustment IS NULL) present,min(price) FILTER (WHERE price>adjustment OR adjustment IS NULL) lo,max(price) FILTER (WHERE price>adjustment OR adjustment IS NULL) hi,count(*) n FROM bench_scalar_sales GROUP BY region",
+  "error": null
+}

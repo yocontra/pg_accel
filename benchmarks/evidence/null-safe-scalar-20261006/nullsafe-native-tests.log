@@ -1,0 +1,74 @@
+Test project /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+      Start  1: test_host_api_contract
+ 1/33 Test  #1: test_host_api_contract ...........   Passed    0.58 sec
+      Start  2: test_device
+ 2/33 Test  #2: test_device ......................   Passed    0.29 sec
+      Start  3: test_bbox
+ 3/33 Test  #3: test_bbox ........................   Passed    0.40 sec
+      Start  4: test_spatial
+ 4/33 Test  #4: test_spatial .....................   Passed    0.56 sec
+      Start  5: test_spatial_dispatch
+ 5/33 Test  #5: test_spatial_dispatch ............   Passed    0.41 sec
+      Start  6: test_spatial_pairwise_boundary
+ 6/33 Test  #6: test_spatial_pairwise_boundary ...   Passed    1.18 sec
+      Start  7: test_spatial_resident
+ 7/33 Test  #7: test_spatial_resident ............   Passed    1.10 sec
+      Start  8: test_h3
+ 8/33 Test  #8: test_h3 ..........................   Passed    1.62 sec
+      Start  9: test_raster_resident
+ 9/33 Test  #9: test_raster_resident .............   Passed    0.57 sec
+      Start 10: test_correctness
+10/33 Test #10: test_correctness .................   Passed    0.58 sec
+      Start 11: test_exec_gpu
+11/33 Test #11: test_exec_gpu ....................   Passed    0.43 sec
+      Start 12: test_fork
+12/33 Test #12: test_fork ........................   Passed    0.70 sec
+      Start 13: test_fork_warmed
+13/33 Test #13: test_fork_warmed .................   Passed    0.72 sec
+      Start 14: test_fork_cold
+14/33 Test #14: test_fork_cold ...................   Passed    0.44 sec
+      Start 15: test_fork_cold_barrier
+15/33 Test #15: test_fork_cold_barrier ...........   Passed    0.39 sec
+      Start 16: test_sycl_basic
+16/33 Test #16: test_sycl_basic ..................   Passed    0.38 sec
+      Start 17: test_scalar
+17/33 Test #17: test_scalar ......................   Passed    0.89 sec
+      Start 18: test_reduce_stats
+18/33 Test #18: test_reduce_stats ................   Passed    0.51 sec
+      Start 19: test_reduce_bool_bit
+19/33 Test #19: test_reduce_bool_bit .............   Passed    0.45 sec
+      Start 20: test_grouped_agg
+20/33 Test #20: test_grouped_agg .................   Passed   33.28 sec
+      Start 21: test_grouped_agg_hash
+21/33 Test #21: test_grouped_agg_hash ............   Passed    4.20 sec
+      Start 22: test_grouped_agg_workspace
+22/33 Test #22: test_grouped_agg_workspace .......   Passed    0.36 sec
+      Start 23: test_hash_agg_partial
+23/33 Test #23: test_hash_agg_partial ............   Passed    0.38 sec
+      Start 24: test_hash_agg_keys
+24/33 Test #24: test_hash_agg_keys ...............   Passed    0.37 sec
+      Start 25: test_hash_join
+25/33 Test #25: test_hash_join ...................   Passed    0.38 sec
+      Start 26: test_hash_domain_matrix
+26/33 Test #26: test_hash_domain_matrix ..........   Passed    0.42 sec
+      Start 27: test_hashagg_spatial_matrix
+27/33 Test #27: test_hashagg_spatial_matrix ......   Passed    0.44 sec
+      Start 28: test_reduce_matrix
+28/33 Test #28: test_reduce_matrix ...............   Passed    0.50 sec
+      Start 29: test_expr_memory
+29/33 Test #29: test_expr_memory .................   Passed    0.37 sec
+      Start 30: test_expr_vm_matrix
+30/33 Test #30: test_expr_vm_matrix ..............   Passed    0.70 sec
+      Start 31: test_oom_invariant
+31/33 Test #31: test_oom_invariant ...............   Passed   56.05 sec
+      Start 32: test_fp64_mul_probe
+32/33 Test #32: test_fp64_mul_probe ..............   Passed    0.55 sec
+      Start 33: test_kernel_failure_status
+33/33 Test #33: test_kernel_failure_status .......   Passed    0.40 sec
+
+100% tests passed out of 33
+
+Label Time Summary:
+host    =   0.58 sec*proc (1 test)
+
+Total Test time (real) = 110.59 sec

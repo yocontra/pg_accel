@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "timing_skew_threshold_fraction": 0.1,
+  "evaluated_no_dispatch_rows": 0,
+  "clean_rows": 0,
+  "warning_rows": 0,
+  "timing_skew_rows": 0,
+  "plan_mismatch_rows": 0,
+  "selected_custom_scan_not_dispatched_rows": 0,
+  "missing_plan_evidence_rows": 0,
+  "ignored_dispatching_rows": 3,
+  "rows": []
+}

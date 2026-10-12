@@ -1,0 +1,7 @@
+19beta1|5s
+h3|4.2.3
+h3_postgis|4.2.3
+pg_accel|1.0.0-rc1
+plpgsql|1.0
+postgis|3.6.4
+postgis_raster|3.6.4

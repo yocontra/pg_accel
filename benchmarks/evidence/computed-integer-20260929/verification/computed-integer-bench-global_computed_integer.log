@@ -1,0 +1,276 @@
+[artifacts] writing benchmark artifacts to benchmarks/evidence/computed-integer-20260929/global_computed_integer
+[diagnostics] RUST_BACKTRACE=1 (set-by-runner)
+[setup] installing extensions: pg_accel
+[setup] pg_accel: ok
+[detect] installed extensions: plpgsql, h3, postgis, postgis_raster, h3_postgis, pg_accel
+[provenance] pg_accel extension provenance accepted
+
+[scale] global_computed_integer @ 250K rows
+[setup] global_computed_integer -- seed 42 (setseed=0.000042), 250000 rows
+[quiescence] setup checkpoint completed at 2026-09-29 19:52:41.975327-07 (wal_lsn=546/34EDBCD8)
+[global_computed_integer] warmup 1/5 [warm]: accel=25.12ms  parallel=9.97ms
+[global_computed_integer] warmup 2/5 [warm]: accel=3.15ms  parallel=8.43ms
+[global_computed_integer] warmup 3/5 [warm]: accel=2.61ms  parallel=7.97ms
+[global_computed_integer] warmup 4/5 [warm]: accel=2.78ms  parallel=8.86ms
+[global_computed_integer] warmup 5/5 [warm]: accel=2.87ms  parallel=8.30ms
+[global_computed_integer] bench 1/10 [warm]: accel=2.94ms  parallel=8.09ms
+[global_computed_integer] bench 2/10 [warm]: accel=2.71ms  parallel=8.03ms
+[global_computed_integer] bench 3/10 [warm]: accel=2.67ms  parallel=8.04ms
+[global_computed_integer] bench 4/10 [warm]: accel=2.85ms  parallel=8.83ms
+[global_computed_integer] bench 5/10 [warm]: accel=2.41ms  parallel=9.27ms
+[global_computed_integer] bench 6/10 [warm]: accel=2.58ms  parallel=8.32ms
+[global_computed_integer] bench 7/10 [warm]: accel=2.65ms  parallel=9.40ms
+[global_computed_integer] bench 8/10 [warm]: accel=2.84ms  parallel=8.03ms
+[global_computed_integer] bench 9/10 [warm]: accel=2.43ms  parallel=7.68ms
+[global_computed_integer] bench 10/10 [warm]: accel=3.40ms  parallel=8.06ms
+[quiescence] checkpointer counters remained unchanged through 2026-09-29 19:52:42.299152-07
+[cleanup] global_computed_integer -- tables dropped
+
+[scale] global_computed_integer @ 1M rows
+[setup] global_computed_integer -- seed 42 (setseed=0.000042), 1000000 rows
+[quiescence] setup checkpoint completed at 2026-09-29 19:52:43.94091-07 (wal_lsn=546/393033F8)
+[global_computed_integer] warmup 1/5 [warm]: accel=28.57ms  parallel=18.72ms
+[global_computed_integer] warmup 2/5 [warm]: accel=6.37ms  parallel=17.57ms
+[global_computed_integer] warmup 3/5 [warm]: accel=6.48ms  parallel=17.79ms
+[global_computed_integer] warmup 4/5 [warm]: accel=6.29ms  parallel=16.72ms
+[global_computed_integer] warmup 5/5 [warm]: accel=7.88ms  parallel=16.33ms
+[global_computed_integer] bench 1/10 [warm]: accel=4.52ms  parallel=19.06ms
+[global_computed_integer] bench 2/10 [warm]: accel=3.87ms  parallel=20.18ms
+[global_computed_integer] bench 3/10 [warm]: accel=3.84ms  parallel=18.63ms
+[global_computed_integer] bench 4/10 [warm]: accel=4.42ms  parallel=18.52ms
+[global_computed_integer] bench 5/10 [warm]: accel=6.26ms  parallel=18.79ms
+[global_computed_integer] bench 6/10 [warm]: accel=6.72ms  parallel=17.64ms
+[global_computed_integer] bench 7/10 [warm]: accel=6.77ms  parallel=18.42ms
+[global_computed_integer] bench 8/10 [warm]: accel=6.45ms  parallel=17.49ms
+[global_computed_integer] bench 9/10 [warm]: accel=5.62ms  parallel=19.36ms
+[global_computed_integer] bench 10/10 [warm]: accel=6.50ms  parallel=18.22ms
+[quiescence] checkpointer counters remained unchanged through 2026-09-29 19:52:44.558099-07
+[cleanup] global_computed_integer -- tables dropped
+# pg_accel Benchmark Report
+
+## Hardware Profile
+
+| Property | Value |
+|----------|-------|
+| OS | macos 26.4.1 |
+| Architecture | aarch64 |
+| CPU | Apple M2 Max |
+| CPU Cores | 12 |
+| Memory | 64 GB |
+
+## Headline
+
+> **NET SPEEDUP**: overall median speedup = **3.06x** (geomean across 2 GPU-dispatched workloads, family size = 2).
+>
+> Significant wins: **2** · Significant losses: **0** · Not significant: **0** · Effect-size rejected: **0**
+
+### Geomean by Category
+
+Sub-1.0x categories are losers. The `outside_h3` row excludes `gpu_h3` workloads — the h3 trig kernels dominate the wall-clock aggregate so this row is the more honest non-h3 picture.
+
+| Category | Workloads | Geomean (median speedup) | Sig Wins | Sig Losses | Total Sig | Not Sig |
+|---|---|---|---|---|---|---|
+| gpu_hashagg | 2 | 3.06x | 2 | 0 | 2 | 0 |
+| **outside_h3** | **2** | **3.06x** | **2** | **0** | **2** | **0** |
+| **overall (GPU-dispatched)** | **2** | **3.06x** | **2** | **0** | **2** | **0** |
+
+### Geomean by Dispatch Source
+
+Splits the `overall (GPU-dispatched)` row into two buckets: pg_accel Custom Scan execution and function/SRF kernel dispatch. Custom Scan rows have a `Custom Scan` plan node; function/SRF rows have non-zero `function_kernel_count` without a Custom Scan node. Either bucket counts as a GPU-dispatched win, but they exercise different code paths and the report must not collapse them into a single bar.
+
+| Dispatch Source | Workloads | Geomean (median speedup) | Sig Wins | Sig Losses | Total Sig | Not Sig |
+|---|---|---|---|---|---|---|
+| Custom Scan dispatch | 2 | 3.06x | 2 | 0 | 2 | 0 |
+| Function/SRF kernel dispatch | 0 | 1.00x | 0 | 0 | 0 | 0 |
+
+### Geomean by Resident-Cache Lane
+
+Splits the `overall (GPU-dispatched)` row into resident-cache lanes (pre-load caches off the timed clock; see `resident_load_ms` per row in Detailed Results) and non-resident lanes (no off-clock preload). Both buckets count as GPU-dispatched wins, but only the non-resident bucket is directly comparable to a PG-parallel baseline that pays scan I/O on the clock.
+
+| Lane | Workloads | Geomean (median speedup) | Sig Wins | Sig Losses | Total Sig | Not Sig |
+|---|---|---|---|---|---|---|
+| Resident-cache lane | 2 | 3.06x | 2 | 0 | 2 | 0 |
+| Non-resident lane | 0 | 1.00x | 0 | 0 | 0 | 0 |
+
+## Dispatch Classification
+
+Plan selection and runtime GPU work are counted separately. Runtime counter deltas are the source of truth for ordinary GPU-dispatched geomeans. A typed derived-output lane may instead use a sealed lifecycle kernel plus complete dependency-stable artifact-hit evidence; plan-only pg_accel rows and rows with stock executor fallback are excluded. Release-gate fields in this section are derived from workload counters, lifecycle captures, and captured plan text.
+
+| Classification | Workloads |
+|---|---:|
+| Total measured rows | 2 |
+| pg_accel Custom Scan plan selected | 2 |
+| GPU kernel dispatched | 2 |
+| Lifecycle-produced artifact reuse credited | 0 |
+| Function/SRF kernel dispatched | 0 |
+| Runtime counter capture available | 2 |
+| Kernel counter delta > 0 | 2 |
+| Accelerated-query counter covers measured pairs | 2 |
+| pg_accel stock executor fallback delta > 0 | 0 |
+| Custom Scan selected but no GPU dispatch | 0 |
+| Planner declined/no credited pg_accel path | 0 |
+| Function/SRF kernel count | 0 |
+| Rows returned to CPU | 20 |
+| GPU-resident pipeline reported | 2 |
+| GPU-dispatched Custom Scan without resident-pipeline proof | 0 |
+| Custom Scan rows with recorded CPU boundary | 0 |
+| Custom Scan rows with native post-aggregate filtering | 0 |
+
+### Dispatch Evidence By Row
+
+Each measured row is assigned one explicit release-gate classification. `rows_returned_to_cpu` is the accel-side output consumption count; `function_kernel_count` is populated only for credited function/SRF dispatch, and `custom_scan_lifecycle_artifact_reuse` means the fresh kernel is retained in the separate lifecycle evidence rather than the warm timing series.
+
+| Workload | Scale | Classification | Function kernel count | Rows returned to CPU | Correctness diff | GPU-resident pipeline | Resident boundary | Kernel delta | Accelerated queries | Rows dispatched | GPU rows processed | Stock fallback |
+|---|---|---|---:|---:|---|---|---|---:|---:|---:|---:|---:|
+| global_computed_integer | 250K | custom_scan_dispatch | 0 | 10 | correctness_diffs/global_computed_integer-250000.json | reported | - | 10 | 10 | 2500000 | 2500000 | 0 |
+| global_computed_integer | 1M | custom_scan_dispatch | 0 | 10 | correctness_diffs/global_computed_integer-1000000.json | reported | - | 10 | 10 | 10000000 | 10000000 | 0 |
+
+## Planner Threshold Matrix
+
+Each row ties planner admission to a concrete release-lane matrix cell: row count, type, cardinality, selectivity, result count, index/pruning shape, retained prepared geometry, batch count, row width, output size, dispatch/output proof, correctness proof, cache policy, warm-run proof, and measured break-even basis. Expected GPU winners must dispatch, consume output, and meet their warm-run threshold; native-decline cells must not select pg_accel. Privileged OS-cold certification is evaluated by the separate operation-cache gate.
+
+| Lane | Workload | Scale | Type | Cardinality | Selectivity | Result Count | Index/Pruning | Prepared Geometry | Batches | Row Width | Output | Dispatch/Output Evidence | Correctness Evidence | Cache Gate | Threshold Basis | Expected | Observed | Decline Evidence | Speedup | Status |
+|---|---|---:|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---:|---|
+| resident_computed_integer_aggregate | global_computed_integer | 250K | independently nullable int4 price and adjustment | one global output row | all rows counted; either NULL operand excludes the expression | one aggregate row | n/a | n/a | backend-local resident groupagg cache consumed by one dense grouped kernel | three checked arithmetic states plus COUNT(*) | exact product SUM, difference NUMERIC AVG and sum MIN/MAX | resident GpuAgg Custom Scan, kernel counter delta > 0, stock fallback counter = 0 | correctness_diffs artifact must pass before timing when artifacts are enabled | warm median threshold; use cache-mode both artifacts for cold-start audit | global computed-measure aggregation warm gate | gpu_winner >= 1.15x | custom_scan_dispatch | - | 3.00x | pass |
+| resident_computed_integer_aggregate | global_computed_integer | 1M | independently nullable int4 price and adjustment | one global output row | all rows counted; either NULL operand excludes the expression | one aggregate row | n/a | n/a | backend-local resident groupagg cache consumed by one dense grouped kernel | three checked arithmetic states plus COUNT(*) | exact product SUM, difference NUMERIC AVG and sum MIN/MAX | resident GpuAgg Custom Scan, kernel counter delta > 0, stock fallback counter = 0 | correctness_diffs artifact must pass before timing when artifacts are enabled | warm median threshold; use cache-mode both artifacts for cold-start audit | global computed-measure aggregation warm gate | gpu_winner >= 1.15x | custom_scan_dispatch | - | 3.13x | pass |
+
+## Kernel Coverage
+
+Workloads grouped by the GPU kernel class they exercise. A high workload count under a single kernel class means lots of redundant variations of the same code path. Use this table when adding new tests — prefer kernels with low coverage.
+
+| Kernel Class | Workloads | Distinct Scales | Geomean | Sig Wins | Sig Losses |
+|---|---|---|---|---|---|
+| `hash_agg` | 2 | 2 | 3.06x | 2 | 0 |
+
+## PostgreSQL Settings
+
+| GUC | Value |
+|-----|-------|
+| `pg_accel.enabled` | `on` |
+| `pg_accel.gpu_enabled` | `on` |
+| `pg_accel.min_batch_size` | `65536` |
+| `pg_accel.kernel_timeout_ms` | `5s` |
+| `max_parallel_workers_per_gather` | `8` |
+| `max_parallel_workers` | `12` |
+| `parallel_setup_cost` | `0` |
+| `parallel_tuple_cost` | `0` |
+| `work_mem` | `512MB` |
+| `shared_buffers` | `16GB` |
+| `effective_cache_size` | `48GB` |
+| `server_version` | `18.4` |
+
+## Methodology
+
+| Parameter | Value |
+|-----------|-------|
+| Iterations | 10 |
+| Warmup iterations | 5 |
+| Artifact directory | `benchmarks/evidence/computed-integer-20260929/global_computed_integer` |
+| Harness build profile | `release` |
+| Row scales | 250K, 1M |
+| Measurement ordering | balanced randomized AB/BA crossover on distinct persistent PostgreSQL backends (`DISCARD ALL` before each arm) |
+| Native-parity same-backend crossover | false |
+| Native-parity raw executions per arm/pair | 1 |
+| Statistical test | Paired t-test (two-tailed, p < 0.05) |
+| Statistical test | Bonferroni correction (family-wise alpha) |
+| Statistical test | Cohen's d effect size (|d| >= 0.5 gate, action_items C9) |
+| Statistical test | 95% CI via t-distribution |
+| Statistical test | Outlier detection (> 3 sigma) |
+
+**Ordering note:** Measurement order (accel-first vs baseline-first) uses an exactly balanced randomized AB/BA schedule. The arms use distinct persistent PostgreSQL backends, with `DISCARD ALL` before every arm.
+
+## Results
+
+All comparisons are against PostgreSQL with parallel workers enabled (the default production configuration). Speedup > 1.00x means pg_accel is faster.
+
+| Workload | 250K | 1M |
+|----------|------|------|
+| global_computed_integer | **3.00x** | **3.13x** |
+
+## Detailed Results
+
+### global_computed_integer
+
+**Query:** Checked INT4 sales arithmetic: product revenue, net price AVG and combined-price extrema
+
+| Scale | Accel median (ms) | Accel p25–p75 | PG Parallel median (ms) | PG p25–p75 | Speedup (median) | Cohen's d | p (Bonferroni) | Verdict | Resident Load (ms) |
+|---|---|---|---|---|---|---|---|---|---|
+| 250K | 2.69 | 2.60–2.85 (p95 3.19) | 8.08 | 8.04–8.71 (p95 9.34) | **3.00x** | 12.26 | 2.416449e-9 | WIN | 47.85ms |
+| 1M | 5.94 (asym var) | 4.44–6.49 (p95 6.75) | 18.57 (asym var) | 18.27–18.99 (p95 19.81) | **3.13x** | 12.86 | 5.751714e-9 | WIN | 94.50ms |
+
+- **250K:**
+  - Physical grouped kernel: mode=parallel_dense_integer, EXPLAIN/native verified=true; calls hash=0, dense-count=0, dense-integer=10, dense-numeric=0, serial-generic=0.
+  - Resident-cache preload: 47.85ms, paid once off the timed clock and amortized across repeated queries against the resident cache.
+  - Artifact lifecycle probe: refreshed 1 relation(s) / 250000 rows in 16.566ms; accel end-to-end 20.51ms; PG parallel 8.53ms; policy=ephemeral_fused; outcomes built=1 rebuilt=0 hit=0; construction bytes=0; construction 0.008ms; preparation 0.008ms; dependency identities 1→1; kernels=1; batches=1; output rows=1; fallback=0; error=none.
+  - Artifact steady state: 10 independently captured warm pairs, 0 hits, 10 build/rebuild outcomes.
+  - Combined lifecycle + steady calibration (n=11): accel median 2.71ms, PG parallel median 8.09ms, speedup 2.98x; warm latency ratchets remain bound to the separate steady-state summary.
+  - Plan snippet (accel, display-truncated to 30 lines):
+
+```
+Custom Scan (GpuAccelAgg)
+  Output: (sum((price * adjustment))), (avg((price - adjustment))), (min((price + adjustment))), (max((price + adjustment))), (count(*))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_integer
+  GPU Descriptor Strategy: descriptor_ungrouped_aggregate
+  GPU Descriptor Specialization: dense_integer_expressions_plain
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: none
+  GPU Descriptor Aggregates: m0:mul(2346151.2:type=23, 2346151.3:type=23) -> value.sum; m1:sub(2346151.2:type=23, 2346151.3:type=23) -> value.avg; m2:add(2346151.2:type=23, 2346151.3:type=23) -> value.min; value.max; m3:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none; m1=none; m2=none; m3=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot1:aggregate[m1].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot2:aggregate[m2].value.min source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot3:aggregate[m2].value.max source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot4:aggregate[m3].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 16395
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+
+```
+
+- **1M:**
+  - Physical grouped kernel: mode=parallel_dense_integer, EXPLAIN/native verified=true; calls hash=0, dense-count=0, dense-integer=10, dense-numeric=0, serial-generic=0.
+  - Resident-cache preload: 94.50ms, paid once off the timed clock and amortized across repeated queries against the resident cache.
+  - Artifact lifecycle probe: refreshed 1 relation(s) / 1000000 rows in 56.023ms; accel end-to-end 61.89ms; PG parallel 17.09ms; policy=ephemeral_fused; outcomes built=1 rebuilt=0 hit=0; construction bytes=0; construction 0.008ms; preparation 0.008ms; dependency identities 1→1; kernels=1; batches=1; output rows=1; fallback=0; error=none.
+  - Artifact steady state: 10 independently captured warm pairs, 0 hits, 10 build/rebuild outcomes.
+  - Combined lifecycle + steady calibration (n=11): accel median 6.26ms, PG parallel median 18.52ms, speedup 2.96x; warm latency ratchets remain bound to the separate steady-state summary.
+  - Plan snippet (accel, display-truncated to 30 lines):
+
+```
+Custom Scan (GpuAccelAgg)
+  Output: (sum((price * adjustment))), (avg((price - adjustment))), (min((price + adjustment))), (max((price + adjustment))), (count(*))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_integer
+  GPU Descriptor Strategy: descriptor_ungrouped_aggregate
+  GPU Descriptor Specialization: dense_integer_expressions_plain
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: none
+  GPU Descriptor Aggregates: m0:mul(2346165.2:type=23, 2346165.3:type=23) -> value.sum; m1:sub(2346165.2:type=23, 2346165.3:type=23) -> value.avg; m2:add(2346165.2:type=23, 2346165.3:type=23) -> value.min; value.max; m3:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none; m1=none; m2=none; m3=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot1:aggregate[m1].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot2:aggregate[m2].value.min source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot3:aggregate[m2].value.max source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot4:aggregate[m3].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 16395
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+
+```
+

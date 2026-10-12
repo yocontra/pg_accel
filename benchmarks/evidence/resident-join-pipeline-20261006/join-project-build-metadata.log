@@ -1,0 +1,103 @@
+-- pgaccel_kernels: SYCL (AdaptiveCpp) is the only supported backend; build fails without AdaptiveCpp
+-- Configuring done (0.2s)
+-- Generating done (0.1s)
+-- Build files have been written to: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+[  2%] Building CXX object CMakeFiles/pgaccel_kernels.dir/src/join_rows.cpp.o
+[  2%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/join_rows.cpp.o
+[  4%] Linking CXX static library libpgaccel_kernels.a
+[  4%] Linking CXX shared library libpgaccel_kernels_shared.dylib
+[ 15%] Built target pgaccel_kernels
+[ 26%] Built target pgaccel_kernels_shared
+[ 27%] Linking CXX executable test_device
+[ 27%] Linking CXX executable test_grouped_agg_workspace
+[ 28%] Linking CXX executable test_reduce_matrix
+[ 28%] Linking CXX executable test_reduce_minimal
+[ 29%] Linking CXX executable test_hashagg_spatial_matrix
+[ 30%] Linking CXX executable test_spatial
+[ 31%] Linking CXX executable test_expr_memory
+[ 32%] Linking CXX executable test_bbox
+[ 33%] Linking CXX executable test_hash_agg_partial
+[ 34%] Linking CXX executable test_fork_warmed
+[ 34%] Linking CXX executable test_spatial_pairwise_boundary
+[ 35%] Linking CXX executable test_grouped_agg_hash
+[ 36%] Linking CXX executable test_spatial_resident
+[ 37%] Linking CXX executable test_host_api_contract
+[ 37%] Linking CXX executable test_fork_cold
+[ 37%] Linking CXX executable test_hash_join
+[ 38%] Linking CXX executable test_spatial_dispatch
+[ 39%] Linking CXX executable test_fork_cold_barrier
+[ 40%] Linking CXX executable test_h3
+[ 41%] Linking CXX executable test_reduce_bool_bit
+[ 42%] Linking CXX executable test_kernel_failure_status
+[ 43%] Linking CXX executable test_raster_resident
+[ 44%] Linking CXX executable test_hash_agg_keys
+[ 45%] Linking CXX executable test_hash_domain_matrix
+[ 45%] Linking CXX executable test_reduce_stats
+[ 45%] Building CXX object CMakeFiles/test_join_rows.dir/test/test_join_rows.cpp.o
+[ 46%] Linking CXX executable test_scalar
+[ 46%] Linking CXX executable test_grouped_agg
+[ 46%] Linking CXX executable test_correctness
+[ 46%] Linking CXX executable test_fork
+[ 47%] Linking CXX executable test_ooo_overlap
+[ 48%] Linking CXX executable test_fp64_probe_sqrt
+[ 49%] Linking CXX executable test_fp64_probe_sin
+[ 50%] Linking CXX executable test_fork_archive_stress
+[ 51%] Linking CXX executable test_exec_gpu
+[ 52%] Linking CXX executable test_fp64_probe_add
+[ 53%] Linking CXX executable test_fp64_probe_atan2
+[ 53%] Linking CXX executable test_fp64_probe_cos
+[ 54%] Built target test_grouped_agg_workspace
+[ 55%] Built target test_hashagg_spatial_matrix
+[ 55%] Linking CXX executable test_fp64_probe_asin
+[ 56%] Linking CXX executable test_oom_invariant
+[ 58%] Linking CXX executable test_sycl_basic
+[ 59%] Linking CXX executable test_fp64_mul_probe
+[ 59%] Linking CXX executable test_fp64_probe_haversine
+[ 60%] Linking CXX executable test_fp64_probe_mul
+[ 61%] Built target test_spatial
+[ 62%] Built target test_reduce_matrix
+[ 63%] Built target test_bbox
+[ 64%] Linking CXX executable test_spatial_bench
+[ 65%] Built target test_spatial_resident
+[ 65%] Built target test_expr_memory
+[ 66%] Linking CXX executable test_expr_vm_matrix
+[ 67%] Built target test_spatial_pairwise_boundary
+[ 67%] Built target test_hash_agg_partial
+[ 68%] Built target test_fork_warmed
+[ 69%] Built target test_reduce_minimal
+[ 70%] Built target test_fork_cold
+[ 71%] Built target test_hash_agg_keys
+[ 72%] Built target test_kernel_failure_status
+[ 73%] Built target test_fork
+[ 74%] Built target test_host_api_contract
+[ 75%] Built target test_h3
+[ 76%] Built target test_hash_domain_matrix
+[ 76%] Built target test_raster_resident
+[ 77%] Built target test_spatial_dispatch
+[ 78%] Built target test_reduce_bool_bit
+[ 79%] Built target test_grouped_agg_hash
+[ 80%] Built target test_fork_cold_barrier
+[ 81%] Built target test_grouped_agg
+[ 83%] Built target test_hash_join
+[ 82%] Built target test_exec_gpu
+[ 84%] Built target test_correctness
+[ 85%] Built target test_reduce_stats
+[ 86%] Built target test_fork_archive_stress
+[ 86%] Built target test_spatial_bench
+[ 86%] Built target test_oom_invariant
+[ 87%] Built target test_expr_vm_matrix
+[ 88%] Built target test_device
+[ 89%] Built target test_fp64_probe_cos
+[ 90%] Built target test_scalar
+[ 91%] Built target test_fp64_probe_atan2
+[ 93%] Built target test_ooo_overlap
+[ 94%] Built target test_fp64_probe_sqrt
+[ 95%] Built target test_fp64_probe_add
+[ 96%] Built target test_sycl_basic
+[ 97%] Built target test_fp64_probe_sin
+[ 97%] Built target test_fp64_probe_haversine
+[ 97%] Built target test_fp64_mul_probe
+[ 98%] Built target test_fp64_probe_asin
+[ 99%] Built target test_fp64_probe_mul
+[100%] Linking CXX executable test_join_rows
+[100%] Built target test_join_rows

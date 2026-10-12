@@ -50,6 +50,26 @@ impl HookContext {
             return None;
         }
 
+        // Preloading installs hooks cluster-wide, but extension SQL objects
+        // exist only in databases that ran CREATE EXTENSION. Never admit a
+        // resident plan without that database-local installation, or while an
+        // extension script can expose an incomplete catalog. PostgreSQL's own
+        // syscache handles CREATE/DROP/rollback invalidation; do not cache this
+        // Boolean independently in a backend or in the structural decline cache.
+        // SAFETY: planner hooks run on the backend main thread in a transaction.
+        let creating = unsafe { pg_sys::creating_extension };
+        // SAFETY: static NUL-terminated name; missing_ok preserves native SQL
+        // in databases where only the shared library has been preloaded.
+        let installed = !creating
+            && unsafe { pg_sys::get_extension_oid(c"pg_accel".as_ptr(), true) }
+                != pg_sys::InvalidOid;
+        if let Some(reason) = extension_catalog_rejection(installed, creating) {
+            context.reject(reason);
+            stats::increment_planner_rejected(reason.stats_key(), 0);
+            stats::record_planner_fast_decline(reason.stats_key());
+            return None;
+        }
+
         Some(context)
     }
 
@@ -119,6 +139,16 @@ impl HookContext {
     }
 }
 
+const fn extension_catalog_rejection(installed: bool, creating: bool) -> Option<RejectionReason> {
+    if creating {
+        Some(RejectionReason::ExtensionCatalogInTransition)
+    } else if !installed {
+        Some(RejectionReason::ExtensionNotInstalled)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +158,25 @@ mod tests {
         let context = HookContext::new("upper_paths", "GpuAgg");
 
         assert_eq!(context.last_decision(), None);
+    }
+
+    #[test]
+    fn preloading_does_not_authorize_database_local_paths() {
+        for (installed, creating, reason) in [
+            (false, false, Some(RejectionReason::ExtensionNotInstalled)),
+            (
+                false,
+                true,
+                Some(RejectionReason::ExtensionCatalogInTransition),
+            ),
+            (
+                true,
+                true,
+                Some(RejectionReason::ExtensionCatalogInTransition),
+            ),
+            (true, false, None),
+        ] {
+            assert_eq!(extension_catalog_rejection(installed, creating), reason);
+        }
     }
 }

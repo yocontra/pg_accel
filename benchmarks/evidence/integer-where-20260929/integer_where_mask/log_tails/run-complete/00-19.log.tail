@@ -1,0 +1,921 @@
+source: /Users/contra/.pgrx/19.log
+tail_bytes: 65536
+---
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: '||CASE WHEN outputs IN ('count(v) c','count(*) n') AND restriction=' WHERE b' THEN 'parallel_dense_count' ELSE 'parallel_dense_integer' END IN plan)=0) THEN
+	                RAISE EXCEPTION '121 missing normal integer dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _integer_where_expected,_integer_where_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 15:08:25.391 MST [35037] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 15:08:25.391 MST [35037] CONTEXT:  SQL statement "CREATE TEMP TABLE _integer_where_actual AS SELECT g,sum(qty) q,avg(v) a,count(*) n FROM _integer_where_agg WHERE v BETWEEN -10 AND 10 OR v IN (-5000,5000,NULL) GROUP BY g"
+	PL/pgSQL function inline_code_block line 34 at EXECUTE
+2026-09-29 15:08:25.391 MST [35037] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_integer_where_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY[' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL',
+	          ' WHERE v<-3000 OR v>3000',
+	          ' WHERE v BETWEEN -10 AND 10 OR v IN (-5000,5000,NULL)'] LOOP
+	        FOREACH outputs IN ARRAY ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) n',
+	            'sum(v) FILTER (WHERE v>0) s,count(w) FILTER (WHERE v IN (-5000,0,5000,NULL)) c',
+	            'count(v) c', 'count(*) n'
+	        ] LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _integer_where_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _integer_where_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _integer_where_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_expected nr)) THEN
+	                RAISE EXCEPTION '121 exact integer SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: '||CASE WHEN outputs IN ('count(v) c','count(*) n') AND restriction=' WHERE b' THEN 'parallel_dense_count' ELSE 'parallel_dense_integer' END IN plan)=0) THEN
+	                RAISE EXCEPTION '121 missing normal integer dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _integer_where_expected,_integer_where_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 15:08:25.392 MST [35037] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 15:08:25.392 MST [35037] CONTEXT:  SQL statement "CREATE TEMP TABLE _integer_where_actual AS SELECT g,sum(qty) q,avg(v) a,count(*) n FROM _integer_where_agg WHERE v BETWEEN -10 AND 10 OR v IN (-5000,5000,NULL) GROUP BY g"
+	PL/pgSQL function inline_code_block line 34 at EXECUTE
+2026-09-29 15:08:25.392 MST [35037] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_integer_where_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY[' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL',
+	          ' WHERE v<-3000 OR v>3000',
+	          ' WHERE v BETWEEN -10 AND 10 OR v IN (-5000,5000,NULL)'] LOOP
+	        FOREACH outputs IN ARRAY ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) n',
+	            'sum(v) FILTER (WHERE v>0) s,count(w) FILTER (WHERE v IN (-5000,0,5000,NULL)) c',
+	            'count(v) c', 'count(*) n'
+	        ] LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _integer_where_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _integer_where_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _integer_where_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_expected nr)) THEN
+	                RAISE EXCEPTION '121 exact integer SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: '||CASE WHEN outputs IN ('count(v) c','count(*) n') AND restriction=' WHERE b' THEN 'parallel_dense_count' ELSE 'parallel_dense_integer' END IN plan)=0) THEN
+	                RAISE EXCEPTION '121 missing normal integer dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _integer_where_expected,_integer_where_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 15:08:25.478 MST [35037] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 15:08:25.478 MST [35037] CONTEXT:  SQL statement "CREATE TEMP TABLE _integer_where_actual AS SELECT g,sum(v) FILTER (WHERE v>0) s,count(w) FILTER (WHERE v IN (-5000,0,5000,NULL)) c FROM _integer_where_agg WHERE v BETWEEN -10 AND 10 OR v IN (-5000,5000,NULL) GROUP BY g"
+	PL/pgSQL function inline_code_block line 34 at EXECUTE
+2026-09-29 15:08:25.478 MST [35037] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_integer_where_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY[' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL',
+	          ' WHERE v<-3000 OR v>3000',
+	          ' WHERE v BETWEEN -10 AND 10 OR v IN (-5000,5000,NULL)'] LOOP
+	        FOREACH outputs IN ARRAY ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) n',
+	            'sum(v) FILTER (WHERE v>0) s,count(w) FILTER (WHERE v IN (-5000,0,5000,NULL)) c',
+	            'count(v) c', 'count(*) n'
+	        ] LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _integer_where_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _integer_where_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _integer_where_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_expected nr)) THEN
+	                RAISE EXCEPTION '121 exact integer SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: '||CASE WHEN outputs IN ('count(v) c','count(*) n') AND restriction=' WHERE b' THEN 'parallel_dense_count' ELSE 'parallel_dense_integer' END IN plan)=0) THEN
+	                RAISE EXCEPTION '121 missing normal integer dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _integer_where_expected,_integer_where_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 15:08:25.485 MST [35037] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 15:08:25.485 MST [35037] CONTEXT:  SQL statement "SELECT GREATEST(reltuples, 0)::float8 FROM pg_catalog.pg_class WHERE oid = 471349::oid"
+	PL/pgSQL function inline_code_block line 42 at FOR over EXECUTE statement
+2026-09-29 15:08:25.485 MST [35037] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_integer_where_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY[' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL',
+	          ' WHERE v<-3000 OR v>3000',
+	          ' WHERE v BETWEEN -10 AND 10 OR v IN (-5000,5000,NULL)'] LOOP
+	        FOREACH outputs IN ARRAY ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) n',
+	            'sum(v) FILTER (WHERE v>0) s,count(w) FILTER (WHERE v IN (-5000,0,5000,NULL)) c',
+	            'count(v) c', 'count(*) n'
+	        ] LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _integer_where_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _integer_where_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _integer_where_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_expected nr)) THEN
+	                RAISE EXCEPTION '121 exact integer SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: '||CASE WHEN outputs IN ('count(v) c','count(*) n') AND restriction=' WHERE b' THEN 'parallel_dense_count' ELSE 'parallel_dense_integer' END IN plan)=0) THEN
+	                RAISE EXCEPTION '121 missing normal integer dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _integer_where_expected,_integer_where_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 15:08:25.556 MST [35037] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 15:08:25.556 MST [35037] CONTEXT:  SQL statement "CREATE TEMP TABLE _integer_where_expected AS SELECT g,count(v) c FROM _integer_where_agg WHERE v BETWEEN -10 AND 10 OR v IN (-5000,5000,NULL) GROUP BY g"
+	PL/pgSQL function inline_code_block line 31 at EXECUTE
+2026-09-29 15:08:25.556 MST [35037] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_integer_where_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY[' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL',
+	          ' WHERE v<-3000 OR v>3000',
+	          ' WHERE v BETWEEN -10 AND 10 OR v IN (-5000,5000,NULL)'] LOOP
+	        FOREACH outputs IN ARRAY ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) n',
+	            'sum(v) FILTER (WHERE v>0) s,count(w) FILTER (WHERE v IN (-5000,0,5000,NULL)) c',
+	            'count(v) c', 'count(*) n'
+	        ] LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _integer_where_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _integer_where_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _integer_where_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_expected nr)) THEN
+	                RAISE EXCEPTION '121 exact integer SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: '||CASE WHEN outputs IN ('count(v) c','count(*) n') AND restriction=' WHERE b' THEN 'parallel_dense_count' ELSE 'parallel_dense_integer' END IN plan)=0) THEN
+	                RAISE EXCEPTION '121 missing normal integer dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _integer_where_expected,_integer_where_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 15:08:25.565 MST [35037] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 15:08:25.565 MST [35037] CONTEXT:  SQL statement "CREATE TEMP TABLE _integer_where_actual AS SELECT g,count(v) c FROM _integer_where_agg WHERE v BETWEEN -10 AND 10 OR v IN (-5000,5000,NULL) GROUP BY g"
+	PL/pgSQL function inline_code_block line 34 at EXECUTE
+2026-09-29 15:08:25.565 MST [35037] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_integer_where_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY[' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL',
+	          ' WHERE v<-3000 OR v>3000',
+	          ' WHERE v BETWEEN -10 AND 10 OR v IN (-5000,5000,NULL)'] LOOP
+	        FOREACH outputs IN ARRAY ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) n',
+	            'sum(v) FILTER (WHERE v>0) s,count(w) FILTER (WHERE v IN (-5000,0,5000,NULL)) c',
+	            'count(v) c', 'count(*) n'
+	        ] LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _integer_where_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _integer_where_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _integer_where_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_expected nr)) THEN
+	                RAISE EXCEPTION '121 exact integer SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: '||CASE WHEN outputs IN ('count(v) c','count(*) n') AND restriction=' WHERE b' THEN 'parallel_dense_count' ELSE 'parallel_dense_integer' END IN plan)=0) THEN
+	                RAISE EXCEPTION '121 missing normal integer dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _integer_where_expected,_integer_where_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 15:08:25.641 MST [35037] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 15:08:25.641 MST [35037] CONTEXT:  SQL statement "CREATE TEMP TABLE _integer_where_expected AS SELECT g,count(*) n FROM _integer_where_agg WHERE v BETWEEN -10 AND 10 OR v IN (-5000,5000,NULL) GROUP BY g"
+	PL/pgSQL function inline_code_block line 31 at EXECUTE
+2026-09-29 15:08:25.641 MST [35037] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_integer_where_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY[' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL',
+	          ' WHERE v<-3000 OR v>3000',
+	          ' WHERE v BETWEEN -10 AND 10 OR v IN (-5000,5000,NULL)'] LOOP
+	        FOREACH outputs IN ARRAY ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) n',
+	            'sum(v) FILTER (WHERE v>0) s,count(w) FILTER (WHERE v IN (-5000,0,5000,NULL)) c',
+	            'count(v) c', 'count(*) n'
+	        ] LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _integer_where_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _integer_where_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _integer_where_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_expected nr)) THEN
+	                RAISE EXCEPTION '121 exact integer SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: '||CASE WHEN outputs IN ('count(v) c','count(*) n') AND restriction=' WHERE b' THEN 'parallel_dense_count' ELSE 'parallel_dense_integer' END IN plan)=0) THEN
+	                RAISE EXCEPTION '121 missing normal integer dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _integer_where_expected,_integer_where_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 15:08:25.649 MST [35037] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 15:08:25.649 MST [35037] CONTEXT:  SQL statement "CREATE TEMP TABLE _integer_where_actual AS SELECT g,count(*) n FROM _integer_where_agg WHERE v BETWEEN -10 AND 10 OR v IN (-5000,5000,NULL) GROUP BY g"
+	PL/pgSQL function inline_code_block line 34 at EXECUTE
+2026-09-29 15:08:25.649 MST [35037] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_integer_where_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY[' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL',
+	          ' WHERE v<-3000 OR v>3000',
+	          ' WHERE v BETWEEN -10 AND 10 OR v IN (-5000,5000,NULL)'] LOOP
+	        FOREACH outputs IN ARRAY ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) n',
+	            'sum(v) FILTER (WHERE v>0) s,count(w) FILTER (WHERE v IN (-5000,0,5000,NULL)) c',
+	            'count(v) c', 'count(*) n'
+	        ] LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _integer_where_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _integer_where_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _integer_where_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_expected nr)) THEN
+	                RAISE EXCEPTION '121 exact integer SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: '||CASE WHEN outputs IN ('count(v) c','count(*) n') AND restriction=' WHERE b' THEN 'parallel_dense_count' ELSE 'parallel_dense_integer' END IN plan)=0) THEN
+	                RAISE EXCEPTION '121 missing normal integer dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _integer_where_expected,_integer_where_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 15:08:25.655 MST [35037] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 15:08:25.655 MST [35037] CONTEXT:  SQL statement "SELECT GREATEST(reltuples, 0)::float8 FROM pg_catalog.pg_class WHERE oid = 471349::oid"
+	PL/pgSQL function inline_code_block line 42 at FOR over EXECUTE statement
+2026-09-29 15:08:25.655 MST [35037] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_integer_where_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY[' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL',
+	          ' WHERE v<-3000 OR v>3000',
+	          ' WHERE v BETWEEN -10 AND 10 OR v IN (-5000,5000,NULL)'] LOOP
+	        FOREACH outputs IN ARRAY ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) n',
+	            'sum(v) FILTER (WHERE v>0) s,count(w) FILTER (WHERE v IN (-5000,0,5000,NULL)) c',
+	            'count(v) c', 'count(*) n'
+	        ] LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _integer_where_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _integer_where_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _integer_where_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_expected nr)) THEN
+	                RAISE EXCEPTION '121 exact integer SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: '||CASE WHEN outputs IN ('count(v) c','count(*) n') AND restriction=' WHERE b' THEN 'parallel_dense_count' ELSE 'parallel_dense_integer' END IN plan)=0) THEN
+	                RAISE EXCEPTION '121 missing normal integer dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _integer_where_expected,_integer_where_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 15:08:25.751 MST [35037] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 15:08:25.751 MST [35037] CONTEXT:  SQL statement "CREATE TEMP TABLE _integer_where_expected AS SELECT g,h,count(*) n,sum(v) s,avg(v) a,count(v) c FROM _integer_where_agg WHERE g IN (0,2) GROUP BY g,h"
+	PL/pgSQL function inline_code_block line 31 at EXECUTE
+2026-09-29 15:08:25.751 MST [35037] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_integer_where_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY[' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL',
+	          ' WHERE v<-3000 OR v>3000',
+	          ' WHERE v BETWEEN -10 AND 10 OR v IN (-5000,5000,NULL)'] LOOP
+	        FOREACH outputs IN ARRAY ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) n',
+	            'sum(v) FILTER (WHERE v>0) s,count(w) FILTER (WHERE v IN (-5000,0,5000,NULL)) c',
+	            'count(v) c', 'count(*) n'
+	        ] LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _integer_where_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _integer_where_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _integer_where_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_expected nr)) THEN
+	                RAISE EXCEPTION '121 exact integer SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: '||CASE WHEN outputs IN ('count(v) c','count(*) n') AND restriction=' WHERE b' THEN 'parallel_dense_count' ELSE 'parallel_dense_integer' END IN plan)=0) THEN
+	                RAISE EXCEPTION '121 missing normal integer dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _integer_where_expected,_integer_where_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 15:08:25.766 MST [35037] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 15:08:25.766 MST [35037] CONTEXT:  SQL statement "CREATE TEMP TABLE _integer_where_actual AS SELECT g,h,count(*) n,sum(v) s,avg(v) a,count(v) c FROM _integer_where_agg WHERE g IN (0,2) GROUP BY g,h"
+	PL/pgSQL function inline_code_block line 34 at EXECUTE
+2026-09-29 15:08:25.766 MST [35037] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_integer_where_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY[' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL',
+	          ' WHERE v<-3000 OR v>3000',
+	          ' WHERE v BETWEEN -10 AND 10 OR v IN (-5000,5000,NULL)'] LOOP
+	        FOREACH outputs IN ARRAY ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) n',
+	            'sum(v) FILTER (WHERE v>0) s,count(w) FILTER (WHERE v IN (-5000,0,5000,NULL)) c',
+	            'count(v) c', 'count(*) n'
+	        ] LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _integer_where_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _integer_where_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _integer_where_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_expected nr)) THEN
+	                RAISE EXCEPTION '121 exact integer SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: '||CASE WHEN outputs IN ('count(v) c','count(*) n') AND restriction=' WHERE b' THEN 'parallel_dense_count' ELSE 'parallel_dense_integer' END IN plan)=0) THEN
+	                RAISE EXCEPTION '121 missing normal integer dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _integer_where_expected,_integer_where_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 15:08:25.766 MST [35037] LOG:  out of file descriptors: Too many open files; release and retry
+2026-09-29 15:08:25.766 MST [35037] CONTEXT:  SQL statement "CREATE TEMP TABLE _integer_where_actual AS SELECT g,h,count(*) n,sum(v) s,avg(v) a,count(v) c FROM _integer_where_agg WHERE g IN (0,2) GROUP BY g,h"
+	PL/pgSQL function inline_code_block line 34 at EXECUTE
+2026-09-29 15:08:25.766 MST [35037] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_integer_where_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY[' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL',
+	          ' WHERE v<-3000 OR v>3000',
+	          ' WHERE v BETWEEN -10 AND 10 OR v IN (-5000,5000,NULL)'] LOOP
+	        FOREACH outputs IN ARRAY ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) n',
+	            'sum(v) FILTER (WHERE v>0) s,count(w) FILTER (WHERE v IN (-5000,0,5000,NULL)) c',
+	            'count(v) c', 'count(*) n'
+	        ] LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _integer_where_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _integer_where_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _integer_where_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_expected nr)) THEN
+	                RAISE EXCEPTION '121 exact integer SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: '||CASE WHEN outputs IN ('count(v) c','count(*) n') AND restriction=' WHERE b' THEN 'parallel_dense_count' ELSE 'parallel_dense_integer' END IN plan)=0) THEN
+	                RAISE EXCEPTION '121 missing normal integer dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _integer_where_expected,_integer_where_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/3145246316047114048.4207963735265050452.metalar.35037.16517137345408601864.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mmetal_code_object: cannot open staged archive /Users/contra/.acpp/apps/global/jit-cache/3145246316047114048.4207963735265050452.metalar.35037.16517137345408601864.tmp for validation: Too many open files
+[1;31m[AdaptiveCpp Error] [0mfrom /Users/contra/Projects/pg_accel/.pgaccel/src/AdaptiveCpp/src/runtime/metal/metal_code_object.cpp:831 @ get_or_create_kernel_pipeline(): metal: Failed to create compute pipeline state after bounded retries: Unable to reach MTLCompilerService. The process is unavailable because the compiler is no longer active. Latest invalidation reason: Connection init failed at lookup with error 3 - No such process
+pgaccel: async SYCL error: from /Users/contra/Projects/pg_accel/.pgaccel/src/AdaptiveCpp/src/runtime/metal/metal_code_object.cpp:831 @ get_or_create_kernel_pipeline(): metal: Failed to create compute pipeline state after bounded retries: Unable to reach MTLCompilerService. The process is unavailable because the compiler is no longer active. Latest invalidation reason: Connection init failed at lookup with error 3 - No such process
+pgaccel: pgaccel_grouped_agg_execute_ex: GPU kernel failure: from /Users/contra/Projects/pg_accel/.pgaccel/src/AdaptiveCpp/src/runtime/metal/metal_code_object.cpp:831 @ get_or_create_kernel_pipeline(): metal: Failed to create compute pipeline state after bounded retries: Unable to reach MTLCompilerService. The process is unavailable because the compiler is no longer active. Latest invalidation reason: Connection init failed at lookup with error 3 - No such process
+2026-09-29T22:08:26.212759Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-29 15:08:26.214 MST [35037] ERROR:  pg_accel: generic aggregate dispatch failed (grouped chunk kernel failed: GPU grouped_agg kernel(grouped_agg_execute) failed with execution_failed); refusing CPU fallback
+2026-09-29 15:08:26.214 MST [35037] CONTEXT:  SQL statement "CREATE TEMP TABLE _integer_where_actual AS SELECT g,h,count(*) n,sum(v) s,avg(v) a,count(v) c FROM _integer_where_agg WHERE g IN (0,2) GROUP BY g,h"
+	PL/pgSQL function inline_code_block line 34 at EXECUTE
+2026-09-29 15:08:26.214 MST [35037] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    outputs text;
+	    restriction text;
+	    query text;
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_integer_where_agg'::regclass,ARRAY['id','g','h','k','v','w','qty','b']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH restriction IN ARRAY ARRAY[' WHERE g IN (0,2)',
+	          ' WHERE id>=250000 AND id<=750003',' WHERE NOT (g=1 OR g=3)',
+	          ' WHERE g<0',' WHERE b',' WHERE g IS NOT NULL',
+	          ' WHERE v<-3000 OR v>3000',
+	          ' WHERE v BETWEEN -10 AND 10 OR v IN (-5000,5000,NULL)'] LOOP
+	        FOREACH outputs IN ARRAY ARRAY[
+	            'count(*) n,sum(v) s,avg(v) a,count(v) c',
+	            'sum(qty) q,avg(v) a,count(*) n',
+	            'sum(v) FILTER (WHERE v>0) s,count(w) FILTER (WHERE v IN (-5000,0,5000,NULL)) c',
+	            'count(v) c', 'count(*) n'
+	        ] LOOP
+	            query := 'SELECT ' || CASE WHEN keys='' THEN '' ELSE keys||',' END || outputs ||
+	                ' FROM _integer_where_agg' || restriction || CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _integer_where_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _integer_where_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _integer_where_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _integer_where_expected nr)) THEN
+	                RAISE EXCEPTION '121 exact integer SQL mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: '||CASE WHEN outputs IN ('count(v) c','count(*) n') AND restriction=' WHERE b' THEN 'parallel_dense_count' ELSE 'parallel_dense_integer' END IN plan)=0) THEN
+	                RAISE EXCEPTION '121 missing normal integer dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _integer_where_expected,_integer_where_actual;
+	        END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 15:09:26.812 MST [34287] LOG:  received fast shutdown request
+2026-09-29 15:09:26.812 MST [34287] LOG:  aborting any active transactions
+2026-09-29 15:09:26.814 MST [34287] LOG:  background worker "logical replication launcher" (PID 34309) exited with exit code 1
+2026-09-29 15:09:26.814 MST [34304] LOG:  shutting down
+2026-09-29 15:09:26.814 MST [34304] LOG:  checkpoint starting: shutdown fast
+2026-09-29 15:09:26.827 MST [34304] LOG:  checkpoint complete: shutdown fast: wrote 126 buffers (0.8%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.002 s, sync=0.011 s, total=0.014 s; sync files=43, longest=0.002 s, average=0.001 s; distance=1774 kB, estimate=1774 kB; lsn=1/0A8ABC80, redo lsn=1/0A8ABC80
+2026-09-29 15:09:26.830 MST [34287] LOG:  database system is shut down
+2026-09-29 15:09:26.929 MST [37498] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-09-29 15:09:26.929 MST [37498] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-09-29 15:09:26.931 MST [37498] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-09-29 15:09:26.932 MST [37498] LOG:  listening on IPv6 address "::", port 28819
+2026-09-29 15:09:26.932 MST [37498] LOG:  listening on IPv4 address "0.0.0.0", port 28819
+2026-09-29 15:09:26.933 MST [37498] LOG:  listening on Unix socket "/Users/contra/.pgrx/.s.PGSQL.28819"
+2026-09-29 15:09:26.936 MST [37503] LOG:  database system was shut down at 2026-09-29 15:09:26 MST
+2026-09-29 15:09:26.937 MST [37498] LOG:  database system is ready to accept connections
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/3145246316047114048.4207963735265050452.metalar.37520.11641875658221971447.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.7257803687367809543.metalar.37520.13225579924178378443.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.2396619832608185849.metalar.37520.13129553807724173429.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.18142089109080253659.metalar.37520.15643413091624273582.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/13998301624069339470.4207963735265050452.metalar.37520.14861320807396245556.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.4960075443637320037.metalar.37520.3964540964972576622.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16305509567563257642.13989030666434936551.metalar.37520.13985537252021444900.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10244442864516165838.698130156320828772.metalar.37874.6693692973986106834.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14640837531610470134.8780090502809704196.metalar.38003.6003626231858769745.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.17924979366636779458.metalar.38066.10181061986460621388.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16555657627412307434.4207963735265050452.metalar.38066.14423446228272241224.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.13473775529383411726.metalar.38066.9817039234935819535.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.1733517338063781522.metalar.38066.4781110333906688434.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/13810581291822887598.4207963735265050452.metalar.38066.17630949631040476634.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.4418692573012420907.metalar.38066.13467855657269827030.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.7555066969494305535.metalar.38066.1482780187522435533.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/17931957249611448910.15271132305240997245.metalar.38353.10124594348019179475.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12987165404132410296.16135683865573851146.metalar.38353.8626885549076724306.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/3160902903123664528.2616460375883204787.metalar.38353.14507598739458169885.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6518678064586571790.16863314113480671605.metalar.38353.16313072534699809492.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.9623768012548848410.metalar.38353.6233612281497445413.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.853711319059894491.metalar.38353.11214187156374265216.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/9877590589045929008.2367417023514701987.metalar.38353.7467513054717650473.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/11685831682742932446.14828399318102547589.metalar.38645.12467227891717355056.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14286325069952665006.17187113931897904785.metalar.38645.12039615965183898670.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12970380103121138026.4207963735265050452.metalar.38737.16313804983710681971.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14335368489825160388.8780090502809704196.metalar.38792.18245323992310574131.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.8976452323020287449.metalar.38792.9763521743845268623.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.5764482677415676145.metalar.39011.4364453428120055036.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/5436284986568462560.2367417023514701987.metalar.39077.2568332420237916389.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10900195627355951314.4207963735265050452.metalar.39077.9893447751422451015.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15645957498266366212.8753726747376668041.metalar.39077.4507283885044028991.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/9620746525974980842.4207963735265050452.metalar.39077.2904474850615877237.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.674763174676644128.metalar.39077.13637714792218187001.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/17815961567180993092.4207963735265050452.metalar.39077.11488102456048672612.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.17121982386026710891.metalar.39077.18291124047356262697.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/9636036650450711250.4207963735265050452.metalar.39077.5047878721016992879.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.8753726747376668041.metalar.39077.6321001259166228510.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15589476389351072860.5966602613203382355.metalar.40050.11909302139791087190.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15389087124731617784.1122049033085418169.metalar.40050.2754948298885453879.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15386323514753433198.5966602613203382355.metalar.40050.14097627196333008881.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/5056334624264330138.17187113931897904785.metalar.40204.11809949326420572302.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10389901486272287036.11666901614963396266.metalar.40204.11496067664379030430.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4420839391651046406.2529528024525715034.metalar.40204.8123240270790183617.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/2993083400042206172.4207963735265050452.metalar.40729.10037885912473844544.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.1569561639427529153.metalar.41041.5745583502625742873.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10244442864516165838.16304117098114763552.metalar.41041.1288874955197291781.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.7982247166132444805.metalar.41041.6898511817564405505.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.16092266504794182207.metalar.41193.3101828608636176449.tmp (kernels_added=1 skipped=0)
+2026-09-29 15:14:26.073 MST [37501] LOG:  checkpoint starting: time
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.14165476072908055785.metalar.41193.2220505067953819616.tmp (kernels_added=1 skipped=0)
+2026-09-29 15:14:33.886 MST [41386] ERROR:  96 and_range FAILED: exact reason shape_multiple_range_predicates was not recorded; plan:
+	        Buffers: local read=2073 written=1
+	        Filter: ((_decline_scalar.price >= 200) AND (_decline_scalar.price <= 800) AND (_decline_scalar.price >= 250))
+	        Output: g, price, quantity
+	        Rows Removed by Filter: 91914
+	  ->  Seq Scan on pg_temp._decline_scalar (actual rows=109110.00 loops=1)
+	  Batches: 1  Memory Usage: 32kB
+	  Buffers: local read=2073 written=1
+	  Group Key: _decline_scalar.g
+	  Output: g, sum((price * quantity)), count(*)
+	HashAggregate (actual rows=65.00 loops=1)
+2026-09-29 15:14:33.886 MST [41386] CONTEXT:  PL/pgSQL function pg_temp_82.decline_contract_ok(text,text,regclass,regclass,bigint,boolean) line 66 at RAISE
+	PL/pgSQL expression "NOT pg_temp.decline_contract_ok(
+	        'and_range', 'shape_multiple_range_predicates',
+	        '_decline_range_native', '_decline_range_enabled',
+	        (SELECT kernels FROM _decline_range_before)
+	    )"
+	PL/pgSQL function inline_code_block line 3 at IF
+2026-09-29 15:14:33.886 MST [41386] STATEMENT:  DO $$
+	BEGIN
+	    IF NOT pg_temp.decline_contract_ok(
+	        'and_range', 'shape_multiple_range_predicates',
+	        '_decline_range_native', '_decline_range_enabled',
+	        (SELECT kernels FROM _decline_range_before)
+	    ) THEN
+	        RAISE EXCEPTION '96 and-range contract returned false';
+	    END IF;
+	END $$;
+2026-09-29 15:14:34.661 MST [41393] ERROR:  97 range adjacent contract FAILED: selected/dispatched (kernels 2 -> 3, stock 0)
+2026-09-29 15:14:34.661 MST [41393] CONTEXT:  PL/pgSQL function inline_code_block line 52 at RAISE
+2026-09-29 15:14:34.661 MST [41393] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu boolean;
+	    kernels_before bigint;
+	    kernels_after bigint;
+	    stock_after bigint;
+	    serial_declines bigint;
+	    multi_declines bigint;
+	    plan_row record;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    PERFORM pg_accel_reset_stats();
+	    SELECT pg_accel_kernel_executions() INTO STRICT kernels_before;
+	
+	    FOR plan_row IN
+	        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+	        SELECT product_id, sum(price * quantity), count(*)
+	        FROM _range_contract
+	        WHERE price >= 200
+	        GROUP BY product_id
+	    LOOP
+	        INSERT INTO _range_plan VALUES ('one_sided', plan_row."QUERY PLAN");
+	    END LOOP;
+	    FOR plan_row IN
+	        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+	        SELECT product_id, sum(price * quantity), count(*)
+	        FROM _range_contract
+	        WHERE quantity >= 2 AND quantity <= 8
+	        GROUP BY product_id
+	    LOOP
+	        INSERT INTO _range_plan VALUES ('rhs_range', plan_row."QUERY PLAN");
+	    END LOOP;
+	    FOR plan_row IN
+	        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+	        SELECT product_id, sum(price * quantity), count(*)
+	        FROM _range_contract
+	        WHERE price >= 200 AND price <= 800 AND price >= 250
+	        GROUP BY product_id
+	    LOOP
+	        INSERT INTO _range_plan VALUES ('third_bound', plan_row."QUERY PLAN");
+	    END LOOP;
+	
+	    SELECT pg_accel_kernel_executions() INTO STRICT kernels_after;
+	    SELECT stock_exec_count INTO STRICT stock_after FROM pg_accel_stats();
+	    SELECT pg_accel_planner_rejection_count('generic_serial_kernel_mode_unqualified')
+	    INTO STRICT serial_declines;
+	    SELECT pg_accel_planner_rejection_count('shape_multiple_range_predicates')
+	    INTO STRICT multi_declines;
+	    IF EXISTS (
+	        SELECT 1 FROM _range_plan WHERE line LIKE '%Custom Scan (%GpuAccel%'
+	    ) OR kernels_after <> kernels_before OR stock_after <> 0 THEN
+	        RAISE EXCEPTION
+	            '97 range adjacent contract FAILED: selected/dispatched (kernels % -> %, stock %)',
+	            kernels_before, kernels_after, stock_after;
+	    END IF;
+	    IF has_gpu AND (serial_declines < 2 OR multi_declines < 1) THEN
+	        RAISE EXCEPTION
+	            '97 range adjacent contract FAILED: decline counts serial %, multiple %',
+	            serial_declines, multi_declines;
+	    END IF;
+	END $$;
+2026-09-29 15:16:01.454 MST [37501] LOG:  checkpoint complete: time: wrote 76 buffers (0.5%), wrote 4 SLRU buffers; 0 WAL file(s) added, 2 removed, 0 recycled; write=95.363 s, sync=0.004 s, total=95.381 s; sync files=135, longest=0.001 s, average=0.001 s; distance=35217 kB, estimate=35217 kB; lsn=1/0CF54CE8, redo lsn=1/0CB100F0
+2026-09-29 15:19:26.454 MST [37501] LOG:  checkpoint starting: time
+2026-09-29 15:20:01.309 MST [37501] LOG:  checkpoint complete: time: wrote 343 buffers (2.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 1 removed, 0 recycled; write=34.848 s, sync=0.001 s, total=34.856 s; sync files=70, longest=0.001 s, average=0.001 s; distance=5058 kB, estimate=32201 kB; lsn=1/0D000A00, redo lsn=1/0D000968

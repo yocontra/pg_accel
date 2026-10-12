@@ -1,0 +1,8 @@
+PGACCEL_TEST_START name=test_scalar
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+Full CFG proof: 468 shared valid, 90 invalid programs passed
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/1323287583512253346.15374149992821018108.metalar.54974.4014566729591058106.tmp (kernels_added=1 skipped=0)
+SPG1: 4211 host/device cases passed (468 shared Rust oracle cases); no SQL admission
+PGACCEL_TEST_RESULT name=test_scalar exit_code=0 result=PASS raw_lines=6 body_sha256=3331f5a45b51960440e903a174c8b558f066dd0f016837dd5e65d78ed0d9b874 binding_sha256=a6b05d202966f113c6873cad9b8110af798da3f3876665a0d7d2a36e013ae92d

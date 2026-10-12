@@ -7,7 +7,10 @@
 
 pub mod abi;
 mod codec;
+pub mod join;
+pub mod join_reduce;
 mod projection;
+pub mod scalar;
 
 pub use codec::{
     AGG_QUERY_SPEC_HEADER_WORDS, AGG_QUERY_SPEC_MAX_WORDS, AGG_QUERY_SPEC_WIRE_MAGIC,
@@ -20,7 +23,7 @@ pub use projection::{
     MAX_AGG_OUTPUT_PROJECTION_SLOTS, ProjectionCodecError,
 };
 
-pub const AGG_QUERY_SPEC_VERSION: u32 = 3;
+pub const AGG_QUERY_SPEC_VERSION: u32 = 6;
 
 const MAX_BYTECODE_WORDS: usize = 65_536;
 const MAX_PROGRAM_INPUTS: usize = 64;
@@ -70,7 +73,7 @@ pub enum MaskKind {
     Recheck,
 }
 
-/// Stable spatial operation carried by AQS3.
+/// Stable spatial operation carried by AQS6.
 ///
 /// PostgreSQL function OIDs are catalog-local identifiers and are therefore
 /// deliberately excluded from the serialized contract. Planner extraction
@@ -86,6 +89,8 @@ pub enum SpatialPredicateKind {
     Touches,
     Crosses,
     Overlaps,
+    Covers,
+    CoveredBy,
 }
 
 /// Catalog-resolved PostGIS value family. This is stable across installations,
@@ -128,6 +133,12 @@ pub enum FilterSpec {
         input: ColumnRef,
         ranges: Vec<ScalarRange>,
     },
+    /// SQL TRUE for NULL inputs or any listed non-NULL INT4 interval.
+    /// An empty list represents IS NULL, not a disabled predicate.
+    NullOrRanges {
+        input: ColumnRef,
+        ranges: Vec<ScalarRange>,
+    },
     Mask {
         input: ColumnRef,
         kind: MaskKind,
@@ -141,6 +152,12 @@ pub enum FilterSpec {
         left: SpatialOperand,
         right: SpatialOperand,
         distance: Option<ScalarValue>,
+    },
+    /// Canonical bounded conjunction: one spatial predicate followed by one
+    /// exact INT4 range predicate. Nested conjunctions are not representable.
+    SpatialAnd {
+        spatial: Box<Self>,
+        scalar: Box<Self>,
     },
 }
 
@@ -199,6 +216,7 @@ pub struct GroupKeyRef {
 pub enum BinaryMeasureOp {
     Mul,
     Sub,
+    Add,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -446,8 +464,49 @@ fn validate_program(inputs: &[ColumnRef], program: &[i32]) -> Result<(), SpecVal
 }
 
 impl FilterSpec {
+    #[must_use]
+    pub fn range_parts(&self) -> Option<(ColumnRef, &[ScalarRange], bool)> {
+        match self {
+            Self::Ranges { input, ranges } => Some((*input, ranges, false)),
+            Self::NullOrRanges { input, ranges } => Some((*input, ranges, true)),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn spatial(&self) -> Option<&Self> {
+        match self {
+            Self::Spatial { .. } => Some(self),
+            Self::SpatialAnd { spatial, .. } => Some(spatial),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn scalar(&self) -> &Self {
+        match self {
+            Self::SpatialAnd { scalar, .. } => scalar,
+            _ => self,
+        }
+    }
+
     fn validate(&self) -> Result<(), SpecValidationError> {
         match self {
+            Self::SpatialAnd { spatial, scalar } => {
+                if !matches!(spatial.as_ref(), Self::Spatial { .. })
+                    || !(scalar
+                        .range_parts()
+                        .is_some_and(|(input, _, _)| input.type_oid == 23)
+                        || matches!(scalar.as_ref(), Self::Bytecode { program, .. }
+                            if scalar::ScalarProgram::validate_wire(program).is_ok_and(|proof|
+                                proof.result_type() == scalar::ScalarType::Bool
+                                    && proof.uses_predicate_mask())))
+                {
+                    return Err(SpecValidationError::new("invalid spatial conjunction"));
+                }
+                spatial.validate()?;
+                scalar.validate()
+            }
             Self::None => Ok(()),
             Self::Ranges { input, ranges } => {
                 input.validate()?;
@@ -459,8 +518,42 @@ impl FilterSpec {
                 }
                 Ok(())
             }
+            Self::NullOrRanges { input, ranges } => {
+                input.validate()?;
+                if input.type_oid != INT4OID
+                    || ranges.len() > abi::PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES
+                {
+                    return Err(SpecValidationError::new(
+                        "invalid NULL-accepting INT4 ranges",
+                    ));
+                }
+                for range in ranges {
+                    range.validate(input.type_oid)?;
+                }
+                Ok(())
+            }
             Self::Mask { input, .. } => input.validate(),
-            Self::Bytecode { inputs, program } => validate_program(inputs, program),
+            Self::Bytecode { inputs, program } => {
+                validate_program(inputs, program)?;
+                if program.first() == Some(&scalar::SCALAR_PROGRAM_MAGIC) {
+                    let proof = scalar::ScalarProgram::validate_wire(program)
+                        .map_err(|_| SpecValidationError::new("invalid SPG1 predicate"))?;
+                    if proof.result_type() != scalar::ScalarType::Bool
+                        || proof.inputs().len() != inputs.len()
+                        || inputs.iter().zip(proof.inputs()).any(|(input, kind)| {
+                            input.type_oid
+                                != match kind {
+                                    scalar::ScalarType::Bool => BOOLOID,
+                                    scalar::ScalarType::Int4 => INT4OID,
+                                    scalar::ScalarType::Date => DATEOID,
+                                }
+                        })
+                    {
+                        return Err(SpecValidationError::new("SPG1 predicate type mismatch"));
+                    }
+                }
+                Ok(())
+            }
             Self::Spatial {
                 predicate,
                 left,
@@ -503,12 +596,24 @@ impl FilterSpec {
         &self,
         relation_allowed: impl Fn(u32) -> bool,
     ) -> Result<(), SpecValidationError> {
+        self.validate_relation_scope_impl(&relation_allowed)
+    }
+
+    fn validate_relation_scope_impl(
+        &self,
+        relation_allowed: &dyn Fn(u32) -> bool,
+    ) -> Result<(), SpecValidationError> {
         self.validate()?;
         let valid = match self {
-            Self::None => true,
-            Self::Ranges { input, .. } | Self::Mask { input, .. } => {
-                relation_allowed(input.relation_oid)
+            Self::SpatialAnd { spatial, scalar } => {
+                spatial.validate_relation_scope_impl(relation_allowed)?;
+                scalar.validate_relation_scope_impl(relation_allowed)?;
+                true
             }
+            Self::None => true,
+            Self::Ranges { input, .. }
+            | Self::NullOrRanges { input, .. }
+            | Self::Mask { input, .. } => relation_allowed(input.relation_oid),
             Self::Bytecode { inputs, .. } => inputs
                 .iter()
                 .all(|input| relation_allowed(input.relation_oid)),
@@ -527,10 +632,14 @@ impl FilterSpec {
 
     fn references_relation(&self, relation_oid: u32) -> bool {
         match self {
-            Self::None => false,
-            Self::Ranges { input, .. } | Self::Mask { input, .. } => {
-                input.relation_oid == relation_oid
+            Self::SpatialAnd { spatial, scalar } => {
+                spatial.references_relation(relation_oid)
+                    || scalar.references_relation(relation_oid)
             }
+            Self::None => false,
+            Self::Ranges { input, .. }
+            | Self::NullOrRanges { input, .. }
+            | Self::Mask { input, .. } => input.relation_oid == relation_oid,
             Self::Bytecode { inputs, .. } => inputs
                 .iter()
                 .any(|input| input.relation_oid == relation_oid),
@@ -675,6 +784,33 @@ impl GroupKeyRef {
 }
 
 impl MeasureSpec {
+    /// COUNT(*) FILTER needs an always-non-NULL counter input; it must not
+    /// become COUNT(predicate_column) when accepted rows can have NULL input.
+    #[must_use]
+    pub fn filtered_count_input(&self) -> Option<ColumnRef> {
+        if self.expression != MeasureExpr::CountStar
+            || self.outputs.as_slice()
+                != [AggregateOutput {
+                    source: AggregateSource::Value,
+                    kind: AggregateKind::Count,
+                }]
+        {
+            return None;
+        }
+        self.filter
+            .range_parts()
+            .map(|(input, _, _)| input)
+            .filter(|input| input.type_oid == INT4OID)
+    }
+
+    /// INT8 SUM/AVG return NUMERIC, unlike widened INT2/INT4 sums. COUNT-only
+    /// INT8 retains its existing integer lane unless mixed with decimal work.
+    pub fn requires_numeric_accumulator(&self) -> bool {
+        matches!(self.expression, MeasureExpr::Column(column)
+            if column.type_oid == 1700 || (column.type_oid == INT8OID
+                && self.outputs.iter().any(|output| matches!(output.kind, AggregateKind::Sum | AggregateKind::Avg))))
+    }
+
     fn validate(&self, fact_rel: u32, dims: &[DimSpec]) -> Result<(), SpecValidationError> {
         if self.outputs.is_empty() || self.outputs.len() > MAX_AGGREGATE_OUTPUTS {
             return Err(SpecValidationError::new("invalid aggregate output count"));
@@ -720,6 +856,29 @@ impl MeasureSpec {
                 result_type_oid,
             } => {
                 validate_program(inputs, program)?;
+                // The existing envelope also carries dormant legacy programs.
+                // Only the explicitly versioned SPG1 measure language has this
+                // type proof. Do not apply it to H3 keys/filter bytecode.
+                if program.first() == Some(&scalar::SCALAR_PROGRAM_MAGIC) {
+                    let decoded = scalar::ScalarProgram::validate_wire(program)
+                        .map_err(|_| SpecValidationError::new("invalid SPG1 measure program"))?;
+                    let oid = |kind| match kind {
+                        scalar::ScalarType::Bool => BOOLOID,
+                        scalar::ScalarType::Int4 => INT4OID,
+                        scalar::ScalarType::Date => DATEOID,
+                    };
+                    if decoded.inputs().len() != inputs.len()
+                        || inputs
+                            .iter()
+                            .zip(decoded.inputs())
+                            .any(|(column, kind)| column.type_oid != oid(*kind))
+                        || *result_type_oid != oid(decoded.result_type())
+                    {
+                        return Err(SpecValidationError::new(
+                            "SPG1 measure binding type mismatch",
+                        ));
+                    }
+                }
                 if *result_type_oid == 0 {
                     return Err(SpecValidationError::new(
                         "bytecode measure has invalid result type",
@@ -932,6 +1091,103 @@ mod validation_edge_tests {
 
     fn error(result: Result<(), SpecValidationError>) -> &'static str {
         result.expect_err("case must be rejected").reason
+    }
+
+    #[test]
+    fn spg1_measure_envelope_roundtrips_and_validates_bound_types() {
+        use scalar::{ScalarInstruction as I, ScalarProgram, ScalarType as T};
+        for (types, result, code) in [
+            (
+                vec![T::Int4, T::Int4],
+                T::Int4,
+                vec![I::Input(0), I::Input(1), I::Add],
+            ),
+            (vec![T::Bool], T::Bool, vec![I::Input(0), I::Not]),
+            (vec![], T::Int4, vec![I::Int4(i32::MIN)]),
+            (vec![], T::Bool, vec![I::Null(T::Bool)]),
+        ] {
+            let oid = |kind| if kind == T::Int4 { INT4OID } else { BOOLOID };
+            let program = ScalarProgram::new(types.clone(), result, code)
+                .expect("SPG1 fixture")
+                .encode();
+            let measure = MeasureSpec {
+                expression: MeasureExpr::Bytecode {
+                    inputs: types
+                        .iter()
+                        .enumerate()
+                        .map(|(index, kind)| ColumnRef {
+                            relation_oid: 1,
+                            attno: index as i32 + 1,
+                            type_oid: oid(*kind),
+                        })
+                        .collect(),
+                    program: program.clone(),
+                    result_type_oid: oid(result),
+                },
+                outputs: vec![output(AggregateSource::Value, AggregateKind::Count)],
+                filter: FilterSpec::None,
+            };
+            let spec = AggQuerySpec {
+                fact_rel: 1,
+                group_keys: vec![],
+                measures: vec![measure.clone()],
+                fact_filter: FilterSpec::None,
+                star_dims: vec![],
+                having: None,
+            };
+            let wire = spec.encode_i32().expect("typed envelope encodes");
+            assert_eq!(
+                AggQuerySpec::decode_i32(&wire).expect("typed envelope decodes"),
+                spec
+            );
+            let start = wire
+                .iter()
+                .position(|word| *word == scalar::SCALAR_PROGRAM_MAGIC)
+                .expect("SPG1 header");
+            let mut broken = wire;
+            broken[start + 3 + types.len()] = 999;
+            assert!(
+                AggQuerySpec::decode_i32(&broken).is_err(),
+                "outer decoder must validate recognized program"
+            );
+            let mut wrong_result = measure.clone();
+            if let MeasureExpr::Bytecode {
+                result_type_oid, ..
+            } = &mut wrong_result.expression
+            {
+                *result_type_oid = INT8OID;
+            }
+            assert_eq!(
+                error(wrong_result.validate(1, &[])),
+                "SPG1 measure binding type mismatch"
+            );
+            let mut wrong_inputs = measure.clone();
+            if let MeasureExpr::Bytecode { inputs, .. } = &mut wrong_inputs.expression {
+                inputs.push(column(1, INT4OID));
+            }
+            assert_eq!(
+                error(wrong_inputs.validate(1, &[])),
+                "SPG1 measure binding type mismatch"
+            );
+            if !types.is_empty() {
+                let mut wrong_type = measure.clone();
+                if let MeasureExpr::Bytecode { inputs, .. } = &mut wrong_type.expression {
+                    inputs[0].type_oid = INT8OID;
+                }
+                assert_eq!(
+                    error(wrong_type.validate(1, &[])),
+                    "SPG1 measure binding type mismatch"
+                );
+            }
+            let mut malformed = measure;
+            if let MeasureExpr::Bytecode { program, .. } = &mut malformed.expression {
+                program.pop();
+            }
+            assert_eq!(
+                error(malformed.validate(1, &[])),
+                "invalid SPG1 measure program"
+            );
+        }
     }
 
     #[test]

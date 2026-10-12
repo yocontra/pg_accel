@@ -1,0 +1,100 @@
+=== pg_accel benchmark plans - captured once per workload/scale ===
+
+=== global_scalar_program @ rows=250000 ===
+Custom Scan (GpuAccelAgg)  (cost=5.00..4255.03 rows=1 width=64) (actual time=25.685..25.687 rows=1.00 loops=1)
+  Output: (sum(CASE WHEN (adjustment IS NULL) THEN price WHEN (price > 0) THEN ((price + adjustment) * (price - adjustment)) ELSE (COALESCE(price, 0) - adjustment) END)), (avg(CASE WHEN (adjustment IS NULL) THEN price WHEN (price > 0) THEN ((price + adjustment) * (price - adjustment)) ELSE (COALESCE(price, 0) - adjustment) END)), (count(CASE WHEN (adjustment IS NULL) THEN price WHEN (price > 0) THEN ((price + adjustment) * (price - adjustment)) ELSE (COALESCE(price, 0) - adjustment) END)), (min(CASE WHEN (adjustment IS NULL) THEN price WHEN (price > 0) THEN ((price + adjustment) * (price - adjustment)) ELSE (COALESCE(price, 0) - adjustment) END)), (max(CASE WHEN (adjustment IS NULL) THEN price WHEN (price > 0) THEN ((price + adjustment) * (price - adjustment)) ELSE (COALESCE(price, 0) - adjustment) END)), (count(*))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_integer
+  GPU Dispatched Physical Kernel Mode: parallel_dense_integer
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_ungrouped_aggregate
+  GPU Descriptor Specialization: dense_scalar_programs_plain
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=220 ephemeral_bytes=220 construction_time_us=1 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=0 ephemeral_build_launches=0 consumer_launches=1 budget_headroom_bytes=8587434592
+  GPU Descriptor Group Keys: none
+  GPU Descriptor Aggregates: m0:bytecode(inputs=2, words=49, result_type=23) -> value.sum; value.avg; value.count; value.min; value.max; m1:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none; m1=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot2:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false; slot3:aggregate[m0].value.min source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot4:aggregate[m0].value.max source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot5:aggregate[m1].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=2391970 generation=1 global=1 relfilenode=2391970
+  GPU Descriptor Bytes: raw=2500000 derived=220 artifact=0 total=2500220
+  GPU Resident Stage Mask: 16395
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 250000
+  Batches: 1
+  Rows Per Batch: 250000.000
+  Dispatch Time: 25.083 ms
+  Avg Dispatch Time Per Batch: 25.083 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 0.011 ms
+Planning:
+  Buffers: shared hit=81
+Planning Time: 0.488 ms
+Execution Time: 25.826 ms
+
+=== global_scalar_program @ rows=1000000 ===
+Finalize Aggregate  (cost=16171.63..16171.64 rows=1 width=64) (actual time=27.902..30.624 rows=1.00 loops=1)
+  Output: sum(CASE WHEN (adjustment IS NULL) THEN price WHEN (price > 0) THEN ((price + adjustment) * (price - adjustment)) ELSE (COALESCE(price, 0) - adjustment) END), avg(CASE WHEN (adjustment IS NULL) THEN price WHEN (price > 0) THEN ((price + adjustment) * (price - adjustment)) ELSE (COALESCE(price, 0) - adjustment) END), count(CASE WHEN (adjustment IS NULL) THEN price WHEN (price > 0) THEN ((price + adjustment) * (price - adjustment)) ELSE (COALESCE(price, 0) - adjustment) END), min(CASE WHEN (adjustment IS NULL) THEN price WHEN (price > 0) THEN ((price + adjustment) * (price - adjustment)) ELSE (COALESCE(price, 0) - adjustment) END), max(CASE WHEN (adjustment IS NULL) THEN price WHEN (price > 0) THEN ((price + adjustment) * (price - adjustment)) ELSE (COALESCE(price, 0) - adjustment) END), count(*)
+  Buffers: shared hit=5234
+  ->  Gather  (cost=16171.50..16171.51 rows=8 width=64) (actual time=27.660..30.489 rows=9.00 loops=1)
+        Output: (PARTIAL sum(CASE WHEN (adjustment IS NULL) THEN price WHEN (price > 0) THEN ((price + adjustment) * (price - adjustment)) ELSE (COALESCE(price, 0) - adjustment) END)), (PARTIAL avg(CASE WHEN (adjustment IS NULL) THEN price WHEN (price > 0) THEN ((price + adjustment) * (price - adjustment)) ELSE (COALESCE(price, 0) - adjustment) END)), (PARTIAL count(CASE WHEN (adjustment IS NULL) THEN price WHEN (price > 0) THEN ((price + adjustment) * (price - adjustment)) ELSE (COALESCE(price, 0) - adjustment) END)), (PARTIAL min(CASE WHEN (adjustment IS NULL) THEN price WHEN (price > 0) THEN ((price + adjustment) * (price - adjustment)) ELSE (COALESCE(price, 0) - adjustment) END)), (PARTIAL max(CASE WHEN (adjustment IS NULL) THEN price WHEN (price > 0) THEN ((price + adjustment) * (price - adjustment)) ELSE (COALESCE(price, 0) - adjustment) END)), (PARTIAL count(*))
+        Workers Planned: 8
+        Workers Launched: 8
+        Buffers: shared hit=5234
+        ->  Partial Aggregate  (cost=16171.50..16171.51 rows=1 width=64) (actual time=23.821..23.821 rows=1.00 loops=9)
+              Output: PARTIAL sum(CASE WHEN (adjustment IS NULL) THEN price WHEN (price > 0) THEN ((price + adjustment) * (price - adjustment)) ELSE (COALESCE(price, 0) - adjustment) END), PARTIAL avg(CASE WHEN (adjustment IS NULL) THEN price WHEN (price > 0) THEN ((price + adjustment) * (price - adjustment)) ELSE (COALESCE(price, 0) - adjustment) END), PARTIAL count(CASE WHEN (adjustment IS NULL) THEN price WHEN (price > 0) THEN ((price + adjustment) * (price - adjustment)) ELSE (COALESCE(price, 0) - adjustment) END), PARTIAL min(CASE WHEN (adjustment IS NULL) THEN price WHEN (price > 0) THEN ((price + adjustment) * (price - adjustment)) ELSE (COALESCE(price, 0) - adjustment) END), PARTIAL max(CASE WHEN (adjustment IS NULL) THEN price WHEN (price > 0) THEN ((price + adjustment) * (price - adjustment)) ELSE (COALESCE(price, 0) - adjustment) END), PARTIAL count(*)
+              Buffers: shared hit=5234
+              Worker 0:  actual time=22.234..22.234 rows=1.00 loops=1
+                Buffers: shared hit=424
+              Worker 1:  actual time=22.322..22.322 rows=1.00 loops=1
+                Buffers: shared hit=647
+              Worker 2:  actual time=22.247..22.247 rows=1.00 loops=1
+                Buffers: shared hit=400
+              Worker 3:  actual time=23.141..23.141 rows=1.00 loops=1
+                Buffers: shared hit=669
+              Worker 4:  actual time=23.547..23.547 rows=1.00 loops=1
+                Buffers: shared hit=673
+              Worker 5:  actual time=24.436..24.436 rows=1.00 loops=1
+                Buffers: shared hit=512
+              Worker 6:  actual time=24.197..24.197 rows=1.00 loops=1
+                Buffers: shared hit=520
+              Worker 7:  actual time=24.760..24.761 rows=1.00 loops=1
+                Buffers: shared hit=664
+              ->  Parallel Seq Scan on public.bench_scalar_sales  (cost=0.00..6484.00 rows=125000 width=8) (actual time=0.007..5.269 rows=111111.11 loops=9)
+                    Output: region, price, adjustment
+                    Buffers: shared hit=5234
+                    Worker 0:  actual time=0.014..4.518 rows=81016.00 loops=1
+                      Buffers: shared hit=424
+                    Worker 1:  actual time=0.006..4.521 rows=123641.00 loops=1
+                      Buffers: shared hit=647
+                    Worker 2:  actual time=0.006..9.129 rows=76433.00 loops=1
+                      Buffers: shared hit=400
+                    Worker 3:  actual time=0.006..4.838 rows=127686.00 loops=1
+                      Buffers: shared hit=669
+                    Worker 4:  actual time=0.005..4.819 rows=128599.00 loops=1
+                      Buffers: shared hit=673
+                    Worker 5:  actual time=0.006..4.840 rows=97833.00 loops=1
+                      Buffers: shared hit=512
+                    Worker 6:  actual time=0.013..5.096 rows=99364.00 loops=1
+                      Buffers: shared hit=520
+                    Worker 7:  actual time=0.005..5.167 rows=126886.00 loops=1
+                      Buffers: shared hit=664
+Planning:
+  Buffers: shared hit=81
+Planning Time: 0.627 ms
+Execution Time: 30.657 ms

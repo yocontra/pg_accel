@@ -1,0 +1,4 @@
+PGACCEL_TEST_START name=test_hash_domain_matrix
+=== pgaccel hash domain matrix ===
+failures=0
+PGACCEL_TEST_RESULT name=test_hash_domain_matrix exit_code=0 result=PASS raw_lines=2 body_sha256=8c80f1afe362a41b3c2fb52a2bdaad414c89beb21c7d966da1a7ecd5aea2712d binding_sha256=730352c615aa82995241514eb32dd8488fc3cf60cb9289a2843d620d3b738190

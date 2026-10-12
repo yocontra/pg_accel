@@ -1,0 +1,11 @@
+12332c0d9d1b506909ee115a116fd1357b143faa909570ded80bcd1c217d7e67  benchmarks/evidence/group-output-cursor-20261010/pgaccel-group-cursor-core18-final.log
+130854d961ecfb88a8b623035ded5c13f7b241327f45e7e42c9c385a3fda9692  benchmarks/evidence/group-output-cursor-20261010/pgaccel-group-cursor-core19.log
+e9bd049d2692a82fab6871f96f16e3b3fe6851652d57c47ef5428f3fc8c67d8b  benchmarks/evidence/group-output-cursor-20261010/pgaccel-group-cursor-doc.log
+71cf3d2fc803466a313a1fe48de762fc28dddcfcb78ea572b3d6de87d42bbc07  benchmarks/evidence/group-output-cursor-20261010/pgaccel-group-cursor-lint18.log
+c8c269e543c10dbf084ee0e2d2ee08c3c765d5d996a9495fc55e0cb9b8b713ea  benchmarks/evidence/group-output-cursor-20261010/pgaccel-group-cursor-lint19.log
+0ed08ecb99f7472d54a56b1f8bd891a34d69f55e4b38f62742b65e046fd927f0  benchmarks/evidence/group-output-cursor-20261010/pgaccel-group-cursor-live18.log
+466e89c380281c76525aed8528d01fc6f46b0c2768ef3b35b90296e934bccdfa  benchmarks/evidence/group-output-cursor-20261010/pgaccel-group-cursor-live19.log
+cc5a0d40b1c8975d466466a134748b315e3ee8cfba649bcf625662ee146514cd  benchmarks/evidence/group-output-cursor-20261010/pgaccel-group-cursor-safety.log
+a9dca926bebbe86c11ee483e8d33c65f95fb6bd7c90e64e2abaf1a72261add72  benchmarks/evidence/group-output-cursor-20261010/pgaccel-group-cursor-scope.log
+612e312fc8abee140268b0855e81f2280fe3c197c615cd10ef0d0d18521c3818  benchmarks/evidence/group-output-cursor-20261010/README.md
+3420b0a8276b4d7ee79e421bd0067eb64512108bc063ffd48667d1ea46496969  benchmarks/evidence/group-output-cursor-20261010/source-snapshot.tar.gz

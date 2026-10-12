@@ -1,0 +1,25 @@
+{
+  "calls": [
+    {
+      "base_declaration": "0x87f9487b8",
+      "base_parameter": 3,
+      "callee_id": "0x87f88ef10",
+      "conditional": false,
+      "destination_id": "0x87f94ae98",
+      "destination_name": "destination",
+      "destination_path": [],
+      "end": 5852166,
+      "local_reads": [
+        "0x87f949678"
+      ],
+      "nullable": true,
+      "start": 5852088
+    }
+  ],
+  "detail": "stable workspace parameter, checked offset initializer/update expressions, typed call arguments and returned-alias facts; caller not approved",
+  "offset_inputs": [
+    "0x87f949678"
+  ],
+  "ok": true,
+  "source_sha256": "dc3fcc9d4e27a1131b8c8cbf643878442fc40992bdeae9c0d572f183b62d4d93"
+}

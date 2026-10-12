@@ -1,0 +1,29 @@
+=== 117_numeric_aggregates ===
+SET
+SET
+SELECT 1000017
+ANALYZE
+psql:/Users/contra/Projects/pg_accel/sql/tests/117_numeric_aggregates.sql:88: WARNING:  pg_accel: grouped aggregate accumulate chunk dispatch returned after 5924664us (warning threshold 5000ms); cancellation and statement_timeout are observed only between synchronous calls
+DO
+PGACCEL_ASSERT_OK:117_numeric_aggregates.assert_001
+SET
+PREPARE
+DO
+PGACCEL_ASSERT_OK:117_numeric_aggregates.assert_002
+DEALLOCATE
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ f
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:117_numeric_aggregates

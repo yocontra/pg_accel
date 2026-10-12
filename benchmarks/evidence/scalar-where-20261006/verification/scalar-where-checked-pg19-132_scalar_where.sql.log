@@ -1,0 +1,46 @@
+=== 132_scalar_where ===
+SET
+SET
+SELECT 250017
+ANALYZE
+psql:sql/tests/132_scalar_where.sql:72: NOTICE:  132 explicit cost decline: SELECT g,sum(a) s,avg(a) av,count(a) c,min(a) lo,max(a) hi,count(*) n FROM _scalar_where WHERE a IS NULL OR b IS NULL GROUP BY g
+psql:sql/tests/132_scalar_where.sql:72: NOTICE:  132 explicit cost decline: SELECT g,h,sum(a) s,avg(a) av,count(a) c,min(a) lo,max(a) hi,count(*) n FROM _scalar_where WHERE a IS NULL OR b IS NULL GROUP BY g,h
+psql:sql/tests/132_scalar_where.sql:72: NOTICE:  132 explicit cost decline: SELECT g,h,k,sum(a) s,avg(a) av,count(a) c,min(a) lo,max(a) hi,count(*) n FROM _scalar_where WHERE a IS NULL OR b IS NULL GROUP BY g,h,k
+psql:sql/tests/132_scalar_where.sql:72: NOTICE:  132 explicit cost decline: SELECT g,sum(a) s,avg(a) av,count(a) c,min(a) lo,max(a) hi,count(*) n FROM _scalar_where WHERE a>b AND flag GROUP BY g
+psql:sql/tests/132_scalar_where.sql:72: NOTICE:  132 scalar WHERE selected 24 of 28 shapes
+DO
+PGACCEL_ASSERT_OK:132_scalar_where.assert_001
+SET
+PREPARE
+DO
+DEALLOCATE
+RESET
+PGACCEL_ASSERT_OK:132_scalar_where.assert_002
+TRUNCATE TABLE
+INSERT 0 1000017
+UPDATE 1
+ANALYZE
+ pg_accel_refresh 
+------------------
+          1000017
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:132_scalar_where.assert_003
+DO
+PGACCEL_ASSERT_OK:132_scalar_where.assert_004
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ t
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:132_scalar_where

@@ -6,595 +6,3321 @@
   "execution_evidence": "not_claimed",
   "families": [
     {
-      "id": "selected.grouped_agg_int4",
+      "id": "selected.pulled_up_reports",
       "disposition": "selected",
       "postgresql_majors": [18, 19],
-      "semantics": {"types": ["int4 group key", "int4 SUM input", "int8 SUM/COUNT result"], "null_patterns": ["non-NULL fixture", "NULL group key", "NULL SUM measure"], "shape_limits": "one fact relation, one dense key, SUM plus COUNT", "dispatch_expectation": "required", "rejection_reason": null},
+      "semantics": {
+        "types": ["INT4 derived scalar aggregates", "global and composite grouping", "inline CTE, nested derived table, owner/invoker view and flattened LATERAL", "exact point/polygon WHERE"],
+        "null_patterns": ["nullable/zero-safe ratio", "NULL/empty geometry", "all-NULL and empty prepared input", "late division errors"],
+        "shape_limits": "only planner-cleared inactive wrappers; all nested FromExpr quals retained; live subplans, materialized CTEs, security barriers, RLS, cross-role definer permission contexts and live self aliases remain native; ordinary cost/memory gates unchanged",
+        "dispatch_expectation": "required",
+        "rejection_reason": null
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["90_selected_path_contract.assert_001"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["90_selected_path_contract.assert_001"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["90_selected_path_contract.assert_001", "95_selected_lifecycle_contract.assert_001"], "gap": null},
+        "types": {"status": "covered", "assertion_ids": ["137_pulled_up_reports.assert_001", "137_pulled_up_reports.assert_002"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["137_pulled_up_reports.assert_001", "137_pulled_up_reports.assert_003", "137_pulled_up_reports.assert_004"], "gap": null},
+        "shape_limits": {"status": "covered", "assertion_ids": ["137_pulled_up_reports.assert_005", "137_pulled_up_reports.assert_006"], "gap": null},
+        "ddl": {"status": "covered", "assertion_ids": ["137_pulled_up_reports.assert_006"], "gap": null},
+        "dml": {"status": "covered", "assertion_ids": ["137_pulled_up_reports.assert_003"], "gap": null},
+        "prepared": {"status": "covered", "assertion_ids": ["137_pulled_up_reports.assert_003", "137_pulled_up_reports.assert_006"], "gap": null},
+        "dispatch": {"status": "covered", "assertion_ids": ["137_pulled_up_reports.assert_001", "137_pulled_up_reports.assert_002", "137_pulled_up_reports.assert_003", "137_pulled_up_reports.assert_004", "137_pulled_up_reports.assert_006"], "gap": null},
         "rejection_reason": {"status": "not_applicable", "assertion_ids": [], "gap": null}
+      }
+    },
+    {
+      "id": "selected.scalar_nullif_extrema",
+      "disposition": "selected",
+      "postgresql_majors": [18, 19],
+      "semantics": {
+        "types": ["INT4/BOOL/DATE NULLIF, GREATEST and LEAST", "SUM/AVG/COUNT/MIN/MAX with global/composite grouping", "WHERE, CASE, aggregate FILTER and qualified spatial conjunction"],
+        "null_patterns": ["NULLIF equality, one/both NULLs", "extrema ignore NULLs and preserve all-NULL results", "zero-safe ratio and bounded values", "DATE infinities", "all-NULL and empty prepared input", "later errors survive NULL/extremal earlier operands"],
+        "shape_limits": "fact-only typed scalar programs; exact built-in equality/default comparator; existing state/program/memory/cost limits; no bigint/text casts, arbitrary functions or cross-RTE producers",
+        "dispatch_expectation": "required",
+        "rejection_reason": null
+      },
+      "evidence": {
+        "types": {"status": "covered", "assertion_ids": ["136_scalar_nullif_extrema.assert_001", "136_scalar_nullif_extrema.assert_002"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["136_scalar_nullif_extrema.assert_001", "136_scalar_nullif_extrema.assert_003", "136_scalar_nullif_extrema.assert_004"], "gap": null},
+        "shape_limits": {"status": "covered", "assertion_ids": ["136_scalar_nullif_extrema.assert_005"], "gap": null},
+        "ddl": {"status": "not_applicable", "assertion_ids": [], "gap": null},
+        "dml": {"status": "covered", "assertion_ids": ["136_scalar_nullif_extrema.assert_003"], "gap": null},
+        "prepared": {"status": "covered", "assertion_ids": ["136_scalar_nullif_extrema.assert_003"], "gap": null},
+        "dispatch": {"status": "covered", "assertion_ids": ["136_scalar_nullif_extrema.assert_001", "136_scalar_nullif_extrema.assert_002", "136_scalar_nullif_extrema.assert_003", "136_scalar_nullif_extrema.assert_004"], "gap": null},
+        "rejection_reason": {"status": "not_applicable", "assertion_ids": [], "gap": null}
+      }
+    },
+    {
+      "id": "selected.null_safe_scalar",
+      "disposition": "selected",
+      "postgresql_majors": [18, 19],
+      "semantics": {
+        "types": ["INT4/BOOL/DATE IS DISTINCT FROM and inverse", "all six Boolean IS tests", "WHERE, CASE, aggregate FILTER and non-NULL COUNT sharing", "qualified spatial conjunction"],
+        "null_patterns": ["both NULL, exactly one NULL, equal and unequal values", "DATE infinities", "all-NULL and empty prepared input", "NULL operand does not suppress other operand errors"],
+        "shape_limits": "fact-only dense integer/scalar programs, same-RTE and existing state/program/memory/cost limits; no general casts, text/bigint comparisons, arbitrary functions or joins",
+        "dispatch_expectation": "required",
+        "rejection_reason": null
+      },
+      "evidence": {
+        "types": {"status": "covered", "assertion_ids": ["135_null_safe_scalar.assert_001", "135_null_safe_scalar.assert_002", "135_null_safe_scalar.assert_004"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["135_null_safe_scalar.assert_001", "135_null_safe_scalar.assert_002", "135_null_safe_scalar.assert_003", "135_null_safe_scalar.assert_004"], "gap": null},
+        "shape_limits": {"status": "covered", "assertion_ids": ["135_null_safe_scalar.assert_005"], "gap": null},
+        "ddl": {"status": "not_applicable", "assertion_ids": [], "gap": null},
+        "dml": {"status": "covered", "assertion_ids": ["135_null_safe_scalar.assert_003"], "gap": null},
+        "prepared": {"status": "covered", "assertion_ids": ["135_null_safe_scalar.assert_003"], "gap": null},
+        "dispatch": {"status": "covered", "assertion_ids": ["135_null_safe_scalar.assert_001", "135_null_safe_scalar.assert_002", "135_null_safe_scalar.assert_003", "135_null_safe_scalar.assert_004"], "gap": null},
+        "rejection_reason": {"status": "not_applicable", "assertion_ids": [], "gap": null}
+      }
+    },
+    {
+      "id": "selected.scalar_where",
+      "disposition": "selected",
+      "postgresql_majors": [18, 19],
+      "semantics": {
+        "types": ["Boolean SPG1 WHERE over INT4/BOOL/DATE", "multi-column comparison, CASE/COALESCE and Boolean conjunction", "qualified point/polygon SQL-mask composition", "distinct integer/date/division SQLSTATEs"],
+        "null_patterns": ["FALSE and UNKNOWN reject group activity", "predicate-only all-NULL update", "empty and reinsert"],
+        "shape_limits": "fact-only dense integer/scalar states with optional qualified point/polygon conjunction; hidden Boolean carrier shares the four-state cap; joins, NUMERIC states, arbitrary types/functions and spatial OR remain unsupported; selective shapes may explicitly decline on cost",
+        "dispatch_expectation": "required",
+        "rejection_reason": null
+      },
+      "evidence": {
+        "types": {"status": "covered", "assertion_ids": ["132_scalar_where.assert_001", "132_scalar_where.assert_003", "132_scalar_where.assert_005", "133_where_qualifier_order.assert_002", "134_spatial_scalar_where.assert_001", "134_spatial_scalar_where.assert_003"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["132_scalar_where.assert_001", "132_scalar_where.assert_002", "133_where_qualifier_order.assert_001", "134_spatial_scalar_where.assert_001"], "gap": null},
+        "shape_limits": {"status": "covered", "assertion_ids": ["132_scalar_where.assert_004", "134_spatial_scalar_where.assert_004"], "gap": null},
+        "ddl": {"status": "not_applicable", "assertion_ids": [], "gap": null},
+        "dml": {"status": "covered", "assertion_ids": ["132_scalar_where.assert_002", "134_spatial_scalar_where.assert_002"], "gap": null},
+        "prepared": {"status": "covered", "assertion_ids": ["132_scalar_where.assert_002", "134_spatial_scalar_where.assert_002"], "gap": null},
+        "dispatch": {"status": "covered", "assertion_ids": ["132_scalar_where.assert_001", "132_scalar_where.assert_002", "132_scalar_where.assert_003", "132_scalar_where.assert_005", "133_where_qualifier_order.assert_001", "133_where_qualifier_order.assert_002", "134_spatial_scalar_where.assert_001", "134_spatial_scalar_where.assert_002", "134_spatial_scalar_where.assert_003"], "gap": null},
+        "rejection_reason": {"status": "not_applicable", "assertion_ids": [], "gap": null}
+      }
+    },
+    {
+      "id": "selected.scalar_date_expressions",
+      "disposition": "selected",
+      "postgresql_majors": [18, 19],
+      "semantics": {
+        "types": ["DATE comparisons and checked DATE/INT4 day arithmetic", "DATE COUNT/MIN/MAX", "INT4 date differences feeding SUM/AVG/COUNT/MIN/MAX"],
+        "null_patterns": ["nullable dates and day counts", "all-NULL and empty input", "infinity and NULL strictness"],
+        "shape_limits": "fact-only dense scalar programs; existing four-state, resident, memory and cost gates; no date arrays/casts/timestamps/intervals",
+        "dispatch_expectation": "required",
+        "rejection_reason": null
+      },
+      "evidence": {
+        "types": {"status": "covered", "assertion_ids": ["131_scalar_date_expressions.assert_001", "131_scalar_date_expressions.assert_002", "131_scalar_date_expressions.assert_004"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["131_scalar_date_expressions.assert_001", "131_scalar_date_expressions.assert_002", "131_scalar_date_expressions.assert_003"], "gap": null},
+        "shape_limits": {"status": "not_applicable", "assertion_ids": [], "gap": null},
+        "ddl": {"status": "not_applicable", "assertion_ids": [], "gap": null},
+        "dml": {"status": "covered", "assertion_ids": ["131_scalar_date_expressions.assert_003"], "gap": null},
+        "prepared": {"status": "covered", "assertion_ids": ["131_scalar_date_expressions.assert_003"], "gap": null},
+        "dispatch": {"status": "covered", "assertion_ids": ["131_scalar_date_expressions.assert_001", "131_scalar_date_expressions.assert_002", "131_scalar_date_expressions.assert_003", "131_scalar_date_expressions.assert_004"], "gap": null},
+        "rejection_reason": {"status": "not_applicable", "assertion_ids": [], "gap": null}
+      }
+    },
+    {
+      "id": "selected.scalar_program_aggregates",
+      "disposition": "selected",
+      "postgresql_majors": [18, 19],
+      "semantics": {
+        "types": ["INT4 scalar arithmetic and lazy CASE/COALESCE", "Boolean scalar COUNT", "multi-column Boolean/CASE/IN aggregate FILTER and filtered COUNT(*)", "INT8 SUM/COUNT, NUMERIC AVG, INT4 MIN/MAX"],
+        "null_patterns": ["nullable inputs", "NULL literal program", "all-NULL inputs", "empty relation"],
+        "shape_limits": "fact-only dense scalar states, including qualified point/polygon spatial masks; four-state cap including predicate carriers; exact loaded evidence and normal cost/budget gates",
+        "dispatch_expectation": "required",
+        "rejection_reason": null
+      },
+      "evidence": {
+        "types": {"status": "covered", "assertion_ids": ["128_scalar_program_aggregates.assert_001", "128_scalar_program_aggregates.assert_002", "128_scalar_program_aggregates.assert_004", "129_spatial_scalar_programs.assert_001", "129_spatial_scalar_programs.assert_002", "129_spatial_scalar_programs.assert_004", "130_scalar_aggregate_filters.assert_001", "130_scalar_aggregate_filters.assert_003"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["128_scalar_program_aggregates.assert_001", "128_scalar_program_aggregates.assert_003", "129_spatial_scalar_programs.assert_001", "129_spatial_scalar_programs.assert_003", "130_scalar_aggregate_filters.assert_001", "130_scalar_aggregate_filters.assert_002"], "gap": null},
+        "shape_limits": {"status": "covered", "assertion_ids": ["128_scalar_program_aggregates.assert_005", "129_spatial_scalar_programs.assert_004", "130_scalar_aggregate_filters.assert_004"], "gap": null},
+        "ddl": {"status": "covered", "assertion_ids": ["128_scalar_program_aggregates.assert_005"], "gap": null},
+        "dml": {"status": "covered", "assertion_ids": ["128_scalar_program_aggregates.assert_003", "129_spatial_scalar_programs.assert_003", "130_scalar_aggregate_filters.assert_002"], "gap": null},
+        "prepared": {"status": "covered", "assertion_ids": ["128_scalar_program_aggregates.assert_003", "129_spatial_scalar_programs.assert_003", "130_scalar_aggregate_filters.assert_002"], "gap": null},
+        "dispatch": {"status": "covered", "assertion_ids": ["128_scalar_program_aggregates.assert_001", "128_scalar_program_aggregates.assert_002", "128_scalar_program_aggregates.assert_003", "128_scalar_program_aggregates.assert_004", "129_spatial_scalar_programs.assert_001", "129_spatial_scalar_programs.assert_002", "129_spatial_scalar_programs.assert_003", "129_spatial_scalar_programs.assert_004", "130_scalar_aggregate_filters.assert_001", "130_scalar_aggregate_filters.assert_002", "130_scalar_aggregate_filters.assert_003"], "gap": null},
+        "rejection_reason": {"status": "not_applicable", "assertion_ids": [], "gap": null}
+      }
+    },
+    {
+      "id": "selected.grouped_agg_int4",
+      "disposition": "selected",
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "int4 group key",
+          "int4 SUM input",
+          "int8 SUM/COUNT result"
+        ],
+        "null_patterns": [
+          "non-NULL fixture",
+          "NULL group key",
+          "NULL SUM measure"
+        ],
+        "shape_limits": "one fact relation, one dense key, SUM plus COUNT",
+        "dispatch_expectation": "required",
+        "rejection_reason": null
+      },
+      "evidence": {
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "90_selected_path_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "90_selected_path_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "90_selected_path_contract.assert_001",
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "not_applicable",
+          "assertion_ids": [],
+          "gap": null
+        }
       }
     },
     {
       "id": "selected.predicate_expression_int4",
       "disposition": "selected",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["int4 group key", "int4 multiplication", "boolean filter"], "null_patterns": ["true, false, and NULL filter rows", "NULL group and multiplication operands"], "shape_limits": "one fact relation, one boolean predicate, exact integer product SUM plus COUNT", "dispatch_expectation": "required", "rejection_reason": null},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "int4 group key",
+          "int4 multiplication",
+          "boolean filter"
+        ],
+        "null_patterns": [
+          "true, false, and NULL filter rows",
+          "NULL group and multiplication operands"
+        ],
+        "shape_limits": "one fact relation, one boolean predicate, exact integer product SUM plus COUNT",
+        "dispatch_expectation": "required",
+        "rejection_reason": null
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_001"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_001", "95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_001"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_001", "95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "rejection_reason": {"status": "not_applicable", "assertion_ids": [], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "91_selected_family_contracts.assert_001"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "91_selected_family_contracts.assert_001",
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "91_selected_family_contracts.assert_001"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "91_selected_family_contracts.assert_001",
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "not_applicable",
+          "assertion_ids": [],
+          "gap": null
+        }
       }
     },
     {
       "id": "selected.aggregate_filter_int4",
       "disposition": "selected",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["int4 group key", "nullable int4 SUM and predicate input", "int8 SUM/COUNT result"], "null_patterns": ["NULL FILTER input evaluates as SQL UNKNOWN", "all-NULL filtered group remains active with NULL SUM", "COUNT(*) remains unfiltered", "NULL group key", "inclusive lower and upper endpoints"], "shape_limits": "one fact relation, one int4 fact group key distinct from the measure, one direct int4 SUM with exactly one proper bounded same-column FILTER interval, plus one unfiltered COUNT(*); no fact filter, join, HAVING, or additional measure", "dispatch_expectation": "required", "rejection_reason": null},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "int4 group key",
+          "nullable int4 SUM and predicate input",
+          "int8 SUM/COUNT result"
+        ],
+        "null_patterns": [
+          "NULL FILTER input evaluates as SQL UNKNOWN",
+          "all-NULL filtered group remains active with NULL SUM",
+          "COUNT(*) remains unfiltered",
+          "NULL group key",
+          "inclusive lower and upper endpoints"
+        ],
+        "shape_limits": "one fact relation, one int4 fact group key distinct from the measure, one direct int4 SUM with exactly one proper bounded same-column FILTER interval, plus one unfiltered COUNT(*); no fact filter, join, HAVING, or additional measure",
+        "dispatch_expectation": "required",
+        "rejection_reason": null
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["98_aggregate_filter_contract.assert_001", "95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["98_aggregate_filter_contract.assert_001", "95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["98_aggregate_filter_contract.assert_001", "98_aggregate_filter_contract.assert_002"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["98_aggregate_filter_contract.assert_001", "95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "rejection_reason": {"status": "not_applicable", "assertion_ids": [], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "98_aggregate_filter_contract.assert_001",
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "98_aggregate_filter_contract.assert_001",
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "98_aggregate_filter_contract.assert_001",
+            "98_aggregate_filter_contract.assert_002"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "98_aggregate_filter_contract.assert_001",
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "not_applicable",
+          "assertion_ids": [],
+          "gap": null
+        }
       }
     },
     {
       "id": "selected.range_intersection_expression_int4",
       "disposition": "selected",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["int4 group key", "nullable int4 range input", "nullable int4 multiplication", "int8 SUM/COUNT result"], "null_patterns": ["NULL range input rejected as SQL UNKNOWN", "NULL product RHS omitted from SUM but retained by COUNT(*)", "NULL group key", "inclusive lower and upper endpoints"], "shape_limits": "exactly two same-column bounds fused into one proper bounded interval over the left operand of one int4 product SUM plus COUNT; no joins or HAVING", "dispatch_expectation": "required", "rejection_reason": null},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "int4 group key",
+          "nullable int4 range input",
+          "nullable int4 multiplication",
+          "int8 SUM/COUNT result"
+        ],
+        "null_patterns": [
+          "NULL range input rejected as SQL UNKNOWN",
+          "NULL product RHS omitted from SUM but retained by COUNT(*)",
+          "NULL group key",
+          "inclusive lower and upper endpoints"
+        ],
+      "shape_limits": "single-column INT4 bounds over a product operand, including one-sided and RHS ranges; SQL97 verifies three-bound intersection and dispatch for the expanded ranges; cross-column predicates remain native; native HAVING is handled outside the descriptor",
+        "dispatch_expectation": "required",
+        "rejection_reason": null
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["97_range_intersection_contract.assert_001", "95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["97_range_intersection_contract.assert_001", "95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["97_range_intersection_contract.assert_001", "97_range_intersection_contract.assert_002"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["97_range_intersection_contract.assert_001", "95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "rejection_reason": {"status": "not_applicable", "assertion_ids": [], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "97_range_intersection_contract.assert_001",
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "97_range_intersection_contract.assert_001",
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "97_range_intersection_contract.assert_001",
+            "97_range_intersection_contract.assert_002"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "97_range_intersection_contract.assert_001",
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "not_applicable",
+          "assertion_ids": [],
+          "gap": null
+        }
       }
     },
     {
       "id": "decline.range_intersection_adjacent",
       "disposition": "declined",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["int4 group key", "nullable int4 range input", "int4 multiplication", "int8 SUM/COUNT result"], "null_patterns": ["NULL predicate input", "non-NULL values inside and outside each interval"], "shape_limits": "one-sided, degenerate, RHS-input, joined, or third-bound variants remain native; a third same-column bound preserves shape_multiple_range_predicates", "dispatch_expectation": "forbidden", "rejection_reason": "shape_multiple_range_predicates"},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "int4 group key",
+          "nullable int4 range input",
+          "int4 multiplication",
+          "int8 SUM/COUNT result"
+        ],
+        "null_patterns": [
+          "NULL predicate input",
+          "non-NULL values inside and outside each interval"
+        ],
+      "shape_limits": "cross-column predicates containing unsupported abs() remain native and preserve shape_multiple_range_predicates; bounded typed cross-column WHERE now has its own selected family, while single-column ranges retain the interval fast path",
+        "dispatch_expectation": "forbidden",
+        "rejection_reason": "shape_multiple_range_predicates"
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["97_range_intersection_contract.assert_002", "96_declined_lifecycle_contract.assert_001"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["97_range_intersection_contract.assert_002", "96_declined_lifecycle_contract.assert_001"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["97_range_intersection_contract.assert_002", "96_declined_lifecycle_contract.assert_001"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_001"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_001"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_001"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["97_range_intersection_contract.assert_002", "96_declined_lifecycle_contract.assert_001"], "gap": null},
-        "rejection_reason": {"status": "covered", "assertion_ids": ["97_range_intersection_contract.assert_002", "96_declined_lifecycle_contract.assert_001"], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "97_range_intersection_contract.assert_002",
+            "96_declined_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "97_range_intersection_contract.assert_002",
+            "96_declined_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "97_range_intersection_contract.assert_002",
+            "96_declined_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "97_range_intersection_contract.assert_002",
+            "96_declined_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "covered",
+          "assertion_ids": [
+            "97_range_intersection_contract.assert_002",
+            "96_declined_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        }
       }
     },
     {
       "id": "selected.count_join_int4",
       "disposition": "selected",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["int4 fact and dimension keys", "int8 COUNT result"], "null_patterns": ["non-NULL unique dimension keys", "NULL fact keys"], "shape_limits": "one unique inner dimension consumed inside COUNT aggregate", "dispatch_expectation": "required", "rejection_reason": null},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "int4 fact and dimension keys",
+          "int8 COUNT result"
+        ],
+        "null_patterns": [
+          "non-NULL unique dimension keys",
+          "NULL fact keys"
+        ],
+        "shape_limits": "one unique inner dimension consumed inside COUNT aggregate",
+        "dispatch_expectation": "required",
+        "rejection_reason": null
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_002"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_002", "95_selected_lifecycle_contract.assert_002"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_002"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_002"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_002"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_002"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_002", "95_selected_lifecycle_contract.assert_002"], "gap": null},
-        "rejection_reason": {"status": "not_applicable", "assertion_ids": [], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "91_selected_family_contracts.assert_002"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "91_selected_family_contracts.assert_002",
+            "95_selected_lifecycle_contract.assert_002"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "91_selected_family_contracts.assert_002"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_002"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_002"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_002"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "91_selected_family_contracts.assert_002",
+            "95_selected_lifecycle_contract.assert_002"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "not_applicable",
+          "assertion_ids": [],
+          "gap": null
+        }
       }
     },
     {
       "id": "selected.star_join_int4",
       "disposition": "selected",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["int4 fact/dimension keys", "int4 measure", "int8 aggregate results"], "null_patterns": ["NULL fact keys", "NULL dimension payloads", "NULL measures"], "shape_limits": "released four-dimension star descriptor with three projected keys", "dispatch_expectation": "required", "rejection_reason": null},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "int4 fact/dimension keys",
+          "int4 measure",
+          "int8 aggregate results"
+        ],
+        "null_patterns": [
+          "NULL fact keys",
+          "NULL dimension payloads",
+          "NULL measures"
+        ],
+        "shape_limits": "released four-dimension star descriptor with three projected keys",
+        "dispatch_expectation": "required",
+        "rejection_reason": null
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_003"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_002"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_003"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_002"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_002"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_002"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_003", "95_selected_lifecycle_contract.assert_002"], "gap": null},
-        "rejection_reason": {"status": "not_applicable", "assertion_ids": [], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "91_selected_family_contracts.assert_003"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_002"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "91_selected_family_contracts.assert_003"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_002"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_002"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_002"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "91_selected_family_contracts.assert_003",
+            "95_selected_lifecycle_contract.assert_002"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "not_applicable",
+          "assertion_ids": [],
+          "gap": null
+        }
       }
     },
     {
       "id": "selected.star_join_int8_membership",
       "disposition": "selected",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["int8 fact and dimension keys", "int4 SUM input", "int8 SUM/COUNT result"], "null_patterns": ["NULL fact key", "NULL dimension payload", "duplicate dimension payload"], "shape_limits": "one unique int8 membership dimension inside a reducing aggregate", "dispatch_expectation": "required", "rejection_reason": null},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "int8 fact and dimension keys",
+          "int4 SUM input",
+          "int8 SUM/COUNT result"
+        ],
+        "null_patterns": [
+          "NULL fact key",
+          "NULL dimension payload",
+          "duplicate dimension payload"
+        ],
+        "shape_limits": "one unique int8 membership dimension inside a reducing aggregate",
+        "dispatch_expectation": "required",
+        "rejection_reason": null
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_003"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_003"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_003"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_003"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_003"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_003"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_003"], "gap": null},
-        "rejection_reason": {"status": "not_applicable", "assertion_ids": [], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_003"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_003"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_003"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_003"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_003"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_003"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_003"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "not_applicable",
+          "assertion_ids": [],
+          "gap": null
+        }
       }
     },
     {
       "id": "selected.h3_parent_count",
       "disposition": "selected",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["h3index/int8 physical cell", "constant integer resolution", "int8 COUNT result"], "null_patterns": ["NULL H3 cell", "non-NULL H3 cell"], "shape_limits": "fused h3_cell_to_parent group key plus COUNT", "dispatch_expectation": "required", "rejection_reason": null},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "h3index/int8 physical cell",
+          "constant integer resolution",
+          "int8 COUNT result"
+        ],
+        "null_patterns": [
+          "NULL H3 cell",
+          "non-NULL H3 cell"
+        ],
+        "shape_limits": "fused h3_cell_to_parent group key plus COUNT",
+        "dispatch_expectation": "required",
+        "rejection_reason": null
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_005"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_005"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_005"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_004"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_004"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_004"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_005", "95_selected_lifecycle_contract.assert_004"], "gap": null},
-        "rejection_reason": {"status": "not_applicable", "assertion_ids": [], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "91_selected_family_contracts.assert_005"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "91_selected_family_contracts.assert_005"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "91_selected_family_contracts.assert_005"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_004"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_004"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_004"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "91_selected_family_contracts.assert_005",
+            "95_selected_lifecycle_contract.assert_004"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "not_applicable",
+          "assertion_ids": [],
+          "gap": null
+        }
       }
     },
     {
       "id": "decline.aggregate_relation_limit",
       "disposition": "declined",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["int4 fact/dimension keys", "int8 COUNT result"], "null_patterns": ["non-NULL and NULL fact keys"], "shape_limits": "five dimensions exceed the released four-dimension descriptor", "dispatch_expectation": "forbidden", "rejection_reason": "shape_too_many_relations"},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "int4 fact/dimension keys",
+          "int8 COUNT result"
+        ],
+        "null_patterns": [
+          "non-NULL and NULL fact keys"
+        ],
+        "shape_limits": "five dimensions exceed the released four-dimension descriptor",
+        "dispatch_expectation": "forbidden",
+        "rejection_reason": "shape_too_many_relations"
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_004", "96_declined_lifecycle_contract.assert_009"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_009"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_004", "96_declined_lifecycle_contract.assert_009"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_009"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_009"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_009"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_004", "96_declined_lifecycle_contract.assert_009"], "gap": null},
-        "rejection_reason": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_004", "96_declined_lifecycle_contract.assert_009"], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "91_selected_family_contracts.assert_004",
+            "96_declined_lifecycle_contract.assert_009"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_009"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "91_selected_family_contracts.assert_004",
+            "96_declined_lifecycle_contract.assert_009"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_009"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_009"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_009"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "91_selected_family_contracts.assert_004",
+            "96_declined_lifecycle_contract.assert_009"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "covered",
+          "assertion_ids": [
+            "91_selected_family_contracts.assert_004",
+            "96_declined_lifecycle_contract.assert_009"
+          ],
+          "gap": null
+        }
       }
     },
     {
       "id": "decline.aggregate_unsupported_predicate",
       "disposition": "declined",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["float4 predicate input", "int8 COUNT result"], "null_patterns": ["NULL predicate input", "non-NULL predicate input"], "shape_limits": "standalone floating predicate outside the exact selected aggregate grammar", "dispatch_expectation": "forbidden", "rejection_reason": "shape_unsupported_predicate"},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "float4 predicate input",
+          "int8 COUNT result"
+        ],
+        "null_patterns": [
+          "NULL predicate input",
+          "non-NULL predicate input"
+        ],
+        "shape_limits": "standalone floating predicate outside the exact selected aggregate grammar",
+        "dispatch_expectation": "forbidden",
+        "rejection_reason": "shape_unsupported_predicate"
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["40_gpu_expr_where.assert_001", "96_declined_lifecycle_contract.assert_002"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["40_gpu_expr_where.assert_006", "96_declined_lifecycle_contract.assert_002"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["40_gpu_expr_where.assert_001", "96_declined_lifecycle_contract.assert_002"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_002"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_002"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_002"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["40_gpu_expr_where.assert_001", "96_declined_lifecycle_contract.assert_002"], "gap": null},
-        "rejection_reason": {"status": "covered", "assertion_ids": ["40_gpu_expr_where.assert_001", "96_declined_lifecycle_contract.assert_002"], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "40_gpu_expr_where.assert_001",
+            "96_declined_lifecycle_contract.assert_002"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "40_gpu_expr_where.assert_006",
+            "96_declined_lifecycle_contract.assert_002"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "40_gpu_expr_where.assert_001",
+            "96_declined_lifecycle_contract.assert_002"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_002"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_002"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_002"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "40_gpu_expr_where.assert_001",
+            "96_declined_lifecycle_contract.assert_002"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "covered",
+          "assertion_ids": [
+            "40_gpu_expr_where.assert_001",
+            "96_declined_lifecycle_contract.assert_002"
+          ],
+          "gap": null
+        }
       }
     },
     {
       "id": "decline.aggregate_modifier",
       "disposition": "declined",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["unsupported aggregate FILTER", "DISTINCT aggregate", "ordered aggregate"], "null_patterns": ["NULL aggregate input remains PostgreSQL-owned", "one-sided and wrong-input FILTER predicates remain PostgreSQL-owned"], "shape_limits": "aggregate semantic modifiers outside the exact bounded direct-int4 SUM FILTER shape remain outside the selected descriptor grammar", "dispatch_expectation": "forbidden", "rejection_reason": "shape_aggregate_modifier"},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "unsupported aggregate FILTER",
+          "DISTINCT aggregate",
+          "ordered aggregate"
+        ],
+        "null_patterns": [
+          "NULL aggregate input remains PostgreSQL-owned",
+          "cross-column FILTER conjunctions and disjunctions remain PostgreSQL-owned"
+        ],
+        "shape_limits": "cross-column FILTER predicates, DISTINCT and aggregate-local ordering remain outside the selected descriptor grammar",
+        "dispatch_expectation": "forbidden",
+        "rejection_reason": "shape_aggregate_modifier"
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_003", "98_aggregate_filter_contract.assert_002"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_003", "98_aggregate_filter_contract.assert_002"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_003", "98_aggregate_filter_contract.assert_002"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_003"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_003"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_003"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_003", "98_aggregate_filter_contract.assert_002"], "gap": null},
-        "rejection_reason": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_003", "98_aggregate_filter_contract.assert_002"], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_003",
+            "98_aggregate_filter_contract.assert_002"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_003",
+            "98_aggregate_filter_contract.assert_002"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_003",
+            "98_aggregate_filter_contract.assert_002"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_003"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_003"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_003"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_003",
+            "98_aggregate_filter_contract.assert_002"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_003",
+            "98_aggregate_filter_contract.assert_002"
+          ],
+          "gap": null
+        }
       }
     },
     {
       "id": "decline.base_scan_filter_projection",
       "disposition": "declined",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["base columns and ordinary PostgreSQL expressions"], "null_patterns": ["PostgreSQL native NULL semantics"], "shape_limits": "row-proportional base scan, filter, and projection remain native", "dispatch_expectation": "forbidden", "rejection_reason": "no_gpu_resident_pipeline"},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "base columns and ordinary PostgreSQL expressions"
+        ],
+        "null_patterns": [
+          "PostgreSQL native NULL semantics"
+        ],
+        "shape_limits": "row-proportional base scan, filter, and projection remain native",
+        "dispatch_expectation": "forbidden",
+        "rejection_reason": "no_gpu_resident_pipeline"
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_004"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_004"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_004"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_004"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_004"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_004"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_004"], "gap": null},
-        "rejection_reason": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_004"], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_004"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_004"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_004"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_004"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_004"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_004"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_004"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_004"
+          ],
+          "gap": null
+        }
       }
     },
     {
       "id": "decline.row_returning_hash_join",
       "disposition": "declined",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["ordinary equality join keys"], "null_patterns": ["NULL join keys remain PostgreSQL-owned"], "shape_limits": "row-returning hash join has no registered GPU executor", "dispatch_expectation": "forbidden", "rejection_reason": "hashjoin_no_selected_gpu_kernel"},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "ordinary equality join keys"
+        ],
+        "null_patterns": [
+          "NULL join keys remain PostgreSQL-owned"
+        ],
+        "shape_limits": "row-returning hash join has no registered GPU executor",
+        "dispatch_expectation": "forbidden",
+        "rejection_reason": "hashjoin_no_selected_gpu_kernel"
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_010"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_010"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_010"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_010"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_010"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_010"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_010"], "gap": null},
-        "rejection_reason": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_010"], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_010"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_010"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_010"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_010"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_010"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_010"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_010"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_010"
+          ],
+          "gap": null
+        }
       }
     },
     {
       "id": "decline.row_returning_inequality_join",
       "disposition": "declined",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["scalar inequality join keys"], "null_patterns": ["NULL inequality operands remain PostgreSQL-owned"], "shape_limits": "row-returning nested-loop inequality output crosses an unsafe host boundary", "dispatch_expectation": "forbidden", "rejection_reason": "nlj_between_host_boundary_unsafe"},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "scalar inequality join keys"
+        ],
+        "null_patterns": [
+          "NULL inequality operands remain PostgreSQL-owned"
+        ],
+        "shape_limits": "row-returning nested-loop inequality output crosses an unsafe host boundary",
+        "dispatch_expectation": "forbidden",
+        "rejection_reason": "nlj_between_host_boundary_unsafe"
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_011"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_011"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_011"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_011"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_011"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_011"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_011"], "gap": null},
-        "rejection_reason": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_011"], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_011"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_011"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_011"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_011"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_011"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_011"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_011"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_011"
+          ],
+          "gap": null
+        }
       }
     },
     {
       "id": "decline.h3_scalar",
       "disposition": "declined",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["point", "integer resolution", "h3index"], "null_patterns": ["NULL input and resolution"], "shape_limits": "standalone h3_latlng_to_cell scalar/predicate is not a fused reducing consumer", "dispatch_expectation": "forbidden", "rejection_reason": "h3_latlng_scalar_predicate_no_gpu_pipeline"},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "point",
+          "integer resolution",
+          "h3index"
+        ],
+        "null_patterns": [
+          "NULL input and resolution"
+        ],
+        "shape_limits": "standalone h3_latlng_to_cell scalar/predicate is not a fused reducing consumer",
+        "dispatch_expectation": "forbidden",
+        "rejection_reason": "h3_latlng_scalar_predicate_no_gpu_pipeline"
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["85_function_matrix.assert_021", "96_declined_lifecycle_contract.assert_012"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["12_h3_operations.assert_001", "96_declined_lifecycle_contract.assert_012"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["12_h3_operations.assert_001", "96_declined_lifecycle_contract.assert_012"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_012"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_012"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_012"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["12_h3_operations.assert_001", "96_declined_lifecycle_contract.assert_012"], "gap": null},
-        "rejection_reason": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_012"], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "85_function_matrix.assert_021",
+            "96_declined_lifecycle_contract.assert_012"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "12_h3_operations.assert_001",
+            "96_declined_lifecycle_contract.assert_012"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "12_h3_operations.assert_001",
+            "96_declined_lifecycle_contract.assert_012"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_012"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_012"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_012"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "12_h3_operations.assert_001",
+            "96_declined_lifecycle_contract.assert_012"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_012"
+          ],
+          "gap": null
+        }
       }
     },
     {
       "id": "decline.h3_lateral_srf",
       "disposition": "declined",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["h3index", "integer expansion distance", "setof h3index"], "null_patterns": ["NULL SRF argument"], "shape_limits": "variable-output H3 SRF has no batched resident expansion", "dispatch_expectation": "forbidden", "rejection_reason": "h3_lateral_srf_no_batched_expansion"},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "h3index",
+          "integer expansion distance",
+          "setof h3index"
+        ],
+        "null_patterns": [
+          "NULL SRF argument"
+        ],
+        "shape_limits": "variable-output H3 SRF has no batched resident expansion",
+        "dispatch_expectation": "forbidden",
+        "rejection_reason": "h3_lateral_srf_no_batched_expansion"
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["12_h3_operations.assert_001", "96_declined_lifecycle_contract.assert_013"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["12_h3_operations.assert_001", "96_declined_lifecycle_contract.assert_013"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["12_h3_operations.assert_001", "96_declined_lifecycle_contract.assert_013"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_013"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_013"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_013"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["12_h3_operations.assert_001", "96_declined_lifecycle_contract.assert_013"], "gap": null},
-        "rejection_reason": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_013"], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "12_h3_operations.assert_001",
+            "96_declined_lifecycle_contract.assert_013"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "12_h3_operations.assert_001",
+            "96_declined_lifecycle_contract.assert_013"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "12_h3_operations.assert_001",
+            "96_declined_lifecycle_contract.assert_013"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_013"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_013"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_013"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "12_h3_operations.assert_001",
+            "96_declined_lifecycle_contract.assert_013"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_013"
+          ],
+          "gap": null
+        }
       }
     },
     {
       "id": "decline.sort_full_output",
       "disposition": "declined",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["int4", "float8", "text"], "null_patterns": ["non-NULL values", "NULLS FIRST ordering"], "shape_limits": "full-output standalone ORDER BY remains native", "dispatch_expectation": "forbidden", "rejection_reason": "sort_heap_full_output"},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "int4",
+          "float8",
+          "text"
+        ],
+        "null_patterns": [
+          "non-NULL values",
+          "NULLS FIRST ordering"
+        ],
+        "shape_limits": "full-output standalone ORDER BY remains native",
+        "dispatch_expectation": "forbidden",
+        "rejection_reason": "sort_heap_full_output"
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["13_sort_orderby.assert_001", "96_declined_lifecycle_contract.assert_005"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_005"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["13_sort_orderby.assert_001", "96_declined_lifecycle_contract.assert_005"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_005"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_005"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_005"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_005"], "gap": null},
-        "rejection_reason": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_005"], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "13_sort_orderby.assert_001",
+            "96_declined_lifecycle_contract.assert_005"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_005"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "13_sort_orderby.assert_001",
+            "96_declined_lifecycle_contract.assert_005"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_005"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_005"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_005"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_005"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_005"
+          ],
+          "gap": null
+        }
       }
     },
     {
       "id": "decline.sort_topk",
       "disposition": "declined",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["int4", "float4", "float8"], "null_patterns": ["non-NULL values", "NULLS LAST ordering"], "shape_limits": "standalone ORDER BY LIMIT/OFFSET has no released GPU kernel", "dispatch_expectation": "forbidden", "rejection_reason": "sort_standalone_topk_no_gpu_kernel"},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "int4",
+          "float4",
+          "float8"
+        ],
+        "null_patterns": [
+          "non-NULL values",
+          "NULLS LAST ordering"
+        ],
+        "shape_limits": "standalone ORDER BY LIMIT/OFFSET has no released GPU kernel",
+        "dispatch_expectation": "forbidden",
+        "rejection_reason": "sort_standalone_topk_no_gpu_kernel"
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["43_sort_topk.assert_002", "96_declined_lifecycle_contract.assert_006"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_006"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["43_sort_topk.assert_002", "43_sort_topk.assert_003", "43_sort_topk.assert_004", "43_sort_topk.assert_005", "43_sort_topk.assert_001", "96_declined_lifecycle_contract.assert_006"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_006"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_006"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_006"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_006"], "gap": null},
-        "rejection_reason": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_006"], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "43_sort_topk.assert_002",
+            "96_declined_lifecycle_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "43_sort_topk.assert_002",
+            "43_sort_topk.assert_003",
+            "43_sort_topk.assert_004",
+            "43_sort_topk.assert_005",
+            "43_sort_topk.assert_001",
+            "96_declined_lifecycle_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_006"
+          ],
+          "gap": null
+        }
       }
     },
     {
       "id": "decline.window",
       "disposition": "declined",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["int4", "int8 window aggregates"], "null_patterns": ["NULL partition values", "NULL frame inputs", "empty input"], "shape_limits": "full-output and reducing window SQL remain native", "dispatch_expectation": "forbidden", "rejection_reason": "no_gpu_resident_pipeline"},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "int4",
+          "int8 window aggregates"
+        ],
+        "null_patterns": [
+          "NULL partition values",
+          "NULL frame inputs",
+          "empty input"
+        ],
+        "shape_limits": "full-output and reducing window SQL remain native",
+        "dispatch_expectation": "forbidden",
+        "rejection_reason": "no_gpu_resident_pipeline"
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["60_window_functions.assert_002", "60_window_functions.assert_005", "60_window_functions.assert_007", "96_declined_lifecycle_contract.assert_007"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["60_window_functions.assert_011", "61_window_edge_cases.assert_002", "61_window_edge_cases.assert_008", "96_declined_lifecycle_contract.assert_007"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["60_window_functions.assert_012", "61_window_edge_cases.assert_010", "96_declined_lifecycle_contract.assert_007"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_007"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_007"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_007"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_007"], "gap": null},
-        "rejection_reason": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_007"], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "60_window_functions.assert_002",
+            "60_window_functions.assert_005",
+            "60_window_functions.assert_007",
+            "96_declined_lifecycle_contract.assert_007"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "60_window_functions.assert_011",
+            "61_window_edge_cases.assert_002",
+            "61_window_edge_cases.assert_008",
+            "96_declined_lifecycle_contract.assert_007"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "60_window_functions.assert_012",
+            "61_window_edge_cases.assert_010",
+            "96_declined_lifecycle_contract.assert_007"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_007"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_007"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_007"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_007"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_007"
+          ],
+          "gap": null
+        }
       }
     },
     {
       "id": "selected.spatial_aggregate",
       "disposition": "selected",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["PostGIS geometry(Point, fixed SRID)", "ST_Intersects", "one-ring constant polygon", "int8 COUNT result"], "null_patterns": ["NULL point geometry", "interior, exterior, and boundary points"], "shape_limits": "one fact relation, column-left ST_Intersects, same nonzero SRID, one-ring polygon constant, ungrouped COUNT(*) only", "dispatch_expectation": "required", "rejection_reason": null},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "PostGIS geometry(Point, fixed SRID)",
+          "ST_Intersects/Contains/Within/Covers/CoveredBy",
+          "constant Polygon/MultiPolygon with holes",
+          "int8 COUNT result",
+          "exact NUMERIC, integer-only and mixed int2/int4/int8 SUM/AVG/COUNT",
+          "spatial WHERE conjoined with exact INT4 TRUE intervals"
+        ],
+        "null_patterns": [
+          "NULL and EMPTY point geometry",
+          "interior, exterior, shell and hole boundary points",
+          "NULL aggregate values and empty input",
+          "independent scalar NULL rejection before group creation"
+        ],
+        "shape_limits": "one fact relation, same nonzero SRID and valid bounded polygonal constant; ungrouped COUNT(*) or zero through three dictionary grouping keys and up to four states over NUMERIC and/or int2/int4/int8 inputs; independent INT4 aggregate filters and optional single-column INT4 WHERE conjunction with hidden inputs within four states; no spatial joins, spatial OR or NULL-accepting scalar conjunctions",
+        "dispatch_expectation": "required",
+        "rejection_reason": null
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["19_spatial_predicates.assert_001", "20_spatial_advanced.assert_001", "92_spatial_resident_agg_contract.assert_001"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["19_spatial_predicates.assert_001", "92_spatial_resident_agg_contract.assert_001"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["92_spatial_resident_agg_contract.assert_001"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_005"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_005"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_005"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["92_spatial_resident_agg_contract.assert_001", "95_selected_lifecycle_contract.assert_005"], "gap": null},
-        "rejection_reason": {"status": "not_applicable", "assertion_ids": [], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "19_spatial_predicates.assert_001",
+            "20_spatial_advanced.assert_001",
+            "92_spatial_resident_agg_contract.assert_001",
+            "112_spatial_polygon_topology.assert_001",
+            "114_spatial_multipolygon_contract.assert_001",
+            "118_spatial_numeric_rollups.assert_001",
+            "120_spatial_integer_rollups.assert_001",
+            "122_spatial_scalar_conjunction.assert_001",
+            "124_bigint_numeric_aggregates.assert_001",
+            "125_null_accepting_predicates.assert_001"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "19_spatial_predicates.assert_001",
+            "92_spatial_resident_agg_contract.assert_001",
+            "118_spatial_numeric_rollups.assert_001",
+            "118_spatial_numeric_rollups.assert_002",
+            "120_spatial_integer_rollups.assert_001",
+            "120_spatial_integer_rollups.assert_002",
+            "122_spatial_scalar_conjunction.assert_001",
+            "122_spatial_scalar_conjunction.assert_003",
+            "124_bigint_numeric_aggregates.assert_001",
+            "125_null_accepting_predicates.assert_001"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "92_spatial_resident_agg_contract.assert_001",
+            "112_spatial_polygon_topology.assert_001",
+            "114_spatial_multipolygon_contract.assert_001",
+            "118_spatial_numeric_rollups.assert_001",
+            "120_spatial_integer_rollups.assert_001",
+            "122_spatial_scalar_conjunction.assert_001",
+            "122_spatial_scalar_conjunction.assert_002",
+            "124_bigint_numeric_aggregates.assert_001",
+            "125_null_accepting_predicates.assert_001"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_005"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_005",
+            "118_spatial_numeric_rollups.assert_002",
+            "120_spatial_integer_rollups.assert_002",
+            "122_spatial_scalar_conjunction.assert_003"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_005",
+            "118_spatial_numeric_rollups.assert_002",
+            "120_spatial_integer_rollups.assert_002",
+            "122_spatial_scalar_conjunction.assert_003"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "92_spatial_resident_agg_contract.assert_001",
+            "95_selected_lifecycle_contract.assert_005",
+            "118_spatial_numeric_rollups.assert_001",
+            "118_spatial_numeric_rollups.assert_002",
+            "120_spatial_integer_rollups.assert_001",
+            "120_spatial_integer_rollups.assert_002",
+            "122_spatial_scalar_conjunction.assert_001",
+            "122_spatial_scalar_conjunction.assert_003",
+            "124_bigint_numeric_aggregates.assert_001",
+            "125_null_accepting_predicates.assert_001"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "not_applicable",
+          "assertion_ids": [],
+          "gap": null
+        }
       }
     },
     {
       "id": "decline.raster",
       "disposition": "declined",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["PostGIS raster", "five-argument ST_Reclass text rules"], "null_patterns": ["NULL raster remains PostgreSQL-owned", "nodata semantics"], "shape_limits": "the external five-argument ST_Reclass family is outside the exact test-only three-argument subset", "dispatch_expectation": "forbidden", "rejection_reason": "raster_unsupported_shape"},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "PostGIS raster",
+          "five-argument ST_Reclass text rules"
+        ],
+        "null_patterns": [
+          "NULL raster remains PostgreSQL-owned",
+          "nodata semantics"
+        ],
+        "shape_limits": "the external five-argument ST_Reclass family is outside the exact test-only three-argument subset",
+        "dispatch_expectation": "forbidden",
+        "rejection_reason": "raster_unsupported_shape"
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["85_function_matrix.assert_037", "96_declined_lifecycle_contract.assert_014"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_014"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["85_function_matrix.assert_037", "96_declined_lifecycle_contract.assert_014"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_014"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_014"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_014"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_014"], "gap": null},
-        "rejection_reason": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_014"], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "85_function_matrix.assert_037",
+            "96_declined_lifecycle_contract.assert_014"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_014"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "85_function_matrix.assert_037",
+            "96_declined_lifecycle_contract.assert_014"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_014"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_014"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_014"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_014"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_014"
+          ],
+          "gap": null
+        }
       }
     },
     {
       "id": "selected.raster_resident_exact_reclass",
       "disposition": "selected",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["PostGIS raster", "three-argument ST_Reclass", "canonical singular integer rules", "8BUI output WKB"], "null_patterns": ["NULL raster row", "source nodata mapped as an ordinary value", "missing selected band declines before dispatch", "unmatched input becomes ordinary zero", "NULL rule argument remains strict"], "shape_limits": "one direct ST_Reclass target over one resident raster column inside the qualified 10,134,528..=63,340,224 selected-pixel envelope; every non-NULL row must contain band one; malformed rules and missing bands remain native", "dispatch_expectation": "required", "rejection_reason": null},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "PostGIS raster",
+          "three-argument ST_Reclass",
+          "canonical singular integer rules",
+          "8BUI output WKB"
+        ],
+        "null_patterns": [
+          "NULL raster row",
+          "source nodata mapped as an ordinary value",
+          "missing selected band declines before dispatch",
+          "unmatched input becomes ordinary zero",
+          "NULL rule argument remains strict"
+        ],
+        "shape_limits": "one direct ST_Reclass target over one resident raster column inside the qualified 10,134,528..=63,340,224 selected-pixel envelope; every non-NULL row must contain band one; malformed rules and missing bands remain native",
+        "dispatch_expectation": "required",
+        "rejection_reason": null
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["93_raster_resident_reclass_contract.assert_001"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["93_raster_resident_reclass_contract.assert_001", "93_raster_resident_reclass_contract.assert_002", "93_raster_resident_reclass_contract.assert_004"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["93_raster_resident_reclass_contract.assert_001", "93_raster_resident_reclass_contract.assert_002", "93_raster_resident_reclass_contract.assert_003"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_006"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_006"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_006"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["93_raster_resident_reclass_contract.assert_001", "93_raster_resident_reclass_contract.assert_002", "93_raster_resident_reclass_contract.assert_003", "93_raster_resident_reclass_contract.assert_004", "95_selected_lifecycle_contract.assert_006"], "gap": null},
-        "rejection_reason": {"status": "not_applicable", "assertion_ids": [], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "93_raster_resident_reclass_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "93_raster_resident_reclass_contract.assert_001",
+            "93_raster_resident_reclass_contract.assert_002",
+            "93_raster_resident_reclass_contract.assert_004"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "93_raster_resident_reclass_contract.assert_001",
+            "93_raster_resident_reclass_contract.assert_002",
+            "93_raster_resident_reclass_contract.assert_003"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "93_raster_resident_reclass_contract.assert_001",
+            "93_raster_resident_reclass_contract.assert_002",
+            "93_raster_resident_reclass_contract.assert_003",
+            "93_raster_resident_reclass_contract.assert_004",
+            "95_selected_lifecycle_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "not_applicable",
+          "assertion_ids": [],
+          "gap": null
+        }
       }
     },
     {
       "id": "selected.grouped_count_bool",
       "disposition": "selected",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["nullable bool fact group key", "distinct nullable bool COUNT input", "int8 COUNT result"], "null_patterns": ["false, true, and NULL group keys", "NULL measure rows ignored by COUNT", "all-NULL measure group remains active with count zero"], "shape_limits": "exactly one boolean fact-column group key and one COUNT over a distinct boolean fact column, with no filter, join, HAVING, or additional measure; qualified from 250K through 1M rows", "dispatch_expectation": "required", "rejection_reason": null},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "nullable bool fact group key",
+          "distinct nullable bool COUNT input",
+          "int8 COUNT result"
+        ],
+        "null_patterns": [
+          "false, true, and NULL group keys",
+          "NULL measure rows ignored by COUNT",
+          "all-NULL measure group remains active with count zero"
+        ],
+        "shape_limits": "exactly one boolean fact-column group key and one COUNT over a distinct boolean fact column, with no filter, join, HAVING, or additional measure; qualified from 250K through 1M rows",
+        "dispatch_expectation": "required",
+        "rejection_reason": null
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["94_grouped_count_bool_contract.assert_001", "95_selected_lifecycle_contract.assert_007"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["94_grouped_count_bool_contract.assert_001", "95_selected_lifecycle_contract.assert_007"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["94_grouped_count_bool_contract.assert_001", "94_grouped_count_bool_contract.assert_002", "96_declined_lifecycle_contract.assert_008"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_007"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_007"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_007"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["94_grouped_count_bool_contract.assert_001", "95_selected_lifecycle_contract.assert_007"], "gap": null},
-        "rejection_reason": {"status": "not_applicable", "assertion_ids": [], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "94_grouped_count_bool_contract.assert_001",
+            "95_selected_lifecycle_contract.assert_007"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "94_grouped_count_bool_contract.assert_001",
+            "95_selected_lifecycle_contract.assert_007"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "94_grouped_count_bool_contract.assert_001",
+            "94_grouped_count_bool_contract.assert_002",
+            "96_declined_lifecycle_contract.assert_008"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_007"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_007"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_007"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "94_grouped_count_bool_contract.assert_001",
+            "95_selected_lifecycle_contract.assert_007"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "not_applicable",
+          "assertion_ids": [],
+          "gap": null
+        }
       }
     },
     {
       "id": "decline.grouped_count_bool_adjacent",
       "disposition": "declined",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["global nullable bool COUNT", "same-column nullable bool grouped COUNT"], "null_patterns": ["NULL measure rows ignored by COUNT", "NULL group remains PostgreSQL-native"], "shape_limits": "global, same-column, filtered, joined, HAVING, and multi-measure boolean COUNT shapes remain native outside the exact released descriptor", "dispatch_expectation": "forbidden", "rejection_reason": "generic_serial_kernel_mode_unqualified"},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "global nullable bool COUNT",
+          "same-column nullable bool grouped COUNT"
+        ],
+        "null_patterns": [
+          "NULL measure rows ignored by COUNT",
+          "NULL group remains PostgreSQL-native"
+        ],
+        "shape_limits": "global, same-column, filtered, joined, HAVING, and multi-measure boolean COUNT shapes remain native outside the exact released descriptor",
+        "dispatch_expectation": "forbidden",
+        "rejection_reason": "generic_serial_kernel_mode_unqualified"
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["94_grouped_count_bool_contract.assert_002", "96_declined_lifecycle_contract.assert_008"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["94_grouped_count_bool_contract.assert_002", "96_declined_lifecycle_contract.assert_008"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["94_grouped_count_bool_contract.assert_002", "96_declined_lifecycle_contract.assert_008"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_008"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_008"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_008"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["94_grouped_count_bool_contract.assert_002", "96_declined_lifecycle_contract.assert_008"], "gap": null},
-        "rejection_reason": {"status": "covered", "assertion_ids": ["94_grouped_count_bool_contract.assert_002", "96_declined_lifecycle_contract.assert_008"], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "94_grouped_count_bool_contract.assert_002",
+            "96_declined_lifecycle_contract.assert_008"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "94_grouped_count_bool_contract.assert_002",
+            "96_declined_lifecycle_contract.assert_008"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "94_grouped_count_bool_contract.assert_002",
+            "96_declined_lifecycle_contract.assert_008"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_008"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_008"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_008"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "94_grouped_count_bool_contract.assert_002",
+            "96_declined_lifecycle_contract.assert_008"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "covered",
+          "assertion_ids": [
+            "94_grouped_count_bool_contract.assert_002",
+            "96_declined_lifecycle_contract.assert_008"
+          ],
+          "gap": null
+        }
       }
     },
     {
       "id": "selected.grouped_count_int2",
       "disposition": "selected",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["nullable bool fact group key", "distinct nullable int2 COUNT input", "full int2 endpoint domain", "int8 COUNT result"], "null_patterns": ["false, true, and NULL group keys", "NULL measure rows ignored by COUNT", "all-NULL measure group remains active with count zero"], "shape_limits": "exactly one boolean fact-column group key and one COUNT over a distinct int2 fact column, with no filter, join, HAVING, or additional measure; qualified from 250K through 1M rows", "dispatch_expectation": "required", "rejection_reason": null},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "nullable bool fact group key",
+          "distinct nullable int2 COUNT input",
+          "full int2 endpoint domain",
+          "int8 COUNT result"
+        ],
+        "null_patterns": [
+          "false, true, and NULL group keys",
+          "NULL measure rows ignored by COUNT",
+          "all-NULL measure group remains active with count zero"
+        ],
+        "shape_limits": "exactly one boolean fact-column group key and one COUNT over a distinct int2 fact column, with no filter, join, HAVING, or additional measure; qualified from 250K through 1M rows",
+        "dispatch_expectation": "required",
+        "rejection_reason": null
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["99_grouped_count_int2_contract.assert_003", "99_grouped_count_int2_contract.assert_004", "95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["99_grouped_count_int2_contract.assert_002", "99_grouped_count_int2_contract.assert_004", "95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["99_grouped_count_int2_contract.assert_004", "99_grouped_count_int2_contract.assert_005", "96_declined_lifecycle_contract.assert_015"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["99_grouped_count_int2_contract.assert_004", "95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "rejection_reason": {"status": "not_applicable", "assertion_ids": [], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "99_grouped_count_int2_contract.assert_003",
+            "99_grouped_count_int2_contract.assert_004",
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "99_grouped_count_int2_contract.assert_002",
+            "99_grouped_count_int2_contract.assert_004",
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "99_grouped_count_int2_contract.assert_004",
+            "99_grouped_count_int2_contract.assert_005",
+            "96_declined_lifecycle_contract.assert_015"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "99_grouped_count_int2_contract.assert_004",
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "not_applicable",
+          "assertion_ids": [],
+          "gap": null
+        }
       }
     },
     {
       "id": "decline.grouped_count_int2_adjacent",
       "disposition": "declined",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["global nullable int2 COUNT", "int4-grouped nullable int2 COUNT", "bool-grouped nullable int4 COUNT"], "null_patterns": ["NULL measure rows ignored by COUNT", "NULL groups remain PostgreSQL-native"], "shape_limits": "global, non-boolean-grouped, filtered, broader-measure, joined, HAVING, and multi-measure typed COUNT shapes remain native outside the exact released descriptor", "dispatch_expectation": "forbidden", "rejection_reason": "generic_serial_kernel_mode_unqualified"},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "global nullable int2 COUNT plus int4 MIN",
+          "bool-grouped nullable int4 COUNT plus MIN",
+        "Boolean-WHERE filtered int2 COUNT plus int4 MIN"
+        ],
+        "null_patterns": [
+          "NULL measure rows ignored by COUNT",
+          "NULL groups remain PostgreSQL-native"
+        ],
+      "shape_limits": "the asserted adjacent boundary retains unsupported MIN states, including Boolean-WHERE filtered typed COUNT plus MIN; plain global int2 COUNT and Boolean-WHERE counts are qualified separately",
+        "dispatch_expectation": "forbidden",
+        "rejection_reason": "generic_serial_kernel_mode_unqualified"
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["99_grouped_count_int2_contract.assert_005", "96_declined_lifecycle_contract.assert_015"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["99_grouped_count_int2_contract.assert_005", "96_declined_lifecycle_contract.assert_015"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["99_grouped_count_int2_contract.assert_005", "96_declined_lifecycle_contract.assert_015"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_015"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_015"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_015"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["99_grouped_count_int2_contract.assert_005", "96_declined_lifecycle_contract.assert_015"], "gap": null},
-        "rejection_reason": {"status": "covered", "assertion_ids": ["99_grouped_count_int2_contract.assert_005", "96_declined_lifecycle_contract.assert_015"], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "99_grouped_count_int2_contract.assert_005",
+            "96_declined_lifecycle_contract.assert_015"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "99_grouped_count_int2_contract.assert_005",
+            "96_declined_lifecycle_contract.assert_015"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "99_grouped_count_int2_contract.assert_005",
+            "96_declined_lifecycle_contract.assert_015"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_015"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_015"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_015"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "99_grouped_count_int2_contract.assert_005",
+            "96_declined_lifecycle_contract.assert_015"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "covered",
+          "assertion_ids": [
+            "99_grouped_count_int2_contract.assert_005",
+            "96_declined_lifecycle_contract.assert_015"
+          ],
+          "gap": null
+        }
       }
     },
     {
       "id": "selected.grouped_count_int8",
       "disposition": "selected",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["nullable bool fact group key", "distinct nullable int8 COUNT input", "full int8 endpoint domain", "int8 COUNT result"], "null_patterns": ["false, true, and NULL group keys", "NULL measure rows ignored by COUNT", "all-NULL measure group remains active with count zero"], "shape_limits": "exactly one boolean fact-column group key and one COUNT over a distinct int8 fact column, with no filter, join, HAVING, or additional measure; qualified from 250K through 1M rows", "dispatch_expectation": "required", "rejection_reason": null},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "nullable bool fact group key",
+          "distinct nullable int8 COUNT input",
+          "full int8 endpoint domain",
+          "int8 COUNT result"
+        ],
+        "null_patterns": [
+          "false, true, and NULL group keys",
+          "NULL measure rows ignored by COUNT",
+          "all-NULL measure group remains active with count zero"
+        ],
+        "shape_limits": "exactly one boolean fact-column group key and one COUNT over a distinct int8 fact column, with no filter, join, HAVING, or additional measure; qualified from 250K through 1M rows",
+        "dispatch_expectation": "required",
+        "rejection_reason": null
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["100_grouped_count_int8_contract.assert_003", "100_grouped_count_int8_contract.assert_004", "95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["100_grouped_count_int8_contract.assert_002", "100_grouped_count_int8_contract.assert_004", "95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["100_grouped_count_int8_contract.assert_004", "100_grouped_count_int8_contract.assert_005", "96_declined_lifecycle_contract.assert_016"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["100_grouped_count_int8_contract.assert_004", "95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "rejection_reason": {"status": "not_applicable", "assertion_ids": [], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "100_grouped_count_int8_contract.assert_003",
+            "100_grouped_count_int8_contract.assert_004",
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "100_grouped_count_int8_contract.assert_002",
+            "100_grouped_count_int8_contract.assert_004",
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "100_grouped_count_int8_contract.assert_004",
+            "100_grouped_count_int8_contract.assert_005",
+            "96_declined_lifecycle_contract.assert_016"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "100_grouped_count_int8_contract.assert_004",
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "not_applicable",
+          "assertion_ids": [],
+          "gap": null
+        }
       }
     },
     {
       "id": "decline.grouped_count_int8_adjacent",
       "disposition": "declined",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["global nullable int8 COUNT", "int4-grouped nullable int8 COUNT", "bool-grouped nullable int4 COUNT"], "null_patterns": ["NULL measure rows ignored by COUNT", "NULL groups remain PostgreSQL-native"], "shape_limits": "global, non-boolean-grouped, filtered, broader-measure, joined, HAVING, and multi-measure typed COUNT shapes remain native outside the exact released descriptor", "dispatch_expectation": "forbidden", "rejection_reason": "generic_serial_kernel_mode_unqualified"},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "global nullable int8 COUNT",
+          "int4-grouped nullable int8 COUNT",
+          "bool-grouped nullable int4 COUNT"
+        ],
+        "null_patterns": [
+          "NULL measure rows ignored by COUNT",
+          "NULL groups remain PostgreSQL-native"
+        ],
+        "shape_limits": "global, non-boolean-grouped, filtered, broader-measure, joined, HAVING, and multi-measure typed COUNT shapes remain native outside the exact released descriptor",
+        "dispatch_expectation": "forbidden",
+        "rejection_reason": "generic_serial_kernel_mode_unqualified"
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["100_grouped_count_int8_contract.assert_005", "96_declined_lifecycle_contract.assert_016"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["100_grouped_count_int8_contract.assert_005", "96_declined_lifecycle_contract.assert_016"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["100_grouped_count_int8_contract.assert_005", "96_declined_lifecycle_contract.assert_016"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_016"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_016"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_016"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["100_grouped_count_int8_contract.assert_005", "96_declined_lifecycle_contract.assert_016"], "gap": null},
-        "rejection_reason": {"status": "covered", "assertion_ids": ["100_grouped_count_int8_contract.assert_005", "96_declined_lifecycle_contract.assert_016"], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "100_grouped_count_int8_contract.assert_005",
+            "96_declined_lifecycle_contract.assert_016"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "100_grouped_count_int8_contract.assert_005",
+            "96_declined_lifecycle_contract.assert_016"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "100_grouped_count_int8_contract.assert_005",
+            "96_declined_lifecycle_contract.assert_016"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_016"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_016"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_016"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "100_grouped_count_int8_contract.assert_005",
+            "96_declined_lifecycle_contract.assert_016"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "covered",
+          "assertion_ids": [
+            "100_grouped_count_int8_contract.assert_005",
+            "96_declined_lifecycle_contract.assert_016"
+          ],
+          "gap": null
+        }
       }
     },
     {
       "id": "selected.grouped_count_date",
       "disposition": "selected",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["nullable bool fact group key", "distinct nullable date COUNT input", "PostgreSQL date infinities", "int8 COUNT result"], "null_patterns": ["false, true, and NULL group keys", "NULL measure rows ignored by COUNT", "all-NULL measure group remains active with count zero"], "shape_limits": "exactly one boolean fact-column group key and one COUNT over a distinct date fact column, with no filter, join, HAVING, or additional measure; qualified from 250K through 1M rows", "dispatch_expectation": "required", "rejection_reason": null},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "nullable bool fact group key",
+          "distinct nullable date COUNT input",
+          "PostgreSQL date infinities",
+          "int8 COUNT result"
+        ],
+        "null_patterns": [
+          "false, true, and NULL group keys",
+          "NULL measure rows ignored by COUNT",
+          "all-NULL measure group remains active with count zero"
+        ],
+        "shape_limits": "exactly one boolean fact-column group key and one COUNT over a distinct date fact column, with no filter, join, HAVING, or additional measure; qualified from 250K through 1M rows",
+        "dispatch_expectation": "required",
+        "rejection_reason": null
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["101_grouped_count_date_contract.assert_003", "101_grouped_count_date_contract.assert_004", "95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["101_grouped_count_date_contract.assert_002", "101_grouped_count_date_contract.assert_004", "95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["101_grouped_count_date_contract.assert_004", "101_grouped_count_date_contract.assert_005", "96_declined_lifecycle_contract.assert_017"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["101_grouped_count_date_contract.assert_004", "95_selected_lifecycle_contract.assert_001"], "gap": null},
-        "rejection_reason": {"status": "not_applicable", "assertion_ids": [], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "101_grouped_count_date_contract.assert_003",
+            "101_grouped_count_date_contract.assert_004",
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "101_grouped_count_date_contract.assert_002",
+            "101_grouped_count_date_contract.assert_004",
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "101_grouped_count_date_contract.assert_004",
+            "101_grouped_count_date_contract.assert_005",
+            "96_declined_lifecycle_contract.assert_017"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "101_grouped_count_date_contract.assert_004",
+            "95_selected_lifecycle_contract.assert_001"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "not_applicable",
+          "assertion_ids": [],
+          "gap": null
+        }
       }
     },
     {
       "id": "decline.grouped_count_date_adjacent",
       "disposition": "declined",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["global nullable date COUNT", "int4-grouped nullable date COUNT", "bool-grouped nullable int4 COUNT"], "null_patterns": ["NULL measure rows ignored by COUNT", "NULL groups remain PostgreSQL-native"], "shape_limits": "global, non-boolean-grouped, filtered, broader-measure, joined, HAVING, and multi-measure typed COUNT shapes remain native outside the exact released descriptor", "dispatch_expectation": "forbidden", "rejection_reason": "generic_serial_kernel_mode_unqualified"},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "global nullable date COUNT",
+          "int4-grouped nullable date COUNT",
+          "bool-grouped nullable int4 COUNT"
+        ],
+        "null_patterns": [
+          "NULL measure rows ignored by COUNT",
+          "NULL groups remain PostgreSQL-native"
+        ],
+        "shape_limits": "global, non-boolean-grouped, filtered, broader-measure, joined, HAVING, and multi-measure typed COUNT shapes remain native outside the exact released descriptor",
+        "dispatch_expectation": "forbidden",
+        "rejection_reason": "generic_serial_kernel_mode_unqualified"
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["101_grouped_count_date_contract.assert_005", "96_declined_lifecycle_contract.assert_017"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["101_grouped_count_date_contract.assert_005", "96_declined_lifecycle_contract.assert_017"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["101_grouped_count_date_contract.assert_005", "96_declined_lifecycle_contract.assert_017"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_017"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_017"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_017"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["101_grouped_count_date_contract.assert_005", "96_declined_lifecycle_contract.assert_017"], "gap": null},
-        "rejection_reason": {"status": "covered", "assertion_ids": ["101_grouped_count_date_contract.assert_005", "96_declined_lifecycle_contract.assert_017"], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "101_grouped_count_date_contract.assert_005",
+            "96_declined_lifecycle_contract.assert_017"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "101_grouped_count_date_contract.assert_005",
+            "96_declined_lifecycle_contract.assert_017"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "101_grouped_count_date_contract.assert_005",
+            "96_declined_lifecycle_contract.assert_017"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_017"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_017"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "96_declined_lifecycle_contract.assert_017"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "101_grouped_count_date_contract.assert_005",
+            "96_declined_lifecycle_contract.assert_017"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "covered",
+          "assertion_ids": [
+            "101_grouped_count_date_contract.assert_005",
+            "96_declined_lifecycle_contract.assert_017"
+          ],
+          "gap": null
+        }
       }
     },
     {
       "id": "selected.grouped_count_timestamp",
       "disposition": "selected",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["nullable bool fact group key", "distinct nullable timestamp COUNT input", "distinct nullable timestamptz COUNT input", "PostgreSQL temporal infinities", "int8 COUNT result"], "null_patterns": ["false, true, and NULL group keys", "NULL measure rows ignored by COUNT", "all-NULL measure group remains active with count zero"], "shape_limits": "exactly one boolean fact-column group key and one COUNT over a distinct timestamp or timestamptz fact column, with no filter, join, HAVING, or additional measure; qualified from 250K through 1M rows", "dispatch_expectation": "required", "rejection_reason": null},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "nullable bool fact group key",
+          "distinct nullable timestamp COUNT input",
+          "distinct nullable timestamptz COUNT input",
+          "PostgreSQL temporal infinities",
+          "int8 COUNT result"
+        ],
+        "null_patterns": [
+          "false, true, and NULL group keys",
+          "NULL measure rows ignored by COUNT",
+          "all-NULL measure group remains active with count zero"
+        ],
+        "shape_limits": "exactly one boolean fact-column group key and one COUNT over a distinct timestamp or timestamptz fact column, with no filter, join, HAVING, or additional measure; qualified from 250K through 1M rows",
+        "dispatch_expectation": "required",
+        "rejection_reason": null
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_003", "102_grouped_count_timestamp_contract.assert_004"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_002", "102_grouped_count_timestamp_contract.assert_004"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_004", "102_grouped_count_timestamp_contract.assert_006"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_005"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_005"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_005"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_004", "102_grouped_count_timestamp_contract.assert_005"], "gap": null},
-        "rejection_reason": {"status": "not_applicable", "assertion_ids": [], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "102_grouped_count_timestamp_contract.assert_003",
+            "102_grouped_count_timestamp_contract.assert_004"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "102_grouped_count_timestamp_contract.assert_002",
+            "102_grouped_count_timestamp_contract.assert_004"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "102_grouped_count_timestamp_contract.assert_004",
+            "102_grouped_count_timestamp_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "102_grouped_count_timestamp_contract.assert_005"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "102_grouped_count_timestamp_contract.assert_005"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "102_grouped_count_timestamp_contract.assert_005"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "102_grouped_count_timestamp_contract.assert_004",
+            "102_grouped_count_timestamp_contract.assert_005"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "not_applicable",
+          "assertion_ids": [],
+          "gap": null
+        }
       }
     },
     {
       "id": "decline.grouped_count_timestamp_adjacent",
       "disposition": "declined",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["global nullable timestamp/timestamptz COUNT", "int4-grouped nullable timestamp COUNT", "timestamp-grouped nullable timestamp COUNT", "bool-grouped nullable int4 COUNT"], "null_patterns": ["NULL measure rows ignored by COUNT", "NULL groups remain PostgreSQL-native"], "shape_limits": "global, non-boolean-grouped, filtered, broader-measure, joined, HAVING, and multi-measure temporal COUNT shapes remain native outside the exact released descriptor", "dispatch_expectation": "forbidden", "rejection_reason": "generic_serial_kernel_mode_unqualified"},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "global nullable timestamp/timestamptz COUNT",
+          "int4-grouped nullable timestamp COUNT",
+          "timestamp-grouped nullable timestamp COUNT",
+          "bool-grouped nullable int4 COUNT"
+        ],
+        "null_patterns": [
+          "NULL measure rows ignored by COUNT",
+          "NULL groups remain PostgreSQL-native"
+        ],
+        "shape_limits": "global, non-boolean-grouped, filtered, broader-measure, joined, HAVING, and multi-measure temporal COUNT shapes remain native outside the exact released descriptor",
+        "dispatch_expectation": "forbidden",
+        "rejection_reason": "generic_serial_kernel_mode_unqualified"
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_006"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_006"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_006"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_006"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_006"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_006"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_006"], "gap": null},
-        "rejection_reason": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_006"], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "102_grouped_count_timestamp_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "102_grouped_count_timestamp_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "102_grouped_count_timestamp_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "102_grouped_count_timestamp_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "102_grouped_count_timestamp_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "102_grouped_count_timestamp_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "102_grouped_count_timestamp_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "covered",
+          "assertion_ids": [
+            "102_grouped_count_timestamp_contract.assert_006"
+          ],
+          "gap": null
+        }
       }
     },
     {
       "id": "selected.grouped_count_float",
       "disposition": "selected",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["nullable bool fact group key", "distinct nullable float4 COUNT input", "distinct nullable float8 COUNT input", "NaN", "positive and negative infinity", "positive and negative zero", "int8 COUNT result"], "null_patterns": ["false, true, and NULL group keys", "NULL measure rows ignored by COUNT", "all-NULL measure group remains active with count zero"], "shape_limits": "exactly one boolean fact-column group key and one COUNT over a distinct float4 or float8 fact column, with no filter, join, HAVING, or additional measure; qualified from 250K through 1M rows", "dispatch_expectation": "required", "rejection_reason": null},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "nullable bool fact group key",
+          "distinct nullable float4 COUNT input",
+          "distinct nullable float8 COUNT input",
+          "NaN",
+          "positive and negative infinity",
+          "positive and negative zero",
+          "int8 COUNT result"
+        ],
+        "null_patterns": [
+          "false, true, and NULL group keys",
+          "NULL measure rows ignored by COUNT",
+          "all-NULL measure group remains active with count zero"
+        ],
+        "shape_limits": "exactly one boolean fact-column group key and one COUNT over a distinct float4 or float8 fact column, with no filter, join, HAVING, or additional measure; qualified from 250K through 1M rows",
+        "dispatch_expectation": "required",
+        "rejection_reason": null
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["103_grouped_count_float_contract.assert_003", "103_grouped_count_float_contract.assert_004"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["103_grouped_count_float_contract.assert_002", "103_grouped_count_float_contract.assert_004"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["103_grouped_count_float_contract.assert_004", "103_grouped_count_float_contract.assert_006"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["103_grouped_count_float_contract.assert_005"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["103_grouped_count_float_contract.assert_005"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["103_grouped_count_float_contract.assert_005"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["103_grouped_count_float_contract.assert_004", "103_grouped_count_float_contract.assert_005"], "gap": null},
-        "rejection_reason": {"status": "not_applicable", "assertion_ids": [], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "103_grouped_count_float_contract.assert_003",
+            "103_grouped_count_float_contract.assert_004"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "103_grouped_count_float_contract.assert_002",
+            "103_grouped_count_float_contract.assert_004"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "103_grouped_count_float_contract.assert_004",
+            "103_grouped_count_float_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "103_grouped_count_float_contract.assert_005"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "103_grouped_count_float_contract.assert_005"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "103_grouped_count_float_contract.assert_005"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "103_grouped_count_float_contract.assert_004",
+            "103_grouped_count_float_contract.assert_005"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "not_applicable",
+          "assertion_ids": [],
+          "gap": null
+        }
       }
     },
     {
       "id": "decline.grouped_count_float_adjacent",
       "disposition": "declined",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["global nullable float4/float8 COUNT", "int4-grouped nullable float4/float8 COUNT", "float-grouped nullable float COUNT", "bool-grouped nullable int4 COUNT"], "null_patterns": ["NULL measure rows ignored by COUNT", "NULL groups remain PostgreSQL-native"], "shape_limits": "global, non-boolean-grouped, filtered, broader-measure, joined, HAVING, and multi-measure float COUNT shapes remain native outside the exact released descriptor", "dispatch_expectation": "forbidden", "rejection_reason": "generic_serial_kernel_mode_unqualified"},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "global nullable float4/float8 COUNT",
+          "int4-grouped nullable float4/float8 COUNT",
+          "float-grouped nullable float COUNT",
+          "bool-grouped nullable int4 COUNT"
+        ],
+        "null_patterns": [
+          "NULL measure rows ignored by COUNT",
+          "NULL groups remain PostgreSQL-native"
+        ],
+        "shape_limits": "global, non-boolean-grouped, filtered, broader-measure, joined, HAVING, and multi-measure float COUNT shapes remain native outside the exact released descriptor",
+        "dispatch_expectation": "forbidden",
+        "rejection_reason": "generic_serial_kernel_mode_unqualified"
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["103_grouped_count_float_contract.assert_006"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["103_grouped_count_float_contract.assert_006"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["103_grouped_count_float_contract.assert_006"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["103_grouped_count_float_contract.assert_006"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["103_grouped_count_float_contract.assert_006"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["103_grouped_count_float_contract.assert_006"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["103_grouped_count_float_contract.assert_006"], "gap": null},
-        "rejection_reason": {"status": "covered", "assertion_ids": ["103_grouped_count_float_contract.assert_006"], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "103_grouped_count_float_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "103_grouped_count_float_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "103_grouped_count_float_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "103_grouped_count_float_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "103_grouped_count_float_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "103_grouped_count_float_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "103_grouped_count_float_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "covered",
+          "assertion_ids": [
+            "103_grouped_count_float_contract.assert_006"
+          ],
+          "gap": null
+        }
       }
     },
     {
       "id": "selected.grouped_integer_sum_avg",
       "disposition": "selected",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["nullable bool fact group key", "nullable int2 SUM and AVG input", "nullable int4 SUM and AVG input", "widened int8 SUM result", "exact numeric AVG result"], "null_patterns": ["false, true, and NULL group keys", "NULL measures excluded independently from SUM and AVG", "all-NULL measure group retains COUNT(*) with NULL SUM/AVG"], "shape_limits": "exactly one boolean fact-column group key, one distinct int2 or int4 fact measure projected as SUM and AVG, and one COUNT(*), with no filter, join, HAVING, or additional measure; qualified from 250K through 1M rows", "dispatch_expectation": "required", "rejection_reason": null},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "zero through three nullable dictionary fact keys",
+          "nullable int2/int4 SUM/AVG/COUNT/MIN/MAX inputs",
+          "two direct INT4 column +, - and * expressions with per-row overflow checks, including COUNT-only outputs",
+          "nullable int8 column SUM/AVG with exact NUMERIC states beyond int64 range, including mixed NUMERIC/int2/int4 inputs; no int8 extrema",
+          "widened int8 SUM result",
+          "exact numeric AVG result",
+          "independent INT4 aggregate filters including predicate-only columns without extra aggregate states",
+          "single-column INT4 IS NULL and NULL-or-range predicates in FILTER and WHERE, including spatial conjunctions"
+        ],
+        "null_patterns": [
+          "NULL dictionary keys",
+          "NULL measures excluded independently from aggregates",
+          "all-NULL groups retain COUNT(*) with NULL SUM/AVG",
+          "empty global aggregates retain one NULL-SUM/zero-COUNT result",
+          "NULL-accepting conditional COUNT(*) includes accepted NULL predicate rows while COUNT(column) excludes NULL values"
+        ],
+        "shape_limits": "one fact relation with up to four integer states including hidden predicate carriers; checked two-column INT4 +, - and * support SUM/AVG/COUNT/MIN/MAX, but not nested or literal arithmetic; arithmetic RHS cannot double as independent FILTER input; int8 SUM/AVG uses exact decimal states and may mix with NUMERIC/int2/int4 columns but not arithmetic or extrema; zero to three dictionary keys; supported FILTER/WHERE/spatial predicates and native HAVING/order/limits; no joins",
+        "dispatch_expectation": "required",
+        "rejection_reason": null
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_001", "104_grouped_integer_sum_avg_contract.assert_003", "104_grouped_integer_sum_avg_contract.assert_004"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_002", "104_grouped_integer_sum_avg_contract.assert_004"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_004", "104_grouped_integer_sum_avg_contract.assert_006"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_005"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_005"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_005"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_004", "104_grouped_integer_sum_avg_contract.assert_005"], "gap": null},
-        "rejection_reason": {"status": "not_applicable", "assertion_ids": [], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "104_grouped_integer_sum_avg_contract.assert_001",
+            "104_grouped_integer_sum_avg_contract.assert_003",
+            "104_grouped_integer_sum_avg_contract.assert_004",
+            "108_multikey_integer_aggregates.assert_001",
+            "110_multimeasure_integer_aggregates.assert_001",
+            "127_fused_integer_rows.assert_001",
+            "126_computed_integer_aggregates.assert_001",
+            "126_computed_integer_aggregates.assert_003",
+            "119_global_integer_aggregates.assert_001",
+            "121_integer_where_aggregates.assert_001",
+            "123_integer_extrema.assert_001",
+            "124_bigint_numeric_aggregates.assert_001",
+            "125_null_accepting_predicates.assert_001"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "104_grouped_integer_sum_avg_contract.assert_002",
+            "104_grouped_integer_sum_avg_contract.assert_004",
+            "115_filtered_integer_counts.assert_001",
+            "127_fused_integer_rows.assert_001",
+            "127_fused_integer_rows.assert_002",
+            "126_computed_integer_aggregates.assert_001",
+            "126_computed_integer_aggregates.assert_002",
+            "126_computed_integer_aggregates.assert_003",
+            "119_global_integer_aggregates.assert_001",
+            "119_global_integer_aggregates.assert_002",
+            "121_integer_where_aggregates.assert_001",
+            "121_integer_where_aggregates.assert_002",
+            "123_integer_extrema.assert_001",
+            "123_integer_extrema.assert_002",
+            "124_bigint_numeric_aggregates.assert_001",
+            "125_null_accepting_predicates.assert_001",
+            "124_bigint_numeric_aggregates.assert_002",
+            "125_null_accepting_predicates.assert_002"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "104_grouped_integer_sum_avg_contract.assert_004",
+            "104_grouped_integer_sum_avg_contract.assert_006",
+            "108_multikey_integer_aggregates.assert_001",
+            "111_independent_aggregate_filters.assert_001",
+            "127_fused_integer_rows.assert_001",
+            "127_fused_integer_rows.assert_002",
+            "126_computed_integer_aggregates.assert_001",
+            "126_computed_integer_aggregates.assert_004",
+            "119_global_integer_aggregates.assert_001",
+            "121_integer_where_aggregates.assert_001",
+            "123_integer_extrema.assert_001",
+            "124_bigint_numeric_aggregates.assert_001",
+            "125_null_accepting_predicates.assert_001"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "104_grouped_integer_sum_avg_contract.assert_005"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "104_grouped_integer_sum_avg_contract.assert_005",
+            "127_fused_integer_rows.assert_002",
+            "126_computed_integer_aggregates.assert_002",
+            "119_global_integer_aggregates.assert_002",
+            "121_integer_where_aggregates.assert_002",
+            "123_integer_extrema.assert_002",
+            "124_bigint_numeric_aggregates.assert_002",
+            "125_null_accepting_predicates.assert_002"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "104_grouped_integer_sum_avg_contract.assert_005",
+            "127_fused_integer_rows.assert_002",
+            "126_computed_integer_aggregates.assert_002",
+            "119_global_integer_aggregates.assert_002",
+            "121_integer_where_aggregates.assert_002",
+            "123_integer_extrema.assert_002",
+            "124_bigint_numeric_aggregates.assert_002",
+            "125_null_accepting_predicates.assert_002"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "104_grouped_integer_sum_avg_contract.assert_004",
+            "127_fused_integer_rows.assert_001",
+            "127_fused_integer_rows.assert_002",
+            "126_computed_integer_aggregates.assert_001",
+            "126_computed_integer_aggregates.assert_002",
+            "126_computed_integer_aggregates.assert_003",
+            "104_grouped_integer_sum_avg_contract.assert_005",
+            "119_global_integer_aggregates.assert_001",
+            "119_global_integer_aggregates.assert_002",
+            "121_integer_where_aggregates.assert_001",
+            "121_integer_where_aggregates.assert_002",
+            "123_integer_extrema.assert_001",
+            "123_integer_extrema.assert_002",
+            "124_bigint_numeric_aggregates.assert_001",
+            "125_null_accepting_predicates.assert_001",
+            "124_bigint_numeric_aggregates.assert_002",
+            "125_null_accepting_predicates.assert_002"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "not_applicable",
+          "assertion_ids": [],
+          "gap": null
+        }
       }
     },
     {
       "id": "decline.grouped_integer_sum_avg_adjacent",
       "disposition": "declined",
-      "postgresql_majors": [18, 19],
-      "semantics": {"types": ["int2 AVG without SUM", "int4 SUM and AVG without COUNT(*)"], "null_patterns": ["NULL measures retain PostgreSQL SUM/AVG semantics", "all-NULL group remains PostgreSQL-native"], "shape_limits": "the asserted adjacent boundary covers int2 AVG-only and int4 SUM+AVG without COUNT(*); both remain native outside the exact released descriptor", "dispatch_expectation": "forbidden", "rejection_reason": "generic_serial_kernel_mode_unqualified"},
+      "postgresql_majors": [
+        18,
+        19
+      ],
+      "semantics": {
+        "types": [
+          "int2 AVG without SUM",
+          "int4 SUM and AVG without COUNT(*)"
+        ],
+        "null_patterns": [
+          "NULL measures retain PostgreSQL SUM/AVG semantics",
+          "all-NULL group remains PostgreSQL-native"
+        ],
+        "shape_limits": "the asserted adjacent boundary covers int2 AVG-only and int4 SUM+AVG without COUNT(*); both remain native outside the exact released descriptor",
+        "dispatch_expectation": "forbidden",
+        "rejection_reason": "generic_serial_kernel_mode_unqualified"
+      },
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_006"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_006"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_006"], "gap": null},
-        "ddl": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_006"], "gap": null},
-        "dml": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_006"], "gap": null},
-        "prepared": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_006"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_006"], "gap": null},
-        "rejection_reason": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_006"], "gap": null}
+        "types": {
+          "status": "covered",
+          "assertion_ids": [
+            "104_grouped_integer_sum_avg_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "nulls": {
+          "status": "covered",
+          "assertion_ids": [
+            "104_grouped_integer_sum_avg_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "shape_limits": {
+          "status": "covered",
+          "assertion_ids": [
+            "104_grouped_integer_sum_avg_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "ddl": {
+          "status": "covered",
+          "assertion_ids": [
+            "104_grouped_integer_sum_avg_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "dml": {
+          "status": "covered",
+          "assertion_ids": [
+            "104_grouped_integer_sum_avg_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "prepared": {
+          "status": "covered",
+          "assertion_ids": [
+            "104_grouped_integer_sum_avg_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "dispatch": {
+          "status": "covered",
+          "assertion_ids": [
+            "104_grouped_integer_sum_avg_contract.assert_006"
+          ],
+          "gap": null
+        },
+        "rejection_reason": {
+          "status": "covered",
+          "assertion_ids": [
+            "104_grouped_integer_sum_avg_contract.assert_006"
+          ],
+          "gap": null
+        }
       }
     }
   ]

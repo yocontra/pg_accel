@@ -139,6 +139,53 @@ pub fn convert_status(func: &'static str, raw: i32) -> PgaccelStatus {
 }
 
 bridge_status_fns! {
+    pub fn pgaccel_join_rows_count_controlled(
+        request: *const crate::gpu::join_rows::NativeJoinRequest,
+        control: *const crate::gpu::join_rows::NativeJoinControl,
+        workspace: *mut std::ffi::c_void,
+        workspace_bytes: u64,
+        result: *mut crate::gpu::join_rows::NativeControlledJoinResult,
+    ) -> PgaccelStatus;
+    pub fn pgaccel_join_rows_project_controlled(
+        request: *const crate::gpu::join_project::NativeProjectRequest,
+        control: *const crate::gpu::join_rows::NativeJoinControl,
+        workspace: *mut std::ffi::c_void,
+        workspace_bytes: u64,
+        result: *mut crate::gpu::join_rows::NativeControlledJoinResult,
+    ) -> PgaccelStatus;
+    pub fn pgaccel_join_rows_controlled_workspace_bytes(
+        request: *const crate::gpu::join_rows::NativeJoinRequest,
+        control: *const crate::gpu::join_rows::NativeJoinControl,
+        bytes: *mut u64,
+    ) -> PgaccelStatus;
+    pub fn pgaccel_join_rows_execute_controlled(
+        request: *const crate::gpu::join_rows::NativeJoinRequest,
+        control: *const crate::gpu::join_rows::NativeJoinControl,
+        workspace: *mut std::ffi::c_void,
+        workspace_bytes: u64,
+        output: *mut crate::gpu::join_rows::JoinRowPair,
+        output_capacity: u64,
+        result: *mut crate::gpu::join_rows::NativeControlledJoinResult,
+    ) -> PgaccelStatus;
+    pub fn pgaccel_join_rows_project(
+        request: *const crate::gpu::join_project::NativeProjectRequest,
+        workspace: *mut std::ffi::c_void,
+        workspace_bytes: u64,
+        result: *mut crate::gpu::join_project::NativeProjectResult,
+    ) -> PgaccelStatus;
+    pub fn pgaccel_join_rows_workspace_bytes(
+        request: *const crate::gpu::join_rows::NativeJoinRequest,
+        bytes: *mut u64,
+    ) -> PgaccelStatus;
+
+    pub fn pgaccel_join_rows_execute(
+        request: *const crate::gpu::join_rows::NativeJoinRequest,
+        workspace: *mut std::ffi::c_void,
+        workspace_bytes: u64,
+        output: *mut crate::gpu::join_rows::JoinRowPair,
+        output_capacity: u64,
+        result: *mut crate::gpu::join_rows::NativeJoinResult,
+    ) -> PgaccelStatus;
     /// Initialise the GPU runtime.  Must be called once before any other
     /// `pgaccel_*` function.
     pub fn pgaccel_init() -> PgaccelStatus;
@@ -594,6 +641,15 @@ bridge_status_fns! {
     ) -> PgaccelStatus;
 
     // -- Expression evaluator kernels --
+
+    /// Device BOOL/NULL to SQL mask; malformed bytes become the rejecting
+    /// marker 2, never SQL UNKNOWN. See the native consumer contract.
+    pub fn pgaccel_bool_sql_mask(
+        values: *const u8,
+        nulls: *const u8,
+        count: usize,
+        output: *mut i8,
+    ) -> PgaccelStatus;
 
     /// Evaluate a predicate expression on a columnar batch.
     ///

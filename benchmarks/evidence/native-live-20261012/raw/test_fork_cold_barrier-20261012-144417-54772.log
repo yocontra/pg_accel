@@ -1,0 +1,20 @@
+PGACCEL_TEST_START name=test_fork_cold_barrier
+=== Synchronized cold-fork GPU boundary test ===
+parent_pid=54773 workers=2 rounds=1 stage_timeout_s=180
+parent will not call pgaccel_init or any other pgaccel API
+round=1 releasing 2 children into pgaccel_init
+round=1 releasing 2 children into first GPU dispatch
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+worker=0 pid=54774 init_ms=33.89 dispatch_ms=439.32 sum=100000.0 gpu_delta=1 exit=ok
+worker=1 pid=54775 init_ms=33.86 dispatch_ms=439.55 sum=100000.0 gpu_delta=1 exit=ok
+RESULT: PASS - 2 synchronized children x 1 rounds
+PGACCEL_TEST_RESULT name=test_fork_cold_barrier exit_code=0 result=PASS raw_lines=18 body_sha256=7c07695c471b37b545ba4897244458c17d2e660b44d9c055c4ff6c44bcb29efb binding_sha256=d71c06bf7da8e4044dcde1399acafd4a98ff932aaf451c07333555c7d842648e

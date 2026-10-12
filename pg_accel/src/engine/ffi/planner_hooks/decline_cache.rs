@@ -23,6 +23,7 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 pub(super) enum DeclinePolicyKey {
     Structural {
         test_force_spatial_groupagg: bool,
+        test_force_numeric_groupagg: bool,
     },
     Device {
         auto_load: bool,
@@ -30,6 +31,7 @@ pub(super) enum DeclinePolicyKey {
         cost_multiplier_bits: u64,
         device_limits: u64,
         test_force_spatial_groupagg: bool,
+        test_force_numeric_groupagg: bool,
     },
 }
 
@@ -42,6 +44,7 @@ impl DeclinePolicyKey {
 
         Self::Structural {
             test_force_spatial_groupagg,
+            test_force_numeric_groupagg: Self::forced_numeric(),
         }
     }
 
@@ -57,6 +60,18 @@ impl DeclinePolicyKey {
             cost_multiplier_bits: gucs::cost_multiplier().to_bits(),
             device_limits: device_limits_fingerprint(),
             test_force_spatial_groupagg,
+            test_force_numeric_groupagg: Self::forced_numeric(),
+        }
+    }
+
+    fn forced_numeric() -> bool {
+        #[cfg(any(test, feature = "pg_test"))]
+        {
+            gucs::test_force_numeric_groupagg()
+        }
+        #[cfg(not(any(test, feature = "pg_test")))]
+        {
+            false
         }
     }
 }
@@ -464,6 +479,7 @@ mod tests {
             2_f64.to_bits(),
             DeclinePolicyKey::Structural {
                 test_force_spatial_groupagg: false,
+                test_force_numeric_groupagg: false,
             },
         )
     }
@@ -475,6 +491,7 @@ mod tests {
             2_f64.to_bits(),
             DeclinePolicyKey::Structural {
                 test_force_spatial_groupagg: false,
+                test_force_numeric_groupagg: false,
             },
         )
     }
@@ -513,12 +530,27 @@ mod tests {
             cost_multiplier_bits: 1.0_f64.to_bits(),
             device_limits: 7,
             test_force_spatial_groupagg,
+            test_force_numeric_groupagg: false,
         };
         let structural = |test_force_spatial_groupagg| DeclinePolicyKey::Structural {
             test_force_spatial_groupagg,
+            test_force_numeric_groupagg: false,
         };
         assert_ne!(device(false), device(true));
         assert_ne!(structural(false), structural(true));
+    }
+
+    #[test]
+    fn forced_numeric_test_policy_cannot_reuse_production_declines() {
+        let normal = key(11);
+        let mut forced = normal.clone();
+        forced.policy = DeclinePolicyKey::Structural {
+            test_force_spatial_groupagg: false,
+            test_force_numeric_groupagg: true,
+        };
+        insert(normal.clone(), "production_numeric_gate", Vec::new());
+        assert_eq!(lookup(&normal), Some("production_numeric_gate"));
+        assert_eq!(lookup(&forced), None);
     }
 
     #[test]

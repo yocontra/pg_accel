@@ -1,0 +1,32 @@
+SET
+CREATE TABLE
+INSERT 0 1
+                QUERY PLAN                
+------------------------------------------
+ Aggregate
+   Output: count(*)
+   ->  Seq Scan on pg_temp._count_rewrite
+         Output: a, b, p, d, e
+(4 rows)
+
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Aggregate
+   Output: count((NOT ((1 / b) IS DISTINCT FROM a)))
+   ->  Seq Scan on pg_temp._count_rewrite
+         Output: a, b, p, d, e
+(4 rows)
+
+psql:.codex/scratch/nullsafe-count-rewrite-probe.sql:19: NOTICE:  count(a IS DISTINCT FROM 1/b) -> no error
+psql:.codex/scratch/nullsafe-count-rewrite-probe.sql:19: NOTICE:  sum(CASE WHEN a IS DISTINCT FROM 1/b THEN 1 ELSE 0 END) -> 22012
+psql:.codex/scratch/nullsafe-count-rewrite-probe.sql:19: NOTICE:  count(1/b IS NOT DISTINCT FROM a) -> 22012
+psql:.codex/scratch/nullsafe-count-rewrite-probe.sql:19: NOTICE:  sum(CASE WHEN 1/b IS NOT DISTINCT FROM a THEN 1 ELSE 0 END) -> 22012
+psql:.codex/scratch/nullsafe-count-rewrite-probe.sql:19: NOTICE:  count((1/b>0) IS UNKNOWN) -> no error
+psql:.codex/scratch/nullsafe-count-rewrite-probe.sql:19: NOTICE:  sum(CASE WHEN (1/b>0) IS UNKNOWN THEN 1 ELSE 0 END) -> 22012
+psql:.codex/scratch/nullsafe-count-rewrite-probe.sql:19: NOTICE:  count((1/b>0) IS NOT TRUE) -> no error
+psql:.codex/scratch/nullsafe-count-rewrite-probe.sql:19: NOTICE:  sum(CASE WHEN (1/b>0) IS NOT TRUE THEN 1 ELSE 0 END) -> 22012
+psql:.codex/scratch/nullsafe-count-rewrite-probe.sql:19: NOTICE:  count(a IS DISTINCT FROM (d-e)) -> no error
+psql:.codex/scratch/nullsafe-count-rewrite-probe.sql:19: NOTICE:  sum(CASE WHEN a IS DISTINCT FROM (d-e) THEN 1 ELSE 0 END) -> 22008
+psql:.codex/scratch/nullsafe-count-rewrite-probe.sql:19: NOTICE:  count(CASE WHEN p THEN a IS DISTINCT FROM 1/b ELSE false END) -> no error
+psql:.codex/scratch/nullsafe-count-rewrite-probe.sql:19: NOTICE:  sum(CASE WHEN CASE WHEN p THEN a IS DISTINCT FROM 1/b ELSE false END THEN 1 ELSE 0 END) -> no error
+DO

@@ -1,0 +1,14 @@
+.....................................................................................................F....................................................
+======================================================================
+FAIL: test_checked_in_cpp_baseline_pins_resident_v2_survivors (test_coverage_tools.ImmutableBaselineTests.test_checked_in_cpp_baseline_pins_resident_v2_survivors)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_coverage_tools.py", line 2603, in test_checked_in_cpp_baseline_pins_resident_v2_survivors
+    self.assertEqual(coverage_tools.BASELINE_CPP_TESTS, 32)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 33 != 32
+
+----------------------------------------------------------------------
+Ran 154 tests in 210.456s
+
+FAILED (failures=1)

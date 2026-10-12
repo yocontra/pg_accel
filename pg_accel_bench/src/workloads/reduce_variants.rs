@@ -61,7 +61,7 @@ pub const REDUCE_SUM_F64: ReduceVariant = ReduceVariant {
 
 pub const REDUCE_SUM_I64: ReduceVariant = ReduceVariant {
     name: "reduce_sum_i64",
-    description: "SUM(bigint) — GPU tree reduction on i64",
+    description: "SUM(bigint) — unpinned exact-residency admission boundary",
     query: "SELECT SUM(vi8) FROM bench_reduce_var",
 };
 

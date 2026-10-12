@@ -1,0 +1,42 @@
+=== 131_scalar_date_expressions ===
+SET
+SET
+SELECT 250017
+ANALYZE
+psql:sql/tests/131_scalar_date_expressions.sql:64: NOTICE:  131 date arithmetic selected 24 of 24 shapes
+DO
+PGACCEL_ASSERT_OK:131_scalar_date_expressions.assert_001
+DO
+PGACCEL_ASSERT_OK:131_scalar_date_expressions.assert_002
+SET
+PREPARE
+DO
+DEALLOCATE
+RESET
+PGACCEL_ASSERT_OK:131_scalar_date_expressions.assert_003
+TRUNCATE TABLE
+INSERT 0 1000017
+UPDATE 1
+ANALYZE
+ pg_accel_refresh 
+------------------
+          1000017
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:131_scalar_date_expressions.assert_004
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ t
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:131_scalar_date_expressions

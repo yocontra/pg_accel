@@ -1,0 +1,74 @@
+[32m[1m       Using[0m[39m [37m[1mCliArgument("pg18")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/bin/pg_config[39m
+CARGO_TARGET_DIR="/Users/contra/Projects/pg_accel/target" PGRX_ALL_FEATURES="false" PGRX_BUILD_PROFILE="dev" PGRX_FEATURES="pg18 pg_test" PGRX_MANIFEST_PATH="/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" PGRX_NO_DEFAULT_FEATURES="true" PGRX_NO_SCHEMA="false" "/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "test" "--manifest-path" "/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" "--features" "pg18 pg_test" "--no-default-features" "pg_scalar_resident_artifact_rejects_stale_inputs_and_reloads"
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.72s
+     Running unittests src/lib.rs (target/debug/deps/pg_accel-ed206a68dc782b00)
+
+running 1 test
+test tests::scalar_lowering::tests::pg_pg_scalar_resident_artifact_rejects_stale_inputs_and_reloads ... [32m[1m       Using[0m[39m [37m[1mPgConfig("pg18")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/bin/pg_config[39m
+[32m[1m    Building[0m[39m extension with features [36mpg_test pg18[39m
+[32m[1m     Running[0m[39m command [36m"/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "rustc" "--lib" "--manifest-path" "/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" "--features" "pg_test pg18" "--no-default-features" "--message-format=json-render-diagnostics"[39m
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.31s
+[32m[1m  Installing[0m[39m extension
+[32m[1m     Copying[0m[39m control file to [36m.pgaccel/postgres/install/18.4/share/extension/pg_accel.control[39m
+[32m[1m     Copying[0m[39m shared library to [36m.pgaccel/postgres/install/18.4/lib/pg_accel.dylib[39m
+[32m[1m  Discovered[0m[39m [36m[1m314[0m[39m SQL entities: [36m[1m25[0m[39m schemas ([36m[1m3[0m[39m unique), [36m[1m287[0m[39m functions, [36m[1m0[0m[39m types, [36m[1m0[0m[39m enums, [36m[1m1[0m[39m sqls, [36m[1m0[0m[39m ords, [36m[1m0[0m[39m hashes, [36m[1m0[0m[39m aggregates, [36m[1m1[0m[39m triggers
+[32m[1m     Writing[0m[39m SQL entities to /Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/share/extension/pg_accel--1.0.0-rc1.sql
+[32m[1m    Finished[0m[39m installing pg_accel
+FAILED
+
+failures:
+
+---- tests::scalar_lowering::tests::pg_pg_scalar_resident_artifact_rejects_stale_inputs_and_reloads stdout ----
+[32m[1m     Running[0m[39m cd "/Users/contra/Projects/pg_accel/target/test-pgdata" && "/Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/bin/initdb" "--locale=C" "--lc-ctype=UTF-8" "-D" "/Users/contra/Projects/pg_accel/target/test-pgdata/18-9208"
+[32m[1m    Finished[0m[39m initializing database
+[32m[1m    Starting[0m[39m test Postgres on port [36m[1m60730[0m[39m
+[36m[2026-10-05 20:15:46.147 PDT] [9284] [6ac467e1.2444]: LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)[39m
+[36m[2026-10-05 20:15:46.147 PDT] [9284] [6ac467e1.2444]: LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query[39m
+[36m[2026-10-05 20:15:46.149 PDT] [9284] [6ac467e1.2444]: LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit[39m
+[36m[2026-10-05 20:15:46.151 PDT] [9284] [6ac467e1.2444]: LOG:  listening on IPv6 address "::1", port 60730[39m
+[36m[2026-10-05 20:15:46.151 PDT] [9284] [6ac467e1.2444]: LOG:  listening on IPv4 address "127.0.0.1", port 60730[39m
+[36m[2026-10-05 20:15:46.151 PDT] [9284] [6ac467e1.2444]: LOG:  listening on Unix socket "/tmp/pgrx-test-sockets-18-9208/.s.PGSQL.60730"[39m
+[36m[2026-10-05 20:15:46.155 PDT] [9294] [6ac467e2.244e]: LOG:  database system was shut down at 2026-10-05 20:15:45 PDT[39m
+[32m[1m    Creating[0m[39m database [36m[1mpgrx_tests[0m[39m
+
+thread 'tests::scalar_lowering::tests::pg_pg_scalar_resident_artifact_rejects_stale_inputs_and_reloads' (14907432) panicked at /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-tests-0.19.1/src/framework.rs:195:9:
+
+
+Postgres Messages:
+[37m[2m[2026-10-05 20:15:46.147 PDT] [9284] [6ac467e1.2444]: LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+[2026-10-05 20:15:46.147 PDT] [9284] [6ac467e1.2444]: LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+[2026-10-05 20:15:46.149 PDT] [9284] [6ac467e1.2444]: LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+[2026-10-05 20:15:46.151 PDT] [9284] [6ac467e1.2444]: LOG:  listening on IPv6 address "::1", port 60730
+[2026-10-05 20:15:46.151 PDT] [9284] [6ac467e1.2444]: LOG:  listening on IPv4 address "127.0.0.1", port 60730
+[2026-10-05 20:15:46.151 PDT] [9284] [6ac467e1.2444]: LOG:  listening on Unix socket "/tmp/pgrx-test-sockets-18-9208/.s.PGSQL.60730"
+[2026-10-05 20:15:46.156 PDT] [9284] [6ac467e1.2444]: LOG:  database system is ready to accept connections
+[0m[39m
+
+Test Function Messages:
+[36m[2026-10-05 20:15:46.337 PDT] [9309] [6ac467e2.245d]: LOG:  statement: START TRANSACTION
+[2026-10-05 20:15:46.337 PDT] [9309] [6ac467e2.245d]: LOG:  statement: SELECT "tests"."pg_scalar_resident_artifact_rejects_stale_inputs_and_reloads"();
+[2026-10-05 20:15:46.392 PDT] [9309] [6ac467e2.245d]: NOTICE:  scalar fixture rows=0 capacity=1 mask=9 count=0
+[2026-10-05 20:15:46.397 PDT] [9309] [6ac467e2.245d]: ERROR:  assertion `left == right` failed
+[2026-10-05 20:15:46.397 PDT] [9309] [6ac467e2.245d]: STATEMENT:  SELECT "tests"."pg_scalar_resident_artifact_rejects_stale_inputs_and_reloads"();
+[2026-10-05 20:15:46.398 PDT] [9309] [6ac467e2.245d]: LOG:  statement: ROLLBACK
+[39m
+
+Client Error:
+[31m[1massertion `left == right` failed
+  left: (None, 0)
+ right: (Some(4202497), 2048)[0m[39m
+postgres location: [37m[2mscalar_lowering.rs:377[0m[39m
+rust location: [33m<unknown>[39m
+
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::scalar_lowering::tests::pg_pg_scalar_resident_artifact_rejects_stale_inputs_and_reloads
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1685 filtered out; finished in 6.12s
+
+error: test failed, to rerun pass `--lib`

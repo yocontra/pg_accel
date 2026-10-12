@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "generated_unix_seconds": 1791275886,
+  "artifact_root": "benchmarks/evidence/scalar-filter-20261006/spatial_grouped_scalar_filter",
+  "known_paths": {
+    "run_manifest_path": "manifest.json",
+    "resume_audit_manifest_path": "resume_audit_manifest.json",
+    "artifact_index_path": "artifact_index.json",
+    "artifact_checklist_path": "artifact_checklist.md"
+  },
+  "bounded_log_policy": {
+    "log_tail_bytes": 65536,
+    "log_delta_bytes": 262144,
+    "telemetry_tail_bytes": 65536,
+    "max_log_candidates": 32,
+    "log_candidates": [
+      "/Users/contra/.pgrx/19.log",
+      "/Users/contra/.pgrx/data-19/pg_accel_panic.log",
+      "/Users/contra/.pgrx/data-19/pg_accel_traces.jsonl",
+      "/Users/contra/.pgrx/data-19/pg_accel_otel.jsonl",
+      "/tmp/pg_accel_panic.log",
+      "/Users/contra/.pgrx/data-18/pg_accel_panic.log",
+      "/Users/contra/.pgrx/data-18/pg_accel_traces.jsonl",
+      "/Users/contra/.pgrx/data-18/pg_accel_otel.jsonl"
+    ],
+    "telemetry_candidates": [
+      "/Users/contra/.pgrx/data-19/pg_accel_traces.jsonl",
+      "/Users/contra/.pgrx/data-19/pg_accel_otel.jsonl",
+      "/Users/contra/.pgrx/data-18/pg_accel_traces.jsonl",
+      "/Users/contra/.pgrx/data-18/pg_accel_otel.jsonl"
+    ]
+  },
+  "log_offset_provenance": [
+    {
+      "path": "/Users/contra/.pgrx/19.log",
+      "existed": true,
+      "len_bytes": 1728342
+    },
+    {
+      "path": "/Users/contra/.pgrx/data-19/pg_accel_panic.log",
+      "existed": true,
+      "len_bytes": 13625
+    },
+    {
+      "path": "/Users/contra/.pgrx/data-19/pg_accel_traces.jsonl",
+      "existed": true,
+      "len_bytes": 100849
+    },
+    {
+      "path": "/Users/contra/.pgrx/data-19/pg_accel_otel.jsonl",
+      "existed": true,
+      "len_bytes": 14806
+    },
+    {
+      "path": "/tmp/pg_accel_panic.log",
+      "existed": false,
+      "len_bytes": 0
+    },
+    {
+      "path": "/Users/contra/.pgrx/data-18/pg_accel_panic.log",
+      "existed": true,
+      "len_bytes": 0
+    },
+    {
+      "path": "/Users/contra/.pgrx/data-18/pg_accel_traces.jsonl",
+      "existed": true,
+      "len_bytes": 114268
+    },
+    {
+      "path": "/Users/contra/.pgrx/data-18/pg_accel_otel.jsonl",
+      "existed": true,
+      "len_bytes": 0
+    }
+  ],
+  "inventory": {
+    "completed_artifacts": [
+      "benchmark_failure_ledger.json",
+      "benchmark_failure_ledger.md",
+      "guc_snapshot.json",
+      "no_dispatch_audit.json",
+      "no_dispatch_audit.md",
+      "report.csv",
+      "report.json",
+      "report.md",
+      "resident_boundary_audit.json",
+      "resident_boundary_audit.md"
+    ],
+    "correctness_artifacts": [
+      "correctness_diffs/spatial_grouped_scalar_filter-1000000.json",
+      "correctness_diffs/spatial_grouped_scalar_filter-2000000.json"
+    ],
+    "pre_risk_artifacts": [
+      "pre_risk_contexts/spatial_grouped_scalar_filter-1000000.json",
+      "pre_risk_contexts/spatial_grouped_scalar_filter-2000000.json"
+    ],
+    "plan_artifacts": [
+      "plan_snippets/spatial_grouped_scalar_filter-1000000.txt",
+      "plan_snippets/spatial_grouped_scalar_filter-2000000.txt"
+    ],
+    "crash_artifacts": [
+      "crashes.json",
+      "crashes.md"
+    ],
+    "log_artifacts": [
+      "log_tails/run-complete/00-19.log.delta",
+      "log_tails/run-complete/00-19.log.tail",
+      "log_tails/run-complete/01-pg_accel_panic.log.delta",
+      "log_tails/run-complete/01-pg_accel_panic.log.tail",
+      "log_tails/run-complete/02-pg_accel_traces.jsonl.delta",
+      "log_tails/run-complete/02-pg_accel_traces.jsonl.tail",
+      "log_tails/run-complete/03-pg_accel_otel.jsonl.delta",
+      "log_tails/run-complete/03-pg_accel_otel.jsonl.tail",
+      "log_tails/run-complete/05-pg_accel_panic.log.delta",
+      "log_tails/run-complete/05-pg_accel_panic.log.tail",
+      "log_tails/run-complete/06-pg_accel_traces.jsonl.delta",
+      "log_tails/run-complete/06-pg_accel_traces.jsonl.tail",
+      "log_tails/run-complete/07-pg_accel_otel.jsonl.delta",
+      "log_tails/run-complete/07-pg_accel_otel.jsonl.tail"
+    ],
+    "provenance_artifacts": [
+      "provenance.json"
+    ],
+    "failure_artifacts": [
+      "benchmark_failure_ledger.json",
+      "benchmark_failure_ledger.md"
+    ]
+  }
+}

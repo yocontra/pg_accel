@@ -1,0 +1,548 @@
+source: /Users/contra/.pgrx/18.log
+tail_bytes: 65536
+---
+2026-09-29 18:37:26.821 PDT [44331] LOG:  checkpoint starting: time
+2026-09-29 18:37:27.851 PDT [44331] LOG:  checkpoint complete: wrote 10 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=1.027 s, sync=0.002 s, total=1.031 s; sync files=9, longest=0.001 s, average=0.001 s; distance=41 kB, estimate=493313 kB; lsn=544/898C3C38, redo lsn=544/898C3BE0
+2026-09-29 18:37:58.816 PDT [44275] LOG:  received fast shutdown request
+2026-09-29 18:37:58.816 PDT [44275] LOG:  aborting any active transactions
+2026-09-29 18:37:58.820 PDT [44275] LOG:  background worker "logical replication launcher" (PID 44336) exited with exit code 1
+2026-09-29 18:37:58.821 PDT [44331] LOG:  shutting down
+2026-09-29 18:37:58.821 PDT [44331] LOG:  checkpoint starting: shutdown immediate
+2026-09-29 18:37:58.830 PDT [44331] LOG:  checkpoint complete: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.008 s, sync=0.001 s, total=0.009 s; sync files=0, longest=0.000 s, average=0.000 s; distance=0 kB, estimate=443981 kB; lsn=544/898C3CE8, redo lsn=544/898C3CE8
+2026-09-29 18:37:58.883 PDT [44275] LOG:  database system is shut down
+2026-09-29 18:38:11.605 PDT [68595] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-09-29 18:38:11.605 PDT [68595] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-09-29 18:38:11.636 PDT [68595] LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-09-29 18:38:11.638 PDT [68595] LOG:  listening on IPv6 address "::", port 28818
+2026-09-29 18:38:11.638 PDT [68595] LOG:  listening on IPv4 address "0.0.0.0", port 28818
+2026-09-29 18:38:11.639 PDT [68595] LOG:  listening on Unix socket "/Users/contra/.pgrx/.s.PGSQL.28818"
+2026-09-29 18:38:11.649 PDT [68601] LOG:  database system was shut down at 2026-09-29 18:37:58 PDT
+2026-09-29 18:38:11.651 PDT [68595] LOG:  database system is ready to accept connections
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14285576951383014456.2703637867414329800.metalar.69369.5583635121123988830.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12658774455206913026.8827064101271592386.metalar.69369.7537641049198500397.tmp (kernels_added=1 skipped=0)
+2026-09-29 18:43:11.651 PDT [68599] LOG:  checkpoint starting: time
+2026-09-29 18:43:29.641 PDT [68599] LOG:  checkpoint complete: wrote 177 buffers (0.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=17.986 s, sync=0.003 s, total=17.990 s; sync files=54, longest=0.002 s, average=0.001 s; distance=1663 kB, estimate=1663 kB; lsn=544/89AA1008, redo lsn=544/89A63CE0
+2026-09-29 18:47:53.749 PDT [68599] LOG:  checkpoint starting: immediate force wait
+2026-09-29 18:47:53.832 PDT [68599] LOG:  checkpoint complete: wrote 10300 buffers (0.5%), wrote 2 SLRU buffers; 0 WAL file(s) added, 8 removed, 0 recycled; write=0.047 s, sync=0.018 s, total=0.083 s; sync files=61, longest=0.002 s, average=0.001 s; distance=124003 kB, estimate=124003 kB; lsn=544/9137CB78, redo lsn=544/9137CB20
+2026-09-29 18:48:00.390 PDT [68599] LOG:  checkpoints are occurring too frequently (7 seconds apart)
+2026-09-29 18:48:00.390 PDT [68599] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 18:48:00.390 PDT [68599] LOG:  checkpoint starting: wal
+2026-09-29 18:48:06.191 PDT [68599] LOG:  checkpoint complete: wrote 40 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 1 removed, 32 recycled; write=4.878 s, sync=0.919 s, total=5.802 s; sync files=29, longest=0.917 s, average=0.032 s; distance=542838 kB, estimate=542838 kB; lsn=544/D1016C78, redo lsn=544/B259A620
+2026-09-29 18:48:06.594 PDT [68599] LOG:  checkpoints are occurring too frequently (6 seconds apart)
+2026-09-29 18:48:06.594 PDT [68599] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 18:48:06.594 PDT [68599] LOG:  checkpoint starting: wal
+2026-09-29 18:48:12.807 PDT [68599] LOG:  checkpoint complete: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=6.202 s, sync=0.001 s, total=6.213 s; sync files=1, longest=0.001 s, average=0.001 s; distance=547694 kB, estimate=547694 kB; lsn=544/F18992A0, redo lsn=544/D3C76118
+2026-09-29 18:48:13.216 PDT [68599] LOG:  checkpoints are occurring too frequently (7 seconds apart)
+2026-09-29 18:48:13.216 PDT [68599] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 18:48:13.217 PDT [68599] LOG:  checkpoint starting: wal
+2026-09-29 18:48:19.340 PDT [68599] LOG:  checkpoint complete: wrote 43233 buffers (2.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=6.107 s, sync=0.005 s, total=6.124 s; sync files=12, longest=0.005 s, average=0.001 s; distance=537889 kB, estimate=546714 kB; lsn=545/129BD790, redo lsn=544/F49BE850
+2026-09-29 18:48:19.748 PDT [68599] LOG:  checkpoints are occurring too frequently (6 seconds apart)
+2026-09-29 18:48:19.748 PDT [68599] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 18:48:19.748 PDT [68599] LOG:  checkpoint starting: wal
+2026-09-29 18:48:25.909 PDT [68599] LOG:  checkpoint complete: wrote 68475 buffers (3.3%), wrote 0 SLRU buffers; 0 WAL file(s) added, 1 removed, 32 recycled; write=6.041 s, sync=0.002 s, total=6.161 s; sync files=3, longest=0.002 s, average=0.001 s; distance=541173 kB, estimate=546160 kB; lsn=545/3403BF28, redo lsn=545/15A3C048
+2026-09-29 18:48:26.108 PDT [68599] LOG:  checkpoints are occurring too frequently (7 seconds apart)
+2026-09-29 18:48:26.108 PDT [68599] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 18:48:26.108 PDT [68599] LOG:  checkpoint starting: wal
+2026-09-29 18:48:32.062 PDT [68599] LOG:  checkpoint complete: wrote 64950 buffers (3.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=5.925 s, sync=0.018 s, total=5.955 s; sync files=13, longest=0.018 s, average=0.002 s; distance=531228 kB, estimate=544667 kB; lsn=545/54407558, redo lsn=545/36103218
+2026-09-29 18:48:49.797 PDT [68599] LOG:  checkpoint starting: immediate force wait
+2026-09-29 18:48:50.058 PDT [68599] LOG:  checkpoint complete: wrote 64049 buffers (3.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 31 recycled; write=0.255 s, sync=0.004 s, total=0.262 s; sync files=41, longest=0.001 s, average=0.001 s; distance=517861 kB, estimate=541986 kB; lsn=545/55AC2BA0, redo lsn=545/55ABC970
+2026-09-29 18:49:10.491 PDT [68599] LOG:  checkpoint starting: immediate force wait
+2026-09-29 18:49:10.543 PDT [68599] LOG:  checkpoint complete: wrote 9436 buffers (0.4%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 6 recycled; write=0.048 s, sync=0.004 s, total=0.053 s; sync files=41, longest=0.002 s, average=0.001 s; distance=102899 kB, estimate=498077 kB; lsn=545/5BF39820, redo lsn=545/5BF397C8
+2026-09-29 18:49:17.605 PDT [68599] LOG:  checkpoints are occurring too frequently (7 seconds apart)
+2026-09-29 18:49:17.605 PDT [68599] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 18:49:17.605 PDT [68599] LOG:  checkpoint starting: wal
+2026-09-29 18:49:22.178 PDT [68599] LOG:  checkpoint complete: wrote 43 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 1 removed, 33 recycled; write=4.383 s, sync=0.178 s, total=4.574 s; sync files=28, longest=0.177 s, average=0.007 s; distance=541489 kB, estimate=541489 kB; lsn=545/9B6754E0, redo lsn=545/7D005FB0
+2026-09-29 18:49:22.451 PDT [68599] LOG:  checkpoints are occurring too frequently (5 seconds apart)
+2026-09-29 18:49:22.451 PDT [68599] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 18:49:22.451 PDT [68599] LOG:  checkpoint starting: wal
+2026-09-29 18:49:24.809 PDT [68599] LOG:  checkpoint complete: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=2.348 s, sync=0.001 s, total=2.359 s; sync files=1, longest=0.001 s, average=0.001 s; distance=546177 kB, estimate=546177 kB; lsn=545/BC3F3A78, redo lsn=545/9E566570
+2026-09-29 18:49:25.002 PDT [68599] LOG:  checkpoints are occurring too frequently (3 seconds apart)
+2026-09-29 18:49:25.002 PDT [68599] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 18:49:25.002 PDT [68599] LOG:  checkpoint starting: wal
+2026-09-29 18:49:27.004 PDT [68599] LOG:  checkpoint complete: wrote 44437 buffers (2.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 1 removed, 33 recycled; write=1.982 s, sync=0.006 s, total=2.002 s; sync files=11, longest=0.006 s, average=0.001 s; distance=551529 kB, estimate=551529 kB; lsn=545/DE80B9C8, redo lsn=545/C00009E8
+2026-09-29 18:49:27.198 PDT [68599] LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-09-29 18:49:27.198 PDT [68599] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 18:49:27.198 PDT [68599] LOG:  checkpoint starting: wal
+2026-09-29 18:49:29.104 PDT [68599] LOG:  checkpoint complete: wrote 69795 buffers (3.3%), wrote 0 SLRU buffers; 0 WAL file(s) added, 3 removed, 31 recycled; write=1.865 s, sync=0.001 s, total=1.907 s; sync files=3, longest=0.001 s, average=0.001 s; distance=557059 kB, estimate=557059 kB; lsn=546/2056EA0, redo lsn=545/E2001788
+2026-09-29 18:49:29.162 PDT [68599] LOG:  checkpoints are occurring too frequently (2 seconds apart)
+2026-09-29 18:49:29.162 PDT [68599] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-09-29 18:49:29.162 PDT [68599] LOG:  checkpoint starting: wal
+2026-09-29 18:49:48.594 PDT [68599] LOG:  checkpoint complete: wrote 68674 buffers (3.3%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 34 recycled; write=19.407 s, sync=0.014 s, total=19.432 s; sync files=11, longest=0.013 s, average=0.002 s; distance=557058 kB, estimate=557059 kB; lsn=546/204D7C78, redo lsn=546/40022A0
+2026-09-29 18:49:48.594 PDT [68599] LOG:  checkpoint starting: immediate force wait
+2026-09-29 18:49:48.772 PDT [68599] LOG:  checkpoint complete: wrote 50571 buffers (2.4%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 28 recycled; write=0.173 s, sync=0.002 s, total=0.179 s; sync files=33, longest=0.001 s, average=0.001 s; distance=463702 kB, estimate=547723 kB; lsn=546/204D7D48, redo lsn=546/204D7CF0
+2026-09-29 18:54:48.775 PDT [68599] LOG:  checkpoint starting: time
+2026-09-29 18:54:54.191 PDT [68599] LOG:  checkpoint complete: wrote 53 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=5.409 s, sync=0.003 s, total=5.416 s; sync files=10, longest=0.001 s, average=0.001 s; distance=350 kB, estimate=492986 kB; lsn=546/2052F7A0, redo lsn=546/2052F748
+2026-09-29 19:14:45.457 PDT [68595] LOG:  received fast shutdown request
+2026-09-29 19:14:45.458 PDT [68595] LOG:  aborting any active transactions
+2026-09-29 19:14:45.461 PDT [68595] LOG:  background worker "logical replication launcher" (PID 68604) exited with exit code 1
+2026-09-29 19:14:45.462 PDT [68599] LOG:  shutting down
+2026-09-29 19:14:45.462 PDT [68599] LOG:  checkpoint starting: shutdown immediate
+2026-09-29 19:14:45.471 PDT [68599] LOG:  checkpoint complete: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.008 s, sync=0.001 s, total=0.010 s; sync files=0, longest=0.000 s, average=0.000 s; distance=0 kB, estimate=443687 kB; lsn=546/2052F850, redo lsn=546/2052F850
+2026-09-29 19:14:45.531 PDT [68595] LOG:  database system is shut down
+2026-09-29 19:15:26.200 PDT [86088] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-09-29 19:15:26.201 PDT [86088] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-09-29 19:15:26.233 PDT [86088] LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-09-29 19:15:26.235 PDT [86088] LOG:  listening on IPv6 address "::", port 28818
+2026-09-29 19:15:26.235 PDT [86088] LOG:  listening on IPv4 address "0.0.0.0", port 28818
+2026-09-29 19:15:26.235 PDT [86088] LOG:  listening on Unix socket "/Users/contra/.pgrx/.s.PGSQL.28818"
+2026-09-29 19:15:26.246 PDT [86094] LOG:  database system was shut down at 2026-09-29 19:14:45 PDT
+2026-09-29 19:15:26.248 PDT [86088] LOG:  database system is ready to accept connections
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.1886687956149655818.metalar.86528.5689960253464932587.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/3523093248116128384.5926118702481557584.metalar.86528.8936588417291111392.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15589476389351072860.4221522401518880599.metalar.86528.17574826886499346804.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/7819755321666386692.5926118702481557584.metalar.86528.8927501511007548066.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/2574708908066720270.5224945270110472103.metalar.86528.12730157575071047467.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6229825781897181524.10734383473398251210.metalar.86528.6706455384680318007.tmp (kernels_added=1 skipped=0)
+2026-09-29 19:18:01.186 PDT [86528] ERROR:  126 missing computed dispatch: SELECT sum(a+b) FILTER (WHERE flag IS NULL OR flag=0) s,avg(a+b) FILTER (WHERE flag IS NULL OR flag=0) a,count(a+b) FILTER (WHERE b>0) c,count(*) n FROM _computed / shape_too_many_measures / Aggregate (actual rows=1.00 loops=1)
+	  Buffers: local read=11008 written=1
+	  I/O Timings: local read=9.279 write=0.021
+	  ->  Seq Scan on _computed (actual rows=1000017.00 loops=1)
+	        Buffers: local read=11008 written=1
+	        I/O Timings: local read=9.279 write=0.021
+	Planning:
+	  Buffers: shared hit=102
+	Planning Time: 0.149 ms
+	Execution Time: 113.949 ms
+	
+2026-09-29 19:18:01.186 PDT [86528] CONTEXT:  PL/pgSQL function inline_code_block line 44 at RAISE
+2026-09-29 19:18:01.186 PDT [86528] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool; keys text; op text; outputs text; restriction text;
+	    query text; oracle text; plan text; line record; kernels bigint;
+	    spatial text := format('ST_Intersects(p,%L::geometry)',
+	        ST_AsEWKT(ST_Segmentize(ST_MakeEnvelope(5,5,15,15,4326),10.0/128)));
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_computed'::regclass,ARRAY['id','g','h','k','a','b','flag','p']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH op IN ARRAY ARRAY['+','-','*'] LOOP
+	       FOREACH restriction IN ARRAY ARRAY['',' WHERE b IS NULL OR b BETWEEN -20 AND 20',
+	           ' WHERE '||spatial||' AND (flag IS NULL OR flag=0)'] LOOP
+	        FOREACH outputs IN ARRAY ARRAY[
+	            format('sum(a%1$sb) s,avg(a%1$sb) a,count(a%1$sb) c,min(a%1$sb) lo,max(a%1$sb) hi,count(*) n',op),
+	            format('sum(a%1$sb) FILTER (WHERE flag IS NULL OR flag=0) s,avg(a%1$sb) FILTER (WHERE flag IS NULL OR flag=0) a,count(a%1$sb) FILTER (WHERE b>0) c,count(*) n',op)
+	        ] LOOP
+	            query := 'SELECT '||CASE WHEN keys='' THEN '' ELSE keys||',' END||outputs||
+	                ' FROM _computed'||restriction||CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _computed_expected AS '||query;
+	            -- Widen arithmetic independently: the bounded fixtures cannot overflow
+	            -- INT4, so a NUMERIC expression is an exact independent arithmetic oracle.
+	            oracle := replace(replace(query,'a'||op||'b','a::numeric'||op||'b::numeric'),
+	                spatial,'(p IS NOT NULL AND id%21 BETWEEN 5 AND 15 AND (id/21)%21 BETWEEN 5 AND 15)');
+	            EXECUTE 'CREATE TEMP TABLE _computed_oracle AS '||oracle;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _computed_actual AS '||query;
+	            IF EXISTS ((SELECT * FROM _computed_expected EXCEPT ALL SELECT * FROM _computed_actual) UNION ALL
+	                       (SELECT * FROM _computed_actual EXCEPT ALL SELECT * FROM _computed_expected) UNION ALL
+	                       (SELECT * FROM _computed_oracle EXCEPT ALL SELECT * FROM _computed_actual) UNION ALL
+	                       (SELECT * FROM _computed_actual EXCEPT ALL SELECT * FROM _computed_oracle)) THEN
+	                RAISE EXCEPTION '126 computed integer mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: parallel_dense_integer' IN plan)=0) THEN
+	                RAISE EXCEPTION '126 missing computed dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _computed_expected,_computed_actual,_computed_oracle;
+	        END LOOP;
+	       END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15386323514753433198.4221522401518880599.metalar.86909.7083123204441368857.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/11587074641377135398.4221522401518880599.metalar.86909.10334000313187023865.tmp (kernels_added=1 skipped=0)
+2026-09-29 19:18:25.391 PDT [86909] ERROR:  126 missing computed dispatch: SELECT sum(a+b) FILTER (WHERE flag IS NULL OR flag=0) s,avg(a+b) FILTER (WHERE flag IS NULL OR flag=0) a,count(a+b) FILTER (WHERE b>0) c FROM _computed WHERE b IS NULL OR b BETWEEN -20 AND 20 / shape_unsupported_predicate / Aggregate (actual rows=1.00 loops=1)
+	  Buffers: local read=11008 written=1
+	  I/O Timings: local read=9.089 write=0.010
+	  ->  Seq Scan on _computed (actual rows=451639.00 loops=1)
+	        Filter: ((b IS NULL) OR ((b >= '-20'::integer) AND (b <= 20)))
+	        Rows Removed by Filter: 548378
+	        Buffers: local read=11008 written=1
+	        I/O Timings: local read=9.089 write=0.010
+	Planning:
+	  Buffers: shared hit=55
+	Planning Time: 0.187 ms
+	Execution Time: 103.907 ms
+	
+2026-09-29 19:18:25.391 PDT [86909] CONTEXT:  PL/pgSQL function inline_code_block line 44 at RAISE
+2026-09-29 19:18:25.391 PDT [86909] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool; keys text; op text; outputs text; restriction text;
+	    query text; oracle text; plan text; line record; kernels bigint;
+	    spatial text := format('ST_Intersects(p,%L::geometry)',
+	        ST_AsEWKT(ST_Segmentize(ST_MakeEnvelope(5,5,15,15,4326),10.0/128)));
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_computed'::regclass,ARRAY['id','g','h','k','a','b','flag','p']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH op IN ARRAY ARRAY['+','-','*'] LOOP
+	       FOREACH restriction IN ARRAY ARRAY['',' WHERE b IS NULL OR b BETWEEN -20 AND 20',
+	           ' WHERE '||spatial||' AND (flag IS NULL OR flag=0)'] LOOP
+	        FOREACH outputs IN ARRAY ARRAY[
+	            format('sum(a%1$sb) s,avg(a%1$sb) a,count(a%1$sb) c,min(a%1$sb) lo,max(a%1$sb) hi,count(*) n',op),
+	            format('sum(a%1$sb) FILTER (WHERE flag IS NULL OR flag=0) s,avg(a%1$sb) FILTER (WHERE flag IS NULL OR flag=0) a,count(a%1$sb) FILTER (WHERE b>0) c',op)
+	        ] LOOP
+	            query := 'SELECT '||CASE WHEN keys='' THEN '' ELSE keys||',' END||outputs||
+	                ' FROM _computed'||restriction||CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _computed_expected AS '||query;
+	            -- Widen arithmetic independently: the bounded fixtures cannot overflow
+	            -- INT4, so a NUMERIC expression is an exact independent arithmetic oracle.
+	            oracle := replace(replace(query,'a'||op||'b','a::numeric'||op||'b::numeric'),
+	                spatial,'(p IS NOT NULL AND id%21 BETWEEN 5 AND 15 AND (id/21)%21 BETWEEN 5 AND 15)');
+	            EXECUTE 'CREATE TEMP TABLE _computed_oracle AS '||oracle;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _computed_actual AS '||query;
+	            IF EXISTS ((SELECT * FROM _computed_expected EXCEPT ALL SELECT * FROM _computed_actual) UNION ALL
+	                       (SELECT * FROM _computed_actual EXCEPT ALL SELECT * FROM _computed_expected) UNION ALL
+	                       (SELECT * FROM _computed_oracle EXCEPT ALL SELECT * FROM _computed_actual) UNION ALL
+	                       (SELECT * FROM _computed_actual EXCEPT ALL SELECT * FROM _computed_oracle)) THEN
+	                RAISE EXCEPTION '126 computed integer mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: parallel_dense_integer' IN plan)=0) THEN
+	                RAISE EXCEPTION '126 missing computed dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _computed_expected,_computed_actual,_computed_oracle;
+	        END LOOP;
+	       END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-09-29 19:19:44.780 PDT [86088] LOG:  received fast shutdown request
+2026-09-29 19:19:44.780 PDT [86088] LOG:  aborting any active transactions
+2026-09-29 19:19:44.781 PDT [86088] LOG:  background worker "logical replication launcher" (PID 86097) exited with exit code 1
+2026-09-29 19:19:44.782 PDT [86092] LOG:  shutting down
+2026-09-29 19:19:44.783 PDT [86092] LOG:  checkpoint starting: shutdown immediate
+2026-09-29 19:19:44.803 PDT [86092] LOG:  checkpoint complete: wrote 93 buffers (0.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.018 s, sync=0.003 s, total=0.021 s; sync files=35, longest=0.001 s, average=0.001 s; distance=638 kB, estimate=638 kB; lsn=546/205CF118, redo lsn=546/205CF118
+2026-09-29 19:19:44.814 PDT [86088] LOG:  database system is shut down
+2026-09-29 19:19:56.651 PDT [87533] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-09-29 19:19:56.652 PDT [87533] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-09-29 19:19:56.689 PDT [87533] LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-09-29 19:19:56.691 PDT [87533] LOG:  listening on IPv6 address "::", port 28818
+2026-09-29 19:19:56.691 PDT [87533] LOG:  listening on IPv4 address "0.0.0.0", port 28818
+2026-09-29 19:19:56.691 PDT [87533] LOG:  listening on Unix socket "/Users/contra/.pgrx/.s.PGSQL.28818"
+2026-09-29 19:19:56.699 PDT [87539] LOG:  database system was shut down at 2026-09-29 19:19:44 PDT
+2026-09-29 19:19:56.701 PDT [87533] LOG:  database system is ready to accept connections
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/3789050777654801272.4221522401518880599.metalar.87783.2018039507279447287.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10244442864516165838.7408510202149379670.metalar.87783.5775164020685663564.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10244442864516165838.3090703762129010548.metalar.87783.17057267973786342743.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/2457796378833377408.5926118702481557584.metalar.87783.10495902543941570119.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/17931957249611448910.13525867538007001721.metalar.87783.14923238826346762401.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/17655480011007121532.13525867538007001721.metalar.87783.2517237480608953764.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/9245433528323173684.13525867538007001721.metalar.87783.9205447680306491484.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/1447493498570855786.13525867538007001721.metalar.87783.4477113368478052200.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12585446269449508572.16712863009449350008.metalar.87783.2713138924033411172.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12585446269449508572.12377077253286113882.metalar.87783.15979536909915249067.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12970380103121138026.5926118702481557584.metalar.87783.9669520736992507747.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15754782506404105962.5926118702481557584.metalar.87783.7949412031487550473.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/3145246316047114048.5926118702481557584.metalar.87783.6087135315918070504.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.927912184318569731.metalar.87783.401482899236511652.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.9049276418905659637.metalar.87783.18423654617355498745.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.17101134409131542397.metalar.87783.1737963256773162757.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14286325069952665006.9717809464307198357.metalar.87783.17045347549485718565.tmp (kernels_added=1 skipped=0)
+2026-09-30T02:21:55.677685Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:21:55.878332Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:21:56.084561Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:21:56.286604Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:21:56.488020Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:21:58.042202Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:21:58.276966Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:21:58.487571Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:21:58.701121Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:21:58.914177Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:22:00.551612Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:22:00.793325Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:22:01.020249Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:22:01.250757Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:22:01.480894Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/5966854446607974876.5224945270110472103.metalar.90943.3489481504478279594.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10244442864516165838.7054955450755258976.metalar.90943.17900219220979386073.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.7465807742750007780.metalar.90943.18213545339072824054.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16305509567563257642.12284544835358214627.metalar.91381.4641643855926745948.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14640837531610470134.1261387210830405632.metalar.91781.16990619770261050193.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.10419690115442131142.metalar.91866.3159668783721461753.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16555657627412307434.5926118702481557584.metalar.91866.13726069807785639737.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.15178267930752939786.metalar.91866.4578867511446482140.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.8094883753765177750.metalar.91866.16811245441172077867.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/13810581291822887598.5926118702481557584.metalar.91866.1908636869062016966.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.6127750155183283759.metalar.91866.6029191833767219914.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.36169905769942523.metalar.91866.12380689446574088509.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12987165404132410296.13237499646727468814.metalar.92209.3282798725710300348.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/3160902903123664528.5483121475028516791.metalar.92209.12431667074501587786.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6518678064586571790.9394222812364568177.metalar.92209.17725841511115086774.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.17137888952111926302.metalar.92209.12503528256554793467.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.7169872292431734751.metalar.92209.1129807962812312583.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/9877590589045929008.5224945270110472103.metalar.92209.2792478580978144788.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/11685831682742932446.11930444065035856769.metalar.92539.14571065980471633234.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14335368489825160388.1261387210830405632.metalar.93079.5833533087431363084.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.1498219709074381533.metalar.93079.14530976898600212188.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10244442864516165838.8939074088126998198.metalar.93207.14956453622499902844.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.2857519958605545461.metalar.96042.116527957252528891.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/5436284986568462560.5224945270110472103.metalar.96258.5829887547468425578.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/9636036650450711250.5926118702481557584.metalar.96258.9535759022200009504.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15645957498266366212.1234832027899689613.metalar.96258.5581737550489358505.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10900195627355951314.5926118702481557584.metalar.96258.16985842147751163113.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/9620746525974980842.5926118702481557584.metalar.96258.8385236507548054524.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.6991065187459102244.metalar.96258.16088120431170648649.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/17815961567180993092.5926118702481557584.metalar.96258.13890331563501156875.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.9639389255261925487.metalar.96258.14605283765092122793.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.1234832027899689613.metalar.96258.1463960593552029507.tmp (kernels_added=1 skipped=0)
+2026-09-29 19:24:56.709 PDT [87537] LOG:  checkpoint starting: time
+2026-09-29 19:26:06.479 PDT [87537] LOG:  checkpoint complete: wrote 689 buffers (0.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 1 removed, 0 recycled; write=69.749 s, sync=0.009 s, total=69.771 s; sync files=69, longest=0.002 s, average=0.001 s; distance=15973 kB, estimate=15973 kB; lsn=546/21A0CEC8, redo lsn=546/21568868
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15389087124731617784.7478839135699258813.metalar.4100.5833947567825838868.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6354719079703378536.4221522401518880599.metalar.4627.2122603879099891618.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10244442864516165838.8500562416394901356.metalar.4627.15629102747588776099.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15389087124731617784.3844448585164170505.metalar.4627.2179843893138489416.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/5056334624264330138.9717809464307198357.metalar.4627.2142002926360653074.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10389901486272287036.14533489845962521006.metalar.4627.12567856184773702731.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4420839391651046406.5423122718830920030.metalar.4627.12384335749655686744.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.5267800053392665341.metalar.4627.6733351083527377817.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.10636896331441017823.metalar.4627.10449682831551893898.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/13998301624069339470.5926118702481557584.metalar.4627.167787764490365316.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16305509567563257642.10852888089113123523.metalar.8284.4833721047069425218.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16305509567563257642.6719401023656040821.metalar.8284.15722644449458166285.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/8697455164100254842.13525867538007001721.metalar.8284.9363952731977638179.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12585446269449508572.17642927303384570434.metalar.8284.13589037999767744601.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16305509567563257642.14126984132260377207.metalar.8284.532405883258080015.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16305509567563257642.4658375398225503651.metalar.8284.4471507113778848076.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/2993083400042206172.5926118702481557584.metalar.8284.3370667187595685715.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.3210441329736109665.metalar.8284.15427507025454308586.tmp (kernels_added=1 skipped=0)
+2026-09-29 19:29:56.406 PDT [87537] LOG:  checkpoint starting: time
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10389901486272287036.15751643984070324372.metalar.8798.2712621106630943808.tmp (kernels_added=1 skipped=0)
+2026-09-29 19:31:02.313 PDT [87537] LOG:  checkpoint complete: wrote 649 buffers (0.0%), wrote 2 SLRU buffers; 0 WAL file(s) added, 1 removed, 0 recycled; write=65.896 s, sync=0.002 s, total=65.908 s; sync files=58, longest=0.001 s, average=0.001 s; distance=14543 kB, estimate=15830 kB; lsn=546/22B97AF8, redo lsn=546/2239C508
+2026-09-30T02:33:35.052294Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:33:35.246769Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:33:35.442464Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:33:35.635635Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:33:35.830392Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:33:37.318254Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:33:37.533078Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:33:37.742526Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:33:37.956538Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:33:38.170525Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:33:39.778866Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:33:40.014090Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:33:40.245217Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:33:40.482962Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:33:40.723038Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.14990512843624691971.metalar.11781.8818080067468857044.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10244442864516165838.9951724999129988132.metalar.11781.4144242723623937934.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.12451780449171035117.metalar.11781.1574148918030058741.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.13891502443098101759.metalar.11994.1095582237658814559.tmp (kernels_added=1 skipped=0)
+2026-09-29 19:34:48.510 PDT [12341] ERROR:  97 range contract FAILED: selected fast path incomplete (kernels 0 -> 2)
+2026-09-29 19:34:48.510 PDT [12341] CONTEXT:  PL/pgSQL function inline_code_block line 92 at RAISE
+2026-09-29 19:34:48.510 PDT [12341] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu boolean;
+	    pinned_rows bigint;
+	    expected_rows bigint;
+	    kernels_before bigint;
+	    kernels_after bigint;
+	    stock_after bigint;
+	    plan_row record;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    SELECT count(*) INTO STRICT expected_rows
+	    FROM _range_contract
+	    WHERE price >= 200 AND price <= 800 AND price >= 250;
+	    IF (SELECT sum(rows) FROM _range_native) IS DISTINCT FROM expected_rows
+	       OR NOT EXISTS (
+	           SELECT 1 FROM _range_native
+	           WHERE product_id = 7 AND total IS NULL AND rows > 0
+	       )
+	       OR NOT EXISTS (
+	           SELECT 1 FROM _range_contract WHERE price IN (250, 800)
+	       ) THEN
+	        RAISE EXCEPTION
+	            '97 range contract FAILED: PostgreSQL oracle did not cover boundaries/NULL SUM';
+	    END IF;
+	
+	    IF has_gpu THEN
+	        SELECT pg_accel_pin(
+	            '_range_contract'::regclass,
+	            ARRAY['product_id', 'price', 'quantity']
+	        ) INTO STRICT pinned_rows;
+	        IF pinned_rows <> 500000 THEN
+	            RAISE EXCEPTION
+	                '97 range contract FAILED: pin returned % rows, expected 500000',
+	                pinned_rows;
+	        END IF;
+	    END IF;
+	
+	    PERFORM set_config('pg_accel.enabled', 'on', false);
+	    PERFORM pg_accel_reset_stats();
+	    SELECT pg_accel_kernel_executions() INTO STRICT kernels_before;
+	
+	    CREATE TEMP TABLE _range_accel AS
+	    SELECT product_id, sum(price * quantity) AS total, count(*) AS rows
+	    FROM _range_contract
+	    WHERE price >= 200 AND price <= 800 AND price >= 250
+	    GROUP BY product_id;
+	
+	    FOR plan_row IN
+	        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+	        SELECT product_id, sum(price * quantity), count(*)
+	        FROM _range_contract
+	        WHERE price >= 200 AND price <= 800 AND price >= 250
+	        GROUP BY product_id
+	    LOOP
+	        INSERT INTO _range_plan VALUES ('selected', plan_row."QUERY PLAN");
+	    END LOOP;
+	
+	    SELECT pg_accel_kernel_executions() INTO STRICT kernels_after;
+	    SELECT stock_exec_count INTO STRICT stock_after FROM pg_accel_stats();
+	    IF EXISTS (
+	        (SELECT * FROM _range_native EXCEPT ALL SELECT * FROM _range_accel)
+	        UNION ALL
+	        (SELECT * FROM _range_accel EXCEPT ALL SELECT * FROM _range_native)
+	    ) THEN
+	        RAISE EXCEPTION '97 range contract FAILED: enabled result differs from PostgreSQL';
+	    END IF;
+	    IF stock_after <> 0 THEN
+	        RAISE EXCEPTION '97 range contract FAILED: stock fallback count is %', stock_after;
+	    END IF;
+	    IF has_gpu THEN
+	        IF NOT EXISTS (
+	            SELECT 1 FROM _range_plan
+	            WHERE family = 'selected' AND line LIKE '%Custom Scan (%GpuAccel%'
+	        ) OR NOT EXISTS (
+	            SELECT 1 FROM _range_plan
+	            WHERE family = 'selected'
+	              AND line LIKE '%GPU Physical Kernel Mode: parallel_dense_integer%'
+	        ) OR NOT EXISTS (
+	            SELECT 1 FROM _range_plan
+	            WHERE family = 'selected'
+	              AND line LIKE '%GPU Dispatched Physical Kernel Mode: parallel_dense_integer%'
+	        ) OR NOT EXISTS (
+	            SELECT 1 FROM _range_plan
+	            WHERE family = 'selected'
+	              AND line LIKE '%GPU Physical Kernel Mode Verified: true%'
+	        ) OR NOT EXISTS (
+	            SELECT 1 FROM _range_plan
+	            WHERE family = 'selected'
+	              AND line LIKE '%GPU Descriptor Specialization: dense_integer_multiply_range%'
+	        ) OR kernels_after <= kernels_before THEN
+	            RAISE EXCEPTION
+	                '97 range contract FAILED: selected fast path incomplete (kernels % -> %)',
+	                kernels_before, kernels_after;
+	        END IF;
+	    ELSIF EXISTS (
+	        SELECT 1 FROM _range_plan
+	        WHERE family = 'selected' AND line LIKE '%Custom Scan (%GpuAccel%'
+	    ) OR kernels_after <> kernels_before THEN
+	        RAISE EXCEPTION
+	            '97 range contract FAILED: CPU-only host selected/dispatched (kernels % -> %)',
+	            kernels_before, kernels_after;
+	    END IF;
+	END $$;
+2026-09-29 19:34:56.313 PDT [87537] LOG:  checkpoint starting: time
+2026-09-29 19:35:10.010 PDT [87533] LOG:  received fast shutdown request
+2026-09-29 19:35:10.010 PDT [87533] LOG:  aborting any active transactions
+2026-09-29 19:35:10.013 PDT [87533] LOG:  background worker "logical replication launcher" (PID 87542) exited with exit code 1
+2026-09-29 19:35:10.066 PDT [87537] LOG:  checkpoint complete: wrote 1104 buffers (0.1%), wrote 3 SLRU buffers; 0 WAL file(s) added, 2 removed, 0 recycled; write=13.732 s, sync=0.014 s, total=13.753 s; sync files=132, longest=0.002 s, average=0.001 s; distance=38758 kB, estimate=38758 kB; lsn=546/24975F90, redo lsn=546/24975F00
+2026-09-29 19:35:10.066 PDT [87537] LOG:  shutting down
+2026-09-29 19:35:10.066 PDT [87537] LOG:  checkpoint starting: shutdown immediate
+2026-09-29 19:35:10.074 PDT [87537] LOG:  checkpoint complete: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.008 s, sync=0.000 s, total=0.009 s; sync files=0, longest=0.000 s, average=0.000 s; distance=0 kB, estimate=34882 kB; lsn=546/24976020, redo lsn=546/24976020
+2026-09-29 19:35:10.088 PDT [87533] LOG:  database system is shut down
+2026-09-29 19:35:47.229 PDT [15304] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-09-29 19:35:47.229 PDT [15304] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-09-29 19:35:47.259 PDT [15304] LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-09-29 19:35:47.260 PDT [15304] LOG:  listening on IPv6 address "::", port 28818
+2026-09-29 19:35:47.261 PDT [15304] LOG:  listening on IPv4 address "0.0.0.0", port 28818
+2026-09-29 19:35:47.261 PDT [15304] LOG:  listening on Unix socket "/Users/contra/.pgrx/.s.PGSQL.28818"
+2026-09-29 19:35:47.268 PDT [15331] LOG:  database system was shut down at 2026-09-29 19:35:10 PDT
+2026-09-29 19:35:47.270 PDT [15304] LOG:  database system is ready to accept connections
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6717228632762971232.9123048110748810553.metalar.17064.10880379062561134535.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15162829544192277552.6018241795984942808.metalar.17064.18011702218191588443.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10423502663859018500.15838927696693884544.metalar.17064.2563555283714419622.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/5748618108809533024.555526314883010541.metalar.17064.11696640610976310858.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6717228632762971232.9899840428722415661.metalar.17244.15112149475634502955.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/2978975677283079604.13938743479207491959.metalar.17244.11776305320553807890.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/13973273337915853672.12238616210926810736.metalar.17244.13581510249233552781.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/8446116495403013168.13938743479207491959.metalar.17244.9878922505187719147.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4181816694159484218.15838927696693884544.metalar.17244.11087236231423693546.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14714609683246305626.12238616210926810736.metalar.17244.10136614721368229936.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/13366251320001815570.12238616210926810736.metalar.17244.11015364434680658684.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/3253447930027007052.12238616210926810736.metalar.17244.7699706292617585077.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10923598263805288442.17698513348984483697.metalar.17244.11422348297224425887.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/10923598263805288442.13378490706854383187.metalar.17244.15758816632535070998.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4298722077087610804.13938743479207491959.metalar.17244.16452927900262590463.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16242482884968033658.2952135965405559646.metalar.17244.12612335589073451293.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/17057143595446024008.2952135965405559646.metalar.17244.18084557300293526203.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/11096193228507251200.2952135965405559646.metalar.17244.205464085074296827.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/983332376802605662.2952135965405559646.metalar.17244.9483286438057960382.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/13194285284440209896.8412042973297812063.metalar.17244.5656779500568943227.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/13194285284440209896.4073970919011091325.metalar.17244.11137307956031084829.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/12516615825855159902.13938743479207491959.metalar.17244.11249138510070236832.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14057919215310217694.13938743479207491959.metalar.17244.8771649019069800426.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/3609020341016162420.13938743479207491959.metalar.17244.10344863046823838678.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15162829544192277552.11505865744165542948.metalar.17244.891468026645630674.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15162829544192277552.17210765654357109202.metalar.17244.11185278270459884690.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15162829544192277552.9087982554052359770.metalar.17244.7474709373368854943.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16136609437581060762.1554033106090432690.metalar.17244.14122459767268015441.tmp (kernels_added=1 skipped=0)
+2026-09-30T02:38:44.717247Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:38:44.911424Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:38:45.101244Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:38:45.296103Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:38:45.493564Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:38:46.998197Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:38:47.215846Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:38:47.426242Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:38:47.641949Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:38:47.850219Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:38:49.457794Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:38:49.693955Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:38:49.920302Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:38:50.152680Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-30T02:38:50.386406Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-09-29 19:39:28.031 PDT [15329] LOG:  checkpoint starting: immediate force wait
+2026-09-29 19:39:28.080 PDT [15329] LOG:  checkpoint complete: wrote 1760 buffers (0.1%), wrote 3 SLRU buffers; 0 WAL file(s) added, 2 removed, 0 recycled; write=0.028 s, sync=0.014 s, total=0.049 s; sync files=62, longest=0.003 s, average=0.001 s; distance=23395 kB, estimate=23395 kB; lsn=546/2604EF38, redo lsn=546/2604EEE0
+2026-09-29 19:39:30.182 PDT [15329] LOG:  checkpoint starting: immediate force wait
+2026-09-29 19:39:30.229 PDT [15329] LOG:  checkpoint complete: wrote 5310 buffers (0.3%), wrote 1 SLRU buffers; 0 WAL file(s) added, 4 removed, 0 recycled; write=0.027 s, sync=0.002 s, total=0.047 s; sync files=36, longest=0.001 s, average=0.001 s; distance=69928 kB, estimate=69928 kB; lsn=546/2A498FE8, redo lsn=546/2A498F90
+2026-09-29 19:40:32.441 PDT [15329] LOG:  checkpoint starting: immediate force wait
+2026-09-29 19:40:32.457 PDT [15329] LOG:  checkpoint complete: wrote 1369 buffers (0.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 1 removed, 0 recycled; write=0.014 s, sync=0.003 s, total=0.017 s; sync files=33, longest=0.001 s, average=0.001 s; distance=17645 kB, estimate=64699 kB; lsn=546/2B5D4708, redo lsn=546/2B5D46B0
+2026-09-29 19:40:34.629 PDT [15329] LOG:  checkpoint starting: immediate force wait
+2026-09-29 19:40:34.677 PDT [15329] LOG:  checkpoint complete: wrote 5297 buffers (0.3%), wrote 1 SLRU buffers; 0 WAL file(s) added, 4 removed, 0 recycled; write=0.028 s, sync=0.002 s, total=0.049 s; sync files=34, longest=0.001 s, average=0.001 s; distance=69781 kB, estimate=69781 kB; lsn=546/2F9F9BC8, redo lsn=546/2F9F9B70
+2026-09-29 19:45:34.675 PDT [15329] LOG:  checkpoint starting: time
+2026-09-29 19:45:38.746 PDT [15329] LOG:  checkpoint complete: wrote 40 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 4 removed, 0 recycled; write=4.050 s, sync=0.004 s, total=4.072 s; sync files=26, longest=0.001 s, average=0.001 s; distance=69323 kB, estimate=69735 kB; lsn=546/33DAC930, redo lsn=546/33DAC8D8
+2026-09-29 19:52:41.947 PDT [15329] LOG:  checkpoint starting: immediate force wait
+2026-09-29 19:52:41.974 PDT [15329] LOG:  checkpoint complete: wrote 1361 buffers (0.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 1 removed, 0 recycled; write=0.015 s, sync=0.005 s, total=0.027 s; sync files=32, longest=0.003 s, average=0.001 s; distance=17596 kB, estimate=64521 kB; lsn=546/34EDBC60, redo lsn=546/34EDBC08
+2026-09-29 19:52:43.884 PDT [15329] LOG:  checkpoint starting: immediate force wait
+2026-09-29 19:52:43.939 PDT [15329] LOG:  checkpoint complete: wrote 5298 buffers (0.3%), wrote 1 SLRU buffers; 0 WAL file(s) added, 5 removed, 0 recycled; write=0.029 s, sync=0.002 s, total=0.056 s; sync files=33, longest=0.001 s, average=0.001 s; distance=69789 kB, estimate=69789 kB; lsn=546/39303380, redo lsn=546/39303328

@@ -1,0 +1,12 @@
+source: /Users/contra/.pgrx/18.log
+run_start_offset_bytes: 1925272
+delta_start_offset_bytes: 1925272
+capture_end_offset_bytes: 1926424
+delta_max_bytes: 262144
+truncated_to_last_delta_bytes: false
+---
+2026-09-29 18:27:11.950 PDT [44331] LOG:  checkpoint complete: wrote 1079 buffers (0.1%), wrote 3 SLRU buffers; 0 WAL file(s) added, 2 removed, 0 recycled; write=52.026 s, sync=0.013 s, total=52.050 s; sync files=117, longest=0.004 s, average=0.001 s; distance=36355 kB, estimate=36355 kB; lsn=542/7EC25D68, redo lsn=542/7C875218
+2026-09-29 18:27:11.950 PDT [44331] LOG:  checkpoint starting: immediate force wait
+2026-09-29 18:27:11.996 PDT [44331] LOG:  checkpoint complete: wrote 2710 buffers (0.1%), wrote 2 SLRU buffers; 0 WAL file(s) added, 2 removed, 0 recycled; write=0.021 s, sync=0.014 s, total=0.046 s; sync files=60, longest=0.003 s, average=0.001 s; distance=36546 kB, estimate=36546 kB; lsn=542/7EC25E38, redo lsn=542/7EC25DE0
+2026-09-29 18:27:13.948 PDT [44331] LOG:  checkpoint starting: immediate force wait
+2026-09-29 18:27:14.017 PDT [44331] LOG:  checkpoint complete: wrote 2329 buffers (0.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 6 removed, 0 recycled; write=0.014 s, sync=0.017 s, total=0.070 s; sync files=30, longest=0.015 s, average=0.001 s; distance=92705 kB, estimate=92705 kB; lsn=542/846AE3A0, redo lsn=542/846AE348

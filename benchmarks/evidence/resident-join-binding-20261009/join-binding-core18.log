@@ -1,0 +1,76 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error: function `invalid` is never used
+  --> pg_accel/src/engine/executor/join.rs:20:4
+   |
+20 | fn invalid(detail: impl Into<String>) -> ResidentLoadError {
+   |    ^^^^^^^
+   |
+   = note: `-D dead-code` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error: struct `ResidentJoinInputs` is never constructed
+  --> pg_accel/src/engine/executor/join.rs:28:19
+   |
+28 | pub(crate) struct ResidentJoinInputs {
+   |                   ^^^^^^^^^^^^^^^^^^
+
+error: associated items `prepare` and `with_bound` are never used
+  --> pg_accel/src/engine/executor/join.rs:36:12
+   |
+35 | impl ResidentJoinInputs {
+   | ----------------------- associated items in this implementation
+36 |     pub fn prepare(spec: JoinQuerySpec) -> Result<Self, ResidentLoadError> {
+   |            ^^^^^^^
+...
+80 |     pub fn with_bound<R>(
+   |            ^^^^^^^^^^
+
+error: struct `BoundJoinInputs` is never constructed
+  --> pg_accel/src/engine/executor/join.rs:92:19
+   |
+92 | pub(crate) struct BoundJoinInputs<'a> {
+   |                   ^^^^^^^^^^^^^^^
+
+error: methods `join` and `project` are never used
+   --> pg_accel/src/engine/executor/join.rs:103:12
+    |
+102 | impl BoundJoinInputs<'_> {
+    | ------------------------ methods in this implementation
+103 |     pub fn join(&self) -> GpuResult<ResidentJoin<'_>> {
+    |            ^^^^
+...
+111 |     pub fn project(&self, output: &ResidentJoinOutput) -> GpuResult<ResidentJoinProjection> {
+    |            ^^^^^^^
+
+error: function `view` is never used
+   --> pg_accel/src/engine/executor/join.rs:116:4
+    |
+116 | fn view<'a>(
+    |    ^^^^
+
+error: function `project_column` is never used
+   --> pg_accel/src/engine/executor/join.rs:135:4
+    |
+135 | fn project_column(
+    |    ^^^^^^^^^^^^^^
+
+error: function `key` is never used
+   --> pg_accel/src/engine/executor/join.rs:170:4
+    |
+170 | fn key(view: ResidentColumnView<'_>) -> Result<ResidentJoinKey<'_>, ResidentLoadError> {
+    |    ^^^
+
+error: function `bind` is never used
+   --> pg_accel/src/engine/executor/join.rs:182:4
+    |
+182 | fn bind<'a>(
+    |    ^^^^
+
+error: function `with_resident_dispatch_inputs` is never used
+    --> pg_accel/src/engine/residency/store.rs:2513:15
+     |
+2513 | pub(crate) fn with_resident_dispatch_inputs<R>(
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: could not compile `pg_accel` (lib test) due to 10 previous errors
+error: Recipe `test-standalone` failed with exit code 101

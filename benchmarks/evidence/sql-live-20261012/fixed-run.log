@@ -1,0 +1,8 @@
+PG18 release install passed
+PG18 full SQL runner exit=0
+PG18 fixed semantic inventory exit=0
+PG18 stop exit=0
+PG19 release install passed
+PG19 full SQL runner exit=1
+PG19 fixed semantic inventory exit=1
+PG19 stop exit=0

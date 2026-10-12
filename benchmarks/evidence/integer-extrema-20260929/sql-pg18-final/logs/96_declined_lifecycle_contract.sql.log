@@ -1,0 +1,435 @@
+=== 96_declined_lifecycle_contract ===
+SET
+SET
+SET
+SELECT 1
+CREATE TABLE
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 200000
+ANALYZE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+PREPARE
+INSERT 0 1024
+ALTER TABLE
+ANALYZE
+SET
+SELECT 65
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 65
+ decline_explain 
+-----------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:96_declined_lifecycle_contract.assert_001
+SET
+SELECT 1
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 1
+ decline_explain 
+-----------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:96_declined_lifecycle_contract.assert_002
+SET
+SELECT 65
+SELECT 65
+SELECT 65
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 65
+ decline_explain 
+-----------------
+ 
+(1 row)
+
+DO
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 65
+ decline_explain 
+-----------------
+ 
+(1 row)
+
+DO
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 65
+ decline_explain 
+-----------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:96_declined_lifecycle_contract.assert_003
+SET
+SELECT 99354
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 99354
+ decline_explain 
+-----------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:96_declined_lifecycle_contract.assert_004
+SET
+SELECT 201024
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 201024
+ decline_explain 
+-----------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:96_declined_lifecycle_contract.assert_005
+SET
+SELECT 128
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 128
+ decline_explain 
+-----------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:96_declined_lifecycle_contract.assert_006
+SET
+SELECT 201024
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 201024
+ decline_explain 
+-----------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:96_declined_lifecycle_contract.assert_007
+SET
+SELECT 3
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 3
+ decline_explain 
+-----------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:96_declined_lifecycle_contract.assert_008
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+INSERT 0 100
+INSERT 0 100
+INSERT 0 100
+INSERT 0 100
+INSERT 0 100
+SELECT 100000
+ANALYZE
+ANALYZE
+ANALYZE
+ANALYZE
+ANALYZE
+ANALYZE
+PREPARE
+INSERT 0 2
+ALTER TABLE
+ANALYZE
+SET
+SELECT 4
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 4
+ decline_explain 
+-----------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:96_declined_lifecycle_contract.assert_009
+CREATE TABLE
+INSERT 0 100000
+CREATE TABLE
+INSERT 0 1000
+ANALYZE
+ANALYZE
+PREPARE
+PREPARE
+INSERT 0 2
+INSERT 0 2
+ALTER TABLE
+ALTER TABLE
+ANALYZE
+ANALYZE
+SET
+SET
+SET
+SET
+SELECT 49009
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 49009
+ decline_explain 
+-----------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:96_declined_lifecycle_contract.assert_010
+SET
+SET
+SET
+SET
+SELECT 12561
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 12561
+ decline_explain 
+-----------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:96_declined_lifecycle_contract.assert_011
+RESET
+RESET
+RESET
+CREATE TABLE
+INSERT 0 100000
+ANALYZE
+PREPARE
+PREPARE
+PREPARE
+INSERT 0 2
+ALTER TABLE
+ANALYZE
+SET
+SELECT 99011
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 99011
+ decline_explain 
+-----------------
+ 
+(1 row)
+
+DO
+SET
+SELECT 98050
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 98050
+ decline_explain 
+-----------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:96_declined_lifecycle_contract.assert_012
+SET
+SELECT 14203
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 14203
+ decline_explain 
+-----------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:96_declined_lifecycle_contract.assert_013
+CREATE TABLE
+INSERT 0 256
+ANALYZE
+PREPARE
+INSERT 0 1
+ALTER TABLE
+ANALYZE
+SET
+SELECT 257
+SELECT 257
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 257
+SELECT 257
+ decline_explain 
+-----------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:96_declined_lifecycle_contract.assert_014
+SET
+SELECT 65
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 65
+ decline_explain 
+-----------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:96_declined_lifecycle_contract.assert_015
+SET
+SELECT 65
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 65
+ decline_explain 
+-----------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:96_declined_lifecycle_contract.assert_016
+SET
+SELECT 65
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+SELECT 1
+SELECT 65
+ decline_explain 
+-----------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:96_declined_lifecycle_contract.assert_017
+DEALLOCATE ALL
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+PGACCEL_FILE_OK:96_declined_lifecycle_contract

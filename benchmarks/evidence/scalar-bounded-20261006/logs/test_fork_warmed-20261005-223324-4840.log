@@ -1,0 +1,54 @@
+PGACCEL_TEST_START name=test_fork_warmed
+=== Fork Policy Test (PG postmaster→backend flow) ===
+Parent PID: 4841
+
+Parent: calling pgaccel_prefork_warmup()...
+Parent: pre-fork policy ready, forking...
+
+
+=== Fork cycle 1/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 2/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 3/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 4/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 5/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 6/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 7/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Fork cycle 8/8 ===
+
+=== Results ===
+PASS: pre-fork policy + child GPU dispatch OK.
+
+=== Warm-parent failed child reinitialization ===
+pgaccel: fork detected (parent=4841, child=4858) — attempting fresh GPU init
+pgaccel: FATAL: injected failure after fork-state invalidation
+
+PASS: all 8 pre-fork policy GPU cycles completed.
+PGACCEL_TEST_RESULT name=test_fork_warmed exit_code=0 result=PASS raw_lines=52 body_sha256=d51036dde26545039a43f85a3e35fde3721f11339d9c62dbca9870bffa76fed3 binding_sha256=7df90b102b62c54c12ca61329a45f0c4af0b9bba1aa03cb98e600bc6394f6ae5

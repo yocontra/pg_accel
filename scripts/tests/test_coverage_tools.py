@@ -850,7 +850,7 @@ class SqlSemanticCoverageTests(unittest.TestCase):
                 REPO_ROOT / "coverage/sql-semantic-assertions.json"
             )
             self.assertEqual(generated, checked_in)
-            self.assertEqual(generated["declared_assertions"], 361)
+            self.assertEqual(generated["declared_assertions"], 462)
             matrix = next(
                 entry
                 for entry in generated["files"]
@@ -2598,11 +2598,22 @@ add_test(NAME ${test_target} COMMAND ${test_target})
         cpp = baseline["cpp"]
         self.assertEqual(coverage_tools.FIXED_THRESHOLD, 90.0)
         self.assertEqual(baseline["minimum_percent"], 90.0)
-        self.assertEqual(coverage_tools.BASELINE_CPP_SOURCES, 16)
-        self.assertEqual(coverage_tools.BASELINE_CPP_DEVICE_OBJECTS, 15)
-        self.assertEqual(coverage_tools.BASELINE_CPP_TESTS, 32)
-        self.assertEqual(len(cpp["sources"]), 16)
-        self.assertEqual(len(cpp["ctest_names"]), 32)
+        self.assertEqual(coverage_tools.BASELINE_CPP_SOURCES, 18)
+        self.assertEqual(coverage_tools.BASELINE_CPP_DEVICE_OBJECTS, 17)
+        self.assertEqual(coverage_tools.BASELINE_CPP_TESTS, 36)
+        self.assertEqual(len(cpp["sources"]), 18)
+        self.assertEqual(len(cpp["ctest_names"]), 36)
+        self.assertIn("pgaccel-kernels/src/join_rows.cpp", cpp["sources"])
+        self.assertIn("pgaccel-kernels/src/join_rows_layout.cpp", cpp["sources"])
+        self.assertIn("test_join_rows", cpp["ctest_names"])
+        self.assertIn("test_join_rows_layout", cpp["ctest_names"])
+        self.assertIn("pgaccel-kernels/src/join_rows_layout.hpp", cpp["executable_headers"])
+        self.assertIn("pgaccel-kernels/include/pgaccel_raster_lookup.hpp", cpp["executable_headers"])
+        self.assertIn("test_raster_lookup", cpp["ctest_names"])
+        self.assertIn("test_scalar", cpp["ctest_names"])
+        self.assertIn(
+            "pgaccel-kernels/include/pgaccel_scalar.hpp", cpp["executable_headers"]
+        )
         self.assertEqual(cpp["exclude"], [])
         self.assertEqual(
             cpp["oom_families"],

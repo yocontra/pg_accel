@@ -327,6 +327,8 @@ pub struct PhysicalKernelModeCounts {
     pub parallel_hash: u64,
     pub parallel_dense_count: u64,
     pub parallel_dense_integer: u64,
+    #[serde(default)]
+    pub parallel_dense_numeric: u64,
     pub serial_generic: u64,
 }
 
@@ -337,6 +339,7 @@ impl PhysicalKernelModeCounts {
             ("parallel_hash", self.parallel_hash),
             ("parallel_dense_count", self.parallel_dense_count),
             ("parallel_dense_integer", self.parallel_dense_integer),
+            ("parallel_dense_numeric", self.parallel_dense_numeric),
             ("serial_generic", self.serial_generic),
         ]
         .into_iter()
@@ -422,6 +425,10 @@ pub struct WorkloadResult {
     /// being treated as a GPU-resident pipeline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_resident_boundary_reason: Option<String>,
+    /// Native filtering after GPU aggregate output materialization, not a
+    /// host-staged input or an intermediate inside the resident GPU pipeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_post_aggregate_filter: Option<String>,
     /// Warmup timings are excluded from statistics but retained in artifacts
     /// so one-time JIT/runtime latency cannot disappear from report evidence.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1275,6 +1282,7 @@ impl WorkloadResult {
             rows_returned_to_cpu: 0,
             gpu_resident_pipeline: GpuResidentPipelineStatus::NotReported,
             gpu_resident_boundary_reason: None,
+            native_post_aggregate_filter: None,
             warmup_iterations: Vec::new(),
             warmup_accel_first_ms: None,
             warmup_accel_max_ms: None,
@@ -2736,16 +2744,30 @@ fn truncate_plan_for_display(plan: &str) -> String {
 fn render_workload_evidence_notes(w: &WorkloadResult, scale_label: &str, out: &mut String) {
     let mut notes: Vec<String> = Vec::new();
 
+    if let Some(filter) = w.native_post_aggregate_filter.clone().or_else(|| {
+        w.plan_snippet.as_deref().and_then(|plan| {
+            plan_text_property(
+                plan,
+                &["gpu post-aggregate filter", "gpu_post_aggregate_filter"],
+            )
+        })
+    }) {
+        notes.push(format!(
+            "Native post-aggregate filter: {filter}; CPU evaluation is included in query timings."
+        ));
+    }
+
     if w.physical_kernel_mode.is_some()
         || w.physical_kernel_mode_counts != PhysicalKernelModeCounts::default()
     {
         notes.push(format!(
-            "Physical grouped kernel: mode={}, EXPLAIN/native verified={}; calls hash={}, dense-count={}, dense-integer={}, serial-generic={}.",
+            "Physical grouped kernel: mode={}, EXPLAIN/native verified={}; calls hash={}, dense-count={}, dense-integer={}, dense-numeric={}, serial-generic={}.",
             w.physical_kernel_mode.as_deref().unwrap_or("ambiguous"),
             w.physical_kernel_mode_verified,
             w.physical_kernel_mode_counts.parallel_hash,
             w.physical_kernel_mode_counts.parallel_dense_count,
             w.physical_kernel_mode_counts.parallel_dense_integer,
+            w.physical_kernel_mode_counts.parallel_dense_numeric,
             w.physical_kernel_mode_counts.serial_generic,
         ));
     }
@@ -3498,6 +3520,16 @@ impl BenchReport {
             w.apply_dispatch_classification(classification);
             w.gpu_resident_boundary_reason =
                 classify_gpu_resident_boundary_reason(w, full_plan.as_deref());
+            let filter_keys = ["gpu post-aggregate filter", "gpu_post_aggregate_filter"];
+            w.native_post_aggregate_filter = w
+                .plan_snippet
+                .as_deref()
+                .and_then(|plan| plan_text_property(plan, &filter_keys))
+                .or_else(|| {
+                    full_plan
+                        .as_deref()
+                        .and_then(|plan| plan_text_property(plan, &filter_keys))
+                });
         }
         report
     }
@@ -4750,6 +4782,11 @@ impl BenchReport {
             .iter()
             .filter(|w| w.plan_selected && w.gpu_resident_boundary_reason.is_some())
             .count();
+        let native_output_filter_rows = report
+            .workloads
+            .iter()
+            .filter(|w| w.plan_selected && w.native_post_aggregate_filter.is_some())
+            .count();
 
         out.push_str("## Dispatch Classification\n\n");
         out.push_str(
@@ -4818,6 +4855,10 @@ impl BenchReport {
             out,
             "| Custom Scan rows with recorded CPU boundary | \
              {gpu_resident_boundary_recorded} |"
+        );
+        let _ = writeln!(
+            out,
+            "| Custom Scan rows with native post-aggregate filtering | {native_output_filter_rows} |"
         );
         out.push('\n');
     }
@@ -5759,12 +5800,31 @@ fn resident_lifecycle_evidence_error(workload: &WorkloadResult) -> Option<String
         ));
     }
     for capture in &workload.artifact_steady_state_captures {
+        // A global raw-column aggregate has no dictionary or derived buffer to
+        // retain. Its ephemeral preparation builds metadata only; require zero
+        // allocated bytes rather than claiming a cache hit that cannot exist.
+        let artifact_valid = if capture.artifact_policy.as_deref() == Some("ephemeral_fused") {
+            probe.artifact_policy == capture.artifact_policy
+                && probe.artifact.builds == 1
+                && probe.artifact.hits == 0
+                && probe.artifact.rebuilds == 0
+                && probe.artifact.artifact_bytes_observed == 0
+                && probe.artifact.construction_bytes == 0
+                && capture.artifact.builds == 1
+                && capture.artifact.hits == 0
+                && capture.artifact.rebuilds == 0
+                && capture.artifact.artifact_bytes_observed == 0
+                && capture.artifact.construction_bytes == 0
+        } else {
+            capture.artifact.ensures() != 0
+                && capture.artifact.hits == capture.artifact.ensures()
+                && capture.artifact.builds == 0
+                && capture.artifact.rebuilds == 0
+        };
         if capture.phase != "steady_state"
             || capture.error.is_some()
-            || capture.artifact.ensures() == 0
-            || capture.artifact.hits != capture.artifact.ensures()
-            || capture.artifact.builds != 0
-            || capture.artifact.rebuilds != 0
+            || !artifact_valid
+            || capture.artifact.raw_load_us != 0
             || capture.refresh_us != 0
             || capture.refreshed_relations != 0
             || capture.refreshed_rows != 0
@@ -5775,7 +5835,7 @@ fn resident_lifecycle_evidence_error(workload: &WorkloadResult) -> Option<String
             || capture.output_rows_consumed == 0
         {
             return Some(format!(
-                "resident steady-state pair {} did not prove artifact hit, stable dependency \
+                "resident steady-state pair {} did not prove artifact hit or zero-buffer preparation, stable dependency \
                  identity, GPU dispatch, consumed output, and zero fallback (error={})",
                 capture
                     .pair_index
@@ -6958,6 +7018,51 @@ mod tests {
                 .expect("missing combined calibration must fail")
                 .contains("combined end-to-end")
         );
+    }
+
+    #[test]
+    fn resident_global_metadata_preparation_requires_zero_buffers_and_real_dispatch() {
+        let mut workload = with_valid_resident_lifecycle(mock_workload_result(
+            "numeric_global_sum_avg",
+            1_000_000,
+            10.0,
+            20.0,
+        ));
+        let probe = workload.artifact_lifecycle_probe.as_mut().expect("probe");
+        probe.artifact_policy = Some("ephemeral_fused".to_owned());
+        probe.artifact.artifact_bytes_observed = 0;
+        probe.artifact.construction_bytes = 0;
+        for capture in &mut workload.artifact_steady_state_captures {
+            capture.artifact_policy = Some("ephemeral_fused".to_owned());
+            capture.artifact.hits = 0;
+            capture.artifact.builds = 1;
+            capture.artifact.artifact_bytes_observed = 0;
+            capture.artifact.construction_bytes = 0;
+        }
+        assert_eq!(resident_lifecycle_evidence_error(&workload), None);
+        for mutation in 0..6 {
+            let mut invalid = workload.clone();
+            let capture = &mut invalid.artifact_steady_state_captures[0];
+            match mutation {
+                0 => capture.artifact.construction_bytes = 1,
+                1 => capture.artifact.artifact_bytes_observed = 1,
+                2 => capture.artifact.raw_load_us = 1,
+                3 => capture.gpu_kernel_executions = 0,
+                4 => capture.artifact_policy = Some("cached_reusable".to_owned()),
+                _ => capture.artifact.builds = 0,
+            }
+            assert!(resident_lifecycle_evidence_error(&invalid).is_some());
+        }
+        for mutation in 0..3 {
+            let mut invalid = workload.clone();
+            let probe = invalid.artifact_lifecycle_probe.as_mut().expect("probe");
+            match mutation {
+                0 => probe.artifact.construction_bytes = 1,
+                1 => probe.artifact.artifact_bytes_observed = 1,
+                _ => probe.artifact.rebuilds = 1,
+            }
+            assert!(resident_lifecycle_evidence_error(&invalid).is_some());
+        }
     }
 
     #[test]
@@ -9584,6 +9689,42 @@ mod tests {
             "GpuAgg drains heap or child tuples on CPU and stages host input/key/value buffers"
         ));
         assert!(markdown.contains("| Custom Scan rows with recorded CPU boundary | 1 |"));
+    }
+
+    #[test]
+    fn native_output_filter_is_reported_without_reclassifying_device_aggregation() {
+        let mut workload = mock_workload_result("grouped_int4_native_having", 1_000_000, 5.0, 20.0);
+        workload.plan_selected = true;
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 10;
+        workload.accel_output_rows_consumed = 20;
+        workload.plan_snippet = Some(
+            "Custom Scan (GpuAccelAgg)\n  Strategy: GpuAgg\n  GPU Resident Pipeline: true\n  \
+             GPU Resident Proof Version: 2\n  GPU Resident Operator Class: resident_groupagg\n  \
+             GPU Resident Stage Mask: 16393\n  GPU Resident Device Columns: 2\n  \
+             GPU Resident Boundary: none: no CPU boundary\n  \
+             GPU Post-Aggregate Filter: PostgreSQL HAVING\n"
+                .to_owned(),
+        );
+        let original = mock_report(vec![workload]);
+        let report = original.with_normalized_dispatch();
+        assert_eq!(
+            report.workloads[0].gpu_resident_pipeline,
+            GpuResidentPipelineStatus::Reported
+        );
+        assert_eq!(
+            report.workloads[0].native_post_aggregate_filter.as_deref(),
+            Some("PostgreSQL HAVING")
+        );
+        assert!(
+            report
+                .to_json()
+                .expect("JSON")
+                .contains("\"native_post_aggregate_filter\": \"PostgreSQL HAVING\"")
+        );
+        let markdown = original.to_markdown();
+        assert!(markdown.contains("| Custom Scan rows with native post-aggregate filtering | 1 |"));
+        assert!(markdown.contains("CPU evaluation is included in query timings"));
     }
 
     #[test]

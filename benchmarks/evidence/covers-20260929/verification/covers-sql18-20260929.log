@@ -1,0 +1,164 @@
+=== 19_spatial_predicates ===
+BEGIN
+CREATE TABLE
+INSERT 0 3000
+CREATE TABLE
+INSERT 0 25
+ANALYZE
+ANALYZE
+SET
+SELECT 3000
+SET
+SELECT 3000
+SET
+SELECT 137
+SET
+SELECT 137
+SET
+SELECT 3000
+SET
+SELECT 3000
+SET
+SELECT 25
+SET
+SELECT 25
+DO
+PGACCEL_ASSERT_OK:19_spatial_predicates.assert_001
+DROP TABLE
+COMMIT
+PGACCEL_FILE_OK:19_spatial_predicates
+=== 20_spatial_advanced ===
+BEGIN
+CREATE TABLE
+INSERT 0 3000
+CREATE TABLE
+INSERT 0 25
+CREATE INDEX
+CREATE INDEX
+CREATE TABLE
+INSERT 0 1
+ANALYZE
+ANALYZE
+ANALYZE
+SET
+SELECT 4314
+SET
+SELECT 4314
+SET
+SELECT 122
+SET
+SELECT 122
+SET
+SELECT 366
+SET
+SELECT 366
+SET
+SELECT 43
+SET
+SELECT 43
+SET
+SELECT 25
+SET
+SELECT 25
+SET
+SELECT 3
+SET
+SELECT 3
+DO
+PGACCEL_ASSERT_OK:20_spatial_advanced.assert_001
+DROP TABLE
+COMMIT
+PGACCEL_FILE_OK:20_spatial_advanced
+=== 92_spatial_resident_agg_contract ===
+SET
+SET
+CREATE TABLE
+INSERT 0 1000000
+ANALYZE
+CREATE TABLE
+DO
+PGACCEL_ASSERT_OK:92_spatial_resident_agg_contract.assert_001
+DROP TABLE
+DROP TABLE
+PGACCEL_FILE_OK:92_spatial_resident_agg_contract
+=== 112_spatial_polygon_topology ===
+SET
+SET
+CREATE TABLE
+INSERT 0 1000017
+INSERT 0 2
+ANALYZE
+SELECT 2
+DO
+PGACCEL_ASSERT_OK:112_spatial_polygon_topology.assert_001
+DO
+PGACCEL_ASSERT_OK:112_spatial_polygon_topology.assert_002
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ f
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:112_spatial_polygon_topology
+=== 114_spatial_multipolygon_contract ===
+SET
+SET
+SET
+CREATE TABLE
+INSERT 0 1000017
+INSERT 0 2
+ANALYZE
+SELECT 1
+SET
+DO
+CREATE FUNCTION
+ check_multi 
+-------------
+ 
+(1 row)
+
+PGACCEL_ASSERT_OK:114_spatial_multipolygon_contract.assert_001
+BEGIN
+UPDATE 989709
+ check_multi 
+-------------
+ 
+(1 row)
+
+ROLLBACK
+DO
+PGACCEL_ASSERT_OK:114_spatial_multipolygon_contract.assert_002
+psql:sql/tests/114_spatial_multipolygon_contract.sql:196: NOTICE:  Nested shells at or near point 3 3
+psql:sql/tests/114_spatial_multipolygon_contract.sql:196: NOTICE:  Nested shells at or near point 3 3
+psql:sql/tests/114_spatial_multipolygon_contract.sql:196: NOTICE:  Nested shells at or near point 3 3
+psql:sql/tests/114_spatial_multipolygon_contract.sql:196: NOTICE:  Nested shells at or near point 3 3
+psql:sql/tests/114_spatial_multipolygon_contract.sql:196: NOTICE:  Nested shells at or near point 3 3
+DO
+PGACCEL_ASSERT_OK:114_spatial_multipolygon_contract.assert_003
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ t
+(1 row)
+
+DROP FUNCTION
+DEALLOCATE
+DEALLOCATE
+RESET
+DROP TABLE
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:114_spatial_multipolygon_contract

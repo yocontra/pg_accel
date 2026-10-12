@@ -1,0 +1,57 @@
+PGACCEL_TEST_START name=test_h3
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+=== pg_accel H3 kernel tests ===
+
+--- H3 APIs: no-device lifecycle ---
+
+=== Results: 23 passed, 0 failed ===
+=== pg_accel H3 kernel tests ===
+
+--- test_get_resolution ---
+--- test_get_base_cell ---
+--- test_is_valid_cell ---
+--- test_is_pentagon ---
+--- test_is_res_class_iii ---
+--- test_cell_to_parent ---
+--- test_cell_to_parent_resident ---
+--- test_lat_lng_to_cell_resident ---
+--- test_cell_to_center_child ---
+--- test_grid_distance ---
+--- test_lat_lng_to_cell ---
+--- test_lat_lng_to_cell_bulk_edge_randomized ---
+--- test_lat_lng_to_cell_fp32_exact_matrix ---
+--- test_cell_to_parent_count_bulk ---
+--- test_lat_lng_count_bulk ---
+--- test_lat_lng_count_bulk_all_res_duplicate_edges ---
+--- test_lat_lng_count_bulk_f32_exact_all_res_edge_randomized ---
+--- test_lat_lng_count_resident_low_high_matrix ---
+--- test_lat_lng_res7_exact_edge_fixups ---
+--- test_lat_lng_to_cell fp64 bulk (1k/64k/256k/1M) ---
+--- test_null_pointers ---
+--- test_api_contract_matrix ---
+--- test_grid_disk ---
+--- test_grid_ring_unsafe ---
+--- test_cell_to_children ---
+--- test_cell_to_boundary ---
+--- test_polyfill ---
+--- test_cells_to_multi_polygon ---
+--- test_executed_h3_branch_matrix ---
+
+=== Results: 1135 passed, 0 failed ===
+PGACCEL_TEST_RESULT name=test_h3 exit_code=0 result=PASS raw_lines=55 body_sha256=0fd16bb04f387c8209678d2f842908505b715ad810cf6c427e1a91598aa425e4 binding_sha256=364517be492a4f96d4df418b9895bb6bab36cc9df0a88dade60233cdaa645878

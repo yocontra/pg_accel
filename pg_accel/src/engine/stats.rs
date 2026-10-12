@@ -285,7 +285,7 @@ static ARTIFACT_CONSTRUCTION_US: AtomicU64 = AtomicU64::new(0);
 static ARTIFACT_PREPARATION_US: AtomicU64 = AtomicU64::new(0);
 static ARTIFACT_RAW_LOAD_US: AtomicU64 = AtomicU64::new(0);
 
-static GROUPED_KERNEL_MODE_CALLS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+static GROUPED_KERNEL_MODE_CALLS: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
 
 const fn grouped_kernel_mode_index(mode: GroupedAggKernelMode) -> usize {
     match mode {
@@ -293,14 +293,16 @@ const fn grouped_kernel_mode_index(mode: GroupedAggKernelMode) -> usize {
         GroupedAggKernelMode::ParallelDenseCount => 1,
         GroupedAggKernelMode::ParallelDenseInteger => 2,
         GroupedAggKernelMode::SerialGeneric => 3,
+        GroupedAggKernelMode::ParallelDenseNumeric => 4,
     }
 }
 
-const GROUPED_KERNEL_MODES: [GroupedAggKernelMode; 4] = [
+const GROUPED_KERNEL_MODES: [GroupedAggKernelMode; 5] = [
     GroupedAggKernelMode::ParallelHash,
     GroupedAggKernelMode::ParallelDenseCount,
     GroupedAggKernelMode::ParallelDenseInteger,
     GroupedAggKernelMode::SerialGeneric,
+    GroupedAggKernelMode::ParallelDenseNumeric,
 ];
 
 // ---------------------------------------------------------------------------
@@ -1193,6 +1195,10 @@ fn pg_accel_device_limits() -> TableIterator<
             limits.gpu_hash_agg_max_groups.to_string(),
         ),
         (
+            "gpu_h3_max_groups".into(),
+            limits.gpu_h3_max_groups.to_string(),
+        ),
+        (
             "gpu_reduce_max_chunk".into(),
             limits.gpu_reduce_max_chunk.to_string(),
         ),
@@ -1916,7 +1922,7 @@ mod tests {
 
         let phase6_count = Spi::get_one::<i64>(
             "SELECT COUNT(*) FROM pg_accel_device_limits() WHERE name IN (\
-             'gpu_h3_group_min_rows', 'gpu_h3_max_chunk_rows', \
+             'gpu_h3_group_min_rows', 'gpu_h3_max_chunk_rows', 'gpu_h3_max_groups', \
              'gpu_op_cost_h3_parent_resident', \
              'gpu_spatial_max_vertices_per_row', \
              'gpu_spatial_max_recheck_fraction', 'gpu_raster_min_pixels', \
@@ -1925,7 +1931,7 @@ mod tests {
         )
         .expect("Phase 6 device-limit lookup should succeed")
         .expect("Phase 6 device-limit lookup should return a count");
-        assert_eq!(phase6_count, 8, "Phase 6 domain limits must be exposed");
+        assert_eq!(phase6_count, 9, "Phase 6 domain limits must be exposed");
 
         let source = Spi::get_one::<String>("SELECT source FROM pg_accel_device_limits() LIMIT 1")
             .expect("source column query should succeed")

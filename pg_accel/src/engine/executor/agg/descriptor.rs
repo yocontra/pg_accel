@@ -14,14 +14,18 @@ use pgrx::pg_sys;
 
 use super::artifact::{
     ArtifactKeyInput, DescriptorAggArtifact, H3ParentArtifact, artifact_column_refs,
-    estimate_descriptor_artifact_bytes_upper_bound, prepare_agg_artifact,
+    descriptor_program_clone_bytes, estimate_descriptor_artifact_bytes_upper_bound,
+    h3_count_filter, h3_parent_artifact_bytes, hash_where_filter, learned_hash_group_bound,
+    prepare_agg_artifact,
 };
-use super::output::{DescriptorAggOutput, validate_h3_compact_key_buffers};
+use super::output::{DescriptorAggOutput, validate_compact_integer_key_buffers};
 use super::spatial::{SpatialAggArtifact, SpatialTransformPlan, SpatialWorkspace};
 use crate::engine::cost::{ExecutorLimits, GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS, Rows};
 use crate::engine::executor::bounded::{
-    BoundedDispatchError, bounded_dispatch_call_count, cleanup_before_rethrow,
-    dispatch_warning_threshold_exceeded, run_bounded_dispatch,
+    BoundedDispatchError, InterruptibleAttempt, InterruptibleDispatchError,
+    bounded_dispatch_call_count, capture_postgres_interrupt, cleanup_before_rethrow,
+    dispatch_warning_threshold_exceeded, postgres_interrupt_pending, run_bounded_dispatch,
+    run_interruptible_dispatch,
 };
 use crate::engine::ffi::syscache::{PostgisCatalogIdentity, resolve_postgis_catalog};
 use crate::engine::gucs;
@@ -30,13 +34,15 @@ use crate::engine::residency::{
     EphemeralDerivedArtifact, PreparedDerived, ResidentByteAccounting, ResidentColumnRef,
     ResidentColumnView, ResidentLoadError, ResidentRelationEvidence, ResolvedDerivedInputs,
     SelectedRelation, build_ephemeral_derived_artifact_with_report,
+    build_ephemeral_host_device_derived_artifact_with_report,
     build_ephemeral_staged_device_transform_artifact_with_report,
-    ensure_derived_artifact_with_report, ensure_device_derived_artifact_with_report,
+    ensure_device_derived_artifact_with_report, ensure_host_device_derived_artifact_with_report,
     ensure_selected_relations, ensure_staged_device_transform_artifact_with_report,
     probe_derived_artifact, resident_live_bytes, with_derived_artifact_inputs,
     with_ephemeral_artifact_inputs,
 };
 use crate::engine::spec::abi;
+use crate::engine::spec::scalar::{ScalarProgram, ScalarType, ValidatedScalarWire};
 use crate::engine::spec::{
     AggOutputProjection, AggOutputSource, AggQuerySpec, AggregateKind, AggregateSource,
     BinaryMeasureOp, ColumnRef, FilterSpec, GroupKeyEncoding, GroupKeySource, JoinMultiplicity,
@@ -63,12 +69,14 @@ const VARCHAROID: u32 = 1043;
 const DATEOID: u32 = 1082;
 const TIMESTAMPOID: u32 = 1114;
 const TIMESTAMPTZOID: u32 = 1184;
-const NORMAL_SPATIAL_PROMOTION_COORDINATES: usize = 1_025;
+const NUMERICOID: u32 = 1700;
 const DESCRIPTOR_SPECIALIZATION_CACHE_CAPACITY: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DescriptorSpecializationFamily {
     HashCount,
+    HashInt4SumCount,
+    HashInt4Extrema,
     DenseCount,
     DenseBoolCount,
     DenseInt2Count,
@@ -79,6 +87,12 @@ enum DescriptorSpecializationFamily {
     DenseFloat8Count,
     DenseInt2SumAvg,
     DenseInt4SumAvg,
+    DenseMultiIntegerSumAvg,
+    DenseFilteredIntegerSumAvg,
+    DenseIntegerExpressions,
+    DenseScalarPrograms,
+    DenseNumericSumAvg,
+    DenseIntegerWithCounts,
     DenseIntegerColumn,
     DenseIntegerColumnMeasureRange,
     DenseIntegerMultiply,
@@ -102,7 +116,17 @@ impl DescriptorSpecialization {
     #[must_use]
     pub(super) const fn label(self) -> &'static str {
         match (self.family, self.membership, self.sql_mask) {
+            (DescriptorSpecializationFamily::DenseIntegerWithCounts, false, false) => {
+                "dense_integer_with_counts_plain"
+            }
+            (DescriptorSpecializationFamily::DenseIntegerWithCounts, _, _) => {
+                "invalid_dense_integer_with_counts_specialization"
+            }
             (DescriptorSpecializationFamily::HashCount, false, false) => "hash_count",
+            (DescriptorSpecializationFamily::HashInt4SumCount, false, false) => {
+                "hash_int4_sum_count"
+            }
+            (DescriptorSpecializationFamily::HashInt4Extrema, false, false) => "hash_int4_extrema",
             (DescriptorSpecializationFamily::DenseCount, false, false) => "dense_count_plain",
             (DescriptorSpecializationFamily::DenseCount, false, true) => "dense_count_sql_mask",
             (DescriptorSpecializationFamily::DenseCount, true, false) => "dense_count_membership",
@@ -220,6 +244,45 @@ impl DescriptorSpecialization {
             (DescriptorSpecializationFamily::DenseIntegerColumn, false, false) => {
                 "dense_integer_column_plain"
             }
+            (DescriptorSpecializationFamily::DenseIntegerExpressions, false, false) => {
+                "dense_integer_expressions_plain"
+            }
+            (DescriptorSpecializationFamily::DenseScalarPrograms, false, false) => {
+                "dense_scalar_programs_plain"
+            }
+            (DescriptorSpecializationFamily::DenseScalarPrograms, false, true) => {
+                "dense_scalar_programs_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseScalarPrograms, true, _) => {
+                "invalid_dense_scalar_programs_specialization"
+            }
+            (DescriptorSpecializationFamily::DenseIntegerExpressions, false, true) => {
+                "dense_integer_expressions_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseIntegerExpressions, true, _) => {
+                "invalid_dense_integer_expressions_specialization"
+            }
+            (DescriptorSpecializationFamily::DenseMultiIntegerSumAvg, false, false) => {
+                "dense_multi_integer_sum_avg_plain"
+            }
+            (DescriptorSpecializationFamily::DenseMultiIntegerSumAvg, _, _) => {
+                "invalid_dense_multi_integer_specialization"
+            }
+            (DescriptorSpecializationFamily::DenseFilteredIntegerSumAvg, false, false) => {
+                "dense_filtered_integer_sum_avg_plain"
+            }
+            (DescriptorSpecializationFamily::DenseFilteredIntegerSumAvg, _, _) => {
+                "invalid_dense_filtered_integer_specialization"
+            }
+            (DescriptorSpecializationFamily::DenseNumericSumAvg, false, false) => {
+                "dense_numeric_sum_avg_plain"
+            }
+            (DescriptorSpecializationFamily::DenseNumericSumAvg, false, true) => {
+                "dense_numeric_sum_avg_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseNumericSumAvg, _, _) => {
+                "invalid_dense_numeric_specialization"
+            }
             (DescriptorSpecializationFamily::DenseIntegerColumn, false, true) => {
                 "dense_integer_column_sql_mask"
             }
@@ -250,7 +313,13 @@ impl DescriptorSpecialization {
             (DescriptorSpecializationFamily::SerialGeneric, _, _) => "serial_generic",
             // Hash descriptors are admitted only without a separate dimension
             // or fact-mask stage. Keep impossible combinations fail-closed.
-            (DescriptorSpecializationFamily::HashCount, _, _) => "invalid_hash_specialization",
+            (
+                DescriptorSpecializationFamily::HashCount
+                | DescriptorSpecializationFamily::HashInt4SumCount
+                | DescriptorSpecializationFamily::HashInt4Extrema,
+                _,
+                _,
+            ) => "invalid_hash_specialization",
             (DescriptorSpecializationFamily::DenseIntegerMultiplyRange, _, _) => {
                 "invalid_dense_integer_range_specialization"
             }
@@ -423,37 +492,364 @@ fn canonical_dense_integer_sum_avg_measure(
     measure: &crate::engine::spec::MeasureSpec,
     measure_type_oid: u32,
 ) -> bool {
+    measure.filter == FilterSpec::None
+        && canonical_dense_integer_sum_avg_value(spec, measure, measure_type_oid)
+}
+
+fn canonical_dense_integer_sum_avg_value(
+    spec: &AggQuerySpec,
+    measure: &crate::engine::spec::MeasureSpec,
+    measure_type_oid: u32,
+) -> bool {
     if !matches!(measure_type_oid, INT2OID | INT4OID) {
         return false;
     }
-    let [group_key] = spec.group_keys.as_slice() else {
-        return false;
-    };
-    let GroupKeySource::FactColumn(group_column) = &group_key.source else {
-        return false;
-    };
-    let MeasureExpr::Column(measure_column) = &measure.expression else {
-        return false;
+    let measure_column = match measure.expression {
+        MeasureExpr::Column(column) => column,
+        MeasureExpr::Binary { lhs, rhs, .. }
+            if measure_type_oid == INT4OID
+                && lhs.type_oid == INT4OID
+                && rhs.type_oid == INT4OID
+                && lhs.relation_oid == spec.fact_rel
+                && rhs.relation_oid == spec.fact_rel
+                && (measure.filter == FilterSpec::None
+                    || measure.filter.range_parts().is_some_and(|(input, _, _)| {
+                        filter_measure_binding(spec, input).is_ok()
+                    })) =>
+        {
+            lhs
+        }
+        _ => match measure.filtered_count_input() {
+            Some(column) => column,
+            None => return false,
+        },
     };
     let outputs = measure.outputs.as_slice();
-    group_key.type_oid == BOOLOID
-        && group_column.type_oid == BOOLOID
+    spec.group_keys.len() <= abi::PGACCEL_GROUPED_AGG_MAX_KEYS
+        && spec.group_keys.iter().all(|key| {
+            matches!(&key.source, GroupKeySource::FactColumn(column)
+                if (column.relation_oid, column.type_oid) == (spec.fact_rel, key.type_oid)
+                    && is_supported_group_type(key.type_oid)
+                    && is_text_family(key.type_oid) == (key.collation_oid != 0))
+        })
         && measure_column.type_oid == measure_type_oid
-        && group_column.relation_oid == spec.fact_rel
         && measure_column.relation_oid == spec.fact_rel
-        && (group_column.relation_oid, group_column.attno)
-            != (measure_column.relation_oid, measure_column.attno)
         && spec.star_dims.is_empty()
-        && spec.fact_filter == FilterSpec::None
+        && canonical_dense_fact_filter(spec)
         && spec.having.is_none()
-        && measure.filter == FilterSpec::None
-        && outputs.len() == 2
-        && outputs.iter().any(|output| {
-            output.source == AggregateSource::Value && output.kind == AggregateKind::Sum
+        && !outputs.is_empty()
+        && outputs.iter().all(|output| {
+            output.source == AggregateSource::Value
+                && matches!(
+                    output.kind,
+                    AggregateKind::Sum
+                        | AggregateKind::Avg
+                        | AggregateKind::Count
+                        | AggregateKind::Min
+                        | AggregateKind::Max
+                )
         })
-        && outputs.iter().any(|output| {
-            output.source == AggregateSource::Value && output.kind == AggregateKind::Avg
+}
+
+fn canonical_dense_filtered_integer_sum_avg(spec: &AggQuerySpec) -> bool {
+    if spec.measures.is_empty()
+        || spec.measures.len() > abi::PGACCEL_GROUPED_AGG_MAX_MEASURES
+        || spec
+            .measures
+            .iter()
+            .all(|measure| measure.filter == FilterSpec::None)
+    {
+        return false;
+    }
+    let values = spec.measures.len()
+        - usize::from(spec.measures.last().is_some_and(canonical_count_measure));
+    values > 0
+        && spec.measures[..values].iter().all(|measure| {
+            (canonical_dense_integer_sum_avg_value(spec, measure, INT2OID)
+                || canonical_dense_integer_sum_avg_value(spec, measure, INT4OID))
+                && canonical_numeric_measure_filter(spec, &measure.filter)
         })
+}
+
+fn canonical_dense_multi_integer_sum_avg(spec: &AggQuerySpec) -> bool {
+    if !(2..=abi::PGACCEL_GROUPED_AGG_MAX_MEASURES).contains(&spec.measures.len()) {
+        return false;
+    }
+    let value_count = spec.measures.len()
+        - usize::from(spec.measures.last().is_some_and(canonical_count_measure));
+    value_count >= 2
+        && spec.measures[..value_count].iter().all(|measure| {
+            canonical_dense_integer_sum_avg_measure(spec, measure, INT2OID)
+                || canonical_dense_integer_sum_avg_measure(spec, measure, INT4OID)
+        })
+}
+
+fn canonical_dense_integer_rollup(spec: &AggQuerySpec) -> bool {
+    let values = spec.measures.len()
+        - usize::from(spec.measures.last().is_some_and(canonical_count_measure));
+    values > 0
+        && spec.measures.len() <= abi::PGACCEL_GROUPED_AGG_MAX_MEASURES
+        && (canonical_dense_filtered_integer_sum_avg(spec)
+            || spec.measures[..values].iter().all(|measure| {
+                canonical_dense_integer_sum_avg_measure(spec, measure, INT2OID)
+                    || canonical_dense_integer_sum_avg_measure(spec, measure, INT4OID)
+            }))
+}
+
+fn has_scalar_measure(spec: &AggQuerySpec) -> bool {
+    spec.measures
+        .iter()
+        .any(|measure| matches!(measure.expression, MeasureExpr::Bytecode { .. }))
+}
+
+/// Typed logical counterpart of the native fused scalar dense family. Spatial
+/// predicates still require the separate geometry/preflight admission contract.
+fn canonical_dense_scalar_programs(spec: &AggQuerySpec) -> bool {
+    if !has_scalar_measure(spec)
+        || spec.measures.len() > abi::PGACCEL_GROUPED_AGG_MAX_MEASURES
+        || !spec.star_dims.is_empty()
+        || spec.having.is_some()
+        || !canonical_dense_fact_filter(spec)
+        || spec.group_keys.len() > abi::PGACCEL_GROUPED_AGG_MAX_KEYS
+        || !spec.group_keys.iter().all(|key| {
+            matches!(key.source, GroupKeySource::FactColumn(column)
+                if (column.relation_oid, column.type_oid) == (spec.fact_rel, key.type_oid)
+                    && is_supported_group_type(key.type_oid)
+                    && is_text_family(key.type_oid) == (key.collation_oid != 0))
+        })
+    {
+        return false;
+    }
+    let values = spec.measures.len()
+        - usize::from(spec.measures.last().is_some_and(canonical_count_measure));
+    spec.measures[..values].iter().all(|measure| {
+        if matches!(measure.expression, MeasureExpr::Bytecode { .. }) {
+            scalar_measure_program(&measure.expression, spec.fact_rel).is_ok()
+                && !measure.outputs.is_empty()
+                && validate_measure_outputs(&measure.expression, &measure.outputs).is_ok()
+                && canonical_numeric_measure_filter(spec, &measure.filter)
+        } else {
+            (canonical_dense_integer_sum_avg_value(spec, measure, INT2OID)
+                || canonical_dense_integer_sum_avg_value(spec, measure, INT4OID))
+                && canonical_numeric_measure_filter(spec, &measure.filter)
+        }
+    })
+}
+
+fn canonical_numeric_measure_filter(spec: &AggQuerySpec, filter: &FilterSpec) -> bool {
+    match filter {
+        FilterSpec::None => true,
+        FilterSpec::Ranges { input, ranges } | FilterSpec::NullOrRanges { input, ranges } => {
+            input.relation_oid == spec.fact_rel
+                && input.type_oid == INT4OID
+                && (matches!(filter, FilterSpec::NullOrRanges { .. }) || !ranges.is_empty())
+                && ranges.len() <= abi::PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES
+                && ranges.iter().all(|range| {
+                    matches!((range.lo, range.hi),
+                    (ScalarValue::I32(lo), ScalarValue::I32(hi)) if lo <= hi)
+                })
+        }
+        _ => false,
+    }
+}
+
+/// Exact dense consumers share range or SQL-mask WHERE semantics. A range
+/// input must already have a value binding (possibly supplied by the planner).
+fn canonical_dense_fact_filter(spec: &AggQuerySpec) -> bool {
+    match spec.fact_filter.scalar() {
+        FilterSpec::None => true,
+        FilterSpec::Bytecode { .. } => scalar_where_measure_binding(spec).is_some(),
+        FilterSpec::Ranges { input, .. } | FilterSpec::NullOrRanges { input, .. } => {
+            canonical_numeric_measure_filter(spec, spec.fact_filter.scalar())
+                && spec
+                    .measures
+                    .iter()
+                    .any(|measure| match measure.expression {
+                        MeasureExpr::Column(column) => column == *input,
+                        MeasureExpr::Binary { lhs, .. } => lhs == *input,
+                        _ => false,
+                    })
+        }
+        FilterSpec::Mask {
+            input,
+            kind: MaskKind::Sql,
+        } => input.relation_oid == spec.fact_rel && input.type_oid == BOOLOID,
+        // The internal spatial executor supplies an exact, rechecked SQL
+        // mask. Public admission still validates the complete geometry shape.
+        FilterSpec::Spatial { .. } => true,
+        _ => false,
+    }
+}
+
+/// Decimal execution requires at least one decimal state; integer-only shapes
+/// retain their own exact kernels.
+fn canonical_dense_numeric_sum_avg(spec: &AggQuerySpec) -> bool {
+    let value_count = spec.measures.len()
+        - usize::from(spec.measures.last().is_some_and(canonical_count_measure));
+    value_count > 0
+        && has_numeric_measure(spec)
+        && spec.measures.len() <= abi::PGACCEL_GROUPED_AGG_MAX_MEASURES
+        && spec.group_keys.len() <= abi::PGACCEL_GROUPED_AGG_MAX_KEYS
+        && spec.group_keys.iter().all(|key| {
+            matches!(&key.source, GroupKeySource::FactColumn(column)
+                if (column.relation_oid, column.type_oid) == (spec.fact_rel, key.type_oid)
+                    && is_supported_group_type(key.type_oid)
+                    && is_text_family(key.type_oid) == (key.collation_oid != 0))
+        })
+        && spec.star_dims.is_empty()
+        && canonical_dense_fact_filter(spec)
+        && spec.having.is_none()
+        && spec.measures[..value_count].iter().all(|measure| {
+            (matches!(measure.expression, MeasureExpr::Column(column)
+                if matches!(column.type_oid, NUMERICOID | INT2OID | INT4OID | INT8OID)
+                    && column.relation_oid == spec.fact_rel)
+                || measure.filtered_count_input().is_some())
+                && canonical_numeric_measure_filter(spec, &measure.filter)
+                && !measure.outputs.is_empty()
+                && measure.outputs.iter().all(|output| {
+                    output.source == AggregateSource::Value
+                        && matches!(
+                            output.kind,
+                            AggregateKind::Sum | AggregateKind::Avg | AggregateKind::Count
+                        )
+                })
+        })
+}
+
+fn has_numeric_measure(spec: &AggQuerySpec) -> bool {
+    spec.measures
+        .iter()
+        .any(crate::engine::spec::MeasureSpec::requires_numeric_accumulator)
+}
+
+/// Allocation-only forecast for a supplied dense capacity. Rows/digits are
+/// deliberately absent: NUMERIC workspace layout depends on digit extents,
+/// measure masks and dense slots, not payload values or chunk row counts.
+pub fn numeric_descriptor_memory_requirements(
+    spec: &AggQuerySpec,
+    columns: &[crate::engine::residency::ResidentNumericColumnStats],
+    nullable_columns: &[i16],
+    group_capacity: usize,
+) -> Result<crate::gpu::GroupedAggMemoryRequirements, String> {
+    if !canonical_dense_numeric_sum_avg(spec)
+        || group_capacity == 0
+        || (spec.group_keys.is_empty() && group_capacity != 1)
+    {
+        return Err(
+            "NUMERIC memory forecast requires canonical dense SUM/AVG/COUNT and a valid capacity"
+                .into(),
+        );
+    }
+    // SAFETY: ABI records contain integers/raw pointers with valid zero bit
+    // patterns. All active fields are initialized below; payloads stay empty.
+    let mut bound = BoundDescriptor {
+        desc: unsafe { std::mem::zeroed() },
+        _numeric_views: std::array::from_fn(|_| None),
+        _scalar_views: std::array::from_fn(|_| None),
+    };
+    let desc = &mut bound.desc;
+    desc.abi_version = abi::PGACCEL_OLAP_ABI_VERSION;
+    desc.size_bytes = size_of::<abi::PgaccelGroupedAggDesc>() as u32;
+    desc.group_capacity = group_capacity;
+    desc.key_count = spec.group_keys.len() as u32;
+    for index in 0..spec.group_keys.len() {
+        desc.keys[index].values.tag = PgaccelValTag::Int32;
+        desc.keys[index].cardinality = if index == 0 {
+            u32::try_from(group_capacity)
+                .map_err(|_| "NUMERIC forecast group capacity exceeds u32")?
+        } else {
+            1
+        };
+        let GroupKeySource::FactColumn(column) = spec.group_keys[index].source else {
+            return Err("NUMERIC forecast key is not a fact column".into());
+        };
+        desc.keys[index].null_code = if nullable_columns
+            .iter()
+            .any(|attno| i32::from(*attno) == column.attno)
+        {
+            0
+        } else {
+            abi::PGACCEL_GROUPED_AGG_KEY_NO_NULL_CODE
+        };
+    }
+    desc.where_filter = disabled_filter();
+    desc.measure_filters.fill(disabled_filter());
+    desc.measure_count = spec.measures.len() as u32;
+    for (index, measure) in spec.measures.iter().enumerate() {
+        let target = &mut desc.measures[index];
+        target.agg_mask = lane_mask(&measure.outputs);
+        if let Some(column) = match measure.expression {
+            MeasureExpr::Column(column) => Some(column),
+            _ => measure.filtered_count_input(),
+        } {
+            if column.type_oid == NUMERICOID {
+                let matching = columns
+                    .iter()
+                    .filter(|stats| i32::from(stats.attno) == column.attno)
+                    .collect::<Vec<_>>();
+                let [stats] = matching.as_slice() else {
+                    return Err(
+                        "NUMERIC forecast requires exactly one resident digit extent per column"
+                            .into(),
+                    );
+                };
+                target.state_bytes = if target.agg_mask == abi::PGACCEL_GROUPED_AGG_LANE_COUNT {
+                    8
+                } else {
+                    stats
+                        .bounds
+                        .sum_state_bytes()
+                        .ok_or("invalid NUMERIC digit bounds")?
+                };
+                target.accumulator_kind = abi::PGACCEL_GROUPED_AGG_ACCUM_NUMERIC;
+                let metadata = Box::new(abi::PgaccelNumericView {
+                    rows: std::ptr::null(),
+                    digits: std::ptr::null(),
+                    row_count: 0,
+                    digit_count: 0,
+                    min_weight: stats.bounds.min_weight,
+                    max_weight: stats.bounds.max_weight,
+                    max_ndigits: stats.bounds.max_ndigits,
+                    reserved: 0,
+                });
+                target.value.values = std::ptr::from_ref(metadata.as_ref()).cast();
+                target.value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_NUMERIC;
+                target.value.element_bytes = size_of::<abi::PgaccelNumericView>() as u32;
+                target.value.flags = abi::PGACCEL_GROUPED_AGG_NUMERIC_PACKED_VIEW;
+                bound._numeric_views[index] = Some(metadata);
+            } else if column.type_oid == INT8OID {
+                target.state_bytes = if target.agg_mask == abi::PGACCEL_GROUPED_AGG_LANE_COUNT {
+                    8
+                } else {
+                    abi::PGACCEL_GROUPED_AGG_INT64_NUMERIC_STATE_BYTES
+                };
+                target.accumulator_kind = abi::PGACCEL_GROUPED_AGG_ACCUM_NUMERIC;
+                target.value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT64;
+                target.value.element_bytes = 8;
+            } else {
+                target.state_bytes = 8;
+                target.accumulator_kind = abi::PGACCEL_GROUPED_AGG_ACCUM_I64;
+                target.value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32;
+                target.value.element_bytes = 4;
+            }
+            if measure.filter != FilterSpec::None {
+                target.flags = abi::PGACCEL_GROUPED_AGG_MEASURE_FLAG_FILTER_INPUT;
+                target.rhs.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32;
+                target.rhs.element_bytes = 4;
+                desc.measure_filters[index] = build_numeric_measure_filter(spec, index)?;
+            }
+        } else {
+            target.op = abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR;
+            target.accumulator_kind = abi::PGACCEL_GROUPED_AGG_ACCUM_I64;
+            target.state_bytes = 8;
+        }
+    }
+    bound.desc.where_filter = build_filter(spec, 0, None)?;
+    // SAFETY: the owned metadata above is live for the synchronous snapshot;
+    // zero rows mean there are no resident device payloads to borrow.
+    let plan = unsafe { ResolvedGroupedAggPlan::from_abi(bound.desc) }
+        .map_err(|error| error.to_string())?;
+    GroupedAggSession::memory_requirements(&plan, 1).map_err(|error| error.to_string())
 }
 
 fn canonical_dense_integer_value_measure(measure: &crate::engine::spec::MeasureSpec) -> bool {
@@ -600,6 +996,12 @@ pub fn planned_descriptor_kernel_mode(
             GroupedAggKernelMode::SerialGeneric
         };
     }
+    if canonical_dense_numeric_sum_avg(spec) {
+        return GroupedAggKernelMode::ParallelDenseNumeric;
+    }
+    if canonical_dense_scalar_programs(spec) {
+        return GroupedAggKernelMode::ParallelDenseInteger;
+    }
     if matches!(spec.measures.as_slice(), [count] if canonical_count_measure(count))
         && ((unique_dimension_inputs(spec) && parallel_dense_fact_filter(&spec.fact_filter))
             || weighted_global_count_inputs(spec))
@@ -608,6 +1010,18 @@ pub fn planned_descriptor_kernel_mode(
     }
     if !unique_dimension_inputs(spec) {
         return GroupedAggKernelMode::SerialGeneric;
+    }
+    if matches!(spec.measures.as_slice(), [measure]
+        if matches!(measure.expression, MeasureExpr::Column(_))
+            && measure.outputs.iter().all(|output| output.kind == AggregateKind::Count)
+            && parallel_dense_fact_filter(&spec.fact_filter)
+            && (canonical_dense_integer_sum_avg_measure(spec, measure, INT2OID)
+                || canonical_dense_integer_sum_avg_measure(spec, measure, INT4OID)))
+    {
+        return GroupedAggKernelMode::ParallelDenseCount;
+    }
+    if canonical_dense_integer_rollup(spec) {
+        return GroupedAggKernelMode::ParallelDenseInteger;
     }
     match spec.measures.as_slice() {
         [count]
@@ -621,6 +1035,12 @@ pub fn planned_descriptor_kernel_mode(
                     || canonical_dense_float8_count_measure(spec, count)) =>
         {
             GroupedAggKernelMode::ParallelDenseCount
+        }
+        [value]
+            if canonical_dense_integer_sum_avg_measure(spec, value, INT2OID)
+                || canonical_dense_integer_sum_avg_measure(spec, value, INT4OID) =>
+        {
+            GroupedAggKernelMode::ParallelDenseInteger
         }
         [value, count]
             if (canonical_dense_integer_value_measure(value)
@@ -648,8 +1068,25 @@ fn classify_descriptor_specialization(
             kind: MaskKind::Sql,
             ..
         } | FilterSpec::Spatial { .. }
+            | FilterSpec::SpatialAnd { .. }
     );
     let family = match mode {
+        GroupedAggKernelMode::ParallelHash
+            if matches!(
+                HashMeasureInput::from_spec(spec),
+                Ok(HashMeasureInput::IntegerStates(_))
+            ) =>
+        {
+            if spec.measures[0]
+                .outputs
+                .iter()
+                .any(|output| matches!(output.kind, AggregateKind::Min | AggregateKind::Max))
+            {
+                DescriptorSpecializationFamily::HashInt4Extrema
+            } else {
+                DescriptorSpecializationFamily::HashInt4SumCount
+            }
+        }
         GroupedAggKernelMode::ParallelHash => DescriptorSpecializationFamily::HashCount,
         GroupedAggKernelMode::ParallelDenseCount => match spec.measures.first() {
             Some(measure) if canonical_dense_bool_count_measure(spec, measure) => {
@@ -676,14 +1113,45 @@ fn classify_descriptor_specialization(
             _ => DescriptorSpecializationFamily::DenseCount,
         },
         GroupedAggKernelMode::ParallelDenseInteger => match spec.measures.first() {
+            _ if canonical_dense_scalar_programs(spec) => {
+                DescriptorSpecializationFamily::DenseScalarPrograms
+            }
+            _ if spec.measures.iter().any(|measure| {
+                matches!(measure.expression, MeasureExpr::Column(_))
+                    && measure
+                        .outputs
+                        .iter()
+                        .any(|output| output.kind == AggregateKind::Count)
+            }) =>
+            {
+                DescriptorSpecializationFamily::DenseIntegerWithCounts
+            }
+            Some(measure)
+                if canonical_dense_integer_measure_range(spec, measure)
+                    && spec.measures.len() == 2
+                    && canonical_count_measure(&spec.measures[1]) =>
+            {
+                DescriptorSpecializationFamily::DenseIntegerColumnMeasureRange
+            }
+            _ if canonical_dense_integer_rollup(spec)
+                && spec
+                    .measures
+                    .iter()
+                    .any(|measure| matches!(measure.expression, MeasureExpr::Binary { .. })) =>
+            {
+                DescriptorSpecializationFamily::DenseIntegerExpressions
+            }
+            _ if canonical_dense_filtered_integer_sum_avg(spec) => {
+                DescriptorSpecializationFamily::DenseFilteredIntegerSumAvg
+            }
+            _ if canonical_dense_multi_integer_sum_avg(spec) => {
+                DescriptorSpecializationFamily::DenseMultiIntegerSumAvg
+            }
             Some(measure) if canonical_dense_integer_sum_avg_measure(spec, measure, INT2OID) => {
                 DescriptorSpecializationFamily::DenseInt2SumAvg
             }
             Some(measure) if canonical_dense_integer_sum_avg_measure(spec, measure, INT4OID) => {
                 DescriptorSpecializationFamily::DenseInt4SumAvg
-            }
-            Some(measure) if canonical_dense_integer_measure_range(spec, measure) => {
-                DescriptorSpecializationFamily::DenseIntegerColumnMeasureRange
             }
             Some(measure) if canonical_dense_integer_range_intersection(spec, measure) => {
                 DescriptorSpecializationFamily::DenseIntegerMultiplyRange
@@ -705,8 +1173,16 @@ fn classify_descriptor_specialization(
             _ => DescriptorSpecializationFamily::SerialGeneric,
         },
         GroupedAggKernelMode::SerialGeneric => DescriptorSpecializationFamily::SerialGeneric,
+        GroupedAggKernelMode::ParallelDenseNumeric => {
+            DescriptorSpecializationFamily::DenseNumericSumAvg
+        }
     };
-    if family == DescriptorSpecializationFamily::HashCount {
+    if matches!(
+        family,
+        DescriptorSpecializationFamily::HashCount
+            | DescriptorSpecializationFamily::HashInt4SumCount
+            | DescriptorSpecializationFamily::HashInt4Extrema
+    ) {
         DescriptorSpecialization {
             family,
             membership: false,
@@ -782,6 +1258,11 @@ fn validate_filter(
 ) -> Result<(), String> {
     match filter {
         FilterSpec::None => Ok(()),
+        FilterSpec::NullOrRanges { input, .. }
+            if !dimension && input.relation_oid == relation_oid && input.type_oid == INT4OID =>
+        {
+            Ok(())
+        }
         FilterSpec::Ranges { input, .. }
             if input.relation_oid == relation_oid
                 && if dimension {
@@ -816,6 +1297,21 @@ fn validate_filter(
             kind: MaskKind::Sql,
         } if input.relation_oid == relation_oid && input.type_oid == BOOLOID => Ok(()),
         FilterSpec::Spatial { .. } if !dimension && allow_internal_spatial => Ok(()),
+        FilterSpec::Bytecode { inputs, program } if !dimension => {
+            if inputs
+                .iter()
+                .any(|input| input.relation_oid != relation_oid)
+                || !crate::engine::spec::scalar::ScalarProgram::validate_wire(program).is_ok_and(
+                    |proof| proof.result_type() == crate::engine::spec::scalar::ScalarType::Bool,
+                )
+            {
+                return Err("invalid typed scalar WHERE".into());
+            }
+            Ok(())
+        }
+        FilterSpec::SpatialAnd { scalar, .. } if !dimension && allow_internal_spatial => {
+            validate_filter(scalar, relation_oid, false, false)
+        }
         _ if dimension => Err("dimension filter is outside the Phase 5D descriptor subset".into()),
         _ => Err("fact filter is outside the Phase 5D descriptor subset".into()),
     }
@@ -847,6 +1343,38 @@ fn validate_measure_outputs(
     };
     let widened_integer = |kind: AggregateKind| basic(kind) || kind == AggregateKind::Avg;
     match expression {
+        MeasureExpr::Bytecode {
+            program,
+            result_type_oid,
+            ..
+        } if ScalarProgram::validate_wire(program).is_ok_and(|proof| {
+            (*result_type_oid == INT4OID
+                && proof.result_type() == ScalarType::Int4
+                && outputs.iter().all(|output| widened_integer(output.kind)))
+                || (*result_type_oid == BOOLOID
+                    && proof.result_type() == ScalarType::Bool
+                    && outputs
+                        .iter()
+                        .all(|output| output.kind == AggregateKind::Count))
+                || (*result_type_oid == DATEOID
+                    && proof.result_type() == ScalarType::Date
+                    && count_min_max())
+        }) =>
+        {
+            Ok(())
+        }
+        MeasureExpr::Column(column)
+            if matches!(column.type_oid, NUMERICOID | INT8OID)
+                && !outputs.is_empty()
+                && outputs.iter().all(|output| {
+                    matches!(
+                        output.kind,
+                        AggregateKind::Sum | AggregateKind::Avg | AggregateKind::Count
+                    )
+                }) =>
+        {
+            Ok(())
+        }
         MeasureExpr::CountStar if outputs.len() == 1 && outputs[0].kind == AggregateKind::Count => {
             Ok(())
         }
@@ -882,8 +1410,11 @@ fn validate_measure_outputs(
         MeasureExpr::Binary { op, lhs, rhs }
             if lhs.type_oid == INT4OID
                 && rhs.type_oid == INT4OID
-                && matches!(op, BinaryMeasureOp::Mul | BinaryMeasureOp::Sub)
-                && outputs.iter().all(|output| basic(output.kind)) =>
+                && matches!(
+                    op,
+                    BinaryMeasureOp::Mul | BinaryMeasureOp::Sub | BinaryMeasureOp::Add
+                )
+                && outputs.iter().all(|output| widened_integer(output.kind)) =>
         {
             Ok(())
         }
@@ -911,6 +1442,47 @@ fn h3_parent_group(spec: &AggQuerySpec) -> Option<(ColumnRef, i32, u32)> {
         return None;
     };
     Some((cell, resolution, key.type_oid))
+}
+
+fn raw_hash_group(spec: &AggQuerySpec) -> Option<ColumnRef> {
+    let [key] = spec.group_keys.as_slice() else {
+        return None;
+    };
+    let GroupKeySource::FactColumn(column) = key.source else {
+        return None;
+    };
+    (column.relation_oid == spec.fact_rel
+        && column.attno > 0
+        && matches!(column.type_oid, INT2OID | INT4OID | INT8OID)
+        && key.type_oid == column.type_oid
+        && key.collation_oid == 0
+        && key.encoding == GroupKeyEncoding::Hash)
+        .then_some(column)
+}
+
+fn compact_hash_column_refs(spec: &AggQuerySpec) -> Result<Vec<ResidentColumnRef>, String> {
+    let mut requests = dispatch_column_refs(spec)?;
+    if let Some(column) = hash_where_filter(spec)? {
+        let predicate = ResidentColumnRef {
+            relid: column.relation_oid.into(),
+            attno: i16::try_from(column.attno).map_err(|_| "hash WHERE attribute exceeds int16")?,
+        };
+        if !requests.contains(&predicate) {
+            requests.push(predicate);
+            requests.sort_unstable_by_key(|request| (u32::from(request.relid), request.attno));
+        }
+    }
+    if let Some(column) = raw_hash_group(spec) {
+        let key = ResidentColumnRef {
+            relid: column.relation_oid.into(),
+            attno: i16::try_from(column.attno).map_err(|_| "raw hash attribute exceeds int16")?,
+        };
+        if !requests.contains(&key) {
+            requests.push(key);
+            requests.sort_unstable_by_key(|request| (u32::from(request.relid), request.attno));
+        }
+    }
+    Ok(requests)
 }
 
 fn validate_h3_runtime_capability(
@@ -987,6 +1559,16 @@ fn validate_runtime_capability_with_spatial(
 ) -> Result<(), String> {
     spec.validate()
         .map_err(|error| format!("invalid aggregate query spec: {error}"))?;
+    for (index, measure) in spec.measures.iter().enumerate() {
+        if matches!(measure.expression, MeasureExpr::Bytecode { .. })
+            && scalar_measure_program(&measure.expression, spec.fact_rel)
+                .is_ok_and(|proof| proof.uses_predicate_mask())
+            && (spec.fact_filter.spatial().is_none()
+                || scalar_where_measure_binding(spec) != Some(index))
+        {
+            return Err("predicate-mask program requires its spatial WHERE carrier".into());
+        }
+    }
     projection
         .validate(spec)
         .map_err(|error| format!("invalid aggregate output projection: {error}"))?;
@@ -1000,6 +1582,12 @@ fn validate_runtime_capability_with_spatial(
     }
     if spec.having.is_some() {
         return Err("HAVING is not implemented by the Phase 5D descriptor executor".into());
+    }
+    if has_numeric_measure(spec) && !canonical_dense_numeric_sum_avg(spec) {
+        return Err("NUMERIC requires fact-column NUMERIC/INT2/INT4/INT8 SUM/AVG/COUNT states, optional exact INT4 aggregate filters and final unfiltered COUNT(*)".into());
+    }
+    if has_scalar_measure(spec) && !canonical_dense_scalar_programs(spec) {
+        return Err("scalar programs require typed fact-only dense integer/Boolean states and exact INT4 filters".into());
     }
     for key in &spec.group_keys {
         if !is_supported_group_type(key.type_oid) {
@@ -1047,6 +1635,9 @@ fn validate_runtime_capability_with_spatial(
     for measure in &spec.measures {
         if !matches!(measure.filter, FilterSpec::None)
             && !canonical_dense_integer_measure_range(spec, measure)
+            && !canonical_dense_filtered_integer_sum_avg(spec)
+            && !canonical_dense_numeric_sum_avg(spec)
+            && !canonical_dense_scalar_programs(spec)
         {
             return Err("aggregate FILTER is not implemented by Phase 5D".into());
         }
@@ -1240,66 +1831,77 @@ fn geometry_typmod_shape(metadata: SpatialValueMetadata) -> Option<(u32, i32)> {
     Some((geometry_type, srid))
 }
 
-/// Production admission for the one spatial shape with exact differential and
-/// performance evidence. Keep this separate from the broader executor-internal
-/// capability so extending exact recheck support cannot silently widen planner
-/// admission.
+/// Production admission for resident point/polygon topological aggregates.
+/// Geometry validation, exact boundary rechecks, bounded coordinate work and
+/// costing remain required; distance and row-producing joins stay separate.
 pub(super) fn validate_normal_spatial_candidate_capability(
     spec: &AggQuerySpec,
     projection: &AggOutputProjection,
 ) -> Result<(), String> {
-    let [measure] = spec.measures.as_slice() else {
-        return Err("normal spatial admission requires exactly one COUNT(*) measure".to_owned());
-    };
-    if !spec.group_keys.is_empty()
-        || !spec.star_dims.is_empty()
-        || spec.having.is_some()
-        || !matches!(measure.expression, MeasureExpr::CountStar)
-        || !matches!(measure.filter, FilterSpec::None)
-        || measure.outputs.as_slice()
-            != [crate::engine::spec::AggregateOutput {
+    if !canonical_dense_numeric_sum_avg(spec)
+        && !canonical_dense_integer_rollup(spec)
+        && !canonical_dense_scalar_programs(spec)
+    {
+        let [measure] = spec.measures.as_slice() else {
+            return Err(
+                "normal spatial admission requires exactly one COUNT(*) measure".to_owned(),
+            );
+        };
+        if !spec.group_keys.is_empty()
+            || !spec.star_dims.is_empty()
+            || spec.having.is_some()
+            || !matches!(measure.expression, MeasureExpr::CountStar)
+            || !matches!(measure.filter, FilterSpec::None)
+            || measure.outputs.as_slice()
+                != [crate::engine::spec::AggregateOutput {
+                    source: AggregateSource::Value,
+                    kind: AggregateKind::Count,
+                }]
+        {
+            return Err(
+                "normal spatial admission covers only ungrouped, unjoined COUNT(*)".to_owned(),
+            );
+        }
+        let [slot] = projection.slots.as_slice() else {
+            return Err("normal spatial admission requires exactly one COUNT(*) output".to_owned());
+        };
+        if slot.source
+            != (AggOutputSource::Aggregate {
+                measure_index: 0,
                 source: AggregateSource::Value,
                 kind: AggregateKind::Count,
-            }]
-    {
-        return Err("normal spatial admission covers only ungrouped, unjoined COUNT(*)".to_owned());
-    }
-    let [slot] = projection.slots.as_slice() else {
-        return Err("normal spatial admission requires exactly one COUNT(*) output".to_owned());
-    };
-    if slot.source
-        != (AggOutputSource::Aggregate {
-            measure_index: 0,
-            source: AggregateSource::Value,
-            kind: AggregateKind::Count,
-        })
-        || slot.source_type_oid != 0
-        || slot.result_type_oid != INT8OID
-        || slot.result_typmod != -1
-        || slot.result_collation_oid != 0
-        || slot.nullable
-    {
-        return Err("normal spatial admission COUNT(*) projection is not canonical".to_owned());
+            })
+            || slot.source_type_oid != 0
+            || slot.result_type_oid != INT8OID
+            || slot.result_typmod != -1
+            || slot.result_collation_oid != 0
+            || slot.nullable
+        {
+            return Err("normal spatial admission COUNT(*) projection is not canonical".to_owned());
+        }
     }
     let FilterSpec::Spatial {
-        predicate: SpatialPredicateKind::Intersects,
-        left:
-            SpatialOperand::Column {
-                column,
-                metadata: column_metadata,
-            },
-        right:
-            SpatialOperand::Constant {
-                metadata: constant_metadata,
-                bytes,
-            },
+        predicate,
+        left,
+        right,
         distance: None,
-    } = &spec.fact_filter
+    } = spec
+        .fact_filter
+        .spatial()
+        .ok_or("spatial predicate missing")?
     else {
-        return Err(
-            "normal spatial admission covers only ST_Intersects(point column, polygon constant)"
-                .to_owned(),
-        );
+        return Err("normal spatial admission requires a topological spatial predicate".to_owned());
+    };
+    let (column, column_metadata, constant_metadata, bytes) = match (predicate, left, right) {
+        (SpatialPredicateKind::Intersects | SpatialPredicateKind::Within | SpatialPredicateKind::CoveredBy,
+         SpatialOperand::Column { column, metadata },
+         SpatialOperand::Constant { metadata: constant_metadata, bytes }) =>
+            (column, metadata, constant_metadata, bytes),
+        (SpatialPredicateKind::Intersects | SpatialPredicateKind::Contains | SpatialPredicateKind::Covers,
+         SpatialOperand::Constant { metadata: constant_metadata, bytes },
+         SpatialOperand::Column { column, metadata }) =>
+            (column, metadata, constant_metadata, bytes),
+        _ => return Err("normal spatial admission requires point/polygon Intersects, Contains, Within, Covers or CoveredBy with the correct orientation".to_owned()),
     };
     let limits = crate::engine::cost::device_limits();
     let parsed = crate::engine::residency::validate_resident_geometry_value(
@@ -1308,6 +1910,7 @@ pub(super) fn validate_normal_spatial_candidate_capability(
     )?;
     let point_type = crate::engine::residency::RESIDENT_GEOMETRY_POINT;
     let polygon_type = crate::engine::residency::RESIDENT_GEOMETRY_POLYGON;
+    let multi_type = crate::engine::residency::RESIDENT_GEOMETRY_MULTIPOLYGON;
     if column.relation_oid != spec.fact_rel
         || geometry_typmod_shape(*column_metadata) != Some((point_type, parsed.srid))
         || column_metadata.srid != Some(parsed.srid)
@@ -1315,14 +1918,14 @@ pub(super) fn validate_normal_spatial_candidate_capability(
         || constant_metadata.kind != SpatialValueKind::Geometry
         || constant_metadata.srid != Some(parsed.srid)
         || (constant_metadata.typmod != -1
-            && geometry_typmod_shape(*constant_metadata) != Some((polygon_type, parsed.srid)))
-        || parsed.geom_type != polygon_type
-        || parsed.ring_count != 1
-        || parsed.coordinate_pairs != NORMAL_SPATIAL_PROMOTION_COORDINATES
+            && geometry_typmod_shape(*constant_metadata) != Some((parsed.geom_type, parsed.srid)))
+        || (parsed.geom_type != polygon_type && parsed.geom_type != multi_type)
+        || parsed.ring_count == 0
+        || parsed.coordinate_pairs < 4
         || parsed.coordinate_pairs > limits.gpu_spatial_max_vertices_per_row
     {
         return Err(
-            "normal spatial admission requires the measured same-SRID POINT/1025-coordinate POLYGON contract"
+            "normal spatial admission requires a bounded same-SRID POINT/polygonal contract"
                 .to_owned(),
         );
     }
@@ -1334,7 +1937,7 @@ pub(super) fn validate_test_forced_spatial_capability(
     spec: &AggQuerySpec,
     projection: &AggOutputProjection,
 ) -> Result<(), String> {
-    if !matches!(spec.fact_filter, FilterSpec::Spatial { .. }) {
+    if spec.fact_filter.spatial().is_none() {
         return Err("test-forced spatial capability requires a spatial fact filter".to_owned());
     }
     validate_internal_runtime_capability(spec, projection)
@@ -1440,7 +2043,7 @@ fn validate_catalog_contract(
         validate_column(dimension.fact_key, dimension.collation_oid)?;
         validate_column(dimension.dim_key, dimension.collation_oid)?;
     }
-    if let FilterSpec::Spatial { left, right, .. } = &spec.fact_filter {
+    if let Some(FilterSpec::Spatial { left, right, .. }) = spec.fact_filter.spatial() {
         for operand in [left, right] {
             let SpatialOperand::Column { column, metadata } = operand else {
                 continue;
@@ -1491,10 +2094,14 @@ fn insert_filter_columns(
     filter: &FilterSpec,
 ) -> Result<(), String> {
     match filter {
-        FilterSpec::None => Ok(()),
-        FilterSpec::Ranges { input, .. } | FilterSpec::Mask { input, .. } => {
-            insert_column(relations, *input)
+        FilterSpec::SpatialAnd { spatial, scalar } => {
+            insert_filter_columns(relations, spatial)?;
+            insert_filter_columns(relations, scalar)
         }
+        FilterSpec::None => Ok(()),
+        FilterSpec::Ranges { input, .. }
+        | FilterSpec::NullOrRanges { input, .. }
+        | FilterSpec::Mask { input, .. } => insert_column(relations, *input),
         FilterSpec::Bytecode { inputs, .. } => {
             for input in inputs {
                 insert_column(relations, *input)?;
@@ -1596,12 +2203,18 @@ fn dispatch_column_refs(spec: &AggQuerySpec) -> Result<Vec<ResidentColumnRef>, S
                 }
             }
         }
+        if let Some((input, _, _)) = measure.filter.range_parts() {
+            insert(input)?;
+        }
+        if let FilterSpec::Mask { input, .. } = measure.filter {
+            insert(input)?;
+        }
     }
     if let Some((cell, ..)) = h3_parent_group(spec) {
         insert(cell)?;
     }
-    if let FilterSpec::Ranges { input, .. } = &spec.fact_filter {
-        insert(*input)?;
+    if let Some((input, _, _)) = spec.fact_filter.scalar().range_parts() {
+        insert(input)?;
     }
     Ok(columns
         .into_iter()
@@ -1629,6 +2242,9 @@ fn dependency_relids(spec: &AggQuerySpec) -> Vec<pg_sys::Oid> {
 #[derive(Debug, Clone)]
 enum DescriptorArtifactKind {
     Dense,
+    RawHash {
+        column: ColumnRef,
+    },
     H3Parent {
         cell: ColumnRef,
         resolution: i32,
@@ -1662,6 +2278,9 @@ enum ArtifactPolicyReason {
     EmptyArtifact,
     MemoryBudget,
     LowerExpectedCost,
+    PredicateOrder,
+    #[cfg(feature = "pg_test")]
+    QualificationOverride,
 }
 
 impl ArtifactPolicyReason {
@@ -1671,6 +2290,9 @@ impl ArtifactPolicyReason {
             Self::EmptyArtifact => "zero_retained_bytes",
             Self::MemoryBudget => "retained_memory_budget",
             Self::LowerExpectedCost => "lower_expected_total_cost",
+            Self::PredicateOrder => "where_before_h3_transform",
+            #[cfg(feature = "pg_test")]
+            Self::QualificationOverride => "test_only_qualification_override",
         }
     }
 }
@@ -1801,18 +2423,39 @@ pub(super) fn test_artifact_policy_evidence() -> ArtifactPolicyEvidence {
 
 enum EphemeralDescriptorArtifact {
     Dense(EphemeralDerivedArtifact<DescriptorAggArtifact>),
-    H3(EphemeralDerivedArtifact<FusedH3Artifact>),
+    Hash(EphemeralDerivedArtifact<FusedHashArtifact>),
     Spatial(EphemeralDerivedArtifact<SpatialAggArtifact>),
 }
 
-struct FusedH3Artifact {
+struct FusedHashArtifact {
     resolved_spec: AggQuerySpec,
     fact_rows: usize,
-    group_capacity: usize,
+    group_capacity: Cell<usize>,
+    // H3 parent resolution; canonical zero for an untransformed BIGINT key.
     resolution: i32,
 }
 
-impl DerivedArtifact for FusedH3Artifact {
+impl FusedHashArtifact {
+    /// Call only after full compact validation/materialization setup succeeds,
+    /// while the dependency-stamped residency borrow still pins every input.
+    fn record_validated_raw_groups(&self, emitted: usize) -> Result<(), String> {
+        if raw_hash_group(&self.resolved_spec).is_some() {
+            // Compact validation has already proved that zero groups imply
+            // zero selected rows. WHERE can reject a nonempty resident input;
+            // its dependency stamp also invalidates this learned empty bound.
+            let rows = if emitted == 0 && hash_where_filter(&self.resolved_spec)?.is_some() {
+                0
+            } else {
+                self.fact_rows
+            };
+            let capacity = learned_hash_group_bound(rows, self.group_capacity.get(), emitted)?;
+            self.group_capacity.set(capacity);
+        }
+        Ok(())
+    }
+}
+
+impl DerivedArtifact for FusedHashArtifact {
     fn device_bytes(&self) -> u64 {
         0
     }
@@ -1909,6 +2552,8 @@ pub(super) struct DescriptorAggPlan {
     artifact_policy: Cell<DescriptorArtifactPolicy>,
     artifact_policy_evidence: Cell<Option<ArtifactPolicyEvidence>>,
     ephemeral_artifact: RefCell<Option<EphemeralDescriptorArtifact>>,
+    #[cfg(feature = "pg_test")]
+    qualification_policy: Option<DescriptorArtifactPolicy>,
 }
 
 pub(super) struct DescriptorResidencyReport {
@@ -1924,6 +2569,8 @@ pub(super) struct DescriptorResidencyReport {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum DescriptorAggExecutionError {
     NumericOverflow,
+    DivisionByZero,
+    DateOutOfRange,
     ExternalRoutineException(String),
     Failure(String),
 }
@@ -1932,6 +2579,8 @@ impl fmt::Display for DescriptorAggExecutionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NumericOverflow => formatter.write_str("numeric value out of range"),
+            Self::DivisionByZero => formatter.write_str("division by zero"),
+            Self::DateOutOfRange => formatter.write_str("date out of range"),
             Self::ExternalRoutineException(message) | Self::Failure(message) => {
                 formatter.write_str(message)
             }
@@ -1964,7 +2613,11 @@ impl From<ResidentLoadError> for DescriptorAggExecutionError {
 }
 
 fn gpu_execution_error(context: &'static str, error: GpuError) -> DescriptorAggExecutionError {
-    if error.status == GpuStatusDetail::NumericOverflow {
+    if error.status == GpuStatusDetail::DateOutOfRange {
+        DescriptorAggExecutionError::DateOutOfRange
+    } else if error.status == GpuStatusDetail::DivisionByZero {
+        DescriptorAggExecutionError::DivisionByZero
+    } else if error.status == GpuStatusDetail::NumericOverflow {
         DescriptorAggExecutionError::NumericOverflow
     } else {
         DescriptorAggExecutionError::Failure(format!("{context}: {error}"))
@@ -2009,11 +2662,21 @@ fn h3_group_capacity(
         .checked_add(1)
         .ok_or_else(|| "H3 NULL group bound overflows usize".to_owned())?;
     let kernel_max_groups = 1_usize << 30;
-    Ok(fact_rows
-        .max(1)
-        .min(possible_with_null)
-        .min(max_groups.min(kernel_max_groups))
-        .max(1))
+    let capacity = fact_rows.max(1).min(possible_with_null);
+    if capacity > max_groups.min(kernel_max_groups) {
+        return Err("H3 group upper bound exceeds the bounded workspace capacity".to_owned());
+    }
+    Ok(capacity)
+}
+
+fn raw_hash_group_capacity(rows: usize, max_groups: usize) -> Result<usize, String> {
+    if rows > u32::MAX as usize || max_groups == 0 {
+        return Err("raw hash rows/capacity exceed the native domain".into());
+    }
+    // Capacity is a bounded allocation budget, not a distinct-count estimate.
+    // The native insertion/finalization gates reject overflow before publishing
+    // output. Thus many rows with few groups need not allocate one slot per row.
+    Ok(rows.max(1).min(max_groups).min(1 << 30))
 }
 
 fn selected_fact_rows(
@@ -2028,24 +2691,47 @@ fn selected_fact_rows(
     usize::try_from(rows).map_err(|_| format!("fact row count {rows} exceeds usize"))
 }
 
+fn h3_mask_work(spec: &AggQuerySpec, rows: usize) -> Result<(u64, u64), String> {
+    let masks =
+        u64::from(h3_count_filter(spec)?.is_some()) + u64::from(hash_where_filter(spec)?.is_some());
+    Ok((
+        u64::try_from(rows)
+            .ok()
+            .and_then(|rows| rows.checked_mul(masks))
+            .ok_or_else(|| "hash mask bytes overflow".to_owned())?,
+        u64::try_from(rows.div_ceil(crate::gpu::SQL_BOOL_MASK_CHUNK_ROWS))
+            .ok()
+            .and_then(|launches| launches.checked_mul(masks))
+            .ok_or_else(|| "hash mask launch count overflow".to_owned())?,
+    ))
+}
+
 fn descriptor_artifact_policy_input(
     plan: &DescriptorAggPlan,
     selected: &[ResidentRelationEvidence],
     cache_hit: bool,
 ) -> Result<ArtifactPolicyInput, String> {
     let fact_rows = selected_fact_rows(selected, plan.spec.fact_rel)?;
+    let (mask_bytes, mask_launches) = if matches!(
+        &plan.artifact_kind,
+        DescriptorArtifactKind::H3Parent { .. } | DescriptorArtifactKind::RawHash { .. }
+    ) {
+        h3_mask_work(&plan.spec, fact_rows)?
+    } else {
+        (0, 0)
+    };
     let relation_rows = selected
         .iter()
         .map(|relation| (u32::from(relation.relid), relation.row_count))
         .collect::<BTreeMap<_, _>>();
     let construction_bytes = match &plan.artifact_kind {
-        DescriptorArtifactKind::H3Parent { .. } => u64::try_from(fact_rows)
-            .ok()
-            .and_then(|rows| rows.checked_mul(std::mem::size_of::<u64>() as u64))
-            .ok_or_else(|| "H3 construction-byte estimate overflow".to_owned())?,
+        DescriptorArtifactKind::RawHash { .. } => 0,
+        DescriptorArtifactKind::H3Parent { .. } => h3_parent_artifact_bytes(&plan.spec, fact_rows)?,
         DescriptorArtifactKind::Dense | DescriptorArtifactKind::Spatial(_) => {
             estimate_descriptor_artifact_bytes_upper_bound(&plan.spec, &relation_rows)
                 .ok_or_else(|| "descriptor construction-byte estimate is unavailable".to_owned())?
+                .checked_add(descriptor_program_clone_bytes(&plan.spec)?)
+                .ok_or_else(|| "descriptor construction-byte estimate overflow".to_owned())?
         }
     };
     let cached_build_launches = match &plan.artifact_kind {
@@ -2053,26 +2739,43 @@ fn descriptor_artifact_policy_input(
             if *max_chunk_rows == 0 {
                 return Err("H3 construction chunk limit is zero".to_owned());
             }
-            u64::try_from(fact_rows.div_ceil(*max_chunk_rows)).unwrap_or(u64::MAX)
+            u64::try_from(fact_rows.div_ceil(*max_chunk_rows))
+                .unwrap_or(u64::MAX)
+                .saturating_add(mask_launches)
         }
-        DescriptorArtifactKind::Spatial(_) => {
-            let chunks = fact_rows.div_ceil(crate::gpu::PGACCEL_SPATIAL_MAX_CHUNK_ROWS);
+        DescriptorArtifactKind::Spatial(spatial) => {
+            let chunks = fact_rows.div_ceil(spatial.chunk_rows());
             // Candidate evaluation, uncertainty compaction, and the possible
             // exact-result patch are distinct observable submissions.
             u64::try_from(chunks.saturating_mul(3)).unwrap_or(u64::MAX)
         }
-        DescriptorArtifactKind::Dense => 0,
+        DescriptorArtifactKind::Dense | DescriptorArtifactKind::RawHash { .. } => 0,
     };
     let ephemeral_build_launches = match &plan.artifact_kind {
-        DescriptorArtifactKind::H3Parent { .. } => 0,
+        DescriptorArtifactKind::H3Parent { .. } | DescriptorArtifactKind::RawHash { .. } => {
+            mask_launches
+        }
         DescriptorArtifactKind::Dense | DescriptorArtifactKind::Spatial(_) => cached_build_launches,
     };
     let ephemeral_bytes = match &plan.artifact_kind {
-        DescriptorArtifactKind::H3Parent { .. } => 0,
+        DescriptorArtifactKind::H3Parent { .. } | DescriptorArtifactKind::RawHash { .. } => {
+            mask_bytes
+        }
         DescriptorArtifactKind::Dense | DescriptorArtifactKind::Spatial(_) => construction_bytes,
     };
     let consumer_launches = match &plan.artifact_kind {
-        DescriptorArtifactKind::H3Parent { .. } | DescriptorArtifactKind::Spatial(_) => 1,
+        DescriptorArtifactKind::Spatial(_)
+            if plan.planned_kernel_mode == GroupedAggKernelMode::ParallelDenseNumeric
+                || canonical_dense_integer_rollup(&plan.spec)
+                || canonical_dense_scalar_programs(&plan.spec) =>
+        {
+            bounded_dispatch_call_count(fact_rows, plan.dispatch_chunk_rows)
+                .and_then(|calls| u64::try_from(calls).ok())
+                .ok_or_else(|| "spatial rollup lifecycle-call estimate overflow".to_owned())?
+        }
+        DescriptorArtifactKind::H3Parent { .. }
+        | DescriptorArtifactKind::RawHash { .. }
+        | DescriptorArtifactKind::Spatial(_) => 1,
         DescriptorArtifactKind::Dense if fact_rows <= plan.grouped_agg_one_shot_max_rows.get() => 1,
         DescriptorArtifactKind::Dense => {
             bounded_dispatch_call_count(fact_rows, plan.dispatch_chunk_rows)
@@ -2114,9 +2817,19 @@ fn descriptor_artifact_policy_input(
 impl DescriptorAggPlan {
     pub(super) fn new(spec: AggQuerySpec, projection: AggOutputProjection) -> Result<Self, String> {
         validate_internal_runtime_capability(&spec, &projection)?;
-        validate_catalog_contract(&spec, &projection)?;
         let planned_kernel_mode =
             planned_descriptor_kernel_mode(&spec, h3_parent_group(&spec).is_some());
+        Self::from_validated_spec(spec, projection, planned_kernel_mode)
+    }
+
+    // Capability validation stays at the entry point. The only other caller is
+    // the pg_test-only compact-hash qualification module below.
+    fn from_validated_spec(
+        spec: AggQuerySpec,
+        projection: AggOutputProjection,
+        planned_kernel_mode: GroupedAggKernelMode,
+    ) -> Result<Self, String> {
+        validate_catalog_contract(&spec, &projection)?;
         let limits = crate::engine::cost::device_limits();
         let executor_limits = ExecutorLimits::from(crate::engine::cost::execution_device_limits());
         let (artifact_kind, catalog_fingerprint) =
@@ -2135,7 +2848,12 @@ impl DescriptorAggPlan {
                     },
                     catalog.fingerprint_words,
                 )
-            } else if matches!(spec.fact_filter, FilterSpec::Spatial { .. }) {
+            } else if planned_kernel_mode == GroupedAggKernelMode::ParallelHash {
+                let column = raw_hash_group(&spec)
+                    .ok_or("raw hash requires one canonical integer fact key")?;
+                HashMeasureInput::from_spec(&spec)?;
+                (DescriptorArtifactKind::RawHash { column }, Vec::new())
+            } else if spec.fact_filter.spatial().is_some() {
                 // SAFETY: executor Begin runs on PostgreSQL's main backend thread.
                 let catalog = unsafe { resolve_postgis_catalog() }?;
                 let artifact_kind =
@@ -2155,7 +2873,11 @@ impl DescriptorAggPlan {
         {
             return Err("spatial source column is missing from artifact requests".to_owned());
         }
-        let dispatch_columns = dispatch_column_refs(&spec)?;
+        let dispatch_columns = if planned_kernel_mode == GroupedAggKernelMode::ParallelHash {
+            compact_hash_column_refs(&spec)?
+        } else {
+            dispatch_column_refs(&spec)?
+        };
         let dispatch_chunk_rows = if h3_parent_group(&spec).is_some() {
             executor_limits.gpu_h3_max_chunk_rows.get()
         } else {
@@ -2163,6 +2885,11 @@ impl DescriptorAggPlan {
                 executor_limits.gpu_reduce_max_chunk.get(),
                 executor_limits.gpu_grouped_agg_one_shot_max_rows.get(),
             )
+        };
+        let max_groups = if h3_parent_group(&spec).is_some() {
+            limits.gpu_h3_max_groups
+        } else {
+            limits.gpu_hash_agg_max_groups
         };
         Ok(Self {
             spec,
@@ -2175,13 +2902,15 @@ impl DescriptorAggPlan {
             dependencies,
             artifact_columns,
             dispatch_columns,
-            max_groups: limits.gpu_hash_agg_max_groups,
+            max_groups,
             dispatch_chunk_rows,
             grouped_agg_one_shot_max_rows: executor_limits.gpu_grouped_agg_one_shot_max_rows,
             artifact_kind,
             artifact_policy: Cell::new(DescriptorArtifactPolicy::CachedReusable),
             artifact_policy_evidence: Cell::new(None),
             ephemeral_artifact: RefCell::new(None),
+            #[cfg(feature = "pg_test")]
+            qualification_policy: None,
         })
     }
 
@@ -2214,20 +2943,31 @@ impl DescriptorAggPlan {
     pub(super) fn ensure_artifact(
         &self,
     ) -> Result<DescriptorResidencyReport, DescriptorAggExecutionError> {
+        self.ensure_artifact_with_poll(postgres_interrupt_pending)
+    }
+
+    // The injected callback only polls signals; PostgreSQL delivery remains
+    // outside every residency/native frame in run_interruptible_dispatch.
+    fn ensure_artifact_with_poll(
+        &self,
+        pending: impl FnMut() -> bool,
+    ) -> Result<DescriptorResidencyReport, DescriptorAggExecutionError> {
         let preparation_started = Instant::now();
         let selected = match &self.artifact_kind {
             DescriptorArtifactKind::Spatial(plan) => verify_catalog_before(
                 || plan.verify_catalog(),
                 || ensure_selected_relations(&self.selected),
             )?,
-            DescriptorArtifactKind::Dense | DescriptorArtifactKind::H3Parent { .. } => {
-                ensure_selected_relations(&self.selected)?
-            }
+            DescriptorArtifactKind::Dense
+            | DescriptorArtifactKind::H3Parent { .. }
+            | DescriptorArtifactKind::RawHash { .. } => ensure_selected_relations(&self.selected)?,
         };
         let owner_relid = pg_sys::Oid::from(self.spec.fact_rel);
         let fact_rows = selected_fact_rows(&selected.evidence, self.spec.fact_rel)?;
-        if matches!(&self.artifact_kind, DescriptorArtifactKind::H3Parent { .. })
-            && fact_rows > u32::MAX as usize
+        if matches!(
+            &self.artifact_kind,
+            DescriptorArtifactKind::H3Parent { .. } | DescriptorArtifactKind::RawHash { .. }
+        ) && fact_rows > u32::MAX as usize
         {
             return Err(format!(
                 "H3 grouped aggregation row count {fact_rows} exceeds the kernel u32 domain"
@@ -2235,13 +2975,16 @@ impl DescriptorAggPlan {
             .into());
         }
         let h3_accounting = ResidentByteAccounting {
-            device_bytes: u64::try_from(fact_rows)
-                .ok()
-                .and_then(|rows| rows.checked_mul(std::mem::size_of::<u64>() as u64))
-                .ok_or_else(|| "derived H3 parent byte count overflow".to_owned())?,
+            device_bytes: if matches!(&self.artifact_kind, DescriptorArtifactKind::H3Parent { .. })
+            {
+                h3_parent_artifact_bytes(&self.spec, fact_rows)?
+            } else {
+                0
+            },
             retained_host_exact_bytes: 0,
         };
         let probe = match &self.artifact_kind {
+            DescriptorArtifactKind::RawHash { .. } => ArtifactProbeOutcome::Miss,
             DescriptorArtifactKind::Dense => probe_derived_artifact::<DescriptorAggArtifact>(
                 owner_relid,
                 &self.identity,
@@ -2274,10 +3017,41 @@ impl DescriptorAggPlan {
             &selected.evidence,
             hit_report.is_some(),
         )?);
+        #[cfg(feature = "pg_test")]
+        let policy = if let Some(forced) = self.qualification_policy {
+            ArtifactPolicyEvidence {
+                policy: forced,
+                reason: ArtifactPolicyReason::QualificationOverride,
+                ..policy
+            }
+        } else {
+            policy
+        };
+        // Raw keys already belong to residency: no derived dictionary/parent
+        // lane exists to cache. FILTER masks remain charged query-local state.
+        let policy = if matches!(&self.artifact_kind, DescriptorArtifactKind::RawHash { .. }) {
+            ArtifactPolicyEvidence {
+                policy: DescriptorArtifactPolicy::EphemeralFused,
+                reason: ArtifactPolicyReason::EmptyArtifact,
+                ..policy
+            }
+        } else if matches!(&self.artifact_kind, DescriptorArtifactKind::H3Parent { .. })
+            && hash_where_filter(&self.spec)?.is_some()
+        {
+            ArtifactPolicyEvidence {
+                policy: DescriptorArtifactPolicy::EphemeralFused,
+                reason: ArtifactPolicyReason::PredicateOrder,
+                ..policy
+            }
+        } else {
+            policy
+        };
         self.artifact_policy.set(policy.policy);
         self.artifact_policy_evidence.set(Some(policy));
         self.ephemeral_artifact.borrow_mut().take();
 
+        let hit_report =
+            hit_report.filter(|_| policy.policy == DescriptorArtifactPolicy::CachedReusable);
         let (artifact_outcome, relations, artifact_bytes) = if let Some(report) = hit_report {
             (
                 report.outcome,
@@ -2287,10 +3061,12 @@ impl DescriptorAggPlan {
         } else if policy.policy == DescriptorArtifactPolicy::EphemeralFused {
             match &self.artifact_kind {
                 DescriptorArtifactKind::Dense => {
-                    let report = build_ephemeral_derived_artifact_with_report(
+                    let report = build_ephemeral_host_device_derived_artifact_with_report(
                         owner_relid,
                         &self.dependencies,
                         &self.artifact_columns,
+                        descriptor_program_clone_bytes(&self.spec)
+                            .map_err(ResidentLoadError::Loader)?,
                         |bundle| {
                             prepare_agg_artifact(
                                 &self.spec,
@@ -2313,20 +3089,29 @@ impl DescriptorAggPlan {
                         .replace(EphemeralDescriptorArtifact::Dense(report.artifact));
                     (outcome, evidence, bytes)
                 }
-                DescriptorArtifactKind::H3Parent { resolution, .. } => {
-                    let group_capacity =
-                        h3_group_capacity(fact_rows, *resolution, self.max_groups)?;
+                DescriptorArtifactKind::H3Parent { .. }
+                | DescriptorArtifactKind::RawHash { .. } => {
+                    let (group_capacity, resolution) = match &self.artifact_kind {
+                        DescriptorArtifactKind::H3Parent { resolution, .. } => (
+                            h3_group_capacity(fact_rows, *resolution, self.max_groups)?,
+                            *resolution,
+                        ),
+                        DescriptorArtifactKind::RawHash { .. } => {
+                            (raw_hash_group_capacity(fact_rows, self.max_groups)?, 0)
+                        }
+                        _ => unreachable!("matched compact hash artifact"),
+                    };
                     let report = build_ephemeral_derived_artifact_with_report(
                         owner_relid,
                         &self.dependencies,
                         &self.artifact_columns,
                         |_bundle| {
                             Ok(PreparedDerived {
-                                prepared: FusedH3Artifact {
+                                prepared: FusedHashArtifact {
                                     resolved_spec: self.spec.clone(),
                                     fact_rows,
-                                    group_capacity,
-                                    resolution: *resolution,
+                                    group_capacity: Cell::new(group_capacity),
+                                    resolution,
                                 },
                                 device_bytes: 0,
                             })
@@ -2335,7 +3120,7 @@ impl DescriptorAggPlan {
                     )?;
                     self.ephemeral_artifact
                         .borrow_mut()
-                        .replace(EphemeralDescriptorArtifact::H3(report.artifact));
+                        .replace(EphemeralDescriptorArtifact::Hash(report.artifact));
                     (
                         if stale {
                             ArtifactEnsureOutcome::Rebuilt
@@ -2387,11 +3172,18 @@ impl DescriptorAggPlan {
             }
         } else {
             let report = match &self.artifact_kind {
-                DescriptorArtifactKind::Dense => ensure_derived_artifact_with_report(
+                DescriptorArtifactKind::RawHash { .. } => {
+                    return Err("raw hash artifacts must remain query-owned"
+                        .to_owned()
+                        .into());
+                }
+                DescriptorArtifactKind::Dense => ensure_host_device_derived_artifact_with_report(
                     owner_relid,
                     &self.identity,
                     &self.dependencies,
                     &self.artifact_columns,
+                    descriptor_program_clone_bytes(&self.spec)
+                        .map_err(ResidentLoadError::Loader)?,
                     |bundle| {
                         prepare_agg_artifact(
                             &self.spec,
@@ -2409,89 +3201,130 @@ impl DescriptorAggPlan {
                 } => {
                     let group_capacity =
                         h3_group_capacity(fact_rows, *resolution, self.max_groups)?;
-                    ensure_device_derived_artifact_with_report(
-                        owner_relid,
-                        &self.identity,
-                        &self.dependencies,
-                        &self.artifact_columns,
-                        h3_accounting,
-                        |bundle| {
-                            let view = find_view(&self.artifact_columns, &bundle.columns, *cell)?;
-                            let (cells, nulls) = match view {
-                                ResidentColumnView::Empty { type_oid }
-                                    if fact_rows == 0 && u32::from(*type_oid) == cell.type_oid =>
-                                {
-                                    (std::ptr::null(), std::ptr::null())
-                                }
-                                ResidentColumnView::H3 {
-                                    type_oid,
-                                    values,
-                                    nulls,
-                                } if u32::from(*type_oid) == cell.type_oid
-                                    && values.len() == fact_rows =>
-                                {
-                                    (values.as_ptr(), null_ptr(*nulls))
-                                }
-                                _ => {
-                                    return Err(ResidentLoadError::Loader(
+                    let result = run_interruptible_dispatch(
+                        |pending| match ensure_device_derived_artifact_with_report(
+                            owner_relid,
+                            &self.identity,
+                            &self.dependencies,
+                            &self.artifact_columns,
+                            h3_accounting,
+                            |bundle| {
+                                let view =
+                                    find_view(&self.artifact_columns, &bundle.columns, *cell)?;
+                                let (cells, nulls) = match view {
+                                    ResidentColumnView::Empty { type_oid }
+                                        if fact_rows == 0
+                                            && u32::from(*type_oid) == cell.type_oid =>
+                                    {
+                                        (std::ptr::null(), std::ptr::null())
+                                    }
+                                    ResidentColumnView::H3 {
+                                        type_oid,
+                                        values,
+                                        nulls,
+                                    } if u32::from(*type_oid) == cell.type_oid
+                                        && values.len() == fact_rows =>
+                                    {
+                                        validate_h3_input_lengths(
+                                            values.len(),
+                                            nulls.map(crate::gpu::ExprDeviceBuffer::len),
+                                            fact_rows,
+                                        )?;
+                                        (values.as_ptr(), null_ptr(*nulls))
+                                    }
+                                    _ => {
+                                        return Err(ResidentLoadError::Loader(
                                         "resident H3 source does not match the planned raw lane"
                                             .to_owned(),
                                     ));
-                                }
-                            };
-                            let parents = if fact_rows == 0 {
-                                None
-                            } else {
-                                Some(
-                                    crate::gpu::ExprDeviceBuffer::<u64>::new(fact_rows)
-                                        .ok_or_else(|| {
-                                            "could not allocate derived H3 parent device lane"
-                                                .to_owned()
-                                        })?,
-                                )
-                            };
-                            if fact_rows != 0 {
-                                if *max_chunk_rows == 0 {
-                                    return Err(ResidentLoadError::Loader(
-                                        "H3 device chunk limit is zero".to_owned(),
-                                    ));
-                                }
-                                let output = parents.as_ref().ok_or_else(|| {
-                                    "nonempty H3 parent artifact has no output".to_owned()
-                                })?;
-                                for offset in (0..fact_rows).step_by(*max_chunk_rows) {
-                                    let count = (fact_rows - offset).min(*max_chunk_rows);
-                                    // SAFETY: matched buffers span fact_rows and this chunk.
-                                    let chunk_cells = unsafe { cells.add(offset) };
-                                    let chunk_nulls = if nulls.is_null() {
-                                        std::ptr::null()
-                                    } else {
-                                        // SAFETY: one NULL byte exists for every source row.
-                                        unsafe { nulls.add(offset) }
-                                    };
-                                    // SAFETY: output has fact_rows elements.
-                                    let chunk_parents = unsafe { output.as_mut_ptr().add(offset) };
-                                    // SAFETY: pointers remain pinned for this synchronous call.
-                                    unsafe {
-                                        crate::gpu::h3_cell_to_parent_resident(
-                                            chunk_cells,
-                                            chunk_nulls,
-                                            count,
-                                            *resolution,
-                                            chunk_parents,
-                                        )
                                     }
-                                    .map_err(ResidentLoadError::Gpu)?;
+                                };
+                                let parents = if fact_rows == 0 {
+                                    None
+                                } else {
+                                    Some(
+                                        crate::gpu::ExprDeviceBuffer::<u64>::new(fact_rows)
+                                            .ok_or_else(|| {
+                                                "could not allocate derived H3 parent device lane"
+                                                    .to_owned()
+                                            })?,
+                                    )
+                                };
+                                if fact_rows != 0 {
+                                    if *max_chunk_rows == 0 {
+                                        return Err(ResidentLoadError::Loader(
+                                            "H3 device chunk limit is zero".to_owned(),
+                                        ));
+                                    }
+                                    let output = parents.as_ref().ok_or_else(|| {
+                                        "nonempty H3 parent artifact has no output".to_owned()
+                                    })?;
+                                    for offset in (0..fact_rows).step_by(*max_chunk_rows) {
+                                        if pending() {
+                                            return Err(ResidentLoadError::PreparationInterrupted);
+                                        }
+                                        let count = (fact_rows - offset).min(*max_chunk_rows);
+                                        // SAFETY: matched buffers span fact_rows and this chunk.
+                                        let chunk_cells = unsafe { cells.add(offset) };
+                                        let chunk_nulls = if nulls.is_null() {
+                                            std::ptr::null()
+                                        } else {
+                                            // SAFETY: one NULL byte exists for every source row.
+                                            unsafe { nulls.add(offset) }
+                                        };
+                                        // SAFETY: output has fact_rows elements.
+                                        let chunk_parents =
+                                            unsafe { output.as_mut_ptr().add(offset) };
+                                        // SAFETY: pointers remain pinned for this synchronous call.
+                                        unsafe {
+                                            crate::gpu::h3_cell_to_parent_resident(
+                                                chunk_cells,
+                                                chunk_nulls,
+                                                count,
+                                                *resolution,
+                                                chunk_parents,
+                                            )
+                                        }
+                                        .map_err(ResidentLoadError::Gpu)?;
+                                    }
                                 }
+                                if pending() {
+                                    return Err(ResidentLoadError::PreparationInterrupted);
+                                }
+                                Ok(H3ParentArtifact::new(
+                                    self.spec.clone(),
+                                    fact_rows,
+                                    group_capacity,
+                                    parents,
+                                    build_cached_h3_filter(
+                                        &self.spec,
+                                        &self.artifact_columns,
+                                        &bundle.columns,
+                                        fact_rows,
+                                        pending,
+                                    )?,
+                                )?)
+                            },
+                        ) {
+                            Ok(report) => Ok(InterruptibleAttempt::Complete(report)),
+                            Err(ResidentLoadError::PreparationInterrupted) => {
+                                Ok(InterruptibleAttempt::Interrupted)
                             }
-                            Ok(H3ParentArtifact::new(
-                                self.spec.clone(),
-                                fact_rows,
-                                group_capacity,
-                                parents,
-                            )?)
+                            Err(error) => Err(error),
                         },
-                    )?
+                        pending,
+                        || {
+                            capture_postgres_interrupt()
+                                .map_or(Ok(()), |error| Err(Box::new(error)))
+                        },
+                    );
+                    match result {
+                        Ok(report) => report,
+                        Err(InterruptibleDispatchError::Dispatch(error)) => {
+                            return Err(error.into());
+                        }
+                        Err(InterruptibleDispatchError::Interrupt(error)) => (*error).rethrow(),
+                    }
                 }
                 DescriptorArtifactKind::Spatial(plan) => verify_catalog_before(
                     || plan.verify_catalog(),
@@ -2544,11 +3377,17 @@ impl DescriptorAggPlan {
 
     fn execute_once(
         &self,
+        pending: &mut dyn FnMut() -> bool,
     ) -> Result<Result<DescriptorAggDispatch, DescriptorAggExecutionError>, ResidentLoadError> {
         let owner_relid = pg_sys::Oid::from(self.spec.fact_rel);
         let result: Result<DescriptorAggDispatch, DescriptorDispatchFailure> =
             if self.artifact_policy.get() == DescriptorArtifactPolicy::CachedReusable {
                 match &self.artifact_kind {
+                    DescriptorArtifactKind::RawHash { .. } => Err(
+                        DescriptorDispatchFailure::Execution(DescriptorAggExecutionError::Failure(
+                            "raw hash artifacts cannot use the derived LRU".into(),
+                        )),
+                    ),
                     DescriptorArtifactKind::Dense => execute_bounded_dense_artifact(
                         owner_relid,
                         &self.identity,
@@ -2576,6 +3415,25 @@ impl DescriptorAggPlan {
                             Ok(dispatch) => dispatch.map_err(DescriptorDispatchFailure::Execution),
                             Err(error) => Err(DescriptorDispatchFailure::Residency(error)),
                         }
+                    }
+                    DescriptorArtifactKind::Spatial(_)
+                        if self.planned_kernel_mode
+                            == GroupedAggKernelMode::ParallelDenseNumeric
+                            || canonical_dense_integer_rollup(&self.spec)
+                            || canonical_dense_scalar_programs(&self.spec) =>
+                    {
+                        execute_bounded_dense_with_resolver(
+                            &CachedSpatialArtifactResolver {
+                                owner_relid,
+                                identity: &self.identity,
+                                requests: &self.dispatch_columns,
+                            },
+                            &self.dispatch_columns,
+                            &self.projection,
+                            self.dispatch_chunk_rows,
+                            self.grouped_agg_one_shot_max_rows.get(),
+                            self.planned_kernel_mode,
+                        )
                     }
                     DescriptorArtifactKind::Spatial(_) => {
                         match with_derived_artifact_inputs::<SpatialAggArtifact, _>(
@@ -2612,25 +3470,47 @@ impl DescriptorAggPlan {
                         self.planned_kernel_mode,
                     ),
                     (
-                        DescriptorArtifactKind::H3Parent { cell, .. },
-                        Some(EphemeralDescriptorArtifact::H3(artifact)),
+                        DescriptorArtifactKind::H3Parent { cell, .. }
+                        | DescriptorArtifactKind::RawHash { column: cell },
+                        Some(EphemeralDescriptorArtifact::Hash(artifact)),
                     ) => match with_ephemeral_artifact_inputs(
                         owner_relid,
                         artifact,
                         &self.dispatch_columns,
                         |inputs| {
-                            build_and_execute_fused_h3_one_shot(
+                            build_and_execute_fused_hash_one_shot(
                                 inputs,
                                 &self.dispatch_columns,
                                 *cell,
                                 &self.projection,
                                 self.planned_kernel_mode,
+                                pending,
                             )
                         },
                     ) {
-                        Ok(dispatch) => dispatch.map_err(DescriptorDispatchFailure::Execution),
+                        Ok(dispatch) => dispatch,
                         Err(error) => Err(DescriptorDispatchFailure::Residency(error)),
                     },
+                    (
+                        DescriptorArtifactKind::Spatial(_),
+                        Some(EphemeralDescriptorArtifact::Spatial(artifact)),
+                    ) if self.planned_kernel_mode == GroupedAggKernelMode::ParallelDenseNumeric
+                        || canonical_dense_integer_rollup(&self.spec)
+                        || canonical_dense_scalar_programs(&self.spec) =>
+                    {
+                        execute_bounded_dense_with_resolver(
+                            &EphemeralSpatialArtifactResolver {
+                                owner_relid,
+                                artifact,
+                                requests: &self.dispatch_columns,
+                            },
+                            &self.dispatch_columns,
+                            &self.projection,
+                            self.dispatch_chunk_rows,
+                            self.grouped_agg_one_shot_max_rows.get(),
+                            self.planned_kernel_mode,
+                        )
+                    }
                     (
                         DescriptorArtifactKind::Spatial(_),
                         Some(EphemeralDescriptorArtifact::Spatial(artifact)),
@@ -2673,6 +3553,75 @@ impl DescriptorAggPlan {
     pub(super) fn execute_prepared(
         &self,
     ) -> Result<DescriptorAggDispatch, DescriptorAggExecutionError> {
+        self.execute_prepared_with_poll(postgres_interrupt_pending)
+    }
+
+    fn execute_hash_once_interruptible(
+        &self,
+        pending: &mut dyn FnMut() -> bool,
+    ) -> Result<Result<DescriptorAggDispatch, DescriptorAggExecutionError>, ResidentLoadError> {
+        self.execute_hash_once_with_service(pending, || {
+            capture_postgres_interrupt().map_or(Ok(()), |error| Err(Box::new(error)))
+        })
+    }
+
+    fn execute_hash_once_with_service(
+        &self,
+        pending: &mut dyn FnMut() -> bool,
+        service: impl FnMut() -> Result<(), Box<pg_sys::panic::CaughtError>>,
+    ) -> Result<Result<DescriptorAggDispatch, DescriptorAggExecutionError>, ResidentLoadError> {
+        if !matches!(
+            self.artifact_kind,
+            DescriptorArtifactKind::H3Parent { .. } | DescriptorArtifactKind::RawHash { .. }
+        ) {
+            return self.execute_once(pending);
+        }
+        // Retain only a scalar, never an owner/store borrow across PG service.
+        // A fatal signal can arrive after the final poll and completed output
+        // validation; that abandoned attempt must not publish learned capacity.
+        let previous_raw_capacity =
+            if matches!(self.artifact_kind, DescriptorArtifactKind::RawHash { .. }) {
+                match self.ephemeral_artifact.borrow().as_ref() {
+                    Some(EphemeralDescriptorArtifact::Hash(owner)) => {
+                        Some(owner.artifact().group_capacity.get())
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+        let result = run_interruptible_dispatch(
+            |pending| match self.execute_once(pending) {
+                Ok(dispatch) => Ok(InterruptibleAttempt::Complete(dispatch)),
+                Err(ResidentLoadError::PreparationInterrupted) => {
+                    Ok(InterruptibleAttempt::Interrupted)
+                }
+                Err(error) => Err(error),
+            },
+            pending,
+            service,
+        );
+        if !matches!(&result, Ok(Ok(_)))
+            && let Some(previous) = previous_raw_capacity
+            && let Some(EphemeralDescriptorArtifact::Hash(owner)) =
+                self.ephemeral_artifact.borrow().as_ref()
+        {
+            owner.artifact().group_capacity.set(previous);
+        }
+        // execute_once returned: both the ephemeral owner RefCell guard and
+        // resident input borrow are gone before PostgreSQL runs. On a fatal
+        // interrupt the driver drops any completed output before rethrow too.
+        match result {
+            Ok(dispatch) => Ok(dispatch),
+            Err(InterruptibleDispatchError::Dispatch(error)) => Err(error),
+            Err(InterruptibleDispatchError::Interrupt(error)) => (*error).rethrow(),
+        }
+    }
+
+    fn execute_prepared_with_poll(
+        &self,
+        mut pending: impl FnMut() -> bool,
+    ) -> Result<DescriptorAggDispatch, DescriptorAggExecutionError> {
         // Spatial dispatch depends on resolved PostGIS function and type OIDs in
         // addition to resident relation generations. Revalidate that catalog
         // identity at the execution boundary without repeating artifact ensure.
@@ -2680,7 +3629,7 @@ impl DescriptorAggPlan {
             plan.verify_catalog()?;
         }
         let (mut result, residency) = execute_with_single_artifact_rebuild(
-            || self.execute_once(),
+            || self.execute_hash_once_interruptible(&mut pending),
             || self.ensure_artifact(),
         )?;
         if result.kernel_mode != self.planned_kernel_mode {
@@ -2940,6 +3889,19 @@ fn filter_measure_binding(spec: &AggQuerySpec, input: ColumnRef) -> Result<usize
         .ok_or_else(|| "fact range input has no descriptor measure binding".to_owned())
 }
 
+fn scalar_where_measure_binding(spec: &AggQuerySpec) -> Option<usize> {
+    let FilterSpec::Bytecode { inputs, program } = spec.fact_filter.scalar() else {
+        return None;
+    };
+    spec.measures.iter().position(|measure| {
+        measure.filter == FilterSpec::None
+            && matches!(&measure.expression, MeasureExpr::Bytecode {
+                inputs: bound_inputs, program: bound_program, result_type_oid: BOOLOID,
+            } if inputs == bound_inputs && program == bound_program)
+            && scalar_measure_program(&measure.expression, spec.fact_rel).is_ok()
+    })
+}
+
 fn build_sql_mask_filter(
     fact_rows: usize,
     mask: Option<*const i8>,
@@ -2961,21 +3923,40 @@ fn build_filter(
     fact_rows: usize,
     fact_mask: Option<*const i8>,
 ) -> Result<abi::PgaccelGroupedAggFilter, String> {
-    match &spec.fact_filter {
+    match spec.fact_filter.scalar() {
         FilterSpec::None => Ok(disabled_filter()),
+        FilterSpec::Bytecode { .. } => {
+            let mut filter = if spec.fact_filter.spatial().is_some() {
+                build_sql_mask_filter(fact_rows, fact_mask)?
+            } else {
+                disabled_filter()
+            };
+            filter.predicate_source = abi::PGACCEL_GROUPED_AGG_PRED_SOURCE_SCALAR;
+            filter.predicate_measure_slot = scalar_where_measure_binding(spec)
+                .ok_or_else(|| "scalar WHERE has no unfiltered Boolean carrier".to_owned())?
+                as i32;
+            Ok(filter)
+        }
         FilterSpec::Mask {
             kind: MaskKind::Sql,
             ..
         }
         | FilterSpec::Spatial { .. } => build_sql_mask_filter(fact_rows, fact_mask),
-        FilterSpec::Ranges { input, ranges } => {
+        FilterSpec::Ranges { input, ranges } | FilterSpec::NullOrRanges { input, ranges } => {
             if ranges.len() > abi::PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES {
                 return Err("fact filter range count exceeds descriptor capacity".to_owned());
             }
-            let mut filter = disabled_filter();
+            let mut filter = if spec.fact_filter.spatial().is_some() {
+                build_sql_mask_filter(fact_rows, fact_mask)?
+            } else {
+                disabled_filter()
+            };
             filter.predicate_measure_slot = i32::try_from(filter_measure_binding(spec, *input)?)
                 .map_err(|_| "filter measure index exceeds i32".to_owned())?;
             filter.predicate_source = abi::PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE;
+            if matches!(spec.fact_filter.scalar(), FilterSpec::NullOrRanges { .. }) {
+                filter.flags = abi::PGACCEL_GROUPED_AGG_FILTER_ACCEPT_NULL;
+            }
             filter.predicate_range_count = i32::try_from(ranges.len())
                 .map_err(|_| "fact filter range count exceeds i32".to_owned())?;
             for (index, range) in ranges.iter().enumerate() {
@@ -2988,17 +3969,58 @@ fn build_filter(
     }
 }
 
+fn build_numeric_measure_filter(
+    spec: &AggQuerySpec,
+    index: usize,
+) -> Result<abi::PgaccelGroupedAggFilter, String> {
+    let measure = spec
+        .measures
+        .get(index)
+        .ok_or("NUMERIC filter slot missing")?;
+    if matches!(measure.expression, MeasureExpr::Binary { .. }) {
+        return build_measure_filter(spec, &measure.filter);
+    }
+    if !canonical_numeric_measure_filter(spec, &measure.filter) {
+        return Err("NUMERIC predicate must be an exact fact INT4 range filter".into());
+    }
+    let mut result = disabled_filter();
+    if let Some((_, ranges, accept_null)) = measure.filter.range_parts() {
+        if accept_null {
+            result.flags = abi::PGACCEL_GROUPED_AGG_FILTER_ACCEPT_NULL;
+        }
+        result.predicate_source = abi::PGACCEL_GROUPED_AGG_PRED_SOURCE_RHS;
+        result.predicate_measure_slot =
+            i32::try_from(index).map_err(|_| "NUMERIC slot exceeds i32")?;
+        result.predicate_range_count = ranges.len() as i32;
+        for (index, range) in ranges.iter().enumerate() {
+            result.predicate_lo[index] = scalar_value(range.lo);
+            result.predicate_hi[index] = scalar_value(range.hi);
+        }
+    }
+    Ok(result)
+}
+
+fn uses_raw_rhs_measure_filter(spec: &AggQuerySpec) -> bool {
+    has_numeric_measure(spec)
+        || canonical_dense_filtered_integer_sum_avg(spec)
+        || has_scalar_measure(spec)
+}
+
 fn build_measure_filter(
     spec: &AggQuerySpec,
     filter: &FilterSpec,
 ) -> Result<abi::PgaccelGroupedAggFilter, String> {
     match filter {
         FilterSpec::None => Ok(disabled_filter()),
-        FilterSpec::Ranges { input, ranges } => {
+        FilterSpec::Ranges { input, ranges } | FilterSpec::NullOrRanges { input, ranges } => {
             if ranges.len() > abi::PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES {
                 return Err("measure filter range count exceeds descriptor capacity".to_owned());
             }
+            let accept_null = matches!(filter, FilterSpec::NullOrRanges { .. });
             let mut filter = disabled_filter();
+            if accept_null {
+                filter.flags = abi::PGACCEL_GROUPED_AGG_FILTER_ACCEPT_NULL;
+            }
             filter.predicate_measure_slot = i32::try_from(filter_measure_binding(spec, *input)?)
                 .map_err(|_| "measure filter input index exceeds i32".to_owned())?;
             filter.predicate_source = abi::PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE;
@@ -3014,12 +4036,455 @@ fn build_measure_filter(
     }
 }
 
+/// Pins host-readable metadata until the resolved GPU plan snapshots it.
+/// Resident payload ownership remains with the surrounding resolver.
+struct BoundDescriptor {
+    desc: abi::PgaccelGroupedAggDesc,
+    _numeric_views: [Option<Box<abi::PgaccelNumericView>>; abi::PGACCEL_GROUPED_AGG_MAX_MEASURES],
+    _scalar_views: [Option<BoundScalarView>; abi::PGACCEL_GROUPED_AGG_MAX_MEASURES],
+}
+
+pub struct BoundScalarView {
+    _view: Box<abi::PgaccelScalarView>,
+    _words: Box<[i32]>,
+    _inputs: Box<[abi::PgaccelScalarInput]>,
+    _charge: crate::engine::residency::ExecutionMemoryCharge,
+}
+
+/// Conservative peak for runtime scalar snapshot payloads only. Bounded
+/// dispatch holds session + bound descriptor + resolved plan + row chunk at
+/// once. One-shot uses fewer snapshots; admission deliberately budgets both
+/// modes without relying on a row-count estimate to predict the runtime mode.
+/// This excludes workspace/output and the logical spec/artifact allocations.
+pub fn scalar_metadata_peak_bytes(spec: &AggQuerySpec) -> Result<u64, String> {
+    let mut snapshot = 0_u64;
+    for measure in &spec.measures {
+        let MeasureExpr::Bytecode {
+            inputs, program, ..
+        } = &measure.expression
+        else {
+            continue;
+        };
+        if spec.measures.len() > abi::PGACCEL_GROUPED_AGG_MAX_MEASURES {
+            return Err("scalar metadata forecast exceeds descriptor measure capacity".into());
+        }
+        scalar_measure_program(&measure.expression, spec.fact_rel)?;
+        let bytes = crate::gpu::scalar_metadata_bytes(program.len(), inputs.len())
+            .map_err(|error| error.to_string())?;
+        snapshot = snapshot
+            .checked_add(bytes as u64)
+            .ok_or("scalar snapshot byte forecast overflow")?;
+    }
+    snapshot
+        .checked_mul(4)
+        .ok_or_else(|| "scalar metadata peak byte forecast overflow".into())
+}
+
+#[allow(clippy::redundant_pub_crate)] // re-exported from the private descriptor module
+pub(crate) fn scalar_measure_program(
+    expression: &MeasureExpr,
+    fact_rel: u32,
+) -> Result<ValidatedScalarWire, String> {
+    let MeasureExpr::Bytecode {
+        inputs,
+        program,
+        result_type_oid,
+    } = expression
+    else {
+        return Err("scalar binding requires a versioned measure program".into());
+    };
+    // Unlike the logical envelope, runtime never accepts opaque legacy words.
+    let decoded = ScalarProgram::validate_wire(program)
+        .map_err(|error| format!("scalar measure program failed validation: {error}"))?;
+    let oid = |kind| match kind {
+        ScalarType::Bool => BOOLOID,
+        ScalarType::Int4 => INT4OID,
+        ScalarType::Date => DATEOID,
+    };
+    if *result_type_oid != oid(decoded.result_type())
+        || inputs.len() != decoded.inputs().len()
+        || inputs.iter().zip(decoded.inputs()).any(|(column, kind)| {
+            column.relation_oid != fact_rel
+                || column.attno <= 0
+                || i16::try_from(column.attno).is_err()
+                || column.type_oid != oid(*kind)
+        })
+    {
+        return Err("scalar measure columns/result differ from the typed fact program".into());
+    }
+    Ok(decoded)
+}
+
+/// Native workspace/output forecast for the fused dense scalar family.
+/// Metadata lives on the stack and borrows program words; no payloads, owners,
+/// ledger reservations or allocation-pool entries are created by this query.
+pub fn scalar_descriptor_memory_requirements(
+    spec: &AggQuerySpec,
+    nullable_columns: &[i16],
+    group_capacity: usize,
+    rows: usize,
+    max_chunk_rows: usize,
+    one_shot_max_rows: usize,
+) -> Result<crate::gpu::GroupedAggMemoryRequirements, String> {
+    if spec.measures.is_empty()
+        || spec.measures.len() > abi::PGACCEL_GROUPED_AGG_MAX_MEASURES
+        || spec.group_keys.len() > abi::PGACCEL_GROUPED_AGG_MAX_KEYS
+        || !spec.star_dims.is_empty()
+        || spec.having.is_some()
+        || group_capacity == 0
+        || (spec.group_keys.is_empty() && group_capacity != 1)
+        || !spec
+            .measures
+            .iter()
+            .any(|measure| matches!(measure.expression, MeasureExpr::Bytecode { .. }))
+    {
+        return Err("scalar layout forecast requires a bounded dense scalar shape".into());
+    }
+    let marker = 0_i32;
+    let null_marker = 0_u8;
+    let nullable = |column: ColumnRef| {
+        nullable_columns
+            .iter()
+            .any(|attno| i32::from(*attno) == column.attno)
+    };
+    let raw_column = |column: ColumnRef| -> Result<abi::PgaccelGroupedAggMeasureCol, String> {
+        if column.relation_oid != spec.fact_rel
+            || column.attno <= 0
+            || i16::try_from(column.attno).is_err()
+            || !matches!(column.type_oid, INT2OID | INT4OID)
+        {
+            return Err("scalar layout forecast raw inputs must be fact INT2/INT4 columns".into());
+        }
+        Ok(abi::PgaccelGroupedAggMeasureCol {
+            values: std::ptr::from_ref(&marker).cast(),
+            nulls: if nullable(column) {
+                &raw const null_marker
+            } else {
+                std::ptr::null()
+            },
+            physical_type: abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32,
+            element_bytes: 4,
+            scale: 0,
+            flags: 0,
+        })
+    };
+    // SAFETY: ABI records have valid zero bit patterns. All active fields are
+    // initialized below, and stack metadata is never passed to execution.
+    let mut desc: abi::PgaccelGroupedAggDesc = unsafe { std::mem::zeroed() };
+    // SAFETY: zero is a valid initial value for each scalar view/input field.
+    let mut views: [abi::PgaccelScalarView; abi::PGACCEL_GROUPED_AGG_MAX_MEASURES] =
+        unsafe { std::mem::zeroed() };
+    // SAFETY: same zero-initialized plain ABI records; unused entries stay inert.
+    let mut bindings: [[abi::PgaccelScalarInput; abi::PGACCEL_SCALAR_MAX_INPUTS];
+        abi::PGACCEL_GROUPED_AGG_MAX_MEASURES] = unsafe { std::mem::zeroed() };
+    desc.abi_version = abi::PGACCEL_OLAP_ABI_VERSION;
+    desc.size_bytes = size_of::<abi::PgaccelGroupedAggDesc>() as u32;
+    desc.row_count = rows;
+    desc.group_capacity = group_capacity;
+    desc.key_count = spec.group_keys.len() as u32;
+    desc.measure_count = spec.measures.len() as u32;
+    desc.measure_filters.fill(disabled_filter());
+    for (index, key) in spec.group_keys.iter().enumerate() {
+        let GroupKeySource::FactColumn(column) = key.source else {
+            return Err("scalar layout forecast requires fact dictionary keys".into());
+        };
+        if column.relation_oid != spec.fact_rel
+            || column.attno <= 0
+            || i16::try_from(column.attno).is_err()
+        {
+            return Err("scalar layout forecast key identity is invalid".into());
+        }
+        desc.keys[index].values.values = std::ptr::from_ref(&marker).cast();
+        desc.keys[index].values.tag = PgaccelValTag::Int32;
+        desc.keys[index].cardinality = if index == 0 {
+            u32::try_from(group_capacity).map_err(|_| "scalar dense capacity exceeds u32")?
+        } else {
+            1
+        };
+        desc.keys[index].null_code = if nullable(column) {
+            0
+        } else {
+            abi::PGACCEL_GROUPED_AGG_KEY_NO_NULL_CODE
+        };
+    }
+    for (index, measure) in spec.measures.iter().enumerate() {
+        let target = &mut desc.measures[index];
+        target.agg_mask = lane_mask(&measure.outputs);
+        target.accumulator_kind = abi::PGACCEL_GROUPED_AGG_ACCUM_I64;
+        target.state_bytes = 8;
+        match &measure.expression {
+            MeasureExpr::Bytecode {
+                inputs, program, ..
+            } => {
+                let proof = scalar_measure_program(&measure.expression, spec.fact_rel)?;
+                for ((binding, column), kind) in
+                    bindings[index].iter_mut().zip(inputs).zip(proof.inputs())
+                {
+                    binding.values = std::ptr::from_ref(&marker).cast();
+                    binding.nulls = if nullable(*column) {
+                        &raw const null_marker
+                    } else {
+                        std::ptr::null()
+                    };
+                    binding.physical_type = match kind {
+                        ScalarType::Bool => abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL,
+                        ScalarType::Int4 => abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32,
+                        ScalarType::Date => abi::PGACCEL_GROUPED_AGG_PHYSICAL_DATE,
+                    };
+                }
+                views[index] = abi::PgaccelScalarView {
+                    version: abi::PGACCEL_SCALAR_VIEW_VERSION,
+                    reserved: 0,
+                    row_count: rows as u64,
+                    word_count: program.len() as u32,
+                    input_count: inputs.len() as u32,
+                    words: program.as_ptr(),
+                    inputs: if inputs.is_empty() {
+                        std::ptr::null()
+                    } else {
+                        bindings[index].as_ptr()
+                    },
+                };
+                target.op = abi::PGACCEL_GROUPED_AGG_MEASURE_SCALAR;
+                target.value = abi::PgaccelGroupedAggMeasureCol {
+                    values: std::ptr::from_ref(&views[index]).cast(),
+                    nulls: std::ptr::null(),
+                    physical_type: match proof.result_type() {
+                        ScalarType::Bool => abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL,
+                        ScalarType::Int4 => abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32,
+                        ScalarType::Date => abi::PGACCEL_GROUPED_AGG_PHYSICAL_DATE,
+                    },
+                    element_bytes: size_of::<abi::PgaccelScalarView>() as u32,
+                    scale: 0,
+                    flags: abi::PGACCEL_GROUPED_AGG_SCALAR_VIEW_V1,
+                };
+            }
+            MeasureExpr::Column(column) => {
+                target.value = raw_column(*column)?;
+            }
+            MeasureExpr::Binary { op, lhs, rhs } => {
+                target.op = match op {
+                    BinaryMeasureOp::Add => abi::PGACCEL_GROUPED_AGG_MEASURE_ADD,
+                    BinaryMeasureOp::Sub => abi::PGACCEL_GROUPED_AGG_MEASURE_SUB,
+                    BinaryMeasureOp::Mul => abi::PGACCEL_GROUPED_AGG_MEASURE_MUL,
+                };
+                target.value = raw_column(*lhs)?;
+                target.rhs = raw_column(*rhs)?;
+            }
+            MeasureExpr::CountStar if measure.filtered_count_input().is_some() => {
+                target.value = raw_column(
+                    measure
+                        .filtered_count_input()
+                        .ok_or("filtered count input missing")?,
+                )?;
+                target.value.nulls = std::ptr::null();
+            }
+            MeasureExpr::CountStar if measure.filter == FilterSpec::None => {
+                target.op = abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR;
+            }
+            _ => return Err("scalar layout forecast measure is unsupported".into()),
+        }
+        if uses_raw_rhs_measure_filter(spec)
+            && !matches!(measure.expression, MeasureExpr::Binary { .. })
+            && let Some((column, _, _)) = measure.filter.range_parts()
+        {
+            target.flags = abi::PGACCEL_GROUPED_AGG_MEASURE_FLAG_FILTER_INPUT;
+            target.rhs = raw_column(column)?;
+        }
+        desc.measure_filters[index] = if uses_raw_rhs_measure_filter(spec) {
+            build_numeric_measure_filter(spec, index)?
+        } else {
+            build_measure_filter(spec, &measure.filter)?
+        };
+    }
+    desc.where_filter = build_filter(spec, rows, Some(std::ptr::from_ref(&null_marker).cast()))?;
+    if !parallel_dense_integer_shape(&desc) {
+        return Err("scalar layout forecast is outside the parallel dense integer family".into());
+    }
+    if !dense_one_shot_eligible(&desc, dense_one_shot_row_cap(one_shot_max_rows)) {
+        let chunk = dense_partial_chunk_rows(
+            &desc,
+            dense_session_chunk_rows(max_chunk_rows, one_shot_max_rows),
+        );
+        if chunk == 0 {
+            return Err("scalar layout forecast has no bounded chunk capacity".into());
+        }
+        desc.row_count = rows.min(chunk);
+        desc.execution_flags =
+            abi::PGACCEL_GROUPED_AGG_EXEC_RESET | abi::PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+    }
+    // SAFETY: every host view and nested slice above is live and validated.
+    // Native layout queries inspect pointer presence but never resident rows;
+    // markers and this private descriptor are never exposed for execution.
+    unsafe { crate::gpu::query_dense_grouped_memory_layout(&desc) }
+        .map_err(|error| error.to_string())
+}
+
+pub fn scalar_measure_column(
+    expression: &MeasureExpr,
+    fact_rel: u32,
+    requests: &[ResidentColumnRef],
+    views: &[ResidentColumnView<'_>],
+    expected_rows: usize,
+    agg_mask: u32,
+) -> Result<(abi::PgaccelGroupedAggMeasureCol, BoundScalarView), String> {
+    let decoded = scalar_measure_program(expression, fact_rel)?;
+    let MeasureExpr::Bytecode {
+        inputs, program, ..
+    } = expression
+    else {
+        unreachable!("validated scalar expression");
+    };
+    if requests.len() != views.len()
+        || agg_mask == 0
+        || agg_mask
+            & !(abi::PGACCEL_GROUPED_AGG_LANE_SUM
+                | abi::PGACCEL_GROUPED_AGG_LANE_COUNT
+                | abi::PGACCEL_GROUPED_AGG_LANE_MIN
+                | abi::PGACCEL_GROUPED_AGG_LANE_MAX)
+            != 0
+        || (decoded.result_type() == ScalarType::Bool
+            && agg_mask != abi::PGACCEL_GROUPED_AGG_LANE_COUNT)
+        || (decoded.result_type() == ScalarType::Date
+            && agg_mask & abi::PGACCEL_GROUPED_AGG_LANE_SUM != 0)
+    {
+        return Err("scalar measure binding bundle or output lanes are invalid".into());
+    }
+    if requests.iter().enumerate().any(|(index, request)| {
+        requests[..index]
+            .iter()
+            .any(|previous| previous.relid == request.relid && previous.attno == request.attno)
+    }) {
+        return Err("scalar resident bundle repeats a column identity".into());
+    }
+    let mut bindings = [abi::PgaccelScalarInput {
+        values: std::ptr::null(),
+        nulls: std::ptr::null(),
+        physical_type: 0,
+        reserved: 0,
+    }; abi::PGACCEL_SCALAR_MAX_INPUTS];
+    for (binding, column) in bindings.iter_mut().zip(inputs) {
+        let view = find_view(requests, views, *column)?;
+        if matches!(view, ResidentColumnView::Bool { nulls: Some(nulls), .. }
+                | ResidentColumnView::I32 { nulls: Some(nulls), .. } if nulls.len() != expected_rows)
+        {
+            return Err("scalar input NULL sidecar length differs from fact rows".into());
+        }
+        let native = measure_column(view, expected_rows)?;
+        // Logical OIDs above prohibit INT2 widening and all reinterpretation.
+        let expected = if column.type_oid == BOOLOID {
+            abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL
+        } else if column.type_oid == DATEOID {
+            abi::PGACCEL_GROUPED_AGG_PHYSICAL_DATE
+        } else {
+            abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32
+        };
+        if native.physical_type != expected || native.flags != 0 {
+            return Err("scalar input lacks its exact resident physical representation".into());
+        }
+        *binding = abi::PgaccelScalarInput {
+            values: native.values,
+            nulls: native.nulls,
+            physical_type: native.physical_type,
+            reserved: 0,
+        };
+    }
+    let charge = crate::gpu::reserve_scalar_metadata(program.len(), inputs.len())
+        .map_err(|error| format!("scalar binding memory reservation failed: {error}"))?;
+    let bindings = bindings[..inputs.len()].to_vec().into_boxed_slice();
+    let words = program.clone().into_boxed_slice();
+    let pinned = Box::new(abi::PgaccelScalarView {
+        version: abi::PGACCEL_SCALAR_VIEW_VERSION,
+        word_count: words.len() as u32,
+        input_count: bindings.len() as u32,
+        reserved: 0,
+        row_count: expected_rows as u64,
+        words: words.as_ptr(),
+        inputs: if bindings.is_empty() {
+            std::ptr::null()
+        } else {
+            bindings.as_ptr()
+        },
+    });
+    let column = abi::PgaccelGroupedAggMeasureCol {
+        values: std::ptr::from_ref(pinned.as_ref()).cast(),
+        nulls: std::ptr::null(),
+        physical_type: match decoded.result_type() {
+            ScalarType::Bool => abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL,
+            ScalarType::Int4 => abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32,
+            ScalarType::Date => abi::PGACCEL_GROUPED_AGG_PHYSICAL_DATE,
+        },
+        element_bytes: size_of::<abi::PgaccelScalarView>() as u32,
+        scale: 0,
+        flags: abi::PGACCEL_GROUPED_AGG_SCALAR_VIEW_V1,
+    };
+    Ok((
+        column,
+        BoundScalarView {
+            _view: pinned,
+            _words: words,
+            _inputs: bindings,
+            _charge: charge,
+        },
+    ))
+}
+
+fn numeric_measure_column(
+    view: &ResidentColumnView<'_>,
+    expected_rows: usize,
+) -> Result<
+    (
+        abi::PgaccelGroupedAggMeasureCol,
+        Box<abi::PgaccelNumericView>,
+        u32,
+    ),
+    String,
+> {
+    if u32::from(view.type_oid()) != NUMERICOID || view.len() != expected_rows {
+        return Err("NUMERIC measure type/length differs from the resolved artifact".to_owned());
+    }
+    let (metadata, nulls) = match view {
+        ResidentColumnView::Numeric { data, .. } => (data.native_view(), null_ptr(data.nulls)),
+        ResidentColumnView::Empty { .. } if expected_rows == 0 => (
+            abi::PgaccelNumericView {
+                rows: std::ptr::null(),
+                digits: std::ptr::null(),
+                digit_count: 0,
+                row_count: 0,
+                min_weight: 0,
+                max_weight: 0,
+                max_ndigits: 0,
+                reserved: 0,
+            },
+            std::ptr::null(),
+        ),
+        _ => return Err("NUMERIC measure lacks exact resident row/digit buffers".to_owned()),
+    };
+    let state_bytes = crate::engine::residency::NumericDigitBounds {
+        min_weight: metadata.min_weight,
+        max_weight: metadata.max_weight,
+        max_ndigits: metadata.max_ndigits,
+    }
+    .sum_state_bytes()
+    .ok_or("NUMERIC digit extents exceed PostgreSQL's stored range")?;
+    let pinned = Box::new(metadata);
+    let column = abi::PgaccelGroupedAggMeasureCol {
+        values: std::ptr::from_ref(pinned.as_ref()).cast(),
+        nulls,
+        physical_type: abi::PGACCEL_GROUPED_AGG_PHYSICAL_NUMERIC,
+        element_bytes: size_of::<abi::PgaccelNumericView>() as u32,
+        scale: 0,
+        flags: abi::PGACCEL_GROUPED_AGG_NUMERIC_PACKED_VIEW,
+    };
+    Ok((column, pinned, state_bytes))
+}
+
 fn build_descriptor_with_fact_mask(
     artifact: &DescriptorAggArtifact,
     requests: &[ResidentColumnRef],
     views: &[ResidentColumnView<'_>],
     fact_mask: Option<*const i8>,
-) -> Result<abi::PgaccelGroupedAggDesc, String> {
+) -> Result<BoundDescriptor, String> {
     let spec = &artifact.resolved_spec;
     if artifact.keys.len() != spec.group_keys.len()
         || artifact.domains.len() != spec.group_keys.len()
@@ -3030,6 +4495,8 @@ fn build_descriptor_with_fact_mask(
     // SAFETY: every enum-bearing field has zero as a valid discriminant and
     // all inactive ABI slots are required to be bytewise zero.
     let mut desc: abi::PgaccelGroupedAggDesc = unsafe { std::mem::zeroed() };
+    let mut numeric_views = std::array::from_fn(|_| None);
+    let mut scalar_views = std::array::from_fn(|_| None);
     desc.abi_version = abi::PGACCEL_OLAP_ABI_VERSION;
     desc.size_bytes = std::mem::size_of::<abi::PgaccelGroupedAggDesc>() as u32;
     desc.row_count = artifact.fact_rows;
@@ -3095,7 +4562,26 @@ fn build_descriptor_with_fact_mask(
         u32::try_from(spec.measures.len()).map_err(|_| "measure count exceeds u32".to_owned())?;
     for (index, measure) in spec.measures.iter().enumerate() {
         let agg_mask = lane_mask(&measure.outputs);
+        let mut state_bytes = 8;
         let (op, value, rhs, accumulator_kind) = match &measure.expression {
+            MeasureExpr::CountStar if measure.filtered_count_input().is_some() => {
+                let input = measure
+                    .filtered_count_input()
+                    .ok_or("filtered COUNT input missing")?;
+                let mut value =
+                    measure_column(find_view(requests, views, input)?, artifact.fact_rows)?;
+                // Count every accepted row, including NULL predicate inputs.
+                // The independent RHS binding retains the real NULL sidecar.
+                value.nulls = std::ptr::null();
+                (
+                    abi::PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
+                    value,
+                    // SAFETY: unary counter has no expression RHS; its typed
+                    // predicate binding is installed below before dispatch.
+                    unsafe { std::mem::zeroed() },
+                    abi::PGACCEL_GROUPED_AGG_ACCUM_I64,
+                )
+            }
             MeasureExpr::CountStar => (
                 abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR,
                 // SAFETY: inactive measure columns must be bytewise zero.
@@ -3107,13 +4593,35 @@ fn build_descriptor_with_fact_mask(
             ),
             MeasureExpr::Column(column) => {
                 let view = find_view(requests, views, *column)?;
+                let input = if column.type_oid == NUMERICOID {
+                    let (input, pinned, width) = numeric_measure_column(view, artifact.fact_rows)?;
+                    numeric_views[index] = Some(pinned);
+                    state_bytes = if agg_mask == abi::PGACCEL_GROUPED_AGG_LANE_COUNT {
+                        8
+                    } else {
+                        width
+                    };
+                    input
+                } else {
+                    if column.type_oid == INT8OID
+                        && has_numeric_measure(spec)
+                        && agg_mask != abi::PGACCEL_GROUPED_AGG_LANE_COUNT
+                    {
+                        state_bytes = abi::PGACCEL_GROUPED_AGG_INT64_NUMERIC_STATE_BYTES;
+                    }
+                    measure_column(view, artifact.fact_rows)?
+                };
                 (
                     abi::PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
-                    measure_column(view, artifact.fact_rows)?,
+                    input,
                     // SAFETY: a unary column measure has no right-hand input;
                     // the ABI requires that inactive descriptor to be zeroed.
                     unsafe { std::mem::zeroed() },
-                    if matches!(column.type_oid, FLOAT4OID | FLOAT8OID)
+                    if column.type_oid == NUMERICOID
+                        || (column.type_oid == INT8OID && has_numeric_measure(spec))
+                    {
+                        abi::PGACCEL_GROUPED_AGG_ACCUM_NUMERIC
+                    } else if matches!(column.type_oid, FLOAT4OID | FLOAT8OID)
                         && agg_mask != abi::PGACCEL_GROUPED_AGG_LANE_COUNT
                     {
                         abi::PGACCEL_GROUPED_AGG_ACCUM_F64
@@ -3129,13 +4637,33 @@ fn build_descriptor_with_fact_mask(
                     match op {
                         BinaryMeasureOp::Mul => abi::PGACCEL_GROUPED_AGG_MEASURE_MUL,
                         BinaryMeasureOp::Sub => abi::PGACCEL_GROUPED_AGG_MEASURE_SUB,
+                        BinaryMeasureOp::Add => abi::PGACCEL_GROUPED_AGG_MEASURE_ADD,
                     },
                     measure_column(lhs_view, artifact.fact_rows)?,
                     measure_column(rhs_view, artifact.fact_rows)?,
                     abi::PGACCEL_GROUPED_AGG_ACCUM_I64,
                 )
             }
-            MeasureExpr::StatsPair { .. } | MeasureExpr::Bytecode { .. } => {
+            MeasureExpr::Bytecode { .. } => {
+                let (column, owner) = scalar_measure_column(
+                    &measure.expression,
+                    spec.fact_rel,
+                    requests,
+                    views,
+                    artifact.fact_rows,
+                    agg_mask,
+                )?;
+                scalar_views[index] = Some(owner);
+                (
+                    abi::PGACCEL_GROUPED_AGG_MEASURE_SCALAR,
+                    column,
+                    // SAFETY: the inactive RHS must be canonical zero; an
+                    // independent predicate may be bound below.
+                    unsafe { std::mem::zeroed() },
+                    abi::PGACCEL_GROUPED_AGG_ACCUM_I64,
+                )
+            }
+            MeasureExpr::StatsPair { .. } => {
                 return Err("unsupported measure escaped the Phase 5D capability backstop".into());
             }
         };
@@ -3145,15 +4673,27 @@ fn build_descriptor_with_fact_mask(
             op,
             agg_mask,
             accumulator_kind,
-            state_bytes: 8,
+            state_bytes,
             flags: 0,
             pad0: 0,
         };
+        if uses_raw_rhs_measure_filter(spec)
+            && !matches!(measure.expression, MeasureExpr::Binary { .. })
+            && let Some((input, _, _)) = measure.filter.range_parts()
+        {
+            let view = find_view(requests, views, input)?;
+            desc.measures[index].rhs = measure_column(view, artifact.fact_rows)?;
+            desc.measures[index].flags = abi::PGACCEL_GROUPED_AGG_MEASURE_FLAG_FILTER_INPUT;
+        }
     }
     desc.where_filter = build_filter(spec, artifact.fact_rows, fact_mask)?;
     for (index, filter) in desc.measure_filters.iter_mut().enumerate() {
         *filter = if let Some(measure) = spec.measures.get(index) {
-            build_measure_filter(spec, &measure.filter)?
+            if uses_raw_rhs_measure_filter(spec) {
+                build_numeric_measure_filter(spec, index)?
+            } else {
+                build_measure_filter(spec, &measure.filter)?
+            }
         } else {
             disabled_filter()
         };
@@ -3185,14 +4725,18 @@ fn build_descriptor_with_fact_mask(
             pad0: 0,
         };
     }
-    Ok(desc)
+    Ok(BoundDescriptor {
+        desc,
+        _numeric_views: numeric_views,
+        _scalar_views: scalar_views,
+    })
 }
 
 fn build_descriptor(
     artifact: &DescriptorAggArtifact,
     requests: &[ResidentColumnRef],
     views: &[ResidentColumnView<'_>],
-) -> Result<abi::PgaccelGroupedAggDesc, String> {
+) -> Result<BoundDescriptor, String> {
     build_descriptor_with_fact_mask(
         artifact,
         requests,
@@ -3205,7 +4749,7 @@ fn build_spatial_descriptor(
     artifact: &SpatialAggArtifact,
     requests: &[ResidentColumnRef],
     views: &[ResidentColumnView<'_>],
-) -> Result<abi::PgaccelGroupedAggDesc, String> {
+) -> Result<BoundDescriptor, String> {
     let fact_mask = spatial_final_mask_binding(
         artifact.base.fact_rows,
         artifact
@@ -3234,7 +4778,7 @@ fn spatial_final_mask_binding(
     }
 }
 
-fn h3_count_descriptor(
+fn hash_count_descriptor(
     fact_rows: usize,
     group_capacity: usize,
     values: *const c_void,
@@ -3285,12 +4829,283 @@ fn h3_count_descriptor(
     desc
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HashMeasureInput {
+    Star,
+    FilteredStar,
+    Column(ColumnRef),
+    /// INT2 residency is losslessly widened to the same INT32 physical lane.
+    IntegerStates(ColumnRef),
+}
+
+impl HashMeasureInput {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Star => "COUNT(*)",
+            Self::FilteredStar => "COUNT(*) FILTER",
+            Self::Column(_) => "COUNT(column)",
+            Self::IntegerStates(column) if column.type_oid == INT2OID => "integer states(int2)",
+            Self::IntegerStates(_) => "integer states(int4)",
+        }
+    }
+
+    fn from_spec(spec: &AggQuerySpec) -> Result<Self, String> {
+        let [measure] = spec.measures.as_slice() else {
+            return Err("hash binding requires one COUNT or INT2/INT4 measure".into());
+        };
+        if !spec.star_dims.is_empty() || spec.having.is_some() {
+            return Err("H3 hash binding does not support joins/HAVING".into());
+        }
+        hash_where_filter(spec)?;
+        let filtered = h3_count_filter(spec)?.is_some();
+        let count = crate::engine::spec::AggregateOutput {
+            source: AggregateSource::Value,
+            kind: AggregateKind::Count,
+        };
+        // Value queries need not expose COUNT. Physical state still uses it
+        // for the exact AVG divisor and SQL NULL validity. Keep logical
+        // projection distinct from the required native lanes.
+        let integer_states = (1..=5).contains(&measure.outputs.len())
+            && measure.outputs.iter().enumerate().all(|(index, output)| {
+                output.source == AggregateSource::Value
+                    && matches!(
+                        output.kind,
+                        AggregateKind::Sum
+                            | AggregateKind::Avg
+                            | AggregateKind::Count
+                            | AggregateKind::Min
+                            | AggregateKind::Max
+                    )
+                    && !measure.outputs[..index].contains(output)
+            })
+            && measure
+                .outputs
+                .iter()
+                .any(|output| output.kind != AggregateKind::Count);
+        if integer_states {
+            return match measure.expression {
+                MeasureExpr::Column(column)
+                    if column.relation_oid == spec.fact_rel
+                        && column.attno > 0
+                        && matches!(column.type_oid, INT2OID | INT4OID) =>
+                {
+                    Ok(Self::IntegerStates(column))
+                }
+                _ => Err("hash value states require an exact INT2/INT4 fact column".into()),
+            };
+        }
+        if measure.outputs.as_slice() != [count] {
+            return Err("hash binding requires COUNT or exact INT2/INT4 states".into());
+        }
+        match measure.expression {
+            MeasureExpr::CountStar if filtered => Ok(Self::FilteredStar),
+            MeasureExpr::CountStar => Ok(Self::Star),
+            MeasureExpr::Column(column)
+                if column.relation_oid == spec.fact_rel
+                    && column.attno > 0
+                    && matches!(
+                        column.type_oid,
+                        BOOLOID
+                            | INT2OID
+                            | INT4OID
+                            | INT8OID
+                            | FLOAT4OID
+                            | FLOAT8OID
+                            | DATEOID
+                            | TIMESTAMPOID
+                            | TIMESTAMPTZOID
+                    ) =>
+            {
+                Ok(Self::Column(column))
+            }
+            _ => Err("H3 hash COUNT input is not a supported fact column".into()),
+        }
+    }
+}
+
+struct BoundHashDescriptor {
+    desc: abi::PgaccelGroupedAggDesc,
+    // Must outlive the synchronous plan/dispatch consuming desc's raw pointer.
+    _filter: Option<crate::gpu::SqlBoolMask>,
+    _where: Option<crate::gpu::SqlBoolMask>,
+}
+
+struct H3FilterInput<'a> {
+    values: &'a crate::gpu::ExprDeviceBuffer<u8>,
+    nulls: Option<&'a crate::gpu::ExprDeviceBuffer<u8>>,
+}
+
+fn resolve_h3_filter<'a>(
+    spec: &AggQuerySpec,
+    requests: &[ResidentColumnRef],
+    views: &'a [ResidentColumnView<'a>],
+    rows: usize,
+) -> Result<Option<H3FilterInput<'a>>, String> {
+    resolve_hash_boolean_input(h3_count_filter(spec)?, requests, views, rows)
+}
+
+fn resolve_hash_boolean_input<'a>(
+    column: Option<ColumnRef>,
+    requests: &[ResidentColumnRef],
+    views: &'a [ResidentColumnView<'a>],
+    rows: usize,
+) -> Result<Option<H3FilterInput<'a>>, String> {
+    let Some(column) = column else {
+        return Ok(None);
+    };
+    let view = find_view(requests, views, column)?;
+    match view {
+        ResidentColumnView::Empty { .. } if rows == 0 => Ok(None),
+        ResidentColumnView::Bool { values, nulls, .. } => {
+            validate_h3_input_lengths(
+                values.len(),
+                nulls.map(crate::gpu::ExprDeviceBuffer::len),
+                rows,
+            )?;
+            Ok(Some(H3FilterInput {
+                values,
+                nulls: *nulls,
+            }))
+        }
+        _ => Err("hash predicate has no exact resident Boolean lane".into()),
+    }
+}
+
+/// Called only inside ensure_device_derived_artifact_with_report after its
+/// whole-artifact reservation. Do not acquire a second query-local charge.
+fn build_cached_h3_filter(
+    spec: &AggQuerySpec,
+    requests: &[ResidentColumnRef],
+    views: &[ResidentColumnView<'_>],
+    rows: usize,
+    pending: &mut dyn FnMut() -> bool,
+) -> Result<Option<crate::gpu::ExprDeviceBuffer<i8>>, ResidentLoadError> {
+    let Some(input) = resolve_h3_filter(spec, requests, views, rows)? else {
+        return Ok(None);
+    };
+    let mask = crate::gpu::ExprDeviceBuffer::<i8>::new(rows)
+        .ok_or_else(|| "could not allocate reserved cached H3 FILTER mask".to_owned())?;
+    if !crate::gpu::write_sql_bool_mask_with_poll(input.values, input.nulls, &mask, pending)
+        .map_err(ResidentLoadError::Gpu)?
+    {
+        return Err(ResidentLoadError::PreparationInterrupted);
+    }
+    Ok(Some(mask))
+}
+
+fn bind_h3_filter(
+    mut desc: abi::PgaccelGroupedAggDesc,
+    spec: &AggQuerySpec,
+    requests: &[ResidentColumnRef],
+    views: &[ResidentColumnView<'_>],
+    pending: &mut dyn FnMut() -> bool,
+) -> Result<BoundHashDescriptor, ResidentLoadError> {
+    let where_mask = if let Some(input) =
+        resolve_hash_boolean_input(hash_where_filter(spec)?, requests, views, desc.row_count)?
+    {
+        Some(
+            crate::gpu::SqlBoolMask::from_resident_with_poll(
+                input.values,
+                input.nulls,
+                &mut *pending,
+            )
+            .map_err(ResidentLoadError::Gpu)?
+            .ok_or(ResidentLoadError::PreparationInterrupted)?,
+        )
+    } else {
+        None
+    };
+    let filter = if let Some(input) = resolve_h3_filter(spec, requests, views, desc.row_count)? {
+        Some(
+            crate::gpu::SqlBoolMask::from_resident_with_poll(input.values, input.nulls, pending)
+                .map_err(ResidentLoadError::Gpu)?
+                .ok_or(ResidentLoadError::PreparationInterrupted)?,
+        )
+    } else {
+        if where_mask.is_none() && pending() {
+            return Err(ResidentLoadError::PreparationInterrupted);
+        }
+        None
+    };
+    if let Some(filter) = &filter {
+        desc.measure_filters[0] = disabled_filter();
+        desc.measure_filters[0].kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
+        desc.measure_filters[0].mask = filter.as_ptr();
+    }
+    if let Some(mask) = &where_mask {
+        desc.where_filter.kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
+        desc.where_filter.mask = mask.as_ptr();
+    }
+    Ok(BoundHashDescriptor {
+        desc,
+        _filter: filter,
+        _where: where_mask,
+    })
+}
+
+fn validate_h3_input_lengths(
+    values: usize,
+    nulls: Option<usize>,
+    rows: usize,
+) -> Result<(), String> {
+    if values != rows || nulls.is_some_and(|len| len != rows) {
+        return Err("H3 hash input value/NULL lengths differ from fact rows".into());
+    }
+    Ok(())
+}
+
+/// Bind only while the caller's residency borrow pins both the grouping and
+/// measure columns. This staged binding does not authorize SQL admission.
+fn bind_hash_measure(
+    desc: &mut abi::PgaccelGroupedAggDesc,
+    spec: &AggQuerySpec,
+    requests: &[ResidentColumnRef],
+    views: &[ResidentColumnView<'_>],
+) -> Result<(), String> {
+    let input = HashMeasureInput::from_spec(spec)?;
+    if requests.len() != views.len()
+        || requests
+            .iter()
+            .enumerate()
+            .any(|(index, request)| requests[..index].iter().any(|previous| previous == request))
+    {
+        return Err("H3 hash resident binding bundle is ambiguous".into());
+    }
+    let column = match input {
+        HashMeasureInput::Column(column) | HashMeasureInput::IntegerStates(column) => column,
+        HashMeasureInput::Star | HashMeasureInput::FilteredStar => return Ok(()),
+    };
+    let view = find_view(requests, views, column)?;
+    let nulls = match view {
+        ResidentColumnView::Empty { .. } => None,
+        ResidentColumnView::Bool { nulls, .. }
+        | ResidentColumnView::I32 { nulls, .. }
+        | ResidentColumnView::I64 { nulls, .. }
+        | ResidentColumnView::F32 { nulls, .. }
+        | ResidentColumnView::F64 { nulls, .. } => nulls.map(crate::gpu::ExprDeviceBuffer::len),
+        _ => return Err("H3 hash COUNT input is not a fixed-width resident lane".into()),
+    };
+    validate_h3_input_lengths(view.len(), nulls, desc.row_count)?;
+    desc.measures[0].value = measure_column(view, desc.row_count)?;
+    desc.measures[0].op = abi::PGACCEL_GROUPED_AGG_MEASURE_COLUMN;
+    if matches!(input, HashMeasureInput::IntegerStates(_)) {
+        if desc.measures[0].value.physical_type != abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32 {
+            return Err("hash integer states have no exact resident INT32 lane".into());
+        }
+        desc.measures[0].agg_mask = hash_integer_lanes(&spec.measures[0]);
+    }
+    Ok(())
+}
+
 fn build_h3_descriptor(
     artifact: &H3ParentArtifact,
     requests: &[ResidentColumnRef],
     views: &[ResidentColumnView<'_>],
     cell: ColumnRef,
-) -> Result<abi::PgaccelGroupedAggDesc, String> {
+) -> Result<BoundHashDescriptor, String> {
+    if hash_where_filter(&artifact.resolved_spec)?.is_some() {
+        return Err("cached H3 parents cannot precede WHERE evaluation".into());
+    }
     let source = find_view(requests, views, cell)?;
     let source_nulls = match source {
         ResidentColumnView::Empty { type_oid }
@@ -3303,6 +5118,11 @@ fn build_h3_descriptor(
             values,
             nulls,
         } if u32::from(*type_oid) == cell.type_oid && values.len() == artifact.fact_rows => {
+            validate_h3_input_lengths(
+                values.len(),
+                nulls.map(crate::gpu::ExprDeviceBuffer::len),
+                artifact.fact_rows,
+            )?;
             null_ptr(*nulls)
         }
         _ => {
@@ -3318,9 +5138,9 @@ fn build_h3_descriptor(
         return Err("H3 parent artifact length changed before dispatch".to_owned());
     }
 
-    Ok(h3_count_descriptor(
+    let mut desc = hash_count_descriptor(
         artifact.fact_rows,
-        artifact.group_capacity,
+        artifact.group_capacity(),
         artifact
             .parents
             .as_ref()
@@ -3330,15 +5150,62 @@ fn build_h3_descriptor(
         source_nulls,
         0,
         0,
-    ))
+    );
+    bind_hash_measure(&mut desc, &artifact.resolved_spec, requests, views)?;
+    let input = resolve_h3_filter(&artifact.resolved_spec, requests, views, desc.row_count)?;
+    let expected = if input.is_some() { desc.row_count } else { 0 };
+    if artifact
+        .filter_mask
+        .as_ref()
+        .map_or(0, crate::gpu::ExprDeviceBuffer::len)
+        != expected
+    {
+        return Err("cached H3 FILTER mask changed length before dispatch".into());
+    }
+    if let Some(mask) = &artifact.filter_mask {
+        desc.measure_filters[0].kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
+        desc.measure_filters[0].mask = mask.as_ptr();
+    }
+    Ok(BoundHashDescriptor {
+        desc,
+        _filter: None,
+        _where: None,
+    })
 }
 
-fn build_fused_h3_descriptor(
-    artifact: &FusedH3Artifact,
+fn build_fused_hash_descriptor(
+    artifact: &FusedHashArtifact,
     requests: &[ResidentColumnRef],
     views: &[ResidentColumnView<'_>],
     cell: ColumnRef,
-) -> Result<abi::PgaccelGroupedAggDesc, String> {
+    pending: &mut dyn FnMut() -> bool,
+) -> Result<BoundHashDescriptor, ResidentLoadError> {
+    let raw = raw_hash_group(&artifact.resolved_spec);
+    let (flags, transform_arg) = if let Some(column) = raw {
+        if column != cell || artifact.resolution != 0 {
+            return Err("raw hash key identity/transform metadata is not canonical"
+                .to_owned()
+                .into());
+        }
+        (0, 0)
+    } else {
+        let (planned_cell, resolution, _) =
+            h3_parent_group(&artifact.resolved_spec).ok_or_else(|| {
+                "compact hash requires an integer fact key or H3 parent key".to_owned()
+            })?;
+        if planned_cell != cell || resolution != artifact.resolution {
+            return Err(
+                "fused H3 key identity/resolution differs from its specification"
+                    .to_owned()
+                    .into(),
+            );
+        }
+        let resolution = u32::try_from(resolution)
+            .ok()
+            .filter(|value| *value <= 15)
+            .ok_or_else(|| "fused H3 parent resolution is outside 0..=15".to_owned())?;
+        (abi::PGACCEL_GROUPED_AGG_KEY_FLAG_H3_PARENT, resolution)
+    };
     let source = find_view(requests, views, cell)?;
     let (values, nulls) = match source {
         ResidentColumnView::Empty { type_oid }
@@ -3350,25 +5217,56 @@ fn build_fused_h3_descriptor(
             type_oid,
             values,
             nulls,
-        } if u32::from(*type_oid) == cell.type_oid && values.len() == artifact.fact_rows => {
+        } if raw.is_none()
+            && u32::from(*type_oid) == cell.type_oid
+            && values.len() == artifact.fact_rows =>
+        {
+            validate_h3_input_lengths(
+                values.len(),
+                nulls.map(crate::gpu::ExprDeviceBuffer::len),
+                artifact.fact_rows,
+            )?;
+            (values.as_ptr().cast::<c_void>(), null_ptr(*nulls))
+        }
+        ResidentColumnView::I64 { values, nulls, .. }
+            if raw.is_some() && cell.type_oid == INT8OID =>
+        {
+            validate_h3_input_lengths(
+                values.len(),
+                nulls.map(crate::gpu::ExprDeviceBuffer::len),
+                artifact.fact_rows,
+            )?;
+            (values.as_ptr().cast::<c_void>(), null_ptr(*nulls))
+        }
+        ResidentColumnView::I32 { values, nulls, .. }
+            if raw.is_some() && matches!(cell.type_oid, INT2OID | INT4OID) =>
+        {
+            validate_h3_input_lengths(
+                values.len(),
+                nulls.map(crate::gpu::ExprDeviceBuffer::len),
+                artifact.fact_rows,
+            )?;
             (values.as_ptr().cast::<c_void>(), null_ptr(*nulls))
         }
         _ => {
-            return Err("fused H3 source is not the planned resident h3index lane".to_owned());
+            return Err("fused H3 source is not the planned resident h3index lane"
+                .to_owned()
+                .into());
         }
     };
-    let resolution = u32::try_from(artifact.resolution)
-        .ok()
-        .filter(|resolution| *resolution <= 15)
-        .ok_or_else(|| "fused H3 parent resolution is outside 0..=15".to_owned())?;
-    Ok(h3_count_descriptor(
+    let mut desc = hash_count_descriptor(
         artifact.fact_rows,
-        artifact.group_capacity,
+        artifact.group_capacity.get(),
         values,
         nulls,
-        abi::PGACCEL_GROUPED_AGG_KEY_FLAG_H3_PARENT,
-        resolution,
-    ))
+        flags,
+        transform_arg,
+    );
+    if raw.is_some() && matches!(cell.type_oid, INT2OID | INT4OID) {
+        desc.keys[0].values.tag = PgaccelValTag::Int32;
+    }
+    bind_hash_measure(&mut desc, &artifact.resolved_spec, requests, views)?;
+    bind_h3_filter(desc, &artifact.resolved_spec, requests, views, pending)
 }
 
 fn verify_native_one_shot_mode(
@@ -3401,9 +5299,11 @@ fn build_and_execute_spatial(
         .map_err(DescriptorAggExecutionError::Failure)?;
     // SAFETY: the composite artifact owns the base descriptor lanes and final
     // SQL mask for the duration of this synchronous residency callback.
-    let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }
+    let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc.desc) }
         .map_err(|error| gpu_execution_error("spatial aggregate descriptor rejected", error))?;
     verify_native_one_shot_mode(&plan, expected_kernel_mode)?;
+    plan.preflight_one_shot_memory()
+        .map_err(|error| gpu_execution_error("spatial aggregate memory preflight failed", error))?;
     let mut storage =
         stats::profile_descriptor_stage(stats::DescriptorExecStage::OutputAllocation, || {
             GroupedAggOutputStorage::new(&plan)
@@ -3434,7 +5334,7 @@ fn build_and_execute_spatial(
         storage,
         outcome,
         inputs.artifact.base.domains.clone(),
-        inputs.artifact.base.resolved_spec.clone(),
+        &inputs.artifact.base.resolved_spec,
         projection.clone(),
     )
     .map_err(DescriptorAggExecutionError::Failure)?;
@@ -3465,9 +5365,11 @@ fn build_and_execute_h3_one_shot(
     // SAFETY: hash/H3 is deliberately one-shot because its native owner
     // indexes are relative to this exact row pointer range. Every pointer is
     // pinned by the active residency callback through the synchronous call.
-    let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }
+    let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc.desc) }
         .map_err(|error| gpu_execution_error("H3 grouped descriptor rejected", error))?;
     verify_native_one_shot_mode(&plan, expected_kernel_mode)?;
+    plan.preflight_hash_memory()
+        .map_err(|error| gpu_execution_error("H3 grouped memory preflight failed", error))?;
     let mut storage =
         stats::profile_descriptor_stage(stats::DescriptorExecStage::OutputAllocation, || {
             GroupedAggOutputStorage::new(&plan)
@@ -3490,13 +5392,24 @@ fn build_and_execute_h3_one_shot(
         .map_err(|error| gpu_execution_error("H3 grouped kernel failed", error))?;
     let dispatch_time_us =
         u64::try_from(dispatch_started.elapsed().as_micros()).unwrap_or(u64::MAX);
-    validate_h3_compact_outcome(outcome, &storage, inputs.artifact.fact_rows)
-        .map_err(DescriptorAggExecutionError::Failure)?;
+    validate_hash_compact_outcome(
+        outcome,
+        &storage,
+        inputs.artifact.fact_rows,
+        &inputs.artifact.resolved_spec,
+    )
+    .map_err(DescriptorAggExecutionError::Failure)?;
+    if let GroupedAggOutcome::Complete(result) = outcome {
+        inputs
+            .artifact
+            .record_validated_groups(result.emitted_group_count)
+            .map_err(DescriptorAggExecutionError::Failure)?;
+    }
     let output = DescriptorAggOutput::new(
         storage,
         outcome,
         std::rc::Rc::from(Vec::<super::artifact::GroupDomain>::new()),
-        inputs.artifact.resolved_spec.clone(),
+        &inputs.artifact.resolved_spec,
         projection.clone(),
     )
     .map_err(DescriptorAggExecutionError::Failure)?;
@@ -3512,34 +5425,42 @@ fn build_and_execute_h3_one_shot(
     })
 }
 
-fn build_and_execute_fused_h3_one_shot(
-    inputs: ResolvedDerivedInputs<'_, FusedH3Artifact>,
+fn build_and_execute_fused_hash_one_shot(
+    inputs: ResolvedDerivedInputs<'_, FusedHashArtifact>,
     requests: &[ResidentColumnRef],
     cell: ColumnRef,
     projection: &AggOutputProjection,
     expected_kernel_mode: GroupedAggKernelMode,
-) -> Result<DescriptorAggDispatch, DescriptorAggExecutionError> {
+    pending: &mut dyn FnMut() -> bool,
+) -> Result<DescriptorAggDispatch, DescriptorDispatchFailure> {
     let desc =
         stats::profile_descriptor_stage(stats::DescriptorExecStage::DerivedInputBinding, || {
-            build_fused_h3_descriptor(inputs.artifact, requests, &inputs.columns, cell)
+            build_fused_hash_descriptor(inputs.artifact, requests, &inputs.columns, cell, pending)
         })
-        .map_err(DescriptorAggExecutionError::Failure)?;
-    // SAFETY: raw H3 inputs and query-owned metadata are pinned through this
-    // synchronous callback. The native hash row loader validates and converts
-    // each non-NULL cell before it can become an owner or output key.
-    let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }
-        .map_err(|error| gpu_execution_error("fused H3 grouped descriptor rejected", error))?;
+        .map_err(DescriptorDispatchFailure::Residency)?;
+    if pending() {
+        return Err(DescriptorDispatchFailure::Residency(
+            ResidentLoadError::PreparationInterrupted,
+        ));
+    }
+    // SAFETY: raw integer/H3 inputs and query-owned metadata are pinned through
+    // this synchronous callback. The native row loader preserves BIGINT bits
+    // or validates/transforms H3 cells, according to the exact descriptor flag.
+    let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc.desc) }
+        .map_err(|error| gpu_execution_error("compact hash grouped descriptor rejected", error))?;
     verify_native_one_shot_mode(&plan, expected_kernel_mode)?;
+    plan.preflight_hash_memory()
+        .map_err(|error| gpu_execution_error("compact hash memory preflight failed", error))?;
     let mut storage =
         stats::profile_descriptor_stage(stats::DescriptorExecStage::OutputAllocation, || {
             GroupedAggOutputStorage::new(&plan)
         })
-        .map_err(|error| gpu_execution_error("fused H3 output allocation failed", error))?;
+        .map_err(|error| gpu_execution_error("compact hash output allocation failed", error))?;
     let mut workspace =
         stats::profile_descriptor_stage(stats::DescriptorExecStage::WorkspaceAllocation, || {
             GroupedAggWorkspace::allocate(&plan)
         })
-        .map_err(|error| gpu_execution_error("fused H3 workspace allocation failed", error))?;
+        .map_err(|error| gpu_execution_error("compact hash workspace allocation failed", error))?;
     let dispatch_started = Instant::now();
     let (outcome, kernel_mode) =
         stats::profile_descriptor_stage(stats::DescriptorExecStage::KernelExecution, || {
@@ -3554,22 +5475,38 @@ fn build_and_execute_fused_h3_one_shot(
                 DescriptorAggExecutionError::NumericOverflow
             } else {
                 DescriptorAggExecutionError::ExternalRoutineException(format!(
-                    "fused h3_cell_to_parent aggregate rejected an input: {error}"
+                    "compact hash aggregate rejected an input: {error}"
                 ))
             }
         })?;
+    if pending() {
+        return Err(DescriptorDispatchFailure::Residency(
+            ResidentLoadError::PreparationInterrupted,
+        ));
+    }
     let dispatch_time_us =
         u64::try_from(dispatch_started.elapsed().as_micros()).unwrap_or(u64::MAX);
-    validate_h3_compact_outcome(outcome, &storage, inputs.artifact.fact_rows)
-        .map_err(DescriptorAggExecutionError::Failure)?;
+    validate_hash_compact_outcome(
+        outcome,
+        &storage,
+        inputs.artifact.fact_rows,
+        &inputs.artifact.resolved_spec,
+    )
+    .map_err(DescriptorAggExecutionError::Failure)?;
     let output = DescriptorAggOutput::new(
         storage,
         outcome,
         std::rc::Rc::from(Vec::<super::artifact::GroupDomain>::new()),
-        inputs.artifact.resolved_spec.clone(),
+        &inputs.artifact.resolved_spec,
         projection.clone(),
     )
     .map_err(DescriptorAggExecutionError::Failure)?;
+    if let GroupedAggOutcome::Complete(result) = outcome {
+        inputs
+            .artifact
+            .record_validated_raw_groups(result.emitted_group_count)
+            .map_err(DescriptorAggExecutionError::Failure)?;
+    }
     Ok(DescriptorAggDispatch {
         output,
         fact_rows: inputs.artifact.fact_rows,
@@ -3582,15 +5519,15 @@ fn build_and_execute_fused_h3_one_shot(
     })
 }
 
-struct DescriptorExecutionMetadata {
-    fact_rows: usize,
-    domains: std::rc::Rc<[super::artifact::GroupDomain]>,
-    resolved_spec: AggQuerySpec,
-}
-
 enum DescriptorDispatchFailure {
     Residency(ResidentLoadError),
     Execution(DescriptorAggExecutionError),
+}
+
+impl From<DescriptorAggExecutionError> for DescriptorDispatchFailure {
+    fn from(error: DescriptorAggExecutionError) -> Self {
+        Self::Execution(error)
+    }
 }
 
 enum DenseBoundedFailure {
@@ -3605,7 +5542,8 @@ enum DenseExecutionSetup {
     },
     Bounded {
         session: Box<GroupedAggSession>,
-        metadata: Box<DescriptorExecutionMetadata>,
+        fact_rows: usize,
+        chunk_rows: usize,
     },
 }
 
@@ -3794,16 +5732,202 @@ fn parallel_dense_count_shape(desc: &abi::PgaccelGroupedAggDesc) -> bool {
         && canonical_disabled_filter(&desc.where_filter)
 }
 
+fn exact_dense_integer_measure_filter(
+    desc: &abi::PgaccelGroupedAggDesc,
+    filter: &abi::PgaccelGroupedAggFilter,
+    rhs_input: bool,
+) -> bool {
+    if canonical_disabled_filter(filter) {
+        return true;
+    }
+    let Ok(slot) = usize::try_from(filter.predicate_measure_slot) else {
+        return false;
+    };
+    let Ok(ranges) = usize::try_from(filter.predicate_range_count) else {
+        return false;
+    };
+    let accept_null = filter.flags == abi::PGACCEL_GROUPED_AGG_FILTER_ACCEPT_NULL;
+    if slot >= desc.measure_count as usize
+        || slot >= abi::PGACCEL_GROUPED_AGG_MAX_MEASURES
+        || (ranges == 0 && !accept_null)
+        || ranges > abi::PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES
+        || filter.kind != abi::PGACCEL_GROUPED_AGG_FILTER_NONE
+        || !filter.mask.is_null()
+        || filter.predicate_source
+            != if rhs_input {
+                abi::PGACCEL_GROUPED_AGG_PRED_SOURCE_RHS
+            } else {
+                abi::PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE
+            }
+        || filter.value_cmp_opcode != crate::engine::expr_compiler::opcode::ALWAYS_TRUE
+        || filter.pad0 != 0
+        || (filter.flags != 0 && !accept_null)
+        || !canonical_null_value(&filter.value_cmp_const)
+    {
+        return false;
+    }
+    let source = &desc.measures[slot];
+    let column = if rhs_input {
+        &source.rhs
+    } else {
+        &source.value
+    };
+    (source.op == abi::PGACCEL_GROUPED_AGG_MEASURE_COLUMN
+        || (rhs_input && source.op == abi::PGACCEL_GROUPED_AGG_MEASURE_SCALAR)
+        || (!rhs_input && integer_binary_op(source.op)))
+        && column.physical_type == abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32
+        && column.element_bytes == 4
+        && (0..ranges).all(|range| {
+            let lo = filter.predicate_lo[range];
+            let hi = filter.predicate_hi[range];
+            lo.tag == PgaccelValTag::Int32
+                && hi.tag == PgaccelValTag::Int32
+                && (lo.data as i32) <= (hi.data as i32)
+        })
+        && filter.predicate_lo[ranges..]
+            .iter()
+            .all(canonical_null_value)
+        && filter.predicate_hi[ranges..]
+            .iter()
+            .all(canonical_null_value)
+}
+
+fn exact_dense_where_ranges(desc: &abi::PgaccelGroupedAggDesc) -> bool {
+    let mut range = desc.where_filter;
+    if range.kind == abi::PGACCEL_GROUPED_AGG_FILTER_SQL && !range.mask.is_null() {
+        range.kind = abi::PGACCEL_GROUPED_AGG_FILTER_NONE;
+        range.mask = std::ptr::null();
+    }
+    exact_dense_integer_measure_filter(desc, &range, false)
+}
+
+fn exact_dense_scalar_where(desc: &abi::PgaccelGroupedAggDesc) -> bool {
+    let mut filter = desc.where_filter;
+    if filter.predicate_source != abi::PGACCEL_GROUPED_AGG_PRED_SOURCE_SCALAR
+        || filter.predicate_measure_slot < 0
+        || filter.predicate_measure_slot as u32 >= desc.measure_count
+        || filter.predicate_measure_slot as usize >= abi::PGACCEL_GROUPED_AGG_MAX_MEASURES
+    {
+        return false;
+    }
+    let slot = filter.predicate_measure_slot as usize;
+    let measure = &desc.measures[slot];
+    if measure.op != abi::PGACCEL_GROUPED_AGG_MEASURE_SCALAR
+        || measure.value.physical_type != abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL
+        || !canonical_disabled_filter(&desc.measure_filters[slot])
+    {
+        return false;
+    }
+    filter.predicate_source = abi::PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE;
+    filter.predicate_measure_slot = 0;
+    parallel_dense_filter_kind(&filter)
+}
+
+fn integer_binary_op(op: i32) -> bool {
+    matches!(
+        op,
+        abi::PGACCEL_GROUPED_AGG_MEASURE_MUL
+            | abi::PGACCEL_GROUPED_AGG_MEASURE_SUB
+            | abi::PGACCEL_GROUPED_AGG_MEASURE_ADD
+    )
+}
+
+fn parallel_dense_multi_integer_shape(desc: &abi::PgaccelGroupedAggDesc) -> bool {
+    if parallel_dense_count_shape(desc) {
+        return false;
+    }
+    let count = desc.measure_count as usize;
+    if desc.grouping_mode != abi::PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX
+        || desc.output_mode != abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE
+        || desc.group_capacity == 0
+        || !(1..=abi::PGACCEL_GROUPED_AGG_MAX_MEASURES).contains(&count)
+        || desc.dim_count != 0
+        || !(parallel_dense_filter_kind(&desc.where_filter)
+            || exact_dense_where_ranges(desc)
+            || exact_dense_scalar_where(desc))
+    {
+        return false;
+    }
+    let values = count
+        - usize::from(desc.measures[count - 1].op == abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR);
+    values > 0
+        && (0..count).all(|slot| {
+            let measure = &desc.measures[slot];
+            let predicate_input =
+                measure.flags == abi::PGACCEL_GROUPED_AGG_MEASURE_FLAG_FILTER_INPUT;
+            if predicate_input {
+                if slot >= values
+                    || desc.measure_filters[slot].predicate_measure_slot != slot as i32
+                    || (desc.measure_filters[slot].predicate_range_count == 0
+                        && desc.measure_filters[slot].flags
+                            != abi::PGACCEL_GROUPED_AGG_FILTER_ACCEPT_NULL)
+                {
+                    return false;
+                }
+            } else if measure.flags != 0 {
+                return false;
+            }
+            measure.accumulator_kind == abi::PGACCEL_GROUPED_AGG_ACCUM_I64
+                && measure.state_bytes == 8
+                && if slot < values {
+                    exact_dense_integer_measure_filter(
+                        desc,
+                        &desc.measure_filters[slot],
+                        predicate_input,
+                    ) && (measure.op == abi::PGACCEL_GROUPED_AGG_MEASURE_COLUMN
+                        || measure.op == abi::PGACCEL_GROUPED_AGG_MEASURE_SCALAR
+                        || integer_binary_op(measure.op))
+                        && measure.agg_mask != 0
+                        && measure.agg_mask
+                            & !(abi::PGACCEL_GROUPED_AGG_LANE_SUM
+                                | abi::PGACCEL_GROUPED_AGG_LANE_COUNT
+                                | abi::PGACCEL_GROUPED_AGG_LANE_MIN
+                                | abi::PGACCEL_GROUPED_AGG_LANE_MAX)
+                            == 0
+                        && if measure.op == abi::PGACCEL_GROUPED_AGG_MEASURE_SCALAR {
+                            measure.value.flags == abi::PGACCEL_GROUPED_AGG_SCALAR_VIEW_V1
+                                && measure.value.element_bytes as usize
+                                    == size_of::<abi::PgaccelScalarView>()
+                                && measure.value.scale == 0
+                                && measure.value.nulls.is_null()
+                                && !measure.value.values.is_null()
+                                && (measure.value.physical_type
+                                    == abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32
+                                    || (measure.value.physical_type
+                                        == abi::PGACCEL_GROUPED_AGG_PHYSICAL_DATE
+                                        && measure.agg_mask & abi::PGACCEL_GROUPED_AGG_LANE_SUM
+                                            == 0)
+                                    || (measure.value.physical_type
+                                        == abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL
+                                        && measure.agg_mask == abi::PGACCEL_GROUPED_AGG_LANE_COUNT))
+                        } else {
+                            measure.value.physical_type == abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32
+                                && measure.value.element_bytes == 4
+                        }
+                        && (!integer_binary_op(measure.op)
+                            || (measure.rhs.physical_type
+                                == abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32
+                                && measure.rhs.element_bytes == 4))
+                } else {
+                    canonical_disabled_filter(&desc.measure_filters[slot])
+                        && measure.agg_mask == abi::PGACCEL_GROUPED_AGG_LANE_COUNT
+                }
+        })
+}
+
 fn parallel_dense_integer_shape(desc: &abi::PgaccelGroupedAggDesc) -> bool {
+    if parallel_dense_multi_integer_shape(desc) {
+        return true;
+    }
     let measure_range = canonical_dense_integer_range_filter(&desc.measure_filters[0]);
     if desc.grouping_mode != abi::PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX
         || desc.output_mode != abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE
         || desc.group_capacity == 0
-        || desc.measure_count != 2
+        || !matches!(desc.measure_count, 1 | 2)
         || !parallel_dense_integer_filter_kind(&desc.where_filter)
         || !parallel_dense_unique_dimensions(desc)
         || (!canonical_disabled_filter(&desc.measure_filters[0]) && !measure_range)
-        || !canonical_disabled_filter(&desc.measure_filters[1])
+        || (desc.measure_count == 2 && !canonical_disabled_filter(&desc.measure_filters[1]))
     {
         return false;
     }
@@ -3832,10 +5956,27 @@ fn parallel_dense_integer_shape(desc: &abi::PgaccelGroupedAggDesc) -> bool {
         && value.value.element_bytes == 4
         && value.accumulator_kind == abi::PGACCEL_GROUPED_AGG_ACCUM_I64
         && value.state_bytes == 8
-        && count.op == abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR
-        && count.agg_mask == abi::PGACCEL_GROUPED_AGG_LANE_COUNT
-        && count.accumulator_kind == abi::PGACCEL_GROUPED_AGG_ACCUM_I64
-        && count.state_bytes == 8
+        && (desc.measure_count == 1
+            || (count.op == abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR
+                && count.agg_mask == abi::PGACCEL_GROUPED_AGG_LANE_COUNT
+                && count.accumulator_kind == abi::PGACCEL_GROUPED_AGG_ACCUM_I64
+                && count.state_bytes == 8))
+}
+
+fn dense_partial_chunk_rows(desc: &abi::PgaccelGroupedAggDesc, requested: usize) -> usize {
+    if !parallel_dense_integer_shape(desc) {
+        return requested;
+    }
+    let count = desc.measure_count as usize;
+    let values = count
+        - usize::from(desc.measures[count - 1].op == abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR);
+    desc.group_capacity
+        .checked_mul(values)
+        .and_then(|groups| {
+            (DENSE_INTEGER_MAX_PARTIAL_BYTES / DENSE_INTEGER_PARTIAL_BYTES).checked_div(groups)
+        })
+        .and_then(|chunks| chunks.checked_mul(DENSE_INTEGER_CHUNK_ROWS))
+        .map_or(0, |rows| requested.min(rows))
 }
 
 fn dense_one_shot_eligible(desc: &abi::PgaccelGroupedAggDesc, row_cap: usize) -> bool {
@@ -3893,15 +6034,6 @@ fn note_dense_test_call_and_maybe_arm_timeout() {
 #[cfg(not(feature = "pg_test"))]
 fn note_dense_test_call_and_maybe_arm_timeout() {}
 
-fn capture_postgres_interrupt() -> Option<pg_sys::panic::CaughtError> {
-    pg_sys::PgTryBuilder::new(|| {
-        pgrx::check_for_interrupts!();
-        None
-    })
-    .catch_others(Some)
-    .execute()
-}
-
 fn warn_if_grouped_dispatch_slow(phase: &str, elapsed: Duration) {
     let threshold_ms = gucs::kernel_timeout_ms();
     if !dispatch_warning_threshold_exceeded(elapsed, threshold_ms) {
@@ -3913,10 +6045,46 @@ fn warn_if_grouped_dispatch_slow(phase: &str, elapsed: Duration) {
     );
 }
 
+trait DenseExecutionArtifact {
+    fn base(&self) -> &DescriptorAggArtifact;
+    fn bind(
+        &self,
+        requests: &[ResidentColumnRef],
+        views: &[ResidentColumnView<'_>],
+    ) -> Result<BoundDescriptor, String>;
+}
+
+impl DenseExecutionArtifact for DescriptorAggArtifact {
+    fn base(&self) -> &DescriptorAggArtifact {
+        self
+    }
+    fn bind(
+        &self,
+        requests: &[ResidentColumnRef],
+        views: &[ResidentColumnView<'_>],
+    ) -> Result<BoundDescriptor, String> {
+        build_descriptor(self, requests, views)
+    }
+}
+
+impl DenseExecutionArtifact for SpatialAggArtifact {
+    fn base(&self) -> &DescriptorAggArtifact {
+        &self.base
+    }
+    fn bind(
+        &self,
+        requests: &[ResidentColumnRef],
+        views: &[ResidentColumnView<'_>],
+    ) -> Result<BoundDescriptor, String> {
+        build_spatial_descriptor(self, requests, views)
+    }
+}
+
 trait DenseArtifactInputResolver {
+    type Artifact: DenseExecutionArtifact;
     fn resolve<R>(
         &self,
-        callback: impl FnOnce(ResolvedDerivedInputs<'_, DescriptorAggArtifact>) -> R,
+        callback: impl FnOnce(ResolvedDerivedInputs<'_, Self::Artifact>) -> R,
     ) -> Result<R, ResidentLoadError>;
 }
 
@@ -3927,12 +6095,152 @@ struct CachedDenseArtifactResolver<'a> {
 }
 
 impl DenseArtifactInputResolver for CachedDenseArtifactResolver<'_> {
+    type Artifact = DescriptorAggArtifact;
     fn resolve<R>(
         &self,
         callback: impl FnOnce(ResolvedDerivedInputs<'_, DescriptorAggArtifact>) -> R,
     ) -> Result<R, ResidentLoadError> {
         with_derived_artifact_inputs(self.owner_relid, self.identity, self.requests, callback)
     }
+}
+
+/// Live integration probe for scalar dependency invalidation. Uses the real
+/// artifact preparation, cached resolver and binder, bypassing admission only.
+#[cfg(feature = "pg_test")]
+pub fn test_scalar_resident_aggregate(
+    spec: &AggQuerySpec,
+    refresh: bool,
+) -> Result<(Option<i64>, u64), String> {
+    struct SnapshotGuard;
+    impl Drop for SnapshotGuard {
+        fn drop(&mut self) {
+            // SAFETY: this helper pushes exactly one private snapshot below.
+            unsafe { pg_sys::PopActiveSnapshot() };
+        }
+    }
+    // SAFETY: the live test runs under an active outer SQL snapshot, whose
+    // command ID predates its nested SPI writes. Match a fresh SQL statement
+    // using a private current-command copy without mutating the outer snapshot.
+    unsafe {
+        pg_sys::PushCopiedSnapshot(pg_sys::GetActiveSnapshot());
+        pg_sys::UpdateActiveSnapshotCommandId();
+    }
+    let _snapshot = SnapshotGuard;
+    if !spec.group_keys.is_empty() || !spec.star_dims.is_empty() || spec.measures.len() != 1 {
+        return Err("scalar currentness fixture requires one global measure".into());
+    }
+    scalar_measure_program(&spec.measures[0].expression, spec.fact_rel)?;
+    let selected = selected_relations(spec)?;
+    let dependencies: Vec<_> = selected.iter().map(|relation| relation.relid).collect();
+    let requests = dispatch_column_refs(spec)?;
+    let artifact_columns = artifact_column_refs(spec)?;
+    let identity = DerivedArtifactIdentity::from_canonical_words(
+        spec.encode_i32().map_err(|error| error.to_string())?,
+    );
+    let owner = pg_sys::Oid::from(spec.fact_rel);
+    if refresh {
+        ensure_selected_relations(&selected).map_err(|error| error.to_string())?;
+        let host_bytes = descriptor_program_clone_bytes(spec)?;
+        let before = resident_live_bytes();
+        let report = ensure_host_device_derived_artifact_with_report(
+            owner,
+            &identity,
+            &dependencies,
+            &artifact_columns,
+            host_bytes,
+            |bundle| prepare_agg_artifact(spec, &artifact_columns, bundle, 1),
+            DescriptorAggArtifact::build,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(report.accounting.retained_host_exact_bytes, host_bytes);
+        assert_eq!(
+            report.accounting.device_bytes, 0,
+            "global unfiltered artifact has no derived device lanes"
+        );
+        assert_eq!(
+            resident_live_bytes(),
+            before
+                + if report.outcome == ArtifactEnsureOutcome::Hit {
+                    0
+                } else {
+                    host_bytes
+                }
+        );
+        let before_local = resident_live_bytes();
+        let local = build_ephemeral_host_device_derived_artifact_with_report(
+            owner,
+            &dependencies,
+            &artifact_columns,
+            host_bytes,
+            |bundle| prepare_agg_artifact(spec, &artifact_columns, bundle, 1),
+            DescriptorAggArtifact::build,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(local.accounting.retained_host_exact_bytes, host_bytes);
+        assert_eq!(resident_live_bytes(), before_local + host_bytes);
+        with_ephemeral_artifact_inputs(owner, &local.artifact, &requests, |inputs| {
+            assert_eq!(inputs.artifact.retained_host_exact_bytes(), host_bytes);
+            inputs.artifact.bind(&requests, &inputs.columns)
+        })
+        .map_err(|error| error.to_string())??;
+        drop(local);
+        assert_eq!(resident_live_bytes(), before_local);
+    }
+    let resolver = CachedDenseArtifactResolver {
+        owner_relid: owner,
+        identity: &identity,
+        requests: &requests,
+    };
+    let projection = AggOutputProjection {
+        slots: [AggregateKind::Sum, AggregateKind::Count]
+            .into_iter()
+            .map(|kind| crate::engine::spec::AggOutputSlot {
+                source: AggOutputSource::Aggregate {
+                    measure_index: 0,
+                    source: AggregateSource::Value,
+                    kind,
+                },
+                source_type_oid: INT4OID,
+                result_type_oid: INT8OID,
+                result_typmod: -1,
+                result_collation_oid: 0,
+                nullable: kind != AggregateKind::Count,
+            })
+            .collect(),
+    };
+    let mut results = Vec::new();
+    for one_shot_rows in [usize::MAX, 1024] {
+        let dispatch = execute_bounded_dense_with_resolver(
+            &resolver,
+            &requests,
+            &projection,
+            1024,
+            one_shot_rows,
+            GroupedAggKernelMode::ParallelDenseInteger,
+        )
+        .map_err(|error| match error {
+            DescriptorDispatchFailure::Residency(error) => error.to_string(),
+            DescriptorDispatchFailure::Execution(error) => error.to_string(),
+        })?;
+        if dispatch.fact_rows > one_shot_rows {
+            assert!(
+                dispatch.batches_executed > 1,
+                "fixture must exercise bounded execution"
+            );
+        } else {
+            assert_eq!(dispatch.batches_executed, 1);
+        }
+        results.push(dispatch.output.test_global_int8_values()?);
+    }
+    assert_eq!(
+        results[0], results[1],
+        "one-shot and bounded SQL result conversion"
+    );
+    let count = results[0][1].ok_or("COUNT returned NULL")?;
+    Ok((
+        results[0][0],
+        u64::try_from(count).map_err(|_| "negative COUNT")?,
+    ))
 }
 
 struct EphemeralDenseArtifactResolver<'a> {
@@ -3942,9 +6250,42 @@ struct EphemeralDenseArtifactResolver<'a> {
 }
 
 impl DenseArtifactInputResolver for EphemeralDenseArtifactResolver<'_> {
+    type Artifact = DescriptorAggArtifact;
     fn resolve<R>(
         &self,
         callback: impl FnOnce(ResolvedDerivedInputs<'_, DescriptorAggArtifact>) -> R,
+    ) -> Result<R, ResidentLoadError> {
+        with_ephemeral_artifact_inputs(self.owner_relid, self.artifact, self.requests, callback)
+    }
+}
+
+struct CachedSpatialArtifactResolver<'a> {
+    owner_relid: pg_sys::Oid,
+    identity: &'a DerivedArtifactIdentity,
+    requests: &'a [ResidentColumnRef],
+}
+
+impl DenseArtifactInputResolver for CachedSpatialArtifactResolver<'_> {
+    type Artifact = SpatialAggArtifact;
+    fn resolve<R>(
+        &self,
+        callback: impl FnOnce(ResolvedDerivedInputs<'_, SpatialAggArtifact>) -> R,
+    ) -> Result<R, ResidentLoadError> {
+        with_derived_artifact_inputs(self.owner_relid, self.identity, self.requests, callback)
+    }
+}
+
+struct EphemeralSpatialArtifactResolver<'a> {
+    owner_relid: pg_sys::Oid,
+    artifact: &'a EphemeralDerivedArtifact<SpatialAggArtifact>,
+    requests: &'a [ResidentColumnRef],
+}
+
+impl DenseArtifactInputResolver for EphemeralSpatialArtifactResolver<'_> {
+    type Artifact = SpatialAggArtifact;
+    fn resolve<R>(
+        &self,
+        callback: impl FnOnce(ResolvedDerivedInputs<'_, SpatialAggArtifact>) -> R,
     ) -> Result<R, ResidentLoadError> {
         with_ephemeral_artifact_inputs(self.owner_relid, self.artifact, self.requests, callback)
     }
@@ -4023,17 +6364,20 @@ fn execute_bounded_dense_with_resolver(
         .resolve(|inputs| {
             let desc = stats::profile_descriptor_stage(
                 stats::DescriptorExecStage::DerivedInputBinding,
-                || build_descriptor(inputs.artifact, requests, &inputs.columns),
+                || inputs.artifact.bind(requests, &inputs.columns),
             )
             .map_err(DescriptorAggExecutionError::Failure)?;
             // SAFETY: every active pointer is pinned by this exact residency
             // callback. The session copies only shape identity; it never
             // submits or dereferences those pointer values after return.
-            let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }
+            let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc.desc) }
                 .map_err(|error| gpu_execution_error("grouped descriptor rejected", error))?;
             if dense_one_shot_eligible(plan.descriptor(), dense_one_shot_row_cap(one_shot_max_rows))
             {
                 verify_native_one_shot_mode(&plan, expected_kernel_mode)?;
+                plan.preflight_one_shot_memory().map_err(|error| {
+                    gpu_execution_error("grouped one-shot memory preflight failed", error)
+                })?;
                 let mut storage = stats::profile_descriptor_stage(
                     stats::DescriptorExecStage::OutputAllocation,
                     || GroupedAggOutputStorage::new(&plan),
@@ -4064,15 +6408,15 @@ fn execute_bounded_dense_with_resolver(
                 let output = DescriptorAggOutput::new(
                     storage,
                     outcome,
-                    inputs.artifact.domains.clone(),
-                    inputs.artifact.resolved_spec.clone(),
+                    inputs.artifact.base().domains.clone(),
+                    &inputs.artifact.base().resolved_spec,
                     projection.clone(),
                 )
                 .map_err(DescriptorAggExecutionError::Failure)?;
                 return Ok(DenseExecutionSetup::OneShot {
                     dispatch: Box::new(DescriptorAggDispatch {
                         output,
-                        fact_rows: inputs.artifact.fact_rows,
+                        fact_rows: inputs.artifact.base().fact_rows,
                         planned_batches: 1,
                         batches_executed: 1,
                         physical_mode_calls: 1,
@@ -4083,6 +6427,8 @@ fn execute_bounded_dense_with_resolver(
                     elapsed,
                 });
             }
+            let bounded_chunk_rows =
+                dense_partial_chunk_rows(plan.descriptor(), bounded_chunk_rows);
             let session = stats::profile_descriptor_stage(
                 stats::DescriptorExecStage::WorkspaceAllocation,
                 || GroupedAggSession::start(&plan, bounded_chunk_rows),
@@ -4095,19 +6441,15 @@ fn execute_bounded_dense_with_resolver(
                     session.kernel_mode().label(),
                 )));
             }
-            let metadata = DescriptorExecutionMetadata {
-                fact_rows: inputs.artifact.fact_rows,
-                domains: inputs.artifact.domains.clone(),
-                resolved_spec: inputs.artifact.resolved_spec.clone(),
-            };
             Ok::<_, DescriptorAggExecutionError>(DenseExecutionSetup::Bounded {
                 session: Box::new(session),
-                metadata: Box::new(metadata),
+                fact_rows: inputs.artifact.base().fact_rows,
+                chunk_rows: bounded_chunk_rows,
             })
         })
         .map_err(DescriptorDispatchFailure::Residency)?
         .map_err(DescriptorDispatchFailure::Execution)?;
-    let (mut session, metadata) = match initialized {
+    let (mut session, fact_rows, bounded_chunk_rows) = match initialized {
         DenseExecutionSetup::OneShot { dispatch, elapsed } => {
             note_dense_test_call_and_maybe_arm_timeout();
             warn_if_grouped_dispatch_slow("one-shot", elapsed);
@@ -4116,13 +6458,12 @@ fn execute_bounded_dense_with_resolver(
                 None => Ok(*dispatch),
             };
         }
-        DenseExecutionSetup::Bounded { session, metadata } => (session, metadata),
+        DenseExecutionSetup::Bounded {
+            session,
+            fact_rows,
+            chunk_rows,
+        } => (session, fact_rows, chunk_rows),
     };
-    let DescriptorExecutionMetadata {
-        fact_rows,
-        domains,
-        resolved_spec,
-    } = *metadata;
     let kernel_mode = session.kernel_mode();
     let planned_calls =
         bounded_dispatch_call_count(fact_rows, bounded_chunk_rows).ok_or_else(|| {
@@ -4140,15 +6481,16 @@ fn execute_bounded_dense_with_resolver(
                 .resolve(|inputs| {
                     let desc = stats::profile_descriptor_stage(
                         stats::DescriptorExecStage::DerivedInputBinding,
-                        || build_descriptor(inputs.artifact, requests, &inputs.columns),
+                        || inputs.artifact.bind(requests, &inputs.columns),
                     )
                     .map_err(DescriptorAggExecutionError::Failure)?;
                     // SAFETY: the descriptor is used only during this synchronous
                     // callback while all row pointers remain pinned.
-                    let plan =
-                        unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.map_err(|error| {
+                    let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc.desc) }.map_err(
+                        |error| {
                             gpu_execution_error("grouped descriptor changed between chunks", error)
-                        })?;
+                        },
+                    )?;
                     let chunk =
                         plan.row_chunk(range.first_row, range.row_count)
                             .map_err(|error| {
@@ -4190,16 +6532,16 @@ fn execute_bounded_dense_with_resolver(
         },
     };
 
-    let (outcome, storage, finalize_elapsed) = resolver
+    let (output, finalize_elapsed) = resolver
         .resolve(|inputs| {
             let desc = stats::profile_descriptor_stage(
                 stats::DescriptorExecStage::DerivedInputBinding,
-                || build_descriptor(inputs.artifact, requests, &inputs.columns),
+                || inputs.artifact.bind(requests, &inputs.columns),
             )
             .map_err(DescriptorAggExecutionError::Failure)?;
             // SAFETY: finalization is synchronous and this fresh plan remains
             // pinned until the callback returns.
-            let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.map_err(|error| {
+            let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc.desc) }.map_err(|error| {
                 gpu_execution_error("grouped descriptor changed before finalize", error)
             })?;
             // Output buffers carry an exact resolved-plan identity. Allocate
@@ -4218,7 +6560,19 @@ fn execute_bounded_dense_with_resolver(
                 || session.finalize(&plan, &mut storage),
             )
             .map_err(|error| gpu_execution_error("grouped finalization failed", error))?;
-            Ok::<_, DescriptorAggExecutionError>((outcome, storage, finalize_started.elapsed()))
+            let finalize_elapsed = finalize_started.elapsed();
+            // Validate output against the current, pinned artifact. The output
+            // retains its dictionary owners, not a duplicate logical spec or
+            // scalar program, after this residency callback ends.
+            let output = DescriptorAggOutput::new(
+                storage,
+                outcome,
+                inputs.artifact.base().domains.clone(),
+                &inputs.artifact.base().resolved_spec,
+                projection.clone(),
+            )
+            .map_err(DescriptorAggExecutionError::Failure)?;
+            Ok::<_, DescriptorAggExecutionError>((output, finalize_elapsed))
         })
         .map_err(DescriptorDispatchFailure::Residency)?
         .map_err(DescriptorDispatchFailure::Execution)?;
@@ -4228,17 +6582,13 @@ fn execute_bounded_dense_with_resolver(
     // store guard has been released, then release detached resources before
     // preserving the original PostgreSQL error and SQLSTATE.
     if let Some(caught) = capture_postgres_interrupt() {
-        return cleanup_before_rethrow((session, storage), caught, |caught| caught.rethrow());
+        return cleanup_before_rethrow((session, output), caught, |caught| caught.rethrow());
     }
 
     let dispatch_time_us =
         u64::try_from(dispatch_started.elapsed().as_micros()).unwrap_or(u64::MAX);
     let completed_calls = launches.saturating_add(1);
     debug_assert_eq!(completed_calls, planned_calls);
-    let output =
-        DescriptorAggOutput::new(storage, outcome, domains, resolved_spec, projection.clone())
-            .map_err(DescriptorAggExecutionError::Failure)
-            .map_err(DescriptorDispatchFailure::Execution)?;
     Ok(DescriptorAggDispatch {
         output,
         fact_rows,
@@ -4251,11 +6601,28 @@ fn execute_bounded_dense_with_resolver(
     })
 }
 
-fn validate_h3_compact_outcome(
+fn validate_hash_selected_rows(
+    spec: &AggQuerySpec,
+    fact_rows: usize,
+    selected: u64,
+) -> Result<(), String> {
+    let rows = u64::try_from(fact_rows)
+        .map_err(|_| "hash fact rows exceed the result domain".to_owned())?;
+    if selected > rows || (hash_where_filter(spec)?.is_none() && selected != rows) {
+        return Err(format!(
+            "hash selected-row count {selected} violates input bound {rows}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_hash_compact_outcome(
     outcome: GroupedAggOutcome,
     storage: &GroupedAggOutputStorage,
     fact_rows: usize,
+    spec: &AggQuerySpec,
 ) -> Result<(), String> {
+    let count_input = HashMeasureInput::from_spec(spec)?;
     let result = match outcome {
         GroupedAggOutcome::Complete(result) => result,
         GroupedAggOutcome::NeedsRecheck(result) => {
@@ -4271,35 +6638,141 @@ fn validate_h3_compact_outcome(
             result.uncertain_count
         ));
     }
-    let expected_selected = u64::try_from(fact_rows)
-        .map_err(|_| "H3 fact row count exceeds the u64 result domain".to_owned())?;
-    if result.selected_count != expected_selected {
-        return Err(format!(
-            "H3 grouped aggregate selected {} rows, expected {expected_selected}",
-            result.selected_count
-        ));
-    }
+    validate_hash_selected_rows(spec, fact_rows, result.selected_count)?;
     if result.emitted_group_count > result.group_capacity {
         return Err("H3 emitted group count exceeds group capacity".to_owned());
     }
     let counts = storage
         .measure_count(0)
-        .ok_or_else(|| "H3 compact output is missing its COUNT(*) lane".to_owned())?;
+        .ok_or_else(|| "H3 compact output is missing its COUNT lane".to_owned())?;
     let key_values = storage
         .key_values(0)
         .ok_or_else(|| "H3 compact output is missing its key lane".to_owned())?;
-    validate_h3_compact_key_buffers(
+    validate_compact_integer_key_buffers(
         key_values,
         storage.key_nulls(0),
         result.group_capacity,
         result.emitted_group_count,
+        spec.group_keys[0].type_oid,
     )?;
     validate_h3_count_partition(
         counts,
         result.group_capacity,
         result.emitted_group_count,
         result.selected_count,
-    )
+        count_input,
+    )?;
+    if let HashMeasureInput::IntegerStates(column) = count_input {
+        use crate::gpu::GroupedAggStateLane;
+        let mask = hash_integer_lanes(&spec.measures[0]);
+        let mut lanes = [None; 3];
+        for (index, (flag, lane)) in [
+            (abi::PGACCEL_GROUPED_AGG_LANE_SUM, GroupedAggStateLane::Sum),
+            (abi::PGACCEL_GROUPED_AGG_LANE_MIN, GroupedAggStateLane::Min),
+            (abi::PGACCEL_GROUPED_AGG_LANE_MAX, GroupedAggStateLane::Max),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if mask & flag != 0 {
+                lanes[index] = Some(storage.measure_state(0, lane).ok_or_else(|| {
+                    "compact hash output is missing a requested integer lane".to_owned()
+                })?);
+            }
+        }
+        validate_hash_integer_states(
+            lanes,
+            storage
+                .measure_nonnull_count(0)
+                .ok_or_else(|| "compact hash output is missing integer validity".to_owned())?,
+            counts,
+            column.type_oid,
+        )?;
+    }
+    Ok(())
+}
+
+/// Validate finalized aggregate state, never scan or recompute resident inputs.
+fn validate_hash_integer_states(
+    lanes: [Option<&[u8]>; 3],
+    nonnull: &[u64],
+    counts: &[u64],
+    type_oid: u32,
+) -> Result<(), String> {
+    let (minimum, maximum) = match type_oid {
+        INT2OID => (i64::from(i16::MIN), i64::from(i16::MAX)),
+        INT4OID => (i64::from(i32::MIN), i64::from(i32::MAX)),
+        _ => return Err("hash integer states have an unsupported logical input type".into()),
+    };
+    if lanes.iter().all(Option::is_none)
+        || lanes
+            .iter()
+            .flatten()
+            .any(|lane| counts.len().checked_mul(size_of::<i64>()) != Some(lane.len()))
+        || nonnull != counts
+    {
+        return Err("hash integer output lengths or non-NULL counts disagree".into());
+    }
+    for (index, count) in counts.iter().enumerate() {
+        if *count > u64::from(u32::MAX) {
+            return Err("H3 SUM/COUNT exceeds its UINT32_MAX row domain".into());
+        }
+        let [sum, low, high] = lanes.map(|lane| {
+            lane.map(|bytes| {
+                i64::from_ne_bytes(
+                    bytes[index * 8..index * 8 + 8]
+                        .try_into()
+                        .expect("exact state width"),
+                )
+            })
+        });
+        // Both products fit signed 64-bit under the checked native row cap.
+        let count = i64::try_from(*count).expect("bounded count");
+        if sum.is_some_and(|sum| sum < minimum * count || sum > maximum * count) {
+            return Err("hash integer SUM is outside its logical type/count bounds".into());
+        }
+        for value in [low, high].into_iter().flatten() {
+            if (count == 0 && value != 0) || (count != 0 && !(minimum..=maximum).contains(&value)) {
+                return Err("hash extremum is outside its logical type/NULL bounds".into());
+            }
+        }
+        if low.zip(high).is_some_and(|(low, high)| low > high)
+            || sum.zip(low).is_some_and(|(sum, low)| sum < low * count)
+            || sum.zip(high).is_some_and(|(sum, high)| sum > high * count)
+            || (count == 1
+                && (low.zip(high).is_some_and(|(low, high)| low != high)
+                    || sum.zip(low).is_some_and(|(sum, low)| sum != low)
+                    || sum.zip(high).is_some_and(|(sum, high)| sum != high)))
+        {
+            return Err("hash integer states are mutually inconsistent".into());
+        }
+    }
+    Ok(())
+}
+
+/// The caller has validated a single integer measure through HashMeasureInput.
+fn hash_integer_lanes(measure: &crate::engine::spec::MeasureSpec) -> u32 {
+    measure
+        .outputs
+        .iter()
+        .fold(abi::PGACCEL_GROUPED_AGG_LANE_COUNT, |mask, output| {
+            mask | match output.kind {
+                AggregateKind::Sum | AggregateKind::Avg => abi::PGACCEL_GROUPED_AGG_LANE_SUM,
+                AggregateKind::Min => abi::PGACCEL_GROUPED_AGG_LANE_MIN,
+                AggregateKind::Max => abi::PGACCEL_GROUPED_AGG_LANE_MAX,
+                _ => 0,
+            }
+        })
+}
+
+#[cfg(test)]
+fn validate_h3_sum_states(
+    sums: &[u8],
+    nonnull: &[u64],
+    counts: &[u64],
+    type_oid: u32,
+) -> Result<(), String> {
+    validate_hash_integer_states([Some(sums), None, None], nonnull, counts, type_oid)
 }
 
 fn validate_h3_count_partition(
@@ -4307,10 +6780,12 @@ fn validate_h3_count_partition(
     group_capacity: usize,
     emitted_group_count: usize,
     selected_count: u64,
+    count_input: HashMeasureInput,
 ) -> Result<(), String> {
     if counts.len() != group_capacity {
         return Err(format!(
-            "H3 COUNT(*) lane has length {}, expected {}",
+            "H3 {} lane has length {}, expected {}",
+            count_input.label(),
             counts.len(),
             group_capacity
         ));
@@ -4318,25 +6793,47 @@ fn validate_h3_count_partition(
     if emitted_group_count > group_capacity {
         return Err("H3 emitted group count exceeds group capacity".to_owned());
     }
+    let emitted_rows = u64::try_from(emitted_group_count)
+        .map_err(|_| "H3 group count exceeds the u64 row domain".to_owned())?;
+    if emitted_rows > selected_count || (emitted_rows == 0 && selected_count != 0) {
+        return Err("H3 emitted groups violate input-row bounds".into());
+    }
     let (emitted, unused) = counts.split_at(emitted_group_count);
-    if emitted.contains(&0) {
+    if count_input == HashMeasureInput::Star && emitted.contains(&0) {
         return Err("H3 compact output contains an emitted zero-count group".to_owned());
     }
     let counted_rows = emitted.iter().try_fold(0_u64, |total, count| {
-        total
-            .checked_add(*count)
-            .ok_or_else(|| "H3 compact output COUNT(*) sum overflows u64".to_owned())
+        total.checked_add(*count).ok_or_else(|| {
+            format!(
+                "H3 compact output {} sum overflows u64",
+                count_input.label()
+            )
+        })
     })?;
-    if counted_rows != selected_count {
+    if counted_rows > selected_count
+        || (count_input == HashMeasureInput::Star && counted_rows != selected_count)
+    {
+        let bound = if count_input == HashMeasureInput::Star {
+            "exactly"
+        } else {
+            "at most"
+        };
         return Err(format!(
-            "H3 compact output counts sum to {counted_rows}, expected {selected_count} selected rows"
+            "H3 compact output counts sum to {counted_rows}, expected {bound} {selected_count} selected rows"
         ));
     }
     if unused.iter().any(|count| *count != 0) {
-        return Err("H3 compact output contains nonzero unused COUNT(*) state".to_owned());
+        return Err(format!(
+            "H3 compact output contains nonzero unused {} state",
+            count_input.label()
+        ));
     }
     Ok(())
 }
+
+#[cfg(feature = "pg_test")]
+#[path = "h3_count_test.rs"]
+mod h3_count_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4544,7 +7041,7 @@ mod tests {
         ));
 
         range.key_count = 0;
-        assert!(!parallel_dense_integer_shape(&range));
+        assert!(parallel_dense_integer_shape(&range));
         range.key_count = 1;
 
         range.where_filter.predicate_source = abi::PGACCEL_GROUPED_AGG_PRED_SOURCE_RHS;
@@ -4553,7 +7050,7 @@ mod tests {
         range.where_filter.predicate_range_count = 2;
         range.where_filter.predicate_lo[1] = scalar_value(ScalarValue::I32(300));
         range.where_filter.predicate_hi[1] = scalar_value(ScalarValue::I32(700));
-        assert!(!parallel_dense_integer_shape(&range));
+        assert!(parallel_dense_integer_shape(&range));
 
         let mut measure_range = release_shape;
         measure_range.key_count = 1;
@@ -4570,6 +7067,8 @@ mod tests {
         ));
         measure_range.where_filter.kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
         measure_range.where_filter.mask = mask.as_ptr();
+        assert!(parallel_dense_integer_shape(&measure_range));
+        measure_range.where_filter.mask = std::ptr::null();
         assert!(!parallel_dense_integer_shape(&measure_range));
     }
 
@@ -5163,8 +7662,14 @@ mod tests {
                 .retain(|output| output.kind == AggregateKind::Avg);
             assert_eq!(
                 planned_descriptor_kernel_mode(&avg_only, false),
-                GroupedAggKernelMode::SerialGeneric,
-                "the released widened integer lane requires the exact SUM+AVG state contract"
+                GroupedAggKernelMode::ParallelDenseInteger,
+                "AVG consumes the exact SUM/non-NULL state without requiring SUM output"
+            );
+            avg_only.measures.pop();
+            assert_eq!(
+                planned_descriptor_kernel_mode(&avg_only, false),
+                GroupedAggKernelMode::ParallelDenseInteger,
+                "selected-row tracking is internal even without COUNT(*) output"
             );
         }
         let mut same_column = bool_count.clone();
@@ -5209,7 +7714,7 @@ mod tests {
         ranges[0].hi = ScalarValue::I32(i32::MAX);
         assert_eq!(
             planned_descriptor_kernel_mode(&one_sided_measure_range, false),
-            GroupedAggKernelMode::SerialGeneric
+            GroupedAggKernelMode::ParallelDenseInteger
         );
         let mut one_sided_range = range_integer.clone();
         let FilterSpec::Ranges { ranges, .. } = &mut one_sided_range.fact_filter else {
@@ -5218,8 +7723,8 @@ mod tests {
         ranges[0].lo = ScalarValue::I32(i32::MIN);
         assert_eq!(
             planned_descriptor_kernel_mode(&one_sided_range, false),
-            GroupedAggKernelMode::SerialGeneric,
-            "one scalar bound has no independently qualified parallel lane"
+            GroupedAggKernelMode::ParallelDenseInteger,
+            "computed integer measures share the qualified scalar filter lane"
         );
         let mut range_on_rhs = range_integer;
         let MeasureExpr::Binary { rhs, .. } = &range_on_rhs.measures[0].expression else {
@@ -5270,8 +7775,8 @@ mod tests {
         };
         assert_eq!(
             planned_descriptor_kernel_mode(&integer, false),
-            GroupedAggKernelMode::SerialGeneric,
-            "predicate-range descriptors route to the serial native data kernel"
+            GroupedAggKernelMode::ParallelDenseInteger,
+            "exact integer WHERE ranges use the bounded dense kernel"
         );
         integer.fact_filter = FilterSpec::Mask {
             input: ColumnRef {
@@ -5478,7 +7983,7 @@ mod tests {
             &range,
             GroupedAggKernelMode::ParallelDenseInteger,
         );
-        assert_eq!(range_variant.label(), "dense_integer_multiply_range");
+        assert_eq!(range_variant.label(), "dense_integer_expressions_plain");
         assert_eq!(range_outcome, DescriptorSpecializationCacheOutcome::Miss);
         let measure_range = dense_integer_measure_range_spec();
         let measure_range_identity =
@@ -5596,11 +8101,7 @@ mod tests {
                     typmod: -1,
                     srid: Some(TEST_SRID),
                 },
-                bytes: polygon_bytes(
-                    TEST_SRID,
-                    u32::try_from(NORMAL_SPATIAL_PROMOTION_COORDINATES)
-                        .expect("promotion coordinate count fits u32"),
-                ),
+                bytes: polygon_bytes(TEST_SRID, 1_025),
             },
             distance: None,
         };
@@ -5618,6 +8119,8 @@ mod tests {
             intersects_fn_oid: pg_sys::Oid::from(10_u32),
             contains_fn_oid: pg_sys::Oid::from(11_u32),
             within_fn_oid: pg_sys::Oid::from(12_u32),
+            covers_fn_oid: pg_sys::Oid::from(16_u32),
+            coveredby_fn_oid: pg_sys::Oid::from(17_u32),
             dwithin_fn_oid: pg_sys::Oid::from(13_u32),
             distance_fn_oid: pg_sys::Oid::from(14_u32),
             is_valid_fn_oid: pg_sys::Oid::from(15_u32),
@@ -5634,14 +8137,14 @@ mod tests {
     }
 
     #[test]
-    fn normal_spatial_candidate_is_only_intersects_point_column_count_star() {
+    fn normal_spatial_candidate_checks_topology_orientation_and_geometry_not_fixture_size() {
         let (spec, projection) = spatial_count_shape();
         validate_normal_spatial_candidate_capability(&spec, &projection)
             .expect("the evidenced normal spatial candidate should bind");
 
         for predicate in [
             SpatialPredicateKind::Contains,
-            SpatialPredicateKind::Within,
+            SpatialPredicateKind::Covers,
             SpatialPredicateKind::DWithin,
         ] {
             let mut unsupported = spec.clone();
@@ -5663,7 +8166,34 @@ mod tests {
             unreachable!("spatial test shape changed")
         };
         std::mem::swap(left, right);
-        assert!(validate_normal_spatial_candidate_capability(&reversed, &projection).is_err());
+        assert!(validate_normal_spatial_candidate_capability(&reversed, &projection).is_ok());
+        let FilterSpec::Spatial { predicate, .. } = &mut reversed.fact_filter else {
+            unreachable!()
+        };
+        *predicate = SpatialPredicateKind::Contains;
+        assert!(validate_normal_spatial_candidate_capability(&reversed, &projection).is_ok());
+        let mut within = spec.clone();
+        let FilterSpec::Spatial { predicate, .. } = &mut within.fact_filter else {
+            unreachable!()
+        };
+        *predicate = SpatialPredicateKind::Within;
+        assert!(validate_normal_spatial_candidate_capability(&within, &projection).is_ok());
+
+        for (mut candidate, kind) in [
+            (reversed.clone(), SpatialPredicateKind::Covers),
+            (within.clone(), SpatialPredicateKind::CoveredBy),
+        ] {
+            let FilterSpec::Spatial { predicate, .. } = &mut candidate.fact_filter else {
+                unreachable!()
+            };
+            *predicate = kind;
+            assert!(validate_normal_spatial_candidate_capability(&candidate, &projection).is_ok());
+            let FilterSpec::Spatial { left, right, .. } = &mut candidate.fact_filter else {
+                unreachable!()
+            };
+            std::mem::swap(left, right);
+            assert!(validate_normal_spatial_candidate_capability(&candidate, &projection).is_err());
+        }
 
         let mut grouped = spec.clone();
         grouped.group_keys.push(GroupKeyRef {
@@ -5673,6 +8203,29 @@ mod tests {
             encoding: GroupKeyEncoding::Hash,
         });
         assert!(validate_normal_spatial_candidate_capability(&grouped, &projection).is_err());
+
+        let mut multi = spec.clone();
+        let FilterSpec::Spatial {
+            right: SpatialOperand::Constant { bytes, metadata },
+            ..
+        } = &mut multi.fact_filter
+        else {
+            unreachable!()
+        };
+        let polygon = bytes.to_vec();
+        let mut encoded = polygon[..8].to_vec();
+        encoded.extend_from_slice(
+            &crate::engine::residency::RESIDENT_GEOMETRY_MULTIPOLYGON.to_le_bytes(),
+        );
+        encoded.extend_from_slice(&2_u32.to_le_bytes());
+        encoded.extend_from_slice(&polygon[8..]);
+        encoded.extend_from_slice(&polygon[8..]);
+        *bytes = encoded.into_boxed_slice();
+        metadata.typmod = (TEST_SRID << 8) | (6 << 2);
+        assert!(validate_normal_spatial_candidate_capability(&multi, &projection).is_ok());
+        assert!(
+            spatial_artifact_kind(&multi, &postgis_catalog(vec![101, 202, 303]), 1_024).is_ok()
+        );
 
         let mut unmeasured_polygon = spec;
         let FilterSpec::Spatial {
@@ -5684,8 +8237,8 @@ mod tests {
         };
         *bytes = polygon_bytes(TEST_SRID, 1_024);
         assert!(
-            validate_normal_spatial_candidate_capability(&unmeasured_polygon, &projection).is_err(),
-            "a nearby but unmeasured polygon size must remain outside normal admission"
+            validate_normal_spatial_candidate_capability(&unmeasured_polygon, &projection).is_ok(),
+            "nearby valid polygon sizes use work limits, not fixture matching"
         );
     }
 
@@ -5884,27 +8437,57 @@ mod tests {
     }
 
     #[test]
+    fn native_hash_column_count_does_not_admit_unqualified_sql() {
+        for type_oid in [
+            BOOLOID,
+            INT2OID,
+            INT4OID,
+            INT8OID,
+            FLOAT4OID,
+            FLOAT8OID,
+            DATEOID,
+            TIMESTAMPOID,
+            TIMESTAMPTZOID,
+        ] {
+            let (mut spec, mut projection) = h3_count_shape();
+            let mut input = column(type_oid);
+            input.attno = 2;
+            spec.measures[0].expression = MeasureExpr::Column(input);
+            projection.slots[1].source_type_oid = type_oid;
+            assert_eq!(
+                planned_descriptor_kernel_mode(&spec, true),
+                GroupedAggKernelMode::SerialGeneric
+            );
+            assert!(validate_runtime_capability(&spec, &projection).is_err());
+            assert!(validate_normal_descriptor_capability(&spec, &projection).is_err());
+        }
+    }
+
+    #[test]
     fn h3_group_capacity_obeys_universe_and_runtime_bounds() {
         assert_eq!(h3_group_capacity(0, 0, usize::MAX), Ok(1));
         assert_eq!(h3_group_capacity(1_000, 0, usize::MAX), Ok(123));
         assert_eq!(h3_group_capacity(7, 15, usize::MAX), Ok(7));
-        assert_eq!(h3_group_capacity(1_000, 15, 19), Ok(19));
-        assert_eq!(
-            h3_group_capacity((1_usize << 30) + 1, 15, usize::MAX),
-            Ok(1_usize << 30)
-        );
+        assert_eq!(h3_group_capacity(12_748_986, 9, 16_776_704), Ok(12_748_986));
+        assert!(h3_group_capacity(16_776_705, 9, 16_776_704).is_err());
+        assert!(h3_group_capacity(1_000, 15, 19).is_err());
+        assert!(h3_group_capacity((1_usize << 30) + 1, 15, usize::MAX).is_err());
+        assert!(h3_group_capacity(1, 0, 0).is_err());
         assert!(h3_group_capacity(1, -1, usize::MAX).is_err());
         assert!(h3_group_capacity(1, 16, usize::MAX).is_err());
     }
 
     #[test]
     fn h3_count_partition_rejects_invalid_compact_state() {
-        validate_h3_count_partition(&[2, 3, 0], 3, 2, 5)
+        validate_h3_count_partition(&[2, 3, 0], 3, 2, 5, HashMeasureInput::Star)
             .expect("valid emitted counts with a zero tail");
-        assert!(validate_h3_count_partition(&[2, 0, 0], 3, 2, 2).is_err());
-        assert!(validate_h3_count_partition(&[u64::MAX, 1], 2, 2, u64::MAX).is_err());
-        assert!(validate_h3_count_partition(&[2, 3, 0], 3, 2, 6).is_err());
-        assert!(validate_h3_count_partition(&[2, 3, 1], 3, 2, 5).is_err());
+        assert!(validate_h3_count_partition(&[2, 0, 0], 3, 2, 2, HashMeasureInput::Star).is_err());
+        assert!(
+            validate_h3_count_partition(&[u64::MAX, 1], 2, 2, u64::MAX, HashMeasureInput::Star)
+                .is_err()
+        );
+        assert!(validate_h3_count_partition(&[2, 3, 0], 3, 2, 6, HashMeasureInput::Star).is_err());
+        assert!(validate_h3_count_partition(&[2, 3, 1], 3, 2, 5, HashMeasureInput::Star).is_err());
     }
 
     #[test]
@@ -6289,8 +8872,347 @@ mod tests {
     }
 
     #[test]
+    fn integer_sum_avg_admits_bounded_multi_key_dictionaries() {
+        for type_oid in [INT2OID, INT4OID] {
+            for key_type in [
+                BOOLOID,
+                INT2OID,
+                INT4OID,
+                INT8OID,
+                FLOAT4OID,
+                FLOAT8OID,
+                DATEOID,
+                TIMESTAMPOID,
+                TIMESTAMPTZOID,
+                TEXTOID,
+                VARCHAROID,
+                BPCHAROID,
+            ] {
+                let mut spec = dense_integer_sum_avg_spec(type_oid);
+                spec.measures.pop();
+                let mut key = spec.group_keys[0].clone();
+                key.source = GroupKeySource::FactColumn(ColumnRef {
+                    relation_oid: spec.fact_rel,
+                    attno: 3,
+                    type_oid: key_type,
+                });
+                key.type_oid = key_type;
+                key.collation_oid = if is_text_family(key_type) { 950 } else { 0 };
+                spec.group_keys = vec![key.clone()];
+                for count in 1..=abi::PGACCEL_GROUPED_AGG_MAX_KEYS {
+                    spec.group_keys.resize(count, key.clone());
+                    assert_eq!(
+                        planned_descriptor_kernel_mode(&spec, false),
+                        GroupedAggKernelMode::ParallelDenseInteger
+                    );
+                }
+                spec.group_keys.push(key);
+                assert_eq!(
+                    planned_descriptor_kernel_mode(&spec, false),
+                    GroupedAggKernelMode::SerialGeneric
+                );
+                spec.group_keys.clear();
+                assert_eq!(
+                    planned_descriptor_kernel_mode(&spec, false),
+                    GroupedAggKernelMode::ParallelDenseInteger
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn independent_integer_filters_bind_raw_inputs_and_keep_exact_states() {
+        let mut spec = dense_integer_sum_avg_spec(INT4OID);
+        let count = spec.measures.pop().expect("count fixture");
+        let mut second = spec.measures[0].clone();
+        let MeasureExpr::Column(input) = spec.measures[0].expression else {
+            unreachable!()
+        };
+        second.expression = MeasureExpr::Column(ColumnRef {
+            attno: 3,
+            type_oid: INT2OID,
+            ..input
+        });
+        spec.measures[0].filter = FilterSpec::Ranges {
+            input,
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::I32(0),
+                hi: ScalarValue::I32(i32::MAX),
+            }],
+        };
+        second.filter = FilterSpec::Ranges {
+            input,
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::I32(i32::MIN),
+                hi: ScalarValue::I32(-1),
+            }],
+        };
+        spec.measures.push(second);
+        spec.measures.push(count);
+        assert!(canonical_dense_filtered_integer_sum_avg(&spec));
+        let mode = planned_descriptor_kernel_mode(&spec, false);
+        assert_eq!(mode, GroupedAggKernelMode::ParallelDenseInteger);
+        assert_eq!(
+            classify_descriptor_specialization(&spec, mode).label(),
+            "dense_filtered_integer_sum_avg_plain"
+        );
+        let desc = zero_descriptor(&spec, &[BOOLOID], &[INT4OID, INT2OID]);
+        assert!(parallel_dense_integer_shape(&desc));
+        assert_eq!(desc.measure_filters[1].predicate_measure_slot, 1);
+        let mut malformed = desc;
+        malformed.measure_filters[0].predicate_measure_slot = 2; // COUNT has no value.
+        assert!(!parallel_dense_integer_shape(&malformed));
+        malformed = desc;
+        malformed.measure_filters[0].predicate_range_count = -1;
+        assert!(!parallel_dense_integer_shape(&malformed));
+        malformed = desc;
+        malformed.measure_filters[0].predicate_hi[0] = scalar_value(ScalarValue::I32(-1));
+        assert!(!parallel_dense_integer_shape(&malformed));
+        malformed = desc;
+        malformed.measure_filters[0].predicate_hi[0] = scalar_value(ScalarValue::I32(0));
+        assert!(parallel_dense_integer_shape(&malformed)); // Equality is exact.
+        let mut unsupported = spec.clone();
+        unsupported.measures[2].filter = spec.measures[0].filter.clone();
+        assert!(canonical_dense_filtered_integer_sum_avg(&unsupported));
+        let FilterSpec::Ranges { input, .. } = &mut spec.measures[0].filter else {
+            unreachable!()
+        };
+        input.attno = 9;
+        assert!(canonical_dense_filtered_integer_sum_avg(&spec));
+        assert_eq!(
+            planned_descriptor_kernel_mode(&spec, false),
+            GroupedAggKernelMode::ParallelDenseInteger
+        );
+        let FilterSpec::Ranges { input, .. } = &mut spec.measures[0].filter else {
+            unreachable!()
+        };
+        input.relation_oid = 99;
+        assert!(!canonical_dense_filtered_integer_sum_avg(&spec));
+        assert_eq!(
+            planned_descriptor_kernel_mode(&spec, false),
+            GroupedAggKernelMode::SerialGeneric
+        );
+    }
+
+    #[test]
+    fn integer_count_outputs_share_nullable_states_and_match_physical_modes() {
+        for filtered in [false, true] {
+            for combined in [false, true] {
+                for lanes in 1..=4 {
+                    let mut spec = dense_integer_sum_avg_spec(INT4OID);
+                    spec.measures.truncate(1);
+                    if !combined {
+                        spec.measures[0].outputs.clear();
+                    }
+                    spec.measures[0]
+                        .outputs
+                        .push(crate::engine::spec::AggregateOutput {
+                            source: AggregateSource::Value,
+                            kind: AggregateKind::Count,
+                        });
+                    let value = spec.measures[0].clone();
+                    spec.measures = (0..lanes)
+                        .map(|slot| {
+                            let mut measure = value.clone();
+                            let MeasureExpr::Column(ref mut column) = measure.expression else {
+                                unreachable!()
+                            };
+                            column.attno += slot as i32;
+                            if filtered {
+                                measure.filter = FilterSpec::Ranges {
+                                    input: *column,
+                                    ranges: vec![ScalarRange {
+                                        lo: ScalarValue::I32(0),
+                                        hi: ScalarValue::I32(20),
+                                    }],
+                                };
+                            }
+                            measure
+                        })
+                        .collect();
+                    let mode = planned_descriptor_kernel_mode(&spec, false);
+                    let desc = zero_descriptor(&spec, &[BOOLOID], &vec![INT4OID; lanes]);
+                    if lanes == 1 && !filtered && !combined {
+                        assert_eq!(mode, GroupedAggKernelMode::ParallelDenseCount);
+                        assert!(parallel_dense_count_shape(&desc));
+                        assert!(!parallel_dense_integer_shape(&desc));
+                    } else {
+                        assert_eq!(mode, GroupedAggKernelMode::ParallelDenseInteger);
+                        assert!(parallel_dense_integer_shape(&desc));
+                        assert_eq!(
+                            classify_descriptor_specialization(&spec, mode).label(),
+                            "dense_integer_with_counts_plain"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn multiple_integer_sum_avg_measures_bind_independent_states() {
+        for lanes in 2..=abi::PGACCEL_GROUPED_AGG_MAX_MEASURES {
+            for with_count in [false, true] {
+                if lanes == abi::PGACCEL_GROUPED_AGG_MAX_MEASURES && with_count {
+                    continue;
+                }
+                let mut spec = dense_integer_sum_avg_spec(INT4OID);
+                let count = spec.measures.pop().expect("fixture count measure");
+                let template = spec.measures[0].clone();
+                spec.measures.clear();
+                let mut types = Vec::new();
+                for slot in 0..lanes {
+                    let mut measure = template.clone();
+                    let MeasureExpr::Column(column) = &mut measure.expression else {
+                        unreachable!()
+                    };
+                    column.attno = i32::try_from(slot + 2).expect("bounded measure slot");
+                    column.type_oid = if slot % 2 == 0 { INT2OID } else { INT4OID };
+                    types.push(column.type_oid);
+                    spec.measures.push(measure);
+                }
+                if with_count {
+                    spec.measures.push(count);
+                }
+                assert!(canonical_dense_multi_integer_sum_avg(&spec));
+                let mode = planned_descriptor_kernel_mode(&spec, false);
+                assert_eq!(mode, GroupedAggKernelMode::ParallelDenseInteger);
+                assert_eq!(
+                    classify_descriptor_specialization(&spec, mode).label(),
+                    "dense_multi_integer_sum_avg_plain"
+                );
+                let desc = zero_descriptor(&spec, &[BOOLOID], &types);
+                assert!(parallel_dense_multi_integer_shape(&desc));
+                assert!(dense_one_shot_eligible(&desc, 1_000_000));
+                let mut bounded = desc;
+                bounded.group_capacity = 100_000;
+                let chunk_rows = dense_partial_chunk_rows(&bounded, 1_000_000);
+                assert!(chunk_rows >= DENSE_INTEGER_CHUNK_ROWS);
+                let bytes = bounded.group_capacity
+                    * lanes
+                    * chunk_rows.div_ceil(DENSE_INTEGER_CHUNK_ROWS)
+                    * DENSE_INTEGER_PARTIAL_BYTES;
+                assert!(bytes <= DENSE_INTEGER_MAX_PARTIAL_BYTES);
+                assert!(
+                    bytes + bounded.group_capacity * lanes * DENSE_INTEGER_PARTIAL_BYTES
+                        > DENSE_INTEGER_MAX_PARTIAL_BYTES
+                );
+                let mut unsupported = desc;
+                unsupported.measures[1].agg_mask |= abi::PGACCEL_GROUPED_AGG_LANE_SUMSQ;
+                assert!(!parallel_dense_integer_shape(&unsupported));
+                let mut unsupported = spec.clone();
+                unsupported.measures[1].outputs[0].kind = AggregateKind::StddevSamp;
+                assert_eq!(
+                    planned_descriptor_kernel_mode(&unsupported, false),
+                    GroupedAggKernelMode::SerialGeneric
+                );
+                let mut unsupported = spec;
+                let MeasureExpr::Column(column) = &mut unsupported.measures[1].expression else {
+                    unreachable!()
+                };
+                column.type_oid = INT8OID;
+                assert_eq!(
+                    planned_descriptor_kernel_mode(&unsupported, false),
+                    GroupedAggKernelMode::ParallelDenseNumeric
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn integer_extrema_combine_with_all_exact_outputs_and_independent_filters() {
+        let kinds = [
+            AggregateKind::Sum,
+            AggregateKind::Avg,
+            AggregateKind::Count,
+            AggregateKind::Min,
+            AggregateKind::Max,
+        ];
+        for type_oid in [INT2OID, INT4OID] {
+            for bits in 1..32 {
+                for grouped in [false, true] {
+                    for filtered in [false, true] {
+                        let mut spec = dense_integer_sum_avg_spec(type_oid);
+                        spec.measures.truncate(1);
+                        if !grouped {
+                            spec.group_keys.clear();
+                        }
+                        spec.measures[0].outputs = kinds
+                            .iter()
+                            .enumerate()
+                            .filter(|(index, _)| bits & (1 << index) != 0)
+                            .map(|(_, kind)| output(AggregateSource::Value, *kind))
+                            .collect();
+                        if filtered {
+                            spec.measures[0].filter = FilterSpec::Ranges {
+                                input: ColumnRef {
+                                    relation_oid: spec.fact_rel,
+                                    attno: 9,
+                                    type_oid: INT4OID,
+                                },
+                                ranges: vec![ScalarRange {
+                                    lo: ScalarValue::I32(-7),
+                                    hi: ScalarValue::I32(9),
+                                }],
+                            };
+                        }
+                        assert!(canonical_dense_integer_rollup(&spec));
+                        let expected = if bits == 4 && !filtered {
+                            GroupedAggKernelMode::ParallelDenseCount
+                        } else {
+                            GroupedAggKernelMode::ParallelDenseInteger
+                        };
+                        assert_eq!(planned_descriptor_kernel_mode(&spec, false), expected);
+                        let desc = zero_descriptor(
+                            &spec,
+                            if grouped { &[BOOLOID] } else { &[] },
+                            &if filtered {
+                                vec![type_oid, INT4OID]
+                            } else {
+                                vec![type_oid]
+                            },
+                        );
+                        assert!(
+                            parallel_dense_integer_shape(&desc)
+                                || parallel_dense_count_shape(&desc)
+                        );
+                        assert_eq!(
+                            desc.measures[0].agg_mask & abi::PGACCEL_GROUPED_AGG_LANE_MIN != 0,
+                            bits & 8 != 0
+                        );
+                        assert_eq!(
+                            desc.measures[0].agg_mask & abi::PGACCEL_GROUPED_AGG_LANE_MAX != 0,
+                            bits & 16 != 0
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn widened_integer_sum_avg_descriptors_share_exact_sum_and_nonnull_state() {
         for type_oid in [INT2OID, INT4OID] {
+            for kinds in [
+                vec![AggregateKind::Sum],
+                vec![AggregateKind::Avg],
+                vec![AggregateKind::Sum, AggregateKind::Avg],
+            ] {
+                let mut optional = dense_integer_sum_avg_spec(type_oid);
+                optional.measures[0]
+                    .outputs
+                    .retain(|output| kinds.contains(&output.kind));
+                optional.measures.pop();
+                let desc = zero_descriptor(&optional, &[BOOLOID], &[type_oid]);
+                assert_eq!(desc.measure_count, 1);
+                assert_eq!(desc.measures[0].agg_mask, abi::PGACCEL_GROUPED_AGG_LANE_SUM);
+                assert_eq!(
+                    desc.measures[0].accumulator_kind,
+                    abi::PGACCEL_GROUPED_AGG_ACCUM_I64
+                );
+                assert!(parallel_dense_integer_shape(&desc));
+                assert!(dense_one_shot_eligible(&desc, 1_000_000));
+            }
             let spec = dense_integer_sum_avg_spec(type_oid);
             let desc = zero_descriptor(&spec, &[BOOLOID], &[type_oid]);
             assert_eq!(desc.measure_count, 2);
@@ -6314,6 +9236,16 @@ mod tests {
 
     #[test]
     fn only_typed_gpu_numeric_overflow_reaches_sql_overflow_path() {
+        let date = gpu_execution_error(
+            "kernel failed",
+            GpuError::new(
+                crate::gpu::GpuErrorDomain::GroupedAgg,
+                crate::gpu::GpuOperation::Kernel("grouped_agg_execute"),
+                GpuStatusDetail::DateOutOfRange,
+            ),
+        );
+        assert_eq!(date, DescriptorAggExecutionError::DateOutOfRange);
+        assert_eq!(date.to_string(), "date out of range");
         let numeric = gpu_execution_error(
             "kernel failed",
             GpuError::new(
@@ -6323,6 +9255,17 @@ mod tests {
             ),
         );
         assert_eq!(numeric, DescriptorAggExecutionError::NumericOverflow);
+
+        let division = gpu_execution_error(
+            "kernel failed",
+            GpuError::new(
+                crate::gpu::GpuErrorDomain::GroupedAgg,
+                crate::gpu::GpuOperation::Kernel("grouped_agg_execute"),
+                GpuStatusDetail::DivisionByZero,
+            ),
+        );
+        assert_eq!(division, DescriptorAggExecutionError::DivisionByZero);
+        assert_eq!(division.to_string(), "division by zero");
 
         let invalid = gpu_execution_error(
             "kernel failed",
@@ -6445,11 +9388,11 @@ mod tests {
     #[test]
     fn h3_count_partition_reports_shape_and_capacity_errors() {
         assert_eq!(
-            validate_h3_count_partition(&[1], 2, 1, 1),
+            validate_h3_count_partition(&[1], 2, 1, 1, HashMeasureInput::Star),
             Err("H3 COUNT(*) lane has length 1, expected 2".to_owned())
         );
         assert_eq!(
-            validate_h3_count_partition(&[1], 1, 2, 1),
+            validate_h3_count_partition(&[1], 1, 2, 1, HashMeasureInput::Star),
             Err("H3 emitted group count exceeds group capacity".to_owned())
         );
     }
@@ -6505,6 +9448,14 @@ mod tests {
         artifact_types: &[u32],
         dispatch_types: &[u32],
     ) -> abi::PgaccelGroupedAggDesc {
+        assert!(
+            !has_numeric_measure(spec)
+                && !spec
+                    .measures
+                    .iter()
+                    .any(|measure| matches!(measure.expression, MeasureExpr::Bytecode { .. })),
+            "use an owned bound descriptor for NUMERIC/scalar views"
+        );
         let artifact = zero_artifact(spec, artifact_types);
         let requests = dispatch_column_refs(&artifact.resolved_spec).expect("dispatch requests");
         assert_eq!(requests.len(), dispatch_types.len());
@@ -6514,11 +9465,1145 @@ mod tests {
                 type_oid: pg_sys::Oid::from(*type_oid),
             })
             .collect::<Vec<_>>();
-        build_descriptor(&artifact, &requests, &views).expect("zero descriptor binds")
+        build_descriptor(&artifact, &requests, &views)
+            .expect("zero descriptor binds")
+            .desc
     }
 
     fn output(source: AggregateSource, kind: AggregateKind) -> AggregateOutput {
         AggregateOutput { source, kind }
+    }
+
+    #[test]
+    fn integer_where_requires_bound_exact_predicate_inputs() {
+        let mut integer = dense_integer_sum_avg_spec(INT4OID);
+        let MeasureExpr::Column(value) = integer.measures[0].expression else {
+            unreachable!()
+        };
+        for ranges in 1..=abi::PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES {
+            integer.fact_filter = FilterSpec::Ranges {
+                input: value,
+                ranges: (0..ranges)
+                    .map(|n| ScalarRange {
+                        lo: ScalarValue::I32(n as i32 * 10),
+                        hi: ScalarValue::I32(n as i32 * 10 + 5),
+                    })
+                    .collect(),
+            };
+            assert!(canonical_dense_integer_rollup(&integer));
+            assert_eq!(
+                planned_descriptor_kernel_mode(&integer, false),
+                GroupedAggKernelMode::ParallelDenseInteger
+            );
+        }
+        for invalid in [
+            ColumnRef { attno: 99, ..value },
+            ColumnRef {
+                relation_oid: 99,
+                ..value
+            },
+            ColumnRef {
+                type_oid: INT8OID,
+                ..value
+            },
+        ] {
+            let mut bad = integer.clone();
+            if let FilterSpec::Ranges { input, .. } = &mut bad.fact_filter {
+                *input = invalid;
+            }
+            assert!(!canonical_dense_integer_rollup(&bad));
+        }
+        integer.fact_filter = FilterSpec::Mask {
+            input: ColumnRef {
+                attno: 99,
+                type_oid: BOOLOID,
+                ..value
+            },
+            kind: MaskKind::Sql,
+        };
+        assert!(canonical_dense_integer_rollup(&integer));
+        integer.group_keys.clear();
+        assert!(canonical_dense_integer_rollup(&integer));
+    }
+
+    #[test]
+    fn spatial_integer_rollups_preserve_projection_and_geometry_guards() {
+        for kind in [AggregateKind::Sum, AggregateKind::Avg, AggregateKind::Count] {
+            for type_oid in [INT2OID, INT4OID] {
+                let mut integer = spec(MeasureExpr::Column(column(type_oid)), kind);
+                integer.fact_filter = spatial_count_shape().0.fact_filter;
+                if let MeasureExpr::Column(ref mut value) = integer.measures[0].expression {
+                    value.attno = 2;
+                }
+                let projection = projection(
+                    kind,
+                    type_oid,
+                    if kind == AggregateKind::Avg {
+                        NUMERICOID
+                    } else {
+                        INT8OID
+                    },
+                );
+                assert!(canonical_dense_integer_rollup(&integer));
+                assert!(
+                    validate_normal_spatial_candidate_capability(&integer, &projection).is_ok()
+                );
+                assert!(validate_normal_descriptor_capability(&integer, &projection).is_err());
+                assert_eq!(
+                    planned_descriptor_kernel_mode(&integer, false),
+                    if kind == AggregateKind::Count {
+                        GroupedAggKernelMode::ParallelDenseCount
+                    } else {
+                        GroupedAggKernelMode::ParallelDenseInteger
+                    }
+                );
+                let mut bad_output = projection.clone();
+                bad_output.slots[0].result_type_oid = FLOAT8OID;
+                assert!(
+                    validate_normal_spatial_candidate_capability(&integer, &bad_output).is_err()
+                );
+                let FilterSpec::Spatial { predicate, .. } = &mut integer.fact_filter else {
+                    unreachable!()
+                };
+                *predicate = SpatialPredicateKind::Covers;
+                assert!(
+                    validate_normal_spatial_candidate_capability(&integer, &projection).is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn spatial_scalar_rollups_require_the_geometry_and_typed_program_contracts() {
+        for kind in [
+            AggregateKind::Sum,
+            AggregateKind::Avg,
+            AggregateKind::Count,
+            AggregateKind::Min,
+            AggregateKind::Max,
+        ] {
+            let mut query = spec(scalar_expression_fixture(), kind);
+            if let MeasureExpr::Bytecode { inputs, .. } = &mut query.measures[0].expression {
+                for input in inputs {
+                    input.attno += 2;
+                }
+            }
+            query.fact_filter = spatial_count_shape().0.fact_filter;
+            let result = match kind {
+                AggregateKind::Avg => NUMERICOID,
+                AggregateKind::Min | AggregateKind::Max => INT4OID,
+                _ => INT8OID,
+            };
+            let projection = projection(kind, INT4OID, result);
+            assert!(canonical_dense_scalar_programs(&query));
+            assert!(validate_normal_spatial_candidate_capability(&query, &projection).is_ok());
+            assert!(validate_normal_descriptor_capability(&query, &projection).is_err());
+            assert_eq!(
+                planned_descriptor_kernel_mode(&query, false),
+                GroupedAggKernelMode::ParallelDenseInteger
+            );
+            let mut malformed = query.clone();
+            if let MeasureExpr::Bytecode { program, .. } = &mut malformed.measures[0].expression {
+                program[0] = 0;
+            }
+            assert!(validate_normal_spatial_candidate_capability(&malformed, &projection).is_err());
+            let FilterSpec::Spatial {
+                predicate,
+                left,
+                right,
+                ..
+            } = &mut query.fact_filter
+            else {
+                unreachable!()
+            };
+            *predicate = SpatialPredicateKind::Covers;
+            std::mem::swap(left, right);
+            assert!(validate_normal_spatial_candidate_capability(&query, &projection).is_ok());
+            let FilterSpec::Spatial { predicate, .. } = &mut query.fact_filter else {
+                unreachable!()
+            };
+            *predicate = SpatialPredicateKind::Within;
+            assert!(validate_normal_spatial_candidate_capability(&query, &projection).is_err());
+        }
+    }
+
+    #[test]
+    fn spatial_where_mask_program_requires_the_exact_carrier_context() {
+        use crate::engine::spec::scalar::{ScalarInstruction as I, ScalarProgram, ScalarType};
+        let mut input = column(INT4OID);
+        input.attno = 3;
+        let inputs = vec![input];
+        let program = ScalarProgram::new(
+            vec![ScalarType::Int4],
+            ScalarType::Bool,
+            vec![I::PredicateMask],
+        )
+        .expect("mask producer")
+        .encode();
+        let mut query = spec(
+            MeasureExpr::Bytecode {
+                inputs: inputs.clone(),
+                program: program.clone(),
+                result_type_oid: BOOLOID,
+            },
+            AggregateKind::Count,
+        );
+        query.fact_filter = FilterSpec::SpatialAnd {
+            spatial: Box::new(spatial_count_shape().0.fact_filter),
+            scalar: Box::new(FilterSpec::Bytecode { inputs, program }),
+        };
+        let projection = projection(AggregateKind::Count, BOOLOID, INT8OID);
+        assert!(query.validate().is_ok());
+        assert!(validate_normal_spatial_candidate_capability(&query, &projection).is_ok());
+        assert!(validate_normal_descriptor_capability(&query, &projection).is_err());
+        let mut invalid = query.clone();
+        invalid.fact_filter = *match invalid.fact_filter {
+            FilterSpec::SpatialAnd { scalar, .. } => scalar,
+            _ => unreachable!(),
+        };
+        assert!(validate_normal_descriptor_capability(&invalid, &projection).is_err());
+        invalid = query.clone();
+        invalid.measures.push(invalid.measures[0].clone());
+        assert!(validate_normal_spatial_candidate_capability(&invalid, &projection).is_err());
+        let FilterSpec::SpatialAnd { scalar, .. } = &mut query.fact_filter else {
+            unreachable!()
+        };
+        let FilterSpec::Bytecode { program, .. } = scalar.as_mut() else {
+            unreachable!()
+        };
+        *program = ScalarProgram::new(
+            vec![ScalarType::Int4],
+            ScalarType::Bool,
+            vec![I::Bool(true)],
+        )
+        .expect("no mask")
+        .encode();
+        assert!(query.validate().is_err());
+    }
+
+    #[test]
+    fn spatial_numeric_admission_keeps_geometry_and_projection_guards() {
+        let mut numeric = spec(MeasureExpr::Column(column(NUMERICOID)), AggregateKind::Sum);
+        numeric.fact_filter = spatial_count_shape().0.fact_filter;
+        // The geometry and value are different physical attributes.
+        if let MeasureExpr::Column(ref mut value) = numeric.measures[0].expression {
+            value.attno = 2;
+        }
+        let projection = projection(AggregateKind::Sum, NUMERICOID, NUMERICOID);
+        assert!(canonical_dense_numeric_sum_avg(&numeric));
+        assert!(validate_normal_spatial_candidate_capability(&numeric, &projection).is_ok());
+        assert!(validate_normal_descriptor_capability(&numeric, &projection).is_err());
+        assert_eq!(
+            planned_descriptor_kernel_mode(&numeric, false),
+            GroupedAggKernelMode::ParallelDenseNumeric
+        );
+        let mut bad_output = projection.clone();
+        bad_output.slots[0].result_type_oid = INT8OID;
+        assert!(validate_normal_spatial_candidate_capability(&numeric, &bad_output).is_err());
+        let FilterSpec::Spatial { predicate, .. } = &mut numeric.fact_filter else {
+            unreachable!()
+        };
+        *predicate = SpatialPredicateKind::Covers;
+        assert!(validate_normal_spatial_candidate_capability(&numeric, &projection).is_err());
+        let FilterSpec::Spatial { left, right, .. } = &mut numeric.fact_filter else {
+            unreachable!()
+        };
+        std::mem::swap(left, right);
+        assert!(validate_normal_spatial_candidate_capability(&numeric, &projection).is_ok());
+    }
+
+    #[test]
+    fn numeric_descriptor_capability_supports_independent_count_states() {
+        let base = spec(MeasureExpr::Column(column(NUMERICOID)), AggregateKind::Sum);
+        for kind in [AggregateKind::Sum, AggregateKind::Avg, AggregateKind::Count] {
+            let mut numeric = base.clone();
+            numeric.measures[0].outputs = vec![output(AggregateSource::Value, kind)];
+            let projection = projection(
+                kind,
+                NUMERICOID,
+                if kind == AggregateKind::Count {
+                    INT8OID
+                } else {
+                    NUMERICOID
+                },
+            );
+            assert!(validate_runtime_capability(&numeric, &projection).is_ok());
+            assert!(validate_normal_descriptor_capability(&numeric, &projection).is_ok());
+            for count in 1..=abi::PGACCEL_GROUPED_AGG_MAX_MEASURES {
+                numeric.measures = vec![base.measures[0].clone(); count];
+                for grouped in [false, true] {
+                    numeric.group_keys = if grouped {
+                        dense_bool_count_spec().group_keys
+                    } else {
+                        vec![]
+                    };
+                    assert!(canonical_dense_numeric_sum_avg(&numeric));
+                    assert_eq!(
+                        planned_descriptor_kernel_mode(&numeric, false),
+                        GroupedAggKernelMode::ParallelDenseNumeric
+                    );
+                    assert_eq!(
+                        planned_descriptor_kernel_mode(&numeric, true),
+                        GroupedAggKernelMode::SerialGeneric
+                    );
+                }
+            }
+        }
+        for kind in [
+            AggregateKind::Min,
+            AggregateKind::Max,
+            AggregateKind::StddevSamp,
+        ] {
+            let mut invalid = base.clone();
+            invalid.measures[0].outputs = vec![output(AggregateSource::Value, kind)];
+            assert!(!canonical_dense_numeric_sum_avg(&invalid));
+            assert!(
+                validate_measure_outputs(
+                    &invalid.measures[0].expression,
+                    &invalid.measures[0].outputs
+                )
+                .is_err()
+            );
+        }
+        let mut mixed = base.clone();
+        mixed.measures.push(
+            spec(MeasureExpr::CountStar, AggregateKind::Count)
+                .measures
+                .remove(0),
+        );
+        assert!(canonical_dense_numeric_sum_avg(&mixed));
+        mixed.measures.swap(0, 1);
+        assert!(!canonical_dense_numeric_sum_avg(&mixed));
+        mixed.measures[0] = spec(MeasureExpr::Column(column(INT4OID)), AggregateKind::Sum)
+            .measures
+            .remove(0);
+        assert!(canonical_dense_numeric_sum_avg(&mixed));
+        for type_oid in [INT2OID, INT4OID, INT8OID] {
+            mixed.measures[0].expression = MeasureExpr::Column(column(type_oid));
+            for kind in [AggregateKind::Sum, AggregateKind::Avg, AggregateKind::Count] {
+                mixed.measures[0].outputs = vec![output(AggregateSource::Value, kind)];
+                assert!(canonical_dense_numeric_sum_avg(&mixed));
+            }
+        }
+        mixed.measures[0].expression = MeasureExpr::Column(column(FLOAT8OID));
+        assert!(!canonical_dense_numeric_sum_avg(&mixed));
+        let mut filtered = base.clone();
+        filtered.fact_filter = FilterSpec::Mask {
+            input: column(BOOLOID),
+            kind: MaskKind::Sql,
+        };
+        assert!(canonical_dense_numeric_sum_avg(&filtered));
+        filtered.measures[0].filter = filtered.fact_filter.clone();
+        filtered.fact_filter = FilterSpec::None;
+        assert!(!canonical_dense_numeric_sum_avg(&filtered));
+        let mut foreign = base;
+        foreign.measures[0].expression = MeasureExpr::Column(ColumnRef {
+            relation_oid: 43,
+            ..column(NUMERICOID)
+        });
+        assert!(!canonical_dense_numeric_sum_avg(&foreign));
+    }
+
+    #[test]
+    fn numeric_filter_binds_an_independent_typed_raw_input_without_a_value_state() {
+        let mut numeric = spec(MeasureExpr::Column(column(NUMERICOID)), AggregateKind::Sum);
+        let predicate = ColumnRef {
+            attno: 2,
+            ..column(INT4OID)
+        };
+        numeric.measures[0].filter = FilterSpec::Ranges {
+            input: predicate,
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::I32(-1),
+                hi: ScalarValue::I32(2),
+            }],
+        };
+        assert!(canonical_dense_numeric_sum_avg(&numeric));
+        let artifact = zero_artifact(&numeric, &[]);
+        let requests = dispatch_column_refs(&numeric).expect("decimal and predicate requests");
+        let views = [
+            ResidentColumnView::Empty {
+                type_oid: pg_sys::Oid::from(NUMERICOID),
+            },
+            ResidentColumnView::Empty {
+                type_oid: pg_sys::Oid::from(INT4OID),
+            },
+        ];
+        let bound = build_descriptor(&artifact, &requests, &views).expect("empty filtered binding");
+        assert_eq!(bound.desc.measure_count, 1);
+        assert_eq!(
+            bound.desc.measures[0].flags,
+            abi::PGACCEL_GROUPED_AGG_MEASURE_FLAG_FILTER_INPUT
+        );
+        assert_eq!(
+            bound.desc.measures[0].rhs.physical_type,
+            abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32
+        );
+        assert_eq!(bound.desc.measures[0].rhs.element_bytes, 4);
+        assert_eq!(
+            bound.desc.measure_filters[0].predicate_source,
+            abi::PGACCEL_GROUPED_AGG_PRED_SOURCE_RHS
+        );
+        assert_eq!(bound.desc.measure_filters[0].predicate_measure_slot, 0);
+        assert!(build_descriptor(&artifact, &requests[..1], &views[..1]).is_err());
+        for invalid in [
+            ColumnRef {
+                relation_oid: 99,
+                ..predicate
+            },
+            ColumnRef {
+                type_oid: NUMERICOID,
+                ..predicate
+            },
+            ColumnRef {
+                type_oid: INT8OID,
+                ..predicate
+            },
+        ] {
+            let mut changed = numeric.clone();
+            if let FilterSpec::Ranges { input, .. } = &mut changed.measures[0].filter {
+                *input = invalid;
+            }
+            assert!(!canonical_dense_numeric_sum_avg(&changed));
+        }
+    }
+
+    #[test]
+    fn integer_filter_binds_predicate_only_columns_without_extra_states() {
+        for type_oid in [INT2OID, INT4OID] {
+            let mut query = spec(MeasureExpr::Column(column(type_oid)), AggregateKind::Sum);
+            query.group_keys.clear();
+            let predicate = ColumnRef {
+                attno: 9,
+                ..column(INT4OID)
+            };
+            query.measures[0].filter = FilterSpec::Ranges {
+                input: predicate,
+                ranges: vec![ScalarRange {
+                    lo: ScalarValue::I32(1),
+                    hi: ScalarValue::I32(1),
+                }],
+            };
+            for count in 1..=4 {
+                query.measures.resize(count, query.measures[0].clone());
+                let artifact = zero_artifact(&query, &[]);
+                let requests = dispatch_column_refs(&query).expect("value and predicate");
+                assert_eq!(requests.len(), 2);
+                let views = [
+                    ResidentColumnView::Empty {
+                        type_oid: pg_sys::Oid::from(type_oid),
+                    },
+                    ResidentColumnView::Empty {
+                        type_oid: pg_sys::Oid::from(INT4OID),
+                    },
+                ];
+                let bound =
+                    build_descriptor(&artifact, &requests, &views).expect("predicate binding");
+                assert_eq!(bound.desc.measure_count as usize, count);
+                assert!(parallel_dense_integer_shape(&bound.desc));
+                for slot in 0..count {
+                    assert_eq!(
+                        bound.desc.measure_filters[slot].predicate_measure_slot,
+                        slot as i32
+                    );
+                    assert_eq!(
+                        bound.desc.measure_filters[slot].predicate_source,
+                        abi::PGACCEL_GROUPED_AGG_PRED_SOURCE_RHS
+                    );
+                    assert_eq!(
+                        bound.desc.measures[slot].flags,
+                        abi::PGACCEL_GROUPED_AGG_MEASURE_FLAG_FILTER_INPUT
+                    );
+                }
+                assert!(build_descriptor(&artifact, &requests[..1], &views[..1]).is_err());
+                let mut malformed = bound.desc;
+                malformed.measures[0].flags = 0;
+                assert!(!parallel_dense_integer_shape(&malformed));
+                malformed = bound.desc;
+                malformed.measures[0].rhs.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT64;
+                assert!(!parallel_dense_integer_shape(&malformed));
+            }
+        }
+    }
+
+    fn scalar_expression_fixture() -> MeasureExpr {
+        MeasureExpr::Bytecode {
+            inputs: vec![
+                column(INT4OID),
+                ColumnRef {
+                    attno: 2,
+                    ..column(BOOLOID)
+                },
+            ],
+            program: vec![
+                crate::engine::spec::scalar::SCALAR_PROGRAM_MAGIC,
+                2,
+                2,
+                2,
+                1,
+                0,
+                0,
+            ],
+            result_type_oid: INT4OID,
+        }
+    }
+
+    #[test]
+    fn scalar_metadata_forecast_covers_simultaneous_owners_and_rejects_opaque_wire() {
+        let mut query = spec(scalar_expression_fixture(), AggregateKind::Sum);
+        let baseline = resident_live_bytes();
+        for slots in 1..=4 {
+            query.measures.resize(slots, query.measures[0].clone());
+            let artifact = zero_artifact(&query, &[]);
+            let requests = dispatch_column_refs(&query).expect("requests");
+            let views = [
+                ResidentColumnView::Empty {
+                    type_oid: pg_sys::INT4OID,
+                },
+                ResidentColumnView::Empty {
+                    type_oid: pg_sys::BOOLOID,
+                },
+            ];
+            let bound = build_descriptor(&artifact, &requests, &views).expect("bound metadata");
+            // SAFETY: zero-row descriptors have no resident payload. These
+            // independent snapshots model bound + plan + session + chunk.
+            let plan = unsafe { ResolvedGroupedAggPlan::from_abi(bound.desc) }.expect("plan");
+            // SAFETY: same live zero-row metadata as above.
+            let session_snapshot = unsafe { ResolvedGroupedAggPlan::from_abi(bound.desc) }
+                .expect("independent session-sized snapshot");
+            let chunk = plan.row_chunk(0, 0).expect("owned chunk");
+            let peak = scalar_metadata_peak_bytes(&query).expect("peak");
+            assert_eq!(peak, resident_live_bytes() - baseline);
+            assert_eq!(peak, slots as u64 * 4 * (40 + 7 * 4 + 2 * 24));
+            drop(chunk);
+            drop(session_snapshot);
+        }
+        assert_eq!(resident_live_bytes(), baseline);
+        query.measures.resize(5, query.measures[0].clone());
+        assert!(scalar_metadata_peak_bytes(&query).is_err());
+        query.measures.truncate(1);
+        let MeasureExpr::Bytecode { program, .. } = &mut query.measures[0].expression else {
+            unreachable!()
+        };
+        program[0] = 0;
+        assert!(scalar_metadata_peak_bytes(&query).is_err());
+        assert_eq!(
+            scalar_metadata_peak_bytes(&spec(MeasureExpr::CountStar, AggregateKind::Count)),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn scalar_executor_binds_owned_metadata_and_independent_predicates() {
+        let baseline = resident_live_bytes();
+        let mut query = spec(scalar_expression_fixture(), AggregateKind::Sum);
+        query.measures[0].filter = FilterSpec::NullOrRanges {
+            input: ColumnRef {
+                attno: 9,
+                ..column(INT4OID)
+            },
+            ranges: vec![],
+        };
+        for slots in 1..=4 {
+            query.measures.resize(slots, query.measures[0].clone());
+            let artifact = zero_artifact(&query, &[]);
+            let requests = dispatch_column_refs(&query).expect("scalar and predicate requests");
+            assert_eq!(
+                requests.iter().map(|r| r.attno).collect::<Vec<_>>(),
+                vec![1, 2, 9]
+            );
+            let views = [
+                ResidentColumnView::Empty {
+                    type_oid: pg_sys::INT4OID,
+                },
+                ResidentColumnView::Empty {
+                    type_oid: pg_sys::BOOLOID,
+                },
+                ResidentColumnView::Empty {
+                    type_oid: pg_sys::INT4OID,
+                },
+            ];
+            let bound = build_descriptor(&artifact, &requests, &views).expect("scalar descriptor");
+            let snapshot_bytes =
+                (slots * crate::gpu::scalar_metadata_bytes(7, 2).expect("metadata size")) as u64;
+            assert_eq!(resident_live_bytes(), baseline + snapshot_bytes);
+            assert!(parallel_dense_integer_shape(&bound.desc));
+            for slot in 0..slots {
+                let owner = bound._scalar_views[slot]
+                    .as_ref()
+                    .expect("owned scalar metadata");
+                assert_eq!(owner._view.row_count, 0);
+                assert_eq!(owner._inputs.len(), 2);
+                assert_eq!(
+                    owner._inputs[0].physical_type,
+                    abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32
+                );
+                assert_eq!(
+                    owner._inputs[1].physical_type,
+                    abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL
+                );
+                assert_eq!(owner._view.words, owner._words.as_ptr());
+                assert_eq!(owner._view.inputs, owner._inputs.as_ptr());
+                assert_eq!(
+                    bound.desc.measures[slot].value.values,
+                    std::ptr::from_ref(owner._view.as_ref()).cast()
+                );
+                assert_eq!(
+                    bound.desc.measures[slot].op,
+                    abi::PGACCEL_GROUPED_AGG_MEASURE_SCALAR
+                );
+                assert_eq!(
+                    bound.desc.measure_filters[slot].predicate_source,
+                    abi::PGACCEL_GROUPED_AGG_PRED_SOURCE_RHS
+                );
+                assert_eq!(
+                    bound.desc.measure_filters[slot].predicate_measure_slot,
+                    slot as i32
+                );
+                assert_eq!(
+                    bound.desc.measure_filters[slot].flags,
+                    abi::PGACCEL_GROUPED_AGG_FILTER_ACCEPT_NULL
+                );
+            }
+            assert!(build_descriptor(&artifact, &requests[..2], &views[..2]).is_err());
+            // The bound owner can die once the facade has copied host metadata.
+            // SAFETY: zero-row resident views contain no active payload pointers.
+            let plan =
+                unsafe { ResolvedGroupedAggPlan::from_abi(bound.desc) }.expect("resolved scalar");
+            assert_eq!(resident_live_bytes(), baseline + 2 * snapshot_bytes);
+            drop(bound);
+            assert_eq!(resident_live_bytes(), baseline + snapshot_bytes);
+            assert!(plan.row_chunk(0, 0).is_ok());
+        }
+        assert_eq!(resident_live_bytes(), baseline);
+    }
+
+    #[test]
+    fn scalar_binding_rejects_opaque_programs_bad_oids_and_incomplete_bundles() {
+        let expression = scalar_expression_fixture();
+        let query = spec(expression.clone(), AggregateKind::Sum);
+        let requests = dispatch_column_refs(&query).expect("requests");
+        let views = [
+            ResidentColumnView::Empty {
+                type_oid: pg_sys::INT4OID,
+            },
+            ResidentColumnView::Empty {
+                type_oid: pg_sys::BOOLOID,
+            },
+        ];
+        let bind = |expr: &MeasureExpr, refs: &[ResidentColumnRef], rows| {
+            scalar_measure_column(
+                expr,
+                42,
+                refs,
+                &views,
+                rows,
+                abi::PGACCEL_GROUPED_AGG_LANE_SUM,
+            )
+        };
+        assert!(bind(&expression, &requests, 0).is_ok());
+        assert!(bind(&expression, &requests, 1).is_err());
+        assert!(bind(&expression, &requests[..1], 0).is_err());
+        let duplicate = [requests[0], requests[0]];
+        assert!(bind(&expression, &duplicate, 0).is_err());
+        for kind in 0..7 {
+            let mut changed = expression.clone();
+            let MeasureExpr::Bytecode {
+                inputs,
+                program,
+                result_type_oid,
+            } = &mut changed
+            else {
+                unreachable!()
+            };
+            match kind {
+                0 => *program = vec![1, 2, 3], // accepted opaque envelope is not executable SPG1
+                1 => program[5] = 99,
+                2 => inputs[0].type_oid = INT2OID,
+                3 => inputs[0].relation_oid = 43,
+                4 => inputs[0].attno = 0,
+                5 => inputs[0].attno = i32::MAX,
+                _ => *result_type_oid = BOOLOID,
+            }
+            assert!(bind(&changed, &requests, 0).is_err(), "mutation {kind}");
+        }
+        let wrong_views = [
+            ResidentColumnView::Empty {
+                type_oid: pg_sys::INT2OID,
+            },
+            ResidentColumnView::Empty {
+                type_oid: pg_sys::BOOLOID,
+            },
+        ];
+        assert!(
+            scalar_measure_column(
+                &expression,
+                42,
+                &requests,
+                &wrong_views,
+                0,
+                abi::PGACCEL_GROUPED_AGG_LANE_SUM
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn scalar_literal_boolean_and_date_count_bind_without_resident_inputs() {
+        for ty in [1, 2, 6] {
+            let query = spec(
+                MeasureExpr::Bytecode {
+                    inputs: vec![],
+                    program: vec![
+                        crate::engine::spec::scalar::SCALAR_PROGRAM_MAGIC,
+                        ty,
+                        0,
+                        3,
+                        ty,
+                    ],
+                    result_type_oid: match ty {
+                        1 => BOOLOID,
+                        6 => DATEOID,
+                        _ => INT4OID,
+                    },
+                },
+                AggregateKind::Count,
+            );
+            let artifact = zero_artifact(&query, &[]);
+            let bound = build_descriptor(&artifact, &[], &[]).expect("typed NULL literal");
+            assert!(parallel_dense_integer_shape(&bound.desc));
+            if ty == 6 {
+                for lanes in [
+                    abi::PGACCEL_GROUPED_AGG_LANE_MIN,
+                    abi::PGACCEL_GROUPED_AGG_LANE_MAX,
+                    abi::PGACCEL_GROUPED_AGG_LANE_COUNT
+                        | abi::PGACCEL_GROUPED_AGG_LANE_MIN
+                        | abi::PGACCEL_GROUPED_AGG_LANE_MAX,
+                ] {
+                    let mut date = bound.desc;
+                    date.measures[0].agg_mask = lanes;
+                    assert!(parallel_dense_integer_shape(&date), "DATE extrema mirror");
+                    // SAFETY: bound owns the complete scalar metadata; the
+                    // zero-row literal has no resident payloads to dereference.
+                    unsafe { ResolvedGroupedAggPlan::from_abi(date) }.expect("DATE extrema facade");
+                    date.measures[0].agg_mask |= abi::PGACCEL_GROUPED_AGG_LANE_SUM;
+                    assert!(
+                        !parallel_dense_integer_shape(&date),
+                        "DATE SUM is not an integer SUM"
+                    );
+                }
+            }
+            assert!(
+                bound._scalar_views[0]
+                    .as_ref()
+                    .expect("view")
+                    ._view
+                    .inputs
+                    .is_null()
+            );
+            let mut malformed = bound.desc;
+            malformed.measures[0].value.element_bytes = 4;
+            assert!(!parallel_dense_integer_shape(&malformed));
+            if ty == 1 || ty == 6 {
+                assert!(
+                    scalar_measure_column(
+                        &query.measures[0].expression,
+                        42,
+                        &[],
+                        &[],
+                        0,
+                        abi::PGACCEL_GROUPED_AGG_LANE_SUM
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scalar_where_requires_an_identical_unfiltered_boolean_carrier() {
+        use crate::engine::spec::scalar::{ScalarInstruction as I, ScalarProgram, ScalarType};
+        let inputs = vec![column(INT4OID)];
+        let program = ScalarProgram::new(
+            vec![ScalarType::Int4],
+            ScalarType::Bool,
+            vec![I::Input(0), I::Int4(0), I::Gt],
+        )
+        .expect("predicate")
+        .encode();
+        let expression = MeasureExpr::Bytecode {
+            inputs: inputs.clone(),
+            program: program.clone(),
+            result_type_oid: BOOLOID,
+        };
+        let mut query = spec(expression, AggregateKind::Count);
+        query.fact_filter = FilterSpec::Bytecode { inputs, program };
+        assert!(query.validate().is_ok());
+        assert!(canonical_dense_scalar_programs(&query));
+        assert_eq!(scalar_where_measure_binding(&query), Some(0));
+        let filter = build_filter(&query, 10, None).expect("scalar WHERE");
+        assert_eq!(
+            filter.predicate_source,
+            abi::PGACCEL_GROUPED_AGG_PRED_SOURCE_SCALAR
+        );
+        assert_eq!(filter.predicate_range_count, 0);
+        assert!(filter.mask.is_null());
+        let raw = spec(MeasureExpr::Column(column(BOOLOID)), AggregateKind::Count);
+        let mut desc = zero_descriptor(&raw, &[], &[BOOLOID]);
+        desc.measures[0].op = abi::PGACCEL_GROUPED_AGG_MEASURE_SCALAR;
+        desc.measures[0].value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL;
+        desc.where_filter = filter;
+        assert!(exact_dense_scalar_where(&desc));
+        desc.where_filter.flags = abi::PGACCEL_GROUPED_AGG_FILTER_ACCEPT_NULL;
+        assert!(!exact_dense_scalar_where(&desc));
+        query.measures[0].filter = FilterSpec::Ranges {
+            input: column(INT4OID),
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::I32(1),
+                hi: ScalarValue::I32(2),
+            }],
+        };
+        assert!(!canonical_dense_scalar_programs(&query));
+        assert!(build_filter(&query, 10, None).is_err());
+        query.measures[0].filter = FilterSpec::None;
+        let FilterSpec::Bytecode { program, .. } = &mut query.fact_filter else {
+            unreachable!()
+        };
+        *program = ScalarProgram::new(vec![ScalarType::Int4], ScalarType::Int4, vec![I::Input(0)])
+            .expect("non-Boolean")
+            .encode();
+        assert!(query.validate().is_err());
+        assert!(build_filter(&query, 10, None).is_err());
+    }
+
+    #[test]
+    fn scalar_runtime_family_admits_only_the_typed_dense_contract() {
+        let query = spec(scalar_expression_fixture(), AggregateKind::Sum);
+        let projection = projection(AggregateKind::Sum, INT4OID, INT8OID);
+        assert!(query.validate().is_ok());
+        assert!(validate_runtime_capability(&query, &projection).is_ok());
+        assert_eq!(
+            planned_descriptor_kernel_mode(&query, false),
+            GroupedAggKernelMode::ParallelDenseInteger
+        );
+        assert_eq!(
+            planned_descriptor_kernel_mode(&query, true),
+            GroupedAggKernelMode::SerialGeneric
+        );
+        assert_eq!(
+            classify_descriptor_specialization(&query, GroupedAggKernelMode::ParallelDenseInteger)
+                .label(),
+            "dense_scalar_programs_plain"
+        );
+        assert!(validate_normal_descriptor_capability(&query, &projection).is_ok());
+        let mut malformed = query.clone();
+        malformed.measures[0].expression = MeasureExpr::Bytecode {
+            inputs: vec![],
+            program: vec![1],
+            result_type_oid: INT4OID,
+        };
+        assert!(validate_runtime_capability(&malformed, &projection).is_err());
+        assert_eq!(
+            planned_descriptor_kernel_mode(&malformed, false),
+            GroupedAggKernelMode::SerialGeneric
+        );
+        let mut oversized = query.clone();
+        oversized.measures.resize(5, oversized.measures[0].clone());
+        assert!(validate_runtime_capability(&oversized, &projection).is_err());
+        let mut wrong_relation = query;
+        wrong_relation.fact_rel = 99;
+        assert!(validate_runtime_capability(&wrong_relation, &projection).is_err());
+    }
+
+    #[test]
+    fn scalar_mixed_states_preserve_independent_raw_filters_and_specialization() {
+        for type_oid in [INT2OID, INT4OID] {
+            let mut query = spec(scalar_expression_fixture(), AggregateKind::Avg);
+            let mut raw = spec(
+                MeasureExpr::Column(ColumnRef {
+                    attno: 3,
+                    ..column(type_oid)
+                }),
+                AggregateKind::Count,
+            )
+            .measures
+            .remove(0);
+            raw.filter = FilterSpec::NullOrRanges {
+                input: ColumnRef {
+                    attno: 9,
+                    ..column(INT4OID)
+                },
+                ranges: vec![],
+            };
+            query.measures.push(raw);
+            query.measures.push(
+                spec(MeasureExpr::CountStar, AggregateKind::Count)
+                    .measures
+                    .remove(0),
+            );
+            let projection = projection(AggregateKind::Avg, INT4OID, NUMERICOID);
+            assert!(validate_runtime_capability(&query, &projection).is_ok());
+            assert_eq!(
+                planned_descriptor_kernel_mode(&query, false),
+                GroupedAggKernelMode::ParallelDenseInteger
+            );
+            assert_eq!(
+                classify_descriptor_specialization(
+                    &query,
+                    GroupedAggKernelMode::ParallelDenseInteger
+                )
+                .label(),
+                "dense_scalar_programs_plain"
+            );
+            let artifact = zero_artifact(&query, &[]);
+            let requests = dispatch_column_refs(&query).expect("mixed inputs");
+            let views =
+                [INT4OID, BOOLOID, type_oid, INT4OID].map(|oid| ResidentColumnView::Empty {
+                    type_oid: pg_sys::Oid::from(oid),
+                });
+            let bound = build_descriptor(&artifact, &requests, &views).expect("mixed binding");
+            assert!(parallel_dense_integer_shape(&bound.desc));
+            assert_eq!(
+                bound.desc.measures[1].flags,
+                abi::PGACCEL_GROUPED_AGG_MEASURE_FLAG_FILTER_INPUT
+            );
+            assert_eq!(
+                bound.desc.measure_filters[1].predicate_source,
+                abi::PGACCEL_GROUPED_AGG_PRED_SOURCE_RHS
+            );
+            query.fact_filter = FilterSpec::Mask {
+                input: ColumnRef {
+                    attno: 2,
+                    ..column(BOOLOID)
+                },
+                kind: MaskKind::Sql,
+            };
+            assert_eq!(
+                classify_descriptor_specialization(
+                    &query,
+                    GroupedAggKernelMode::ParallelDenseInteger
+                )
+                .label(),
+                "dense_scalar_programs_sql_mask"
+            );
+        }
+    }
+
+    #[test]
+    fn null_accepting_filters_bind_integer_decimal_and_filtered_star_counts() {
+        for type_oid in [INT2OID, INT4OID, INT8OID, NUMERICOID] {
+            for null_only in [false, true] {
+                let mut query = spec(MeasureExpr::Column(column(type_oid)), AggregateKind::Sum);
+                let predicate = ColumnRef {
+                    attno: 9,
+                    ..column(INT4OID)
+                };
+                let filter = FilterSpec::NullOrRanges {
+                    input: predicate,
+                    ranges: if null_only {
+                        vec![]
+                    } else {
+                        vec![ScalarRange {
+                            lo: ScalarValue::I32(-1),
+                            hi: ScalarValue::I32(1),
+                        }]
+                    },
+                };
+                query.measures[0].filter = filter.clone();
+                query.measures.push(crate::engine::spec::MeasureSpec {
+                    expression: MeasureExpr::CountStar,
+                    outputs: vec![output(AggregateSource::Value, AggregateKind::Count)],
+                    filter,
+                });
+                query.group_keys.clear();
+                assert!(
+                    canonical_dense_integer_rollup(&query)
+                        || canonical_dense_numeric_sum_avg(&query)
+                );
+                let artifact = zero_artifact(&query, &[]);
+                let requests = dispatch_column_refs(&query).expect("value and nullable predicate");
+                let views = [
+                    ResidentColumnView::Empty {
+                        type_oid: pg_sys::Oid::from(type_oid),
+                    },
+                    ResidentColumnView::Empty {
+                        type_oid: pg_sys::Oid::from(INT4OID),
+                    },
+                ];
+                let bound =
+                    build_descriptor(&artifact, &requests, &views).expect("nullable binding");
+                assert_eq!(
+                    bound.desc.measures[1].op,
+                    abi::PGACCEL_GROUPED_AGG_MEASURE_COLUMN
+                );
+                assert_eq!(
+                    bound.desc.measures[1].agg_mask,
+                    abi::PGACCEL_GROUPED_AGG_LANE_COUNT
+                );
+                assert!(bound.desc.measures[1].value.nulls.is_null());
+                for slot in 0..2 {
+                    assert_eq!(
+                        bound.desc.measure_filters[slot].flags,
+                        abi::PGACCEL_GROUPED_AGG_FILTER_ACCEPT_NULL
+                    );
+                    assert_eq!(
+                        bound.desc.measure_filters[slot].predicate_range_count,
+                        i32::from(!null_only)
+                    );
+                    assert_eq!(
+                        bound.desc.measure_filters[slot].predicate_source,
+                        abi::PGACCEL_GROUPED_AGG_PRED_SOURCE_RHS
+                    );
+                }
+                if matches!(type_oid, INT2OID | INT4OID) {
+                    assert!(parallel_dense_integer_shape(&bound.desc));
+                    let mut bad = bound.desc;
+                    bad.measure_filters[0].flags = 2;
+                    assert!(!parallel_dense_integer_shape(&bad));
+                    if null_only {
+                        bad = bound.desc;
+                        bad.measure_filters[0].flags = 0;
+                        assert!(!parallel_dense_integer_shape(&bad));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bigint_numeric_binding_keeps_raw_buffers_and_independent_filters() {
+        let mut query = spec(MeasureExpr::Column(column(INT8OID)), AggregateKind::Sum);
+        query.group_keys.clear();
+        query.measures[0].outputs = [AggregateKind::Sum, AggregateKind::Avg, AggregateKind::Count]
+            .into_iter()
+            .map(|kind| output(AggregateSource::Value, kind))
+            .collect();
+        let predicate = ColumnRef {
+            attno: 9,
+            ..column(INT4OID)
+        };
+        query.measures[0].filter = FilterSpec::Ranges {
+            input: predicate,
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::I32(1),
+                hi: ScalarValue::I32(1),
+            }],
+        };
+        for count in 1..=4 {
+            query.measures.resize(count, query.measures[0].clone());
+            assert!(canonical_dense_numeric_sum_avg(&query));
+            let artifact = zero_artifact(&query, &[]);
+            let requests = dispatch_column_refs(&query).expect("raw bigint and predicate");
+            let views = [
+                ResidentColumnView::Empty {
+                    type_oid: pg_sys::Oid::from(INT8OID),
+                },
+                ResidentColumnView::Empty {
+                    type_oid: pg_sys::Oid::from(INT4OID),
+                },
+            ];
+            let bound = build_descriptor(&artifact, &requests, &views).expect("bigint binding");
+            assert_eq!(bound.desc.measure_count as usize, count);
+            for slot in 0..count {
+                let measure = &bound.desc.measures[slot];
+                assert_eq!(
+                    measure.state_bytes,
+                    abi::PGACCEL_GROUPED_AGG_INT64_NUMERIC_STATE_BYTES
+                );
+                assert_eq!(
+                    measure.accumulator_kind,
+                    abi::PGACCEL_GROUPED_AGG_ACCUM_NUMERIC
+                );
+                assert_eq!(
+                    measure.value.physical_type,
+                    abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT64
+                );
+                assert_eq!(measure.value.element_bytes, 8);
+                assert_eq!(measure.value.flags, 0);
+                assert!(bound._numeric_views[slot].is_none());
+                assert_eq!(
+                    bound.desc.measure_filters[slot].predicate_measure_slot,
+                    slot as i32
+                );
+            }
+            assert!(build_descriptor(&artifact, &requests[..1], &views[..1]).is_err());
+        }
+        query.measures.truncate(1);
+        query.measures[0].filter = FilterSpec::None;
+        query.measures[0].outputs = vec![output(AggregateSource::Value, AggregateKind::Count)];
+        assert!(!query.measures[0].requires_numeric_accumulator());
+        assert!(!canonical_dense_numeric_sum_avg(&query));
+        for kind in [
+            AggregateKind::Min,
+            AggregateKind::Max,
+            AggregateKind::StddevSamp,
+        ] {
+            query.measures[0].outputs = vec![
+                output(AggregateSource::Value, AggregateKind::Sum),
+                output(AggregateSource::Value, kind),
+            ];
+            assert!(!canonical_dense_numeric_sum_avg(&query));
+        }
+    }
+
+    #[test]
+    fn empty_numeric_binding_owns_metadata_and_shares_sum_avg_count() {
+        let mut numeric = spec(MeasureExpr::Column(column(NUMERICOID)), AggregateKind::Sum);
+        numeric.measures[0].outputs =
+            [AggregateKind::Sum, AggregateKind::Avg, AggregateKind::Count]
+                .into_iter()
+                .map(|kind| output(AggregateSource::Value, kind))
+                .collect();
+        let artifact = zero_artifact(&numeric, &[]);
+        let requests = dispatch_column_refs(&artifact.resolved_spec).expect("dispatch columns");
+        let views = [ResidentColumnView::Empty {
+            type_oid: pg_sys::Oid::from(NUMERICOID),
+        }];
+        let bound = build_descriptor(&artifact, &requests, &views).expect("numeric binding");
+        let measure = &bound.desc.measures[0];
+        assert_eq!(
+            measure.agg_mask,
+            abi::PGACCEL_GROUPED_AGG_LANE_SUM | abi::PGACCEL_GROUPED_AGG_LANE_COUNT
+        );
+        assert_eq!(
+            measure.accumulator_kind,
+            abi::PGACCEL_GROUPED_AGG_ACCUM_NUMERIC
+        );
+        assert_eq!(measure.state_bytes, 32);
+        assert_eq!(
+            measure.value.values,
+            std::ptr::from_ref(bound._numeric_views[0].as_deref().expect("pinned metadata")).cast()
+        );
+        // SAFETY: the bound descriptor pins the readable metadata, and an empty
+        // relation has no device payloads to borrow. Construction snapshots it.
+        let plan = unsafe { ResolvedGroupedAggPlan::from_abi(bound.desc) }.expect("numeric plan");
+        drop(bound);
+        let chunk = plan
+            .row_chunk(0, 0)
+            .expect("owned empty metadata survives binding");
+        drop(chunk);
+        assert_eq!(plan.row_count(), 0);
+        numeric.measures[0].outputs = vec![output(AggregateSource::Value, AggregateKind::Count)];
+        let artifact = zero_artifact(&numeric, &[]);
+        let bound =
+            build_descriptor(&artifact, &requests, &views).expect("empty numeric count binding");
+        assert_eq!(
+            bound.desc.measures[0].agg_mask,
+            abi::PGACCEL_GROUPED_AGG_LANE_COUNT
+        );
+        assert_eq!(bound.desc.measures[0].state_bytes, 8);
+    }
+
+    #[test]
+    fn numeric_binding_rejects_type_and_row_count_mismatches() {
+        let empty = ResidentColumnView::Empty {
+            type_oid: pg_sys::Oid::from(NUMERICOID),
+        };
+        assert!(numeric_measure_column(&empty, 1).is_err());
+        let wrong_type = ResidentColumnView::Empty {
+            type_oid: pg_sys::Oid::from(INT4OID),
+        };
+        assert!(numeric_measure_column(&wrong_type, 0).is_err());
     }
 
     #[test]
@@ -6617,7 +10702,7 @@ mod tests {
                 )
                 .is_ok()
             );
-            if oid == INT2OID {
+            if matches!(oid, INT2OID | INT8OID) {
                 assert!(
                     validate_measure_outputs(
                         &MeasureExpr::Column(column(oid)),
@@ -6818,6 +10903,20 @@ mod tests {
         };
         let refs = dispatch_column_refs(&dispatch_spec).expect("measure and range inputs collect");
         assert_eq!(refs.len(), 2);
+        dispatch_spec.measures[0].expression = MeasureExpr::Column(column(NUMERICOID));
+        dispatch_spec.measures[0].filter = dispatch_spec.fact_filter.clone();
+        dispatch_spec.fact_filter = FilterSpec::None;
+        let refs =
+            dispatch_column_refs(&dispatch_spec).expect("independent decimal predicate input");
+        assert_eq!(
+            refs.len(),
+            2,
+            "predicate-only raw inputs must be borrowed for dispatch"
+        );
+        assert!(
+            refs.iter()
+                .any(|request| i32::from(request.attno) == fact_second.attno)
+        );
         let mut invalid = column(INT4OID);
         invalid.attno = i32::MAX;
         dispatch_spec.measures[0].expression = MeasureExpr::Column(invalid);
@@ -6940,12 +11039,1347 @@ mod tests {
     }
 
     #[test]
+    fn staged_h3_integer_sum_count_binds_cached_and_fused_without_sql_admission() {
+        for value_type in [INT2OID, INT4OID] {
+            for filtered in [false, true] {
+                for reverse in [false, true] {
+                    let (mut spec, mut projection) = h3_count_shape();
+                    let GroupKeySource::H3CellToParent { cell, resolution } =
+                        spec.group_keys[0].source
+                    else {
+                        unreachable!()
+                    };
+                    let value = ColumnRef {
+                        attno: 2,
+                        type_oid: value_type,
+                        ..cell
+                    };
+                    spec.measures[0].expression = MeasureExpr::Column(value);
+                    spec.measures[0]
+                        .outputs
+                        .push(crate::engine::spec::AggregateOutput {
+                            source: AggregateSource::Value,
+                            kind: AggregateKind::Sum,
+                        });
+                    if reverse {
+                        spec.measures[0].outputs.reverse();
+                    }
+                    if filtered {
+                        spec.measures[0].filter = FilterSpec::Mask {
+                            input: ColumnRef {
+                                attno: 3,
+                                type_oid: BOOLOID,
+                                ..cell
+                            },
+                            kind: MaskKind::Sql,
+                        };
+                    }
+                    projection.slots[1].source_type_oid = value_type;
+                    let mut sum_slot = projection.slots[1];
+                    sum_slot.source = AggOutputSource::Aggregate {
+                        measure_index: 0,
+                        source: AggregateSource::Value,
+                        kind: AggregateKind::Sum,
+                    };
+                    sum_slot.nullable = true;
+                    projection.slots.push(sum_slot);
+                    spec.validate().expect("logical SUM/COUNT");
+                    projection
+                        .validate(&spec)
+                        .expect("canonical SUM/COUNT projection");
+                    assert!(validate_internal_runtime_capability(&spec, &projection).is_err());
+                    assert!(validate_normal_descriptor_capability(&spec, &projection).is_err());
+                    assert_eq!(
+                        HashMeasureInput::from_spec(&spec),
+                        Ok(HashMeasureInput::IntegerStates(value))
+                    );
+                    assert_eq!(
+                        classify_descriptor_specialization(
+                            &spec,
+                            GroupedAggKernelMode::ParallelHash
+                        )
+                        .family,
+                        DescriptorSpecializationFamily::HashInt4SumCount
+                    );
+                    let requests = dispatch_column_refs(&spec).expect("complete dependencies");
+                    assert_eq!(
+                        requests
+                            .iter()
+                            .map(|request| request.attno)
+                            .collect::<Vec<_>>(),
+                        if filtered { vec![1, 2, 3] } else { vec![1, 2] }
+                    );
+                    let mut views = vec![
+                        ResidentColumnView::Empty {
+                            type_oid: cell.type_oid.into(),
+                        },
+                        ResidentColumnView::Empty {
+                            type_oid: value_type.into(),
+                        },
+                    ];
+                    if filtered {
+                        views.push(ResidentColumnView::Empty {
+                            type_oid: BOOLOID.into(),
+                        });
+                    }
+                    let cached = H3ParentArtifact::new(spec.clone(), 0, 1, None, None)
+                        .expect("empty artifact");
+                    let fused = FusedHashArtifact {
+                        resolved_spec: spec.clone(),
+                        fact_rows: 0,
+                        group_capacity: Cell::new(1),
+                        resolution,
+                    };
+                    for bound in [
+                        build_h3_descriptor(&cached, &requests, &views, cell)
+                            .expect("cached SUM binding"),
+                        build_fused_hash_descriptor(&fused, &requests, &views, cell, &mut || false)
+                            .expect("fused SUM binding"),
+                    ] {
+                        let measure = bound.desc.measures[0];
+                        assert_eq!(measure.op, abi::PGACCEL_GROUPED_AGG_MEASURE_COLUMN);
+                        assert_eq!(
+                            measure.agg_mask,
+                            abi::PGACCEL_GROUPED_AGG_LANE_SUM | abi::PGACCEL_GROUPED_AGG_LANE_COUNT
+                        );
+                        assert_eq!(
+                            measure.value.physical_type,
+                            abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32
+                        );
+                        assert_eq!(measure.value.element_bytes, 4);
+                        assert_eq!(measure.accumulator_kind, abi::PGACCEL_GROUPED_AGG_ACCUM_I64);
+                        assert_eq!(measure.state_bytes, 8);
+                        // SAFETY: zero rows, canonical inactive slots and no device inputs.
+                        let plan = unsafe { ResolvedGroupedAggPlan::from_abi(bound.desc) }
+                            .expect("valid wire descriptor");
+                        assert_eq!(
+                            plan.one_shot_kernel_mode().expect("native hash shape"),
+                            GroupedAggKernelMode::ParallelHash
+                        );
+                    }
+                    views[1] = ResidentColumnView::Empty {
+                        type_oid: INT8OID.into(),
+                    };
+                    assert!(build_h3_descriptor(&cached, &requests, &views, cell).is_err());
+                    assert!(
+                        build_fused_hash_descriptor(&fused, &requests, &views, cell, &mut || false)
+                            .is_err()
+                    );
+                    for type_oid in [BOOLOID, INT8OID, NUMERICOID, FLOAT4OID, DATEOID] {
+                        let mut wrong = spec.clone();
+                        wrong.measures[0].expression =
+                            MeasureExpr::Column(ColumnRef { type_oid, ..value });
+                        assert!(HashMeasureInput::from_spec(&wrong).is_err());
+                    }
+                    let mut wrong = spec.clone();
+                    wrong.measures[0].outputs[0] = wrong.measures[0].outputs[1];
+                    assert!(HashMeasureInput::from_spec(&wrong).is_err());
+                    let mut wrong = spec;
+                    wrong.measures[0]
+                        .outputs
+                        .push(crate::engine::spec::AggregateOutput {
+                            source: AggregateSource::Value,
+                            kind: AggregateKind::StddevSamp,
+                        });
+                    assert!(HashMeasureInput::from_spec(&wrong).is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn h3_integer_aggregate_subsets_keep_internal_count_out_of_projection() {
+        use crate::engine::spec::AggregateOutput;
+        let kinds = [
+            AggregateKind::Sum,
+            AggregateKind::Avg,
+            AggregateKind::Count,
+            AggregateKind::Min,
+            AggregateKind::Max,
+        ];
+        for value_type in [INT2OID, INT4OID] {
+            for mask in 1..32 {
+                let outputs = kinds
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| mask & (1 << index) != 0)
+                    .map(|(_, kind)| AggregateOutput {
+                        source: AggregateSource::Value,
+                        kind: *kind,
+                    })
+                    .collect::<Vec<_>>();
+                for rotation in 0..outputs.len() {
+                    for reverse in [false, true] {
+                        for filtered in [false, true] {
+                            let (mut spec, mut projection) = h3_count_shape();
+                            let GroupKeySource::H3CellToParent { cell, resolution } =
+                                spec.group_keys[0].source
+                            else {
+                                unreachable!()
+                            };
+                            let column = ColumnRef {
+                                attno: 2,
+                                type_oid: value_type,
+                                ..cell
+                            };
+                            spec.measures[0].expression = MeasureExpr::Column(column);
+                            spec.measures[0].outputs = outputs.clone();
+                            spec.measures[0].outputs.rotate_left(rotation);
+                            if reverse {
+                                spec.measures[0].outputs.reverse();
+                            }
+                            if filtered {
+                                spec.measures[0].filter = FilterSpec::Mask {
+                                    input: ColumnRef {
+                                        attno: 3,
+                                        type_oid: BOOLOID,
+                                        ..cell
+                                    },
+                                    kind: MaskKind::Sql,
+                                };
+                            }
+                            let template = projection.slots[1];
+                            projection.slots.truncate(1);
+                            for output in &spec.measures[0].outputs {
+                                projection.slots.push(crate::engine::spec::AggOutputSlot {
+                                    source: AggOutputSource::Aggregate {
+                                        measure_index: 0,
+                                        source: output.source,
+                                        kind: output.kind,
+                                    },
+                                    source_type_oid: value_type,
+                                    result_type_oid: if output.kind == AggregateKind::Avg {
+                                        NUMERICOID
+                                    } else if matches!(
+                                        output.kind,
+                                        AggregateKind::Min | AggregateKind::Max
+                                    ) {
+                                        value_type
+                                    } else {
+                                        INT8OID
+                                    },
+                                    nullable: output.kind != AggregateKind::Count,
+                                    ..template
+                                });
+                            }
+                            spec.validate().expect("logical aggregate subset");
+                            projection
+                                .validate(&spec)
+                                .expect("no extra COUNT projection needed");
+                            assert_eq!(projection.slots.len(), 1 + outputs.len());
+                            assert!(
+                                validate_internal_runtime_capability(&spec, &projection).is_err()
+                            );
+                            assert!(
+                                validate_normal_descriptor_capability(&spec, &projection).is_err()
+                            );
+                            assert_eq!(
+                                planned_descriptor_kernel_mode(&spec, true),
+                                GroupedAggKernelMode::SerialGeneric
+                            );
+                            let requests =
+                                dispatch_column_refs(&spec).expect("all resident dependencies");
+                            let mut views = vec![
+                                ResidentColumnView::Empty {
+                                    type_oid: cell.type_oid.into(),
+                                },
+                                ResidentColumnView::Empty {
+                                    type_oid: value_type.into(),
+                                },
+                            ];
+                            if filtered {
+                                views.push(ResidentColumnView::Empty {
+                                    type_oid: BOOLOID.into(),
+                                });
+                            }
+                            let cached = H3ParentArtifact::new(spec.clone(), 0, 1, None, None)
+                                .expect("empty artifact");
+                            let fused = FusedHashArtifact {
+                                resolved_spec: spec.clone(),
+                                fact_rows: 0,
+                                group_capacity: Cell::new(1),
+                                resolution,
+                            };
+                            for bound in [
+                                build_h3_descriptor(&cached, &requests, &views, cell)
+                                    .expect("cached subset"),
+                                build_fused_hash_descriptor(
+                                    &fused,
+                                    &requests,
+                                    &views,
+                                    cell,
+                                    &mut || false,
+                                )
+                                .expect("fused subset"),
+                            ] {
+                                let expected = abi::PGACCEL_GROUPED_AGG_LANE_COUNT
+                                    | if mask & 3 != 0 {
+                                        abi::PGACCEL_GROUPED_AGG_LANE_SUM
+                                    } else {
+                                        0
+                                    }
+                                    | if mask & 8 != 0 {
+                                        abi::PGACCEL_GROUPED_AGG_LANE_MIN
+                                    } else {
+                                        0
+                                    }
+                                    | if mask & 16 != 0 {
+                                        abi::PGACCEL_GROUPED_AGG_LANE_MAX
+                                    } else {
+                                        0
+                                    };
+                                assert_eq!(bound.desc.measures[0].agg_mask, expected);
+                                // SAFETY: canonical zero-row descriptor, no readable input payloads.
+                                let plan = unsafe { ResolvedGroupedAggPlan::from_abi(bound.desc) }
+                                    .expect("physical aggregate states");
+                                assert_eq!(
+                                    plan.one_shot_kernel_mode().expect("native mode"),
+                                    GroupedAggKernelMode::ParallelHash
+                                );
+                            }
+                            let mut duplicate = spec.clone();
+                            let first = duplicate.measures[0].outputs[0];
+                            duplicate.measures[0].outputs.push(first);
+                            assert!(HashMeasureInput::from_spec(&duplicate).is_err());
+                            let mut wrong = spec.clone();
+                            wrong.measures[0].outputs[0].kind = AggregateKind::StddevSamp;
+                            assert!(HashMeasureInput::from_spec(&wrong).is_err());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hash_sum_output_validity_and_extreme_bounds() {
+        let bytes = |sums: &[i64]| {
+            sums.iter()
+                .flat_map(|sum| sum.to_ne_bytes())
+                .collect::<Vec<_>>()
+        };
+        for (type_oid, minimum, maximum) in [
+            (INT2OID, i64::from(i16::MIN), i64::from(i16::MAX)),
+            (INT4OID, i64::from(i32::MIN), i64::from(i32::MAX)),
+        ] {
+            for count in [0_u64, 1, 2, 1_000_017, u64::from(u32::MAX)] {
+                for sum in [minimum * count as i64, 0, maximum * count as i64] {
+                    validate_h3_sum_states(&bytes(&[sum, 0]), &[count, 0], &[count, 0], type_oid)
+                        .expect("valid exact range");
+                }
+                for sum in [minimum * count as i64 - 1, maximum * count as i64 + 1] {
+                    assert!(
+                        validate_h3_sum_states(&bytes(&[sum]), &[count], &[count], type_oid)
+                            .is_err()
+                    );
+                }
+            }
+            validate_h3_sum_states(&[], &[], &[], type_oid).expect("empty lanes");
+            assert!(validate_h3_sum_states(&[0; 7], &[0], &[0], type_oid).is_err());
+            assert!(validate_h3_sum_states(&[0; 16], &[0], &[0], type_oid).is_err());
+            assert!(validate_h3_sum_states(&[0; 8], &[], &[0], type_oid).is_err());
+            assert!(validate_h3_sum_states(&[0; 8], &[1], &[0], type_oid).is_err());
+            assert!(validate_h3_sum_states(&[0; 8], &[u64::MAX], &[u64::MAX], type_oid).is_err());
+            assert!(
+                validate_h3_sum_states(
+                    &[0; 8],
+                    &[u64::from(u32::MAX) + 1],
+                    &[u64::from(u32::MAX) + 1],
+                    type_oid
+                )
+                .is_err()
+            );
+            assert!(validate_h3_sum_states(&bytes(&[1]), &[0], &[0], type_oid).is_err());
+        }
+        assert!(validate_h3_sum_states(&[], &[], &[], INT8OID).is_err());
+        assert!(validate_h3_sum_states(&bytes(&[32768]), &[1], &[1], INT2OID).is_err());
+        validate_h3_sum_states(&bytes(&[32768]), &[1], &[1], INT4OID)
+            .expect("valid INT4, invalid INT2");
+    }
+
+    #[test]
+    fn hash_extrema_validate_optional_lanes_nulls_and_joint_states() {
+        for (type_oid, low, high) in [
+            (INT2OID, i64::from(i16::MIN), i64::from(i16::MAX)),
+            (INT4OID, i64::from(i32::MIN), i64::from(i32::MAX)),
+        ] {
+            for count in [0_u64, 1, 2, 1_000_017, u64::from(u32::MAX)] {
+                let values = match count {
+                    0 => [0, 0, 0],
+                    1 => [low, low, low],
+                    _ => [low * (count as i64 - 1) + high, low, high],
+                };
+                let bytes = values.map(i64::to_ne_bytes);
+                for mask in 1..8 {
+                    let lanes = std::array::from_fn(|index| {
+                        (mask & (1 << index) != 0).then_some(bytes[index].as_slice())
+                    });
+                    validate_hash_integer_states(lanes, &[count], &[count], type_oid)
+                        .expect("exact optional states");
+                }
+            }
+            let check = |sum: Option<i64>, low: Option<i64>, high: Option<i64>, count: u64| {
+                let values = [sum, low, high].map(|value| value.map(i64::to_ne_bytes));
+                let lanes = values
+                    .each_ref()
+                    .map(|value| value.as_ref().map(<[u8; 8]>::as_slice));
+                validate_hash_integer_states(lanes, &[count], &[count], type_oid)
+            };
+            assert!(check(None, Some(low - 1), None, 2).is_err());
+            assert!(check(None, None, Some(high + 1), 2).is_err());
+            assert!(check(None, Some(1), None, 0).is_err());
+            assert!(check(None, None, Some(-1), 0).is_err());
+            assert!(check(None, Some(7), Some(6), 2).is_err());
+            assert!(check(Some(3), Some(2), None, 2).is_err());
+            assert!(check(Some(5), None, Some(2), 2).is_err());
+            assert!(check(None, Some(2), Some(3), 1).is_err());
+            assert!(check(Some(3), Some(2), None, 1).is_err());
+            assert!(check(Some(2), None, Some(3), 1).is_err());
+            assert!(check(None, Some(0), None, u64::from(u32::MAX) + 1).is_err());
+        }
+        assert!(validate_hash_integer_states([None; 3], &[], &[], INT4OID).is_err());
+        assert!(
+            validate_hash_integer_states([None, Some(&[0; 7]), None], &[0], &[0], INT4OID).is_err()
+        );
+        assert!(
+            validate_hash_integer_states([None, None, Some(&[0; 16])], &[0], &[0], INT4OID)
+                .is_err()
+        );
+        assert!(
+            validate_hash_integer_states([None, Some(&[0; 8]), None], &[1], &[0], INT4OID).is_err()
+        );
+        assert!(validate_hash_integer_states([None, Some(&[]), None], &[], &[], INT8OID).is_err());
+    }
+
+    #[test]
+    fn hash_integer_full_projection_permutations_preserve_minimal_lanes() {
+        use crate::engine::spec::AggregateOutput;
+        let kinds = [
+            AggregateKind::Sum,
+            AggregateKind::Avg,
+            AggregateKind::Count,
+            AggregateKind::Min,
+            AggregateKind::Max,
+        ];
+        let mut permutations = 0;
+        for a in 0..5 {
+            for b in 0..5 {
+                for c in 0..5 {
+                    for d in 0..5 {
+                        for e in 0..5 {
+                            let indices = [a, b, c, d, e];
+                            if indices
+                                .iter()
+                                .enumerate()
+                                .any(|(index, value)| indices[..index].contains(value))
+                            {
+                                continue;
+                            }
+                            let (mut spec, _) = h3_count_shape();
+                            let value = ColumnRef {
+                                relation_oid: spec.fact_rel,
+                                attno: 2,
+                                type_oid: INT2OID,
+                            };
+                            spec.measures[0].expression = MeasureExpr::Column(value);
+                            spec.measures[0].outputs = indices
+                                .map(|index| AggregateOutput {
+                                    source: AggregateSource::Value,
+                                    kind: kinds[index],
+                                })
+                                .to_vec();
+                            assert_eq!(
+                                HashMeasureInput::from_spec(&spec),
+                                Ok(HashMeasureInput::IntegerStates(value))
+                            );
+                            assert_eq!(
+                                hash_integer_lanes(&spec.measures[0]),
+                                abi::PGACCEL_GROUPED_AGG_LANE_SUM
+                                    | abi::PGACCEL_GROUPED_AGG_LANE_COUNT
+                                    | abi::PGACCEL_GROUPED_AGG_LANE_MIN
+                                    | abi::PGACCEL_GROUPED_AGG_LANE_MAX
+                            );
+                            let specialization = classify_descriptor_specialization(
+                                &spec,
+                                GroupedAggKernelMode::ParallelHash,
+                            );
+                            assert_eq!(
+                                specialization.family,
+                                DescriptorSpecializationFamily::HashInt4Extrema
+                            );
+                            assert_eq!(specialization.label(), "hash_int4_extrema");
+                            permutations += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(permutations, 120);
+    }
+
+    #[test]
+    fn hash_column_counts_preserve_zero_groups_without_weakening_star_checks() {
+        let input = HashMeasureInput::Column(column(INT4OID));
+        for rows in 0_usize..=8 {
+            for null_mask in 0..(1_u32 << rows) {
+                let mut counts = [0_u64; 3];
+                for row in 0..rows {
+                    if null_mask & (1 << row) == 0 {
+                        counts[row % 3] += 1;
+                    }
+                }
+                let groups = rows.min(3);
+                validate_h3_count_partition(&counts, 3, groups, rows as u64, input)
+                    .expect("nullable counts retain every input group");
+                assert_eq!(
+                    validate_h3_count_partition(
+                        &counts,
+                        3,
+                        groups,
+                        rows as u64,
+                        HashMeasureInput::Star
+                    )
+                    .is_ok(),
+                    null_mask == 0,
+                    "COUNT(*) may not borrow nullable-count validation"
+                );
+            }
+        }
+        for (counts, emitted, selected) in [
+            ([0, 0, 0], 0, 1),               // missing all input groups
+            ([0, 0, 0], 2, 1),               // more groups than rows
+            ([0, 0, 0], 1, 0),               // ghost group on empty input
+            ([2, 2, 0], 2, 3),               // counts exceed rows
+            ([0, 0, 1], 2, 3),               // nonzero unused tail
+            ([u64::MAX, 1, 0], 2, u64::MAX), // addition overflow
+        ] {
+            assert!(validate_h3_count_partition(&counts, 3, emitted, selected, input).is_err());
+        }
+    }
+
+    #[test]
+    fn h3_input_spans_require_exact_value_and_null_domains() {
+        for rows in [0, 1, 8192, 1_000_000] {
+            assert!(validate_h3_input_lengths(rows, None, rows).is_ok());
+            assert!(validate_h3_input_lengths(rows, Some(rows), rows).is_ok());
+            assert!(validate_h3_input_lengths(rows + 1, None, rows).is_err());
+            assert!(validate_h3_input_lengths(rows, Some(rows + 1), rows).is_err());
+            if rows != 0 {
+                assert!(validate_h3_input_lengths(rows - 1, None, rows).is_err());
+                assert!(validate_h3_input_lengths(rows, Some(rows - 1), rows).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn staged_h3_column_count_binds_all_fixed_width_types_and_dependencies() {
+        for type_oid in [
+            BOOLOID,
+            INT2OID,
+            INT4OID,
+            INT8OID,
+            FLOAT4OID,
+            FLOAT8OID,
+            DATEOID,
+            TIMESTAMPOID,
+            TIMESTAMPTZOID,
+        ] {
+            let (mut spec, _) = h3_count_shape();
+            let GroupKeySource::H3CellToParent { cell, resolution } = spec.group_keys[0].source
+            else {
+                unreachable!()
+            };
+            let input = ColumnRef {
+                attno: 2,
+                type_oid,
+                ..cell
+            };
+            spec.measures[0].expression = MeasureExpr::Column(input);
+            assert_eq!(
+                HashMeasureInput::from_spec(&spec),
+                Ok(HashMeasureInput::Column(input))
+            );
+            let requests = [
+                ResidentColumnRef {
+                    relid: pg_sys::Oid::from(cell.relation_oid),
+                    attno: 1,
+                },
+                ResidentColumnRef {
+                    relid: pg_sys::Oid::from(input.relation_oid),
+                    attno: 2,
+                },
+            ];
+            assert_eq!(
+                dispatch_column_refs(&spec).expect("dispatch dependencies"),
+                requests
+            );
+            assert_eq!(
+                selected_relations(&spec).expect("resident inputs")[0].columns,
+                [1, 2]
+            );
+            let views = [
+                ResidentColumnView::Empty {
+                    type_oid: pg_sys::Oid::from(cell.type_oid),
+                },
+                ResidentColumnView::Empty {
+                    type_oid: pg_sys::Oid::from(type_oid),
+                },
+            ];
+            let cached =
+                H3ParentArtifact::new(spec.clone(), 0, 1, None, None).expect("empty artifact");
+            let fused = FusedHashArtifact {
+                resolved_spec: spec,
+                fact_rows: 0,
+                group_capacity: Cell::new(1),
+                resolution,
+            };
+            for desc in [
+                build_h3_descriptor(&cached, &requests, &views, cell).expect("cached binding"),
+                build_fused_hash_descriptor(&fused, &requests, &views, cell, &mut || false)
+                    .expect("fused binding"),
+            ] {
+                let desc = &desc.desc;
+                assert_eq!(desc.measures[0].op, abi::PGACCEL_GROUPED_AGG_MEASURE_COLUMN);
+                assert_eq!(
+                    desc.measures[0].agg_mask,
+                    abi::PGACCEL_GROUPED_AGG_LANE_COUNT
+                );
+                let expected = measure_column(&views[1], 0).expect("physical mapping");
+                assert_eq!(desc.measures[0].value.physical_type, expected.physical_type);
+                assert_eq!(desc.measures[0].value.element_bytes, expected.element_bytes);
+                assert!(desc.measures[0].value.values.is_null());
+                assert!(desc.measures[0].value.nulls.is_null());
+            }
+            assert!(build_h3_descriptor(&cached, &requests[..1], &views[..1], cell).is_err());
+            assert!(
+                build_fused_hash_descriptor(&fused, &requests, &views[..1], cell, &mut || false)
+                    .is_err()
+            );
+            let duplicated = [requests[0], requests[0]];
+            assert!(build_h3_descriptor(&cached, &duplicated, &views, cell).is_err());
+            let wrong_views = [
+                ResidentColumnView::Empty {
+                    type_oid: pg_sys::Oid::from(cell.type_oid),
+                },
+                ResidentColumnView::Empty {
+                    type_oid: pg_sys::Oid::from(TEXTOID),
+                },
+            ];
+            assert!(
+                build_fused_hash_descriptor(&fused, &requests, &wrong_views, cell, &mut || false)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn staged_hash_count_binding_rejects_other_measure_semantics() {
+        let (original, _) = h3_count_shape();
+        assert_eq!(
+            HashMeasureInput::from_spec(&original),
+            Ok(HashMeasureInput::Star)
+        );
+        for type_oid in [TEXTOID, NUMERICOID, 0] {
+            let mut wrong = original.clone();
+            wrong.measures[0].expression = MeasureExpr::Column(ColumnRef {
+                attno: 2,
+                ..column(type_oid)
+            });
+            assert!(HashMeasureInput::from_spec(&wrong).is_err());
+        }
+        for input in [
+            ColumnRef {
+                relation_oid: original.fact_rel + 1,
+                ..column(INT4OID)
+            },
+            ColumnRef {
+                attno: 0,
+                ..column(INT4OID)
+            },
+        ] {
+            let mut wrong = original.clone();
+            wrong.measures[0].expression = MeasureExpr::Column(input);
+            assert!(HashMeasureInput::from_spec(&wrong).is_err());
+        }
+        let mut wrong = original.clone();
+        wrong.measures[0].outputs[0].kind = AggregateKind::Sum;
+        assert!(HashMeasureInput::from_spec(&wrong).is_err());
+        let mut wrong = original.clone();
+        wrong.measures.push(wrong.measures[0].clone());
+        assert!(HashMeasureInput::from_spec(&wrong).is_err());
+        let mut wrong = original;
+        wrong.measures[0].filter = FilterSpec::Mask {
+            input: column(BOOLOID),
+            kind: MaskKind::Recheck,
+        };
+        assert!(HashMeasureInput::from_spec(&wrong).is_err());
+        wrong.fact_filter = wrong.measures[0].filter.clone();
+        wrong.measures[0].filter = FilterSpec::None;
+        assert!(HashMeasureInput::from_spec(&wrong).is_err());
+    }
+
+    #[test]
+    fn filtered_h3_counts_keep_star_partition_checks_separate() {
+        for counts in [[0, 0, 0], [0, 2, 0], [1, 1, 0]] {
+            validate_h3_count_partition(&counts, 3, 2, 5, HashMeasureInput::FilteredStar)
+                .expect("FILTER permits zero groups and rejected rows");
+            assert!(validate_h3_count_partition(&counts, 3, 2, 5, HashMeasureInput::Star).is_err());
+        }
+        for (counts, emitted, rows) in [
+            ([1, 2, 0], 2, 2),
+            ([0, 0, 1], 2, 5),
+            ([u64::MAX, 1, 0], 2, u64::MAX),
+            ([0, 0, 0], 0, 5),
+            ([0, 0, 0], 2, 1),
+        ] {
+            assert!(
+                validate_h3_count_partition(
+                    &counts,
+                    3,
+                    emitted,
+                    rows,
+                    HashMeasureInput::FilteredStar
+                )
+                .is_err()
+            );
+        }
+        validate_h3_count_partition(&[0], 1, 0, 0, HashMeasureInput::FilteredStar)
+            .expect("empty FILTER");
+    }
+
+    #[test]
+    fn h3_mask_policy_accounts_for_bounded_conversion_work() {
+        let (mut spec, _) = h3_count_shape();
+        for rows in [0, 1, 65535, 65536, 65537, 1_000_017, 12_748_986] {
+            assert_eq!(h3_mask_work(&spec, rows), Ok((0, 0)));
+        }
+        spec.measures[0].filter = FilterSpec::Mask {
+            input: ColumnRef {
+                relation_oid: spec.fact_rel,
+                attno: 3,
+                type_oid: BOOLOID,
+            },
+            kind: MaskKind::Sql,
+        };
+        for (rows, launches) in [
+            (0, 0),
+            (1, 1),
+            (65535, 1),
+            (65536, 1),
+            (65537, 2),
+            (1_000_017, 16),
+            (12_748_986, 195),
+        ] {
+            assert_eq!(h3_mask_work(&spec, rows), Ok((rows as u64, launches)));
+        }
+        spec.measures[0].filter = FilterSpec::Mask {
+            input: column(BOOLOID),
+            kind: MaskKind::Recheck,
+        };
+        assert!(h3_mask_work(&spec, 1).is_err());
+    }
+
+    #[test]
+    fn filtered_h3_binding_keeps_predicate_dependencies_and_empty_ownership() {
+        let (mut spec, projection) = h3_count_shape();
+        let GroupKeySource::H3CellToParent { cell, resolution } = spec.group_keys[0].source else {
+            unreachable!()
+        };
+        let predicate = ColumnRef {
+            attno: 3,
+            type_oid: BOOLOID,
+            ..cell
+        };
+        spec.measures[0].filter = FilterSpec::Mask {
+            input: predicate,
+            kind: MaskKind::Sql,
+        };
+        assert_eq!(
+            HashMeasureInput::from_spec(&spec),
+            Ok(HashMeasureInput::FilteredStar)
+        );
+        assert!(validate_normal_descriptor_capability(&spec, &projection).is_err());
+        assert!(validate_internal_runtime_capability(&spec, &projection).is_err());
+        let requests = dispatch_column_refs(&spec).expect("predicate request");
+        assert_eq!(requests.iter().map(|r| r.attno).collect::<Vec<_>>(), [1, 3]);
+        let selected = selected_relations(&spec).expect("resident predicate dependency");
+        assert_eq!(selected[0].columns, [1, 3]);
+        let views = [
+            ResidentColumnView::Empty {
+                type_oid: cell.type_oid.into(),
+            },
+            ResidentColumnView::Empty {
+                type_oid: BOOLOID.into(),
+            },
+        ];
+        let cached = H3ParentArtifact::new(spec.clone(), 0, 1, None, None).expect("empty artifact");
+        let fused = FusedHashArtifact {
+            resolved_spec: spec.clone(),
+            fact_rows: 0,
+            group_capacity: Cell::new(1),
+            resolution,
+        };
+        for bound in [
+            build_h3_descriptor(&cached, &requests, &views, cell).expect("cached empty filter"),
+            build_fused_hash_descriptor(&fused, &requests, &views, cell, &mut || false)
+                .expect("fused empty filter"),
+        ] {
+            assert!(bound._filter.is_none());
+            assert!(canonical_disabled_filter(&bound.desc.measure_filters[0]));
+        }
+        assert!(build_h3_descriptor(&cached, &requests[..1], &views[..1], cell).is_err());
+        let wrong_views = [
+            ResidentColumnView::Empty {
+                type_oid: cell.type_oid.into(),
+            },
+            ResidentColumnView::Empty {
+                type_oid: INT4OID.into(),
+            },
+        ];
+        assert!(
+            build_fused_hash_descriptor(&fused, &requests, &wrong_views, cell, &mut || false)
+                .is_err()
+        );
+        for input in [
+            ColumnRef {
+                relation_oid: cell.relation_oid + 1,
+                ..predicate
+            },
+            ColumnRef {
+                attno: 0,
+                ..predicate
+            },
+            ColumnRef {
+                type_oid: INT4OID,
+                ..predicate
+            },
+        ] {
+            spec.measures[0].filter = FilterSpec::Mask {
+                input,
+                kind: MaskKind::Sql,
+            };
+            assert!(HashMeasureInput::from_spec(&spec).is_err());
+        }
+    }
+
+    #[test]
+    fn raw_integer_hash_binding_preserves_inputs_and_native_shape() {
+        for key_type in [INT2OID, INT4OID, INT8OID] {
+            for kind in [
+                AggregateKind::Count,
+                AggregateKind::Sum,
+                AggregateKind::Avg,
+                AggregateKind::Min,
+                AggregateKind::Max,
+            ] {
+                for filtered in [false, true] {
+                    let (mut spec, _) = h3_count_shape();
+                    let key = column(key_type);
+                    spec.group_keys[0].source = GroupKeySource::FactColumn(key);
+                    spec.group_keys[0].type_oid = key_type;
+                    spec.measures[0].expression = MeasureExpr::Column(ColumnRef {
+                        attno: 2,
+                        ..column(INT4OID)
+                    });
+                    spec.measures[0].outputs[0].kind = kind;
+                    if filtered {
+                        spec.measures[0].filter = FilterSpec::Mask {
+                            input: ColumnRef {
+                                attno: 3,
+                                ..column(BOOLOID)
+                            },
+                            kind: MaskKind::Sql,
+                        };
+                    }
+                    assert_eq!(raw_hash_group(&spec), Some(key));
+                    assert_ne!(
+                        planned_descriptor_kernel_mode(&spec, false),
+                        GroupedAggKernelMode::ParallelHash
+                    );
+                    let requests =
+                        compact_hash_column_refs(&spec).expect("raw key and measure dependencies");
+                    let mut views = vec![
+                        ResidentColumnView::Empty {
+                            type_oid: key_type.into(),
+                        },
+                        ResidentColumnView::Empty {
+                            type_oid: INT4OID.into(),
+                        },
+                    ];
+                    if filtered {
+                        views.push(ResidentColumnView::Empty {
+                            type_oid: BOOLOID.into(),
+                        });
+                    }
+                    let mut artifact = FusedHashArtifact {
+                        resolved_spec: spec,
+                        fact_rows: 0,
+                        group_capacity: Cell::new(1),
+                        resolution: 0,
+                    };
+                    let bound =
+                        build_fused_hash_descriptor(&artifact, &requests, &views, key, &mut || {
+                            false
+                        })
+                        .expect("raw integer binding");
+                    assert_eq!(bound.desc.keys[0].flags, 0);
+                    assert_eq!(bound.desc.keys[0].pad0, 0);
+                    assert_eq!(
+                        bound.desc.keys[0].values.tag,
+                        if key_type == INT8OID {
+                            PgaccelValTag::Int64
+                        } else {
+                            PgaccelValTag::Int32
+                        }
+                    );
+                    assert_eq!(
+                        bound.desc.measures[0].agg_mask,
+                        abi::PGACCEL_GROUPED_AGG_LANE_COUNT
+                            | match kind {
+                                AggregateKind::Count => 0,
+                                AggregateKind::Sum | AggregateKind::Avg =>
+                                    abi::PGACCEL_GROUPED_AGG_LANE_SUM,
+                                AggregateKind::Min => abi::PGACCEL_GROUPED_AGG_LANE_MIN,
+                                AggregateKind::Max => abi::PGACCEL_GROUPED_AGG_LANE_MAX,
+                                AggregateKind::StddevSamp => unreachable!(),
+                            }
+                    );
+                    // SAFETY: canonical zero-row descriptor, no readable input payloads.
+                    let native = unsafe { ResolvedGroupedAggPlan::from_abi(bound.desc) }
+                        .expect("raw hash ABI");
+                    assert_eq!(
+                        native.one_shot_kernel_mode().expect("native shape"),
+                        GroupedAggKernelMode::ParallelHash
+                    );
+                    assert!(matches!(
+                        build_fused_hash_descriptor(&artifact, &requests, &views, key, &mut || {
+                            true
+                        }),
+                        Err(ResidentLoadError::PreparationInterrupted)
+                    ));
+                    artifact.resolution = 1;
+                    assert!(
+                        build_fused_hash_descriptor(&artifact, &requests, &views, key, &mut || {
+                            false
+                        })
+                        .is_err()
+                    );
+                    artifact.resolution = 0;
+                    views[0] = ResidentColumnView::Empty {
+                        type_oid: BOOLOID.into(),
+                    };
+                    assert!(
+                        build_fused_hash_descriptor(&artifact, &requests, &views, key, &mut || {
+                            false
+                        })
+                        .is_err()
+                    );
+                    for type_oid in [BOOLOID, TIMESTAMPOID, NUMERICOID] {
+                        let mut wrong = artifact.resolved_spec.clone();
+                        wrong.group_keys[0].type_oid = type_oid;
+                        assert!(raw_hash_group(&wrong).is_none());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hash_where_binding_tracks_predicates_and_keeps_sql_admission_closed() {
+        for key_type in [INT2OID, INT4OID, INT8OID] {
+            for filtered in [false, true] {
+                let (mut spec, projection) = h3_count_shape();
+                let key = column(key_type);
+                spec.group_keys[0].source = GroupKeySource::FactColumn(key);
+                spec.group_keys[0].type_oid = key_type;
+                let predicate = ColumnRef {
+                    attno: 4,
+                    ..column(BOOLOID)
+                };
+                spec.fact_filter = FilterSpec::Mask {
+                    input: predicate,
+                    kind: MaskKind::Sql,
+                };
+                if filtered {
+                    spec.measures[0].filter = FilterSpec::Mask {
+                        input: ColumnRef {
+                            attno: 3,
+                            ..predicate
+                        },
+                        kind: MaskKind::Sql,
+                    };
+                }
+                assert!(HashMeasureInput::from_spec(&spec).is_ok());
+                assert_ne!(
+                    planned_descriptor_kernel_mode(&spec, false),
+                    GroupedAggKernelMode::ParallelHash
+                );
+                assert!(validate_normal_descriptor_capability(&spec, &projection).is_err());
+                let requests = compact_hash_column_refs(&spec).expect("key and both predicates");
+                let attributes: Vec<_> = requests.iter().map(|request| request.attno).collect();
+                assert_eq!(
+                    attributes,
+                    if filtered { vec![1, 3, 4] } else { vec![1, 4] }
+                );
+                assert_eq!(
+                    selected_relations(&spec).expect("predicate dependency")[0].columns,
+                    attributes
+                );
+                assert!(
+                    artifact_column_refs(&spec)
+                        .expect("WHERE snapshot identity")
+                        .iter()
+                        .any(|request| request.attno == 4)
+                );
+                let mut views = vec![ResidentColumnView::Empty {
+                    type_oid: key_type.into(),
+                }];
+                views.extend((1..requests.len()).map(|_| ResidentColumnView::Empty {
+                    type_oid: BOOLOID.into(),
+                }));
+                let artifact = FusedHashArtifact {
+                    resolved_spec: spec.clone(),
+                    fact_rows: 0,
+                    group_capacity: Cell::new(1),
+                    resolution: 0,
+                };
+                let bound =
+                    build_fused_hash_descriptor(&artifact, &requests, &views, key, &mut || false)
+                        .expect("empty WHERE binding requires no device allocation");
+                assert!(bound._where.is_none() && bound._filter.is_none());
+                assert!(canonical_disabled_filter(&bound.desc.where_filter));
+                assert!(
+                    build_fused_hash_descriptor(&artifact, &requests, &views, key, &mut || true)
+                        .is_err()
+                );
+                let last = views.len() - 1;
+                views[last] = ResidentColumnView::Empty {
+                    type_oid: INT4OID.into(),
+                };
+                assert!(
+                    build_fused_hash_descriptor(&artifact, &requests, &views, key, &mut || false)
+                        .is_err()
+                );
+                for bad in [
+                    FilterSpec::Mask {
+                        input: predicate,
+                        kind: MaskKind::Recheck,
+                    },
+                    FilterSpec::Mask {
+                        input: ColumnRef {
+                            type_oid: INT4OID,
+                            ..predicate
+                        },
+                        kind: MaskKind::Sql,
+                    },
+                    FilterSpec::Mask {
+                        input: ColumnRef {
+                            relation_oid: spec.fact_rel + 1,
+                            ..predicate
+                        },
+                        kind: MaskKind::Sql,
+                    },
+                    FilterSpec::Mask {
+                        input: ColumnRef {
+                            attno: 0,
+                            ..predicate
+                        },
+                        kind: MaskKind::Sql,
+                    },
+                ] {
+                    spec.fact_filter = bad;
+                    assert!(HashMeasureInput::from_spec(&spec).is_err());
+                }
+            }
+        }
+        let (mut h3, _) = h3_count_shape();
+        h3.fact_filter = FilterSpec::Mask {
+            input: ColumnRef {
+                attno: 4,
+                ..column(BOOLOID)
+            },
+            kind: MaskKind::Sql,
+        };
+        let GroupKeySource::H3CellToParent { cell, resolution } = h3.group_keys[0].source else {
+            unreachable!()
+        };
+        let requests = compact_hash_column_refs(&h3).expect("H3 WHERE dependencies");
+        let views = [
+            ResidentColumnView::Empty {
+                type_oid: cell.type_oid.into(),
+            },
+            ResidentColumnView::Empty {
+                type_oid: BOOLOID.into(),
+            },
+        ];
+        let fused = FusedHashArtifact {
+            resolved_spec: h3.clone(),
+            fact_rows: 0,
+            group_capacity: Cell::new(1),
+            resolution,
+        };
+        let bound = build_fused_hash_descriptor(&fused, &requests, &views, cell, &mut || false)
+            .expect("empty H3 WHERE still uses fused key flags");
+        assert_eq!(
+            bound.desc.keys[0].flags,
+            abi::PGACCEL_GROUPED_AGG_KEY_FLAG_H3_PARENT
+        );
+        assert!(bound._where.is_none());
+        assert!(
+            H3ParentArtifact::new(h3, 0, 1, None, None).is_err(),
+            "cached prevalidation must not move H3 errors before WHERE"
+        );
+    }
+
+    #[test]
+    fn hash_where_selection_and_empty_capacity_learning_are_exact() {
+        let (mut spec, _) = h3_count_shape();
+        spec.group_keys[0].source = GroupKeySource::FactColumn(column(INT8OID));
+        spec.group_keys[0].type_oid = INT8OID;
+        for rows in 0..8 {
+            for selected in 0..10 {
+                assert_eq!(
+                    validate_hash_selected_rows(&spec, rows, selected).is_ok(),
+                    selected == rows as u64
+                );
+            }
+        }
+        spec.fact_filter = FilterSpec::Mask {
+            input: ColumnRef {
+                attno: 4,
+                ..column(BOOLOID)
+            },
+            kind: MaskKind::Sql,
+        };
+        for rows in 0..8 {
+            for selected in 0..10 {
+                assert_eq!(
+                    validate_hash_selected_rows(&spec, rows, selected).is_ok(),
+                    selected <= rows as u64
+                );
+            }
+        }
+        assert!(validate_hash_selected_rows(&spec, 1, u64::MAX).is_err());
+        let make = || FusedHashArtifact {
+            resolved_spec: spec.clone(),
+            fact_rows: 65_537,
+            group_capacity: Cell::new(100),
+            resolution: 0,
+        };
+        let artifact = make();
+        artifact
+            .record_validated_raw_groups(0)
+            .expect("WHERE rejected every row");
+        assert_eq!(artifact.group_capacity.get(), 1);
+        artifact
+            .record_validated_raw_groups(0)
+            .expect("warm empty result");
+        assert!(artifact.record_validated_raw_groups(2).is_err());
+        assert_eq!(artifact.group_capacity.get(), 1);
+        assert_eq!(
+            make().group_capacity.get(),
+            100,
+            "new generation forgets the empty bound"
+        );
+        validate_h3_count_partition(&[0], 1, 0, 0, HashMeasureInput::Star)
+            .expect("empty WHERE count");
+        assert!(validate_h3_count_partition(&[0], 1, 1, 0, HashMeasureInput::Star).is_err());
+        assert_eq!(h3_mask_work(&spec, 65_537), Ok((65_537, 2)));
+        spec.measures[0].filter = spec.fact_filter.clone();
+        assert_eq!(h3_mask_work(&spec, 65_537), Ok((65_537, 2)));
+        spec.measures[0].filter = FilterSpec::Mask {
+            input: ColumnRef {
+                attno: 3,
+                ..column(BOOLOID)
+            },
+            kind: MaskKind::Sql,
+        };
+        assert_eq!(h3_mask_work(&spec, 65_537), Ok((131_074, 4)));
+        assert!(h3_mask_work(&spec, usize::MAX).is_err());
+    }
+
+    #[test]
+    fn hash_where_implies_only_identical_validated_boolean_filters() {
+        let (mut spec, projection) = h3_count_shape();
+        spec.fact_filter = FilterSpec::Mask {
+            input: ColumnRef {
+                attno: 3,
+                ..column(BOOLOID)
+            },
+            kind: MaskKind::Sql,
+        };
+        spec.measures[0].filter = spec.fact_filter.clone();
+        assert_eq!(h3_count_filter(&spec), Ok(None));
+        assert_eq!(
+            HashMeasureInput::from_spec(&spec),
+            Ok(HashMeasureInput::Star)
+        );
+        // Every admitted row contributes to COUNT(*): folding strengthens,
+        // rather than relaxes, the compact output partition proof.
+        let kind = HashMeasureInput::from_spec(&spec).expect("validated implied FILTER");
+        validate_h3_count_partition(&[2, 3, 0], 3, 2, 5, kind)
+            .expect("exact selected-row partition");
+        assert!(validate_h3_count_partition(&[2, 2, 0], 3, 2, 5, kind).is_err());
+        assert!(validate_h3_count_partition(&[0, 5, 0], 3, 2, 5, kind).is_err());
+        for rows in [0, 1, 65_535, 65_536, 65_537, 1_000_017] {
+            assert_eq!(
+                h3_mask_work(&spec, rows),
+                Ok((
+                    rows as u64,
+                    rows.div_ceil(crate::gpu::SQL_BOOL_MASK_CHUNK_ROWS) as u64
+                ))
+            );
+        }
+        for raw in [false, true] {
+            let mut shape = spec.clone();
+            if raw {
+                shape.group_keys[0].source = GroupKeySource::FactColumn(column(INT8OID));
+                shape.group_keys[0].type_oid = INT8OID;
+            }
+            let requests = compact_hash_column_refs(&shape).expect("shared predicate requests");
+            assert_eq!(requests.iter().map(|r| r.attno).collect::<Vec<_>>(), [1, 3]);
+            assert_eq!(
+                selected_relations(&shape).expect("shared dependencies")[0].columns,
+                [1, 3]
+            );
+            assert!(
+                artifact_column_refs(&shape)
+                    .expect("shared artifact dependency")
+                    .iter()
+                    .any(|r| r.attno == 3)
+            );
+            assert!(validate_normal_descriptor_capability(&shape, &projection).is_err());
+        }
+        // COUNT(column) remains nullable even though its FILTER is implied.
+        let value = ColumnRef {
+            attno: 2,
+            ..column(INT4OID)
+        };
+        spec.measures[0].expression = MeasureExpr::Column(value);
+        assert_eq!(
+            HashMeasureInput::from_spec(&spec),
+            Ok(HashMeasureInput::Column(value))
+        );
+        validate_h3_count_partition(&[0, 2, 0], 3, 2, 5, HashMeasureInput::Column(value))
+            .expect("nullable measure may contribute fewer selected rows");
+        spec.measures[0].expression = MeasureExpr::CountStar;
+
+        // Neither another attribute nor another Boolean predicate kind proves
+        // implication. Identical invalid predicates must still fail closed.
+        spec.measures[0].filter = FilterSpec::Mask {
+            input: ColumnRef {
+                attno: 4,
+                ..column(BOOLOID)
+            },
+            kind: MaskKind::Sql,
+        };
+        assert!(
+            h3_count_filter(&spec)
+                .expect("distinct valid FILTER")
+                .is_some()
+        );
+        assert_eq!(
+            HashMeasureInput::from_spec(&spec),
+            Ok(HashMeasureInput::FilteredStar)
+        );
+        for bad in [
+            FilterSpec::Mask {
+                input: column(BOOLOID),
+                kind: MaskKind::Recheck,
+            },
+            FilterSpec::Mask {
+                input: column(INT4OID),
+                kind: MaskKind::Sql,
+            },
+            FilterSpec::Mask {
+                input: ColumnRef {
+                    attno: 0,
+                    ..column(BOOLOID)
+                },
+                kind: MaskKind::Sql,
+            },
+            FilterSpec::Mask {
+                input: ColumnRef {
+                    relation_oid: spec.fact_rel + 1,
+                    ..column(BOOLOID)
+                },
+                kind: MaskKind::Sql,
+            },
+        ] {
+            spec.fact_filter = bad.clone();
+            spec.measures[0].filter = bad;
+            assert!(h3_count_filter(&spec).is_err());
+            assert!(HashMeasureInput::from_spec(&spec).is_err());
+        }
+    }
+
+    #[test]
+    fn raw_hash_capacity_bounds_workspace_not_input_cardinality() {
+        assert_eq!(raw_hash_group_capacity(0, 1), Ok(1));
+        assert_eq!(raw_hash_group_capacity(16385, 16385), Ok(16385));
+        assert!(raw_hash_group_capacity(0, 0).is_err());
+        assert_eq!(raw_hash_group_capacity(16385, 16384), Ok(16384));
+        assert_eq!(raw_hash_group_capacity(12_748_986, 100_000), Ok(100_000));
+        assert_eq!(raw_hash_group_capacity(u32::MAX as usize, 1), Ok(1));
+        assert_eq!(raw_hash_group_capacity(1 << 30, usize::MAX), Ok(1 << 30));
+        assert_eq!(
+            raw_hash_group_capacity((1 << 30) + 1, usize::MAX),
+            Ok(1 << 30)
+        );
+        assert!(raw_hash_group_capacity(u32::MAX as usize + 1, usize::MAX).is_err());
+    }
+
+    #[test]
+    fn raw_hash_learns_only_validated_capacity_for_its_current_generation() {
+        let (mut raw, _) = h3_count_shape();
+        raw.group_keys[0].source = GroupKeySource::FactColumn(column(INT8OID));
+        raw.group_keys[0].type_oid = INT8OID;
+        let make = || FusedHashArtifact {
+            resolved_spec: raw.clone(),
+            fact_rows: 12_748_986,
+            group_capacity: Cell::new(100_000),
+            resolution: 0,
+        };
+        let artifact = make();
+        artifact
+            .record_validated_raw_groups(4467)
+            .expect("successful compact result");
+        assert_eq!(artifact.group_capacity.get(), 4467);
+        artifact
+            .record_validated_raw_groups(4467)
+            .expect("same immutable keys");
+        for invalid in [0, 4468, usize::MAX] {
+            assert!(artifact.record_validated_raw_groups(invalid).is_err());
+            assert_eq!(
+                artifact.group_capacity.get(),
+                4467,
+                "failure cannot publish a new bound"
+            );
+        }
+        let rebuilt = make();
+        assert_eq!(
+            rebuilt.group_capacity.get(),
+            100_000,
+            "new generation discards learned state"
+        );
+        let (h3, _) = h3_count_shape();
+        let fused_h3 = FusedHashArtifact {
+            resolved_spec: h3,
+            ..make()
+        };
+        fused_h3
+            .record_validated_raw_groups(4467)
+            .expect("H3 behavior unchanged");
+        assert_eq!(fused_h3.group_capacity.get(), 100_000);
+    }
+
+    #[test]
     fn empty_h3_descriptor_and_view_lookup_fail_closed_without_device_work() {
         let (spec, _) = h3_count_shape();
         let GroupKeySource::H3CellToParent { cell, .. } = spec.group_keys[0].source else {
             unreachable!()
         };
-        let artifact = H3ParentArtifact::new(spec, 0, 1, None).expect("empty H3 artifact");
+        let artifact = H3ParentArtifact::new(spec, 0, 1, None, None).expect("empty H3 artifact");
         let request = ResidentColumnRef {
             relid: pg_sys::Oid::from(cell.relation_oid),
             attno: 1,
@@ -6954,39 +12388,60 @@ mod tests {
             type_oid: pg_sys::Oid::from(cell.type_oid),
         };
         let desc = build_h3_descriptor(&artifact, &[request], std::slice::from_ref(&view), cell)
-            .expect("empty H3 descriptor binds");
+            .expect("empty H3 descriptor binds")
+            .desc;
         assert_eq!(desc.grouping_mode, abi::PGACCEL_GROUPED_AGG_GROUPING_HASH);
         assert_eq!(desc.output_mode, abi::PGACCEL_GROUPED_AGG_OUTPUT_COMPACT);
         assert_eq!(desc.group_capacity, 1);
         assert!(desc.keys[0].values.values.is_null());
 
-        let fused = FusedH3Artifact {
+        let fused = FusedHashArtifact {
             resolved_spec: artifact.resolved_spec,
             fact_rows: 0,
-            group_capacity: 1,
-            resolution: 3,
+            group_capacity: Cell::new(1),
+            resolution: 7,
         };
-        let fused_desc =
-            build_fused_h3_descriptor(&fused, &[request], std::slice::from_ref(&view), cell)
-                .expect("empty fused H3 descriptor binds");
+        let fused_desc = build_fused_hash_descriptor(
+            &fused,
+            &[request],
+            std::slice::from_ref(&view),
+            cell,
+            &mut || false,
+        )
+        .expect("empty fused H3 descriptor binds")
+        .desc;
         assert_eq!(
             fused_desc.keys[0].flags,
             abi::PGACCEL_GROUPED_AGG_KEY_FLAG_H3_PARENT
         );
-        assert_eq!(fused_desc.keys[0].pad0, 3);
+        assert_eq!(fused_desc.keys[0].pad0, 7);
         assert!(fused_desc.keys[0].values.values.is_null());
         assert_eq!(fused_desc.group_capacity, desc.group_capacity);
+        assert!(
+            matches!(
+                build_fused_hash_descriptor(
+                    &fused,
+                    &[request],
+                    std::slice::from_ref(&view),
+                    cell,
+                    &mut || true
+                ),
+                Err(ResidentLoadError::PreparationInterrupted)
+            ),
+            "empty unfiltered binding still observes pending signals without FFI"
+        );
 
-        let invalid_fused = FusedH3Artifact {
+        let invalid_fused = FusedHashArtifact {
             resolution: 16,
             ..fused
         };
         assert!(
-            build_fused_h3_descriptor(
+            build_fused_hash_descriptor(
                 &invalid_fused,
                 &[request],
                 std::slice::from_ref(&view),
                 cell,
+                &mut || false,
             )
             .is_err()
         );

@@ -1,0 +1,27 @@
+{
+  "workload": "grouped_date_span",
+  "rows": 250000,
+  "seed": 42,
+  "iterations": 30,
+  "warmup": 10,
+  "timing_mode": "raw",
+  "cache_mode": "warm",
+  "realistic_gucs": false,
+  "skip_guc_verify": false,
+  "capture_plans": true,
+  "capture_planner_stages": false,
+  "native_parity_pairing": false,
+  "backend_pid": 52191,
+  "backend_pid_error": null,
+  "setup_sql": [
+    "DROP TABLE IF EXISTS bench_scalar_sales",
+    "CREATE TABLE bench_scalar_sales AS SELECT CASE WHEN i%97=0 THEN NULL ELSE i%32 END region, CASE WHEN i%11=0 THEN NULL ELSE DATE '2000-01-01'+(i%1001-500) END order_date, CASE WHEN i%13=0 THEN NULL ELSE DATE '2000-01-01'+(i%101-50) END ship_date  FROM generate_series(1,250000) s(i)",
+    "ANALYZE bench_scalar_sales"
+  ],
+  "pre_query_sql": [],
+  "accel_query_sql": "SELECT region,sum(ship_date-order_date) total,avg(ship_date-order_date) mean,count(ship_date-order_date) present,min(ship_date-order_date) lo,max(ship_date-order_date) hi,count(*) n FROM bench_scalar_sales GROUP BY region",
+  "baseline_query_sql": "SELECT region,sum(ship_date-order_date) total,avg(ship_date-order_date) mean,count(ship_date-order_date) present,min(ship_date-order_date) lo,max(ship_date-order_date) hi,count(*) n FROM bench_scalar_sales GROUP BY region",
+  "explain_sql": "EXPLAIN (VERBOSE, COSTS OFF) SELECT region,sum(ship_date-order_date) total,avg(ship_date-order_date) mean,count(ship_date-order_date) present,min(ship_date-order_date) lo,max(ship_date-order_date) hi,count(*) n FROM bench_scalar_sales GROUP BY region",
+  "explain": "Custom Scan (GpuAccelAgg)\n  Output: region, (sum((ship_date - order_date))), (avg((ship_date - order_date))), (count((ship_date - order_date))), (min((ship_date - order_date))), (max((ship_date - order_date))), (count(*))\n  Strategy: GpuAgg\n  Plan Selected: true\n  Batch Size: 65536\n  Expected Threads: 1\n  GPU Resident Pipeline: true\n  GPU Resident Proof Version: 2\n  GPU Resident Operator Class: resident_groupagg\n  GPU Physical Kernel Mode: parallel_dense_integer\n  GPU Descriptor Strategy: descriptor_grouped_aggregate\n  GPU Descriptor Specialization: dense_scalar_programs_plain\n  GPU Descriptor Specialization Cache: miss\n  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)\n  GPU Descriptor Group Keys: k0:fact(2444642.1:type=23) type=23 collation=0 encoding=hash\n  GPU Descriptor Aggregates: m0:bytecode(inputs=2, words=11, result_type=23) -> value.sum; value.avg; value.count; value.min; value.max; m1:count_star -> value.count\n  GPU Descriptor Filter: fact=none; measures=[m0=none; m1=none]; dimensions=[none]\n  GPU Descriptor Star Dimensions: none\n  GPU Descriptor Output: slot0:group[k0] source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot2:aggregate[m0].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot3:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false; slot4:aggregate[m0].value.min source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot5:aggregate[m0].value.max source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot6:aggregate[m1].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false\n  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)\n  GPU Descriptor Artifact: not initialized\n  GPU Descriptor Generations: not inspected\n  GPU Descriptor Bytes: not inspected\n  GPU Resident Stage Mask: 16395\n  GPU Resident Device Columns: 3\n  GPU Resident Boundary: none: no CPU boundary\n",
+  "explain_error": null
+}

@@ -1,0 +1,26 @@
+Test project /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+    Start 23: test_grouped_agg_hash
+1/1 Test #23: test_grouped_agg_hash ............***Failed    0.08 sec
+--- hash COUNT(column) metadata contracts (no device initialization) ---
+--- hash FILTER metadata contracts (protected row storage) ---
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:1118: pgaccel_init() returned -5, expected 0
+--- hash COUNT(column) exact NULL groups, types, merge sort, and failures ---
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+FAIL: unexpected test exception: shared USM allocation failed
+test_grouped_agg_hash: 1901 passed, 2 failed
+gpu-noise[test_grouped_agg_hash]: suppressed metal-no-devices=2; raw log: /Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs/test_grouped_agg_hash-20261010-033036-71640.log
+gpu-test[test_grouped_agg_hash]: failed with exit code 1
+--- failure summary from /Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs/test_grouped_agg_hash-20261010-033036-71640.log ---
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:1118: pgaccel_init() returned -5, expected 0
+FAIL: unexpected test exception: shared USM allocation failed
+PGACCEL_TEST_RESULT name=test_grouped_agg_hash exit_code=1 result=FAIL raw_lines=10 body_sha256=69356e201f10f067af7ab76b2eecf5a553ec8dd11cfa751658f08a9848bd6f4c binding_sha256=525ed192be16043a959d1c7c6ff64f18f3f0bdee3ddcc1020b11106f87e4fe12
+
+
+0% tests passed, 1 tests failed out of 1
+
+Total Test time (real) =   0.08 sec
+
+The following tests FAILED:
+	 23 - test_grouped_agg_hash (Failed)
+Errors while running CTest

@@ -1,0 +1,52 @@
+PGACCEL_TEST_START name=test_fp64_mul_probe
+
+=== Probe A: v * v (same SSA) ===
+  v*v                          got=1 (0x3ff0000000000000)  expected=1 (0x3ff0000000000000)  xor=0x0000000000000000  OK
+  v*v                          got=0.25 (0x3fd0000000000000)  expected=0.25 (0x3fd0000000000000)  xor=0x0000000000000000  OK
+  v*v                          got=4 (0x4010000000000000)  expected=4 (0x4010000000000000)  xor=0x0000000000000000  OK
+  v*v                          got=9 (0x4022000000000000)  expected=9 (0x4022000000000000)  xor=0x0000000000000000  OK
+  v*v                          got=10000 (0x40c3880000000000)  expected=10000 (0x40c3880000000000)  xor=0x0000000000000000  OK
+  v*v                          got=2.25 (0x4002000000000000)  expected=2.25 (0x4002000000000000)  xor=0x0000000000000000  OK
+  v*v                          got=1e-300 (0x01a56e1fc2f8f359)  expected=1e-300 (0x01a56e1fc2f8f359)  xor=0x0000000000000000  OK
+  v*v                          got=16 (0x4030000000000000)  expected=16 (0x4030000000000000)  xor=0x0000000000000000  OK
+
+=== Probe B: v * w (separate loads of same addr) ===
+  v*w                          got=1 (0x3ff0000000000000)  expected=1 (0x3ff0000000000000)  xor=0x0000000000000000  OK
+  v*w                          got=0.25 (0x3fd0000000000000)  expected=0.25 (0x3fd0000000000000)  xor=0x0000000000000000  OK
+  v*w                          got=4 (0x4010000000000000)  expected=4 (0x4010000000000000)  xor=0x0000000000000000  OK
+  v*w                          got=9 (0x4022000000000000)  expected=9 (0x4022000000000000)  xor=0x0000000000000000  OK
+  v*w                          got=10000 (0x40c3880000000000)  expected=10000 (0x40c3880000000000)  xor=0x0000000000000000  OK
+  v*w                          got=2.25 (0x4002000000000000)  expected=2.25 (0x4002000000000000)  xor=0x0000000000000000  OK
+  v*w                          got=1e-300 (0x01a56e1fc2f8f359)  expected=1e-300 (0x01a56e1fc2f8f359)  xor=0x0000000000000000  OK
+  v*w                          got=16 (0x4030000000000000)  expected=16 (0x4030000000000000)  xor=0x0000000000000000  OK
+
+=== Probe C: v * 2.0 (immediate const operand) ===
+  v*2.0                        got=2 (0x4000000000000000)  expected=2 (0x4000000000000000)  xor=0x0000000000000000  OK
+  v*2.0                        got=1 (0x3ff0000000000000)  expected=1 (0x3ff0000000000000)  xor=0x0000000000000000  OK
+  v*2.0                        got=4 (0x4010000000000000)  expected=4 (0x4010000000000000)  xor=0x0000000000000000  OK
+  v*2.0                        got=6 (0x4018000000000000)  expected=6 (0x4018000000000000)  xor=0x0000000000000000  OK
+  v*2.0                        got=-200 (0xc069000000000000)  expected=-200 (0xc069000000000000)  xor=0x0000000000000000  OK
+  v*2.0                        got=3 (0x4008000000000000)  expected=3 (0x4008000000000000)  xor=0x0000000000000000  OK
+  v*2.0                        got=2e-150 (0x20da2fe76a3f9475)  expected=2e-150 (0x20da2fe76a3f9475)  xor=0x0000000000000000  OK
+  v*2.0                        got=8 (0x4020000000000000)  expected=8 (0x4020000000000000)  xor=0x0000000000000000  OK
+
+=== Probe D: v + v (pure add, control) ===
+  v+v                          got=2 (0x4000000000000000)  expected=2 (0x4000000000000000)  xor=0x0000000000000000  OK
+  v+v                          got=1 (0x3ff0000000000000)  expected=1 (0x3ff0000000000000)  xor=0x0000000000000000  OK
+  v+v                          got=4 (0x4010000000000000)  expected=4 (0x4010000000000000)  xor=0x0000000000000000  OK
+  v+v                          got=6 (0x4018000000000000)  expected=6 (0x4018000000000000)  xor=0x0000000000000000  OK
+  v+v                          got=-200 (0xc069000000000000)  expected=-200 (0xc069000000000000)  xor=0x0000000000000000  OK
+  v+v                          got=3 (0x4008000000000000)  expected=3 (0x4008000000000000)  xor=0x0000000000000000  OK
+  v+v                          got=2e-150 (0x20da2fe76a3f9475)  expected=2e-150 (0x20da2fe76a3f9475)  xor=0x0000000000000000  OK
+  v+v                          got=8 (0x4020000000000000)  expected=8 (0x4020000000000000)  xor=0x0000000000000000  OK
+
+=== Ratio summary (got/expected) ===
+  in=1  v*v_ratio=1  v*w_ratio=1  v*2.0_ratio=1
+  in=0.5  v*v_ratio=1  v*w_ratio=1  v*2.0_ratio=1
+  in=2  v*v_ratio=1  v*w_ratio=1  v*2.0_ratio=1
+  in=3  v*v_ratio=1  v*w_ratio=1  v*2.0_ratio=1
+  in=-100  v*v_ratio=1  v*w_ratio=1  v*2.0_ratio=1
+  in=1.5  v*v_ratio=1  v*w_ratio=1  v*2.0_ratio=1
+  in=1e-150  v*v_ratio=1  v*w_ratio=1  v*2.0_ratio=1
+  in=4  v*v_ratio=1  v*w_ratio=1  v*2.0_ratio=1
+PGACCEL_TEST_RESULT name=test_fp64_mul_probe exit_code=0 result=PASS raw_lines=50 body_sha256=088b54a99cd2bbcf30ce17d40ce2eaa9fa8a19fd1d6295c68bff933d096d465f binding_sha256=ca383a656945db82956f24eea972f25e3a627b4f95f1572ca48c5116e786c422

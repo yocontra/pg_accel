@@ -1,6 +1,8 @@
 //! Begin-time host preparation and device ownership for generic aggregates.
 
 use std::any::Any;
+use std::borrow::Cow;
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
@@ -11,7 +13,7 @@ use crate::engine::residency::{
 };
 use crate::engine::spec::{
     AggQuerySpec, ColumnRef, FilterSpec, GroupKeyEncoding, GroupKeySource, JoinMultiplicity,
-    MaskKind, ScalarRange, ScalarValue,
+    MaskKind, MeasureExpr, ScalarRange, ScalarValue,
 };
 use crate::gpu::ExprDeviceBuffer;
 
@@ -101,7 +103,7 @@ fn canonical_text(type_oid: u32, value: &str) -> String {
     }
 }
 
-enum HostColumn {
+enum HostColumn<'a> {
     Bool {
         type_oid: u32,
         values: Vec<u8>,
@@ -131,12 +133,29 @@ enum HostColumn {
         type_oid: u32,
         codes: Vec<i32>,
         nulls: Option<Vec<u8>>,
-        labels: Vec<String>,
+        labels: Cow<'a, [String]>,
     },
 }
 
-impl HostColumn {
-    fn copy_from(view: ResidentColumnView<'_>) -> Result<Self, String> {
+impl<'a> HostColumn<'a> {
+    /// Value/NULL lanes have already been downloaded; labels stay borrowed
+    /// under the immutable resident input bundle. Final group datums still own
+    /// their strings, so no resident-label borrow escapes preparation.
+    fn text_from_copied_lanes(
+        type_oid: u32,
+        codes: Vec<i32>,
+        nulls: Option<Vec<u8>>,
+        labels: &'a [String],
+    ) -> Self {
+        Self::Text {
+            type_oid,
+            codes,
+            nulls,
+            labels: Cow::Borrowed(labels),
+        }
+    }
+
+    fn copy_from(view: ResidentColumnView<'a>) -> Result<Self, String> {
         let copy_nulls = |nulls: Option<&ExprDeviceBuffer<u8>>| {
             nulls
                 .map(ExprDeviceBuffer::copy_to_vec)
@@ -174,7 +193,7 @@ impl HostColumn {
                     type_oid,
                     codes: Vec::new(),
                     nulls: None,
-                    labels: Vec::new(),
+                    labels: Cow::Borrowed(&[]),
                 },
                 type_oid => {
                     return Err(format!(
@@ -232,12 +251,12 @@ impl HostColumn {
                 codes,
                 nulls,
                 labels,
-            } => Self::Text {
-                type_oid: u32::from(type_oid),
-                codes: codes.copy_to_vec().map_err(|error| error.to_string())?,
-                nulls: copy_nulls(nulls)?,
-                labels: labels.to_vec(),
-            },
+            } => Self::text_from_copied_lanes(
+                u32::from(type_oid),
+                codes.copy_to_vec().map_err(|error| error.to_string())?,
+                copy_nulls(nulls)?,
+                labels,
+            ),
             ResidentColumnView::H3 { type_oid, .. } => {
                 return Err(format!(
                     "resident H3 type OID {} cannot enter dense host dictionary preparation",
@@ -247,6 +266,12 @@ impl HostColumn {
             ResidentColumnView::Geometry { type_oid, .. } => {
                 return Err(format!(
                     "resident geometry type OID {} cannot enter dense host dictionary preparation",
+                    u32::from(type_oid)
+                ));
+            }
+            ResidentColumnView::Numeric { type_oid, .. } => {
+                return Err(format!(
+                    "resident NUMERIC type OID {} requires exact decimal dictionary preparation",
                     u32::from(type_oid)
                 ));
             }
@@ -414,15 +439,15 @@ impl HostColumn {
     }
 }
 
-struct HostColumns {
-    columns: BTreeMap<(u32, i16), HostColumn>,
+struct HostColumns<'a> {
+    columns: BTreeMap<(u32, i16), HostColumn<'a>>,
     row_counts: BTreeMap<u32, usize>,
 }
 
-impl HostColumns {
+impl<'a> HostColumns<'a> {
     fn copy(
         requests: &[ResidentColumnRef],
-        bundle: ResidentInputBundle<'_>,
+        bundle: ResidentInputBundle<'a>,
     ) -> Result<Self, String> {
         if requests.len() != bundle.columns.len() {
             return Err("resident bulk column count changed during preparation".to_owned());
@@ -458,7 +483,7 @@ impl HostColumns {
         })
     }
 
-    fn get(&self, column: ColumnRef) -> Result<&HostColumn, String> {
+    fn get(&self, column: ColumnRef) -> Result<&HostColumn<'a>, String> {
         let attno = i16::try_from(column.attno)
             .map_err(|_| format!("attribute {} exceeds int16", column.attno))?;
         let value = self
@@ -496,13 +521,17 @@ fn collect_filter_column(
 ) -> Result<(), String> {
     match filter {
         FilterSpec::None => Ok(()),
-        FilterSpec::Ranges { input, .. } | FilterSpec::Mask { input, .. } => {
+        FilterSpec::Ranges { input, .. }
+        | FilterSpec::NullOrRanges { input, .. }
+        | FilterSpec::Mask { input, .. } => {
             let attno = i16::try_from(input.attno)
                 .map_err(|_| format!("attribute {} exceeds int16", input.attno))?;
             output.insert((input.relation_oid, attno));
             Ok(())
         }
-        FilterSpec::Bytecode { .. } | FilterSpec::Spatial { .. } => {
+        FilterSpec::Bytecode { .. }
+        | FilterSpec::Spatial { .. }
+        | FilterSpec::SpatialAnd { .. } => {
             Err("derived artifact cannot evaluate bytecode/spatial filters".to_owned())
         }
     }
@@ -536,7 +565,25 @@ pub(super) fn artifact_column_refs(spec: &AggQuerySpec) -> Result<Vec<ResidentCo
         insert_column_ref(&mut columns, dimension.dim_key)?;
         collect_filter_column(&dimension.filter, &mut columns)?;
     }
+    if spec
+        .group_keys
+        .iter()
+        .any(|key| matches!(key.source, GroupKeySource::H3CellToParent { .. }))
+        && let Some(input) = h3_count_filter(spec)?
+    {
+        insert_column_ref(&mut columns, input)?;
+    }
     match &spec.fact_filter {
+        FilterSpec::SpatialAnd { spatial, .. } => {
+            let FilterSpec::Spatial { left, right, .. } = spatial.as_ref() else {
+                return Err("invalid spatial conjunction".into());
+            };
+            for operand in [left, right] {
+                if let Some(column) = operand.column() {
+                    insert_column_ref(&mut columns, column)?;
+                }
+            }
+        }
         FilterSpec::Mask { .. } => collect_filter_column(&spec.fact_filter, &mut columns)?,
         FilterSpec::Spatial { left, right, .. } => {
             for operand in [left, right] {
@@ -545,7 +592,10 @@ pub(super) fn artifact_column_refs(spec: &AggQuerySpec) -> Result<Vec<ResidentCo
                 }
             }
         }
-        FilterSpec::None | FilterSpec::Ranges { .. } | FilterSpec::Bytecode { .. } => {}
+        FilterSpec::None
+        | FilterSpec::Ranges { .. }
+        | FilterSpec::NullOrRanges { .. }
+        | FilterSpec::Bytecode { .. } => {}
     }
     Ok(columns
         .into_iter()
@@ -602,12 +652,16 @@ fn in_range(value: ScalarValue, range: ScalarRange) -> Result<bool, String> {
         && scalar_cmp(value, range.hi)? != std::cmp::Ordering::Greater)
 }
 
-fn filter_accepts(filter: &FilterSpec, columns: &HostColumns, row: usize) -> Result<bool, String> {
+fn filter_accepts(
+    filter: &FilterSpec,
+    columns: &HostColumns<'_>,
+    row: usize,
+) -> Result<bool, String> {
     match filter {
         FilterSpec::None => Ok(true),
-        FilterSpec::Ranges { input, ranges } => {
+        FilterSpec::Ranges { input, ranges } | FilterSpec::NullOrRanges { input, ranges } => {
             let Some(value) = columns.get(*input)?.filter_value(row)? else {
-                return Ok(false);
+                return Ok(matches!(filter, FilterSpec::NullOrRanges { .. }));
             };
             for range in ranges {
                 if in_range(value, *range)? {
@@ -628,7 +682,9 @@ fn filter_accepts(filter: &FilterSpec, columns: &HostColumns, row: usize) -> Res
         FilterSpec::Mask { .. } => {
             Err("recheck/non-boolean masks are not childless-safe".to_owned())
         }
-        FilterSpec::Bytecode { .. } | FilterSpec::Spatial { .. } => {
+        FilterSpec::Bytecode { .. }
+        | FilterSpec::Spatial { .. }
+        | FilterSpec::SpatialAnd { .. } => {
             Err("bytecode/spatial filters are not supported by Phase 5D".to_owned())
         }
     }
@@ -640,6 +696,91 @@ struct DictionaryBuilder {
     by_key: BTreeMap<CanonicalKey, i32>,
     values: Vec<GroupDatum>,
     null_code: Option<i32>,
+}
+
+/// Reuse resident text codes and compact primitive domains while constructing
+/// one grouping dictionary. Entries are filled lazily in row order: unused
+/// resident labels never become groups, and the first visible SQL datum stays
+/// the representative (including bpchar spellings and NULL-code placement).
+enum DictionaryCodeCache {
+    None,
+    Text(Vec<i32>),
+    Bool([i32; 2]),
+    I32 { minimum: i32, codes: Vec<i32> },
+}
+
+struct ColumnDictionaryEncoder<'a> {
+    column: &'a HostColumn<'a>,
+    cache: DictionaryCodeCache,
+}
+
+impl<'a> ColumnDictionaryEncoder<'a> {
+    fn new(column: &'a HostColumn<'a>) -> Self {
+        const MAX_DIRECT_DOMAIN: i64 = 4096;
+        let cache = match column {
+            HostColumn::Text { labels, .. } => DictionaryCodeCache::Text(vec![-1; labels.len()]),
+            HostColumn::Bool { .. } => DictionaryCodeCache::Bool([-1; 2]),
+            HostColumn::I32 { values, nulls, .. } if !values.is_empty() => {
+                let (minimum, maximum) = values
+                    .iter()
+                    .enumerate()
+                    .filter(|(row, _)| nulls.as_ref().is_none_or(|nulls| nulls[*row] == 0))
+                    .fold((i32::MAX, i32::MIN), |(lo, hi), (_, value)| {
+                        (lo.min(*value), hi.max(*value))
+                    });
+                let span = i64::from(maximum) - i64::from(minimum) + 1;
+                if (1..=MAX_DIRECT_DOMAIN).contains(&span) {
+                    DictionaryCodeCache::I32 {
+                        minimum,
+                        codes: vec![
+                            -1;
+                            usize::try_from(span).expect("bounded positive i32 domain")
+                        ],
+                    }
+                } else {
+                    DictionaryCodeCache::None
+                }
+            }
+            _ => DictionaryCodeCache::None,
+        };
+        Self { column, cache }
+    }
+
+    fn code_for(&mut self, row: usize, dictionary: &mut DictionaryBuilder) -> Result<i32, String> {
+        if self.column.is_null(row)? {
+            return dictionary.code_for(None);
+        }
+        let slot =
+            match (&mut self.cache, self.column) {
+                (DictionaryCodeCache::Text(remap), HostColumn::Text { codes, .. }) => {
+                    let source = usize::try_from(codes[row])
+                        .map_err(|_| "resident text code is negative".to_owned())?;
+                    Some(remap.get_mut(source).ok_or_else(|| {
+                        "resident text code exceeds its label dictionary".to_owned()
+                    })?)
+                }
+                (DictionaryCodeCache::Bool(remap), HostColumn::Bool { values, .. }) => Some(
+                    remap
+                        .get_mut(usize::from(values[row]))
+                        .ok_or_else(|| "resident boolean value is not canonical".to_owned())?,
+                ),
+                (DictionaryCodeCache::I32 { minimum, codes }, HostColumn::I32 { values, .. }) => {
+                    let index = usize::try_from(i64::from(values[row]) - i64::from(*minimum))
+                        .map_err(|_| "resident integer dictionary index is negative".to_owned())?;
+                    Some(codes.get_mut(index).ok_or_else(|| {
+                        "resident integer dictionary index exceeds domain".to_owned()
+                    })?)
+                }
+                _ => None,
+            };
+        if let Some(slot) = slot {
+            if *slot < 0 {
+                *slot = dictionary.code_for(self.column.dictionary_value(row)?)?;
+            }
+            return Ok(*slot);
+        }
+        dictionary.code_for(self.column.dictionary_value(row)?)
+    }
 }
 
 impl DictionaryBuilder {
@@ -703,7 +844,7 @@ fn device_dimension_code(code: Option<usize>) -> Result<i32, String> {
 
 fn prepare_dimension(
     dimension: &crate::engine::spec::DimSpec,
-    columns: &HostColumns,
+    columns: &HostColumns<'_>,
     fact_rows: usize,
     pad_device_lanes: bool,
 ) -> Result<PreparedDimension, String> {
@@ -840,6 +981,14 @@ pub(crate) fn estimate_descriptor_artifact_bytes_upper_bound(
         }
     }
 
+    if spec
+        .group_keys
+        .iter()
+        .any(|key| matches!(key.source, GroupKeySource::H3CellToParent { .. }))
+        && h3_count_filter(spec).ok()?.is_some()
+    {
+        add(fact_rows()?, 1)?;
+    }
     for dimension in &spec.star_dims {
         let dimension_rows = *relation_rows.get(&dimension.relation_oid)?;
         add(fact_rows()?, 4)?;
@@ -854,13 +1003,61 @@ pub(crate) fn estimate_descriptor_artifact_bytes_upper_bound(
             kind: MaskKind::Sql,
             ..
         } => add(fact_rows()?, 1)?,
-        FilterSpec::Spatial { .. } => add(fact_rows()?, 1)?,
-        FilterSpec::None | FilterSpec::Ranges { .. } => {}
-        FilterSpec::Mask { .. } | FilterSpec::Bytecode { .. } => {
+        FilterSpec::Spatial { .. } | FilterSpec::SpatialAnd { .. } => add(fact_rows()?, 1)?,
+        FilterSpec::None
+        | FilterSpec::Ranges { .. }
+        | FilterSpec::NullOrRanges { .. }
+        | FilterSpec::Bytecode { .. } => {}
+        FilterSpec::Mask { .. } => {
             return None;
         }
     }
     Some(bytes)
+}
+
+/// Exact requested payload of newly cloned measure/WHERE-program vectors. Their
+/// source capacity is irrelevant: cloning retains only the active elements.
+#[allow(clippy::redundant_pub_crate)] // re-exported from the private artifact module
+pub(crate) fn descriptor_program_clone_bytes(spec: &AggQuerySpec) -> Result<u64, String> {
+    descriptor_program_bytes(spec, false)
+}
+
+fn descriptor_program_bytes(spec: &AggQuerySpec, retained: bool) -> Result<u64, String> {
+    let mut programs = spec
+        .measures
+        .iter()
+        .filter_map(|measure| match &measure.expression {
+            MeasureExpr::Bytecode {
+                inputs, program, ..
+            } => Some((inputs, program)),
+            _ => None,
+        })
+        .chain(match spec.fact_filter.scalar() {
+            FilterSpec::Bytecode { inputs, program } => Some((inputs, program)),
+            _ => None,
+        });
+    programs.try_fold(0_u64, |bytes, (inputs, program)| {
+        let inputs = if retained {
+            inputs.capacity()
+        } else {
+            inputs.len()
+        };
+        let words = if retained {
+            program.capacity()
+        } else {
+            program.len()
+        };
+        inputs
+            .checked_mul(size_of::<ColumnRef>())
+            .and_then(|input_bytes| {
+                words
+                    .checked_mul(size_of::<i32>())
+                    .and_then(|words| words.checked_add(input_bytes))
+            })
+            .and_then(|payload| u64::try_from(payload).ok())
+            .and_then(|payload| bytes.checked_add(payload))
+            .ok_or_else(|| "descriptor program payload bytes overflow".into())
+    })
 }
 
 fn checked_device_bytes(prepared: &PreparedAggArtifact) -> Result<u64, String> {
@@ -922,9 +1119,10 @@ fn prepare_agg_artifact_impl(
         let input = match &key.source {
             GroupKeySource::FactColumn(column) => {
                 let column = columns.get(*column)?;
+                let mut encoder = ColumnDictionaryEncoder::new(column);
                 let mut codes = Vec::with_capacity(fact_rows);
                 for row in 0..fact_rows {
-                    codes.push(dictionary.code_for(column.dictionary_value(row)?)?);
+                    codes.push(encoder.code_for(row, &mut dictionary)?);
                 }
                 PreparedKeyInput::Fact(codes)
             }
@@ -941,6 +1139,7 @@ fn prepare_agg_artifact_impl(
                     return Err("cannot group by a counted dimension".to_owned());
                 }
                 let group_column = columns.get(*group_column)?;
+                let mut encoder = ColumnDictionaryEncoder::new(group_column);
                 let lookup_len = if pad_device_lanes {
                     group_column.len()
                 } else {
@@ -953,7 +1152,7 @@ fn prepare_agg_artifact_impl(
                     else {
                         continue;
                     };
-                    lookup[join_code] = dictionary.code_for(group_column.dictionary_value(row)?)?;
+                    lookup[join_code] = encoder.code_for(row, &mut dictionary)?;
                 }
                 PreparedKeyInput::Dimension { dim_index, lookup }
             }
@@ -995,7 +1194,10 @@ fn prepare_agg_artifact_impl(
             }
             Some(mask)
         }
-        FilterSpec::None | FilterSpec::Ranges { .. } => None,
+        FilterSpec::None
+        | FilterSpec::Ranges { .. }
+        | FilterSpec::NullOrRanges { .. }
+        | FilterSpec::Bytecode { .. } => None,
         _ => return Err("fact filter is not descriptor-compatible".to_owned()),
     };
     resolved_spec
@@ -1104,19 +1306,87 @@ pub(super) struct DescriptorAggArtifact {
     pub fact_mask: Option<ExprDeviceBuffer<i8>>,
     pub domains: Rc<[GroupDomain]>,
     device_bytes: u64,
+    program_host_bytes: u64,
 }
 
 /// Device-derived H3 parent lane for the exact HASH/COMPACT grouped path.
 ///
 /// The raw source column owns the NULL sidecar. This artifact owns only the
-/// transformed parent values and therefore charges exactly eight bytes per
-/// fact row.
+/// transformed parent values plus an optional exact Boolean FILTER mask.
+/// Both lanes are pinned to the same dependency generations and snapshot.
 pub(super) struct H3ParentArtifact {
     pub resolved_spec: AggQuerySpec,
     pub fact_rows: usize,
-    pub group_capacity: usize,
+    group_capacity: Cell<usize>,
     pub parents: Option<ExprDeviceBuffer<u64>>,
+    pub filter_mask: Option<ExprDeviceBuffer<i8>>,
     device_bytes: u64,
+}
+
+/// Physical measure FILTER after exact WHERE implication. A direct Boolean
+/// predicate identical to WHERE is TRUE for every selected row, so it needs
+/// neither another mask nor a per-measure device test. Validate before folding:
+/// matching malformed or recheck predicates must never become unfiltered.
+pub(super) fn h3_count_filter(spec: &AggQuerySpec) -> Result<Option<ColumnRef>, String> {
+    let [measure] = spec.measures.as_slice() else {
+        return Err("hash binding requires one measure".into());
+    };
+    let filter = hash_boolean_filter(spec, &measure.filter)?;
+    Ok(if measure.filter == spec.fact_filter {
+        None
+    } else {
+        filter
+    })
+}
+
+pub(super) fn hash_where_filter(spec: &AggQuerySpec) -> Result<Option<ColumnRef>, String> {
+    hash_boolean_filter(spec, &spec.fact_filter)
+}
+
+fn hash_boolean_filter(
+    spec: &AggQuerySpec,
+    filter: &FilterSpec,
+) -> Result<Option<ColumnRef>, String> {
+    match *filter {
+        FilterSpec::None => Ok(None),
+        FilterSpec::Mask {
+            input,
+            kind: MaskKind::Sql,
+        } if input.relation_oid == spec.fact_rel
+            && input.attno > 0
+            && input.type_oid == BOOLOID =>
+        {
+            Ok(Some(input))
+        }
+        _ => Err("hash predicate requires an exact resident fact Boolean".into()),
+    }
+}
+
+pub(super) fn h3_parent_artifact_bytes(spec: &AggQuerySpec, rows: usize) -> Result<u64, String> {
+    let width = std::mem::size_of::<u64>() + usize::from(h3_count_filter(spec)?.is_some());
+    rows.checked_mul(width)
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| "derived H3 parent/mask byte count overflow".to_owned())
+}
+
+fn h3_artifact_lane_bytes(
+    spec: &AggQuerySpec,
+    rows: usize,
+    parent_rows: usize,
+    mask_rows: usize,
+) -> Result<u64, String> {
+    if parent_rows != rows {
+        return Err("derived H3 parent lane length does not match fact rows".to_owned());
+    }
+    let expected_mask_rows = if h3_count_filter(spec)?.is_some() {
+        rows
+    } else {
+        0
+    };
+    if mask_rows != expected_mask_rows {
+        return Err("derived H3 FILTER mask length does not match its logical input".into());
+    }
+    h3_parent_artifact_bytes(spec, rows)
 }
 
 impl H3ParentArtifact {
@@ -1125,22 +1395,51 @@ impl H3ParentArtifact {
         fact_rows: usize,
         group_capacity: usize,
         parents: Option<ExprDeviceBuffer<u64>>,
+        filter_mask: Option<ExprDeviceBuffer<i8>>,
     ) -> Result<Self, String> {
-        if parents.as_ref().map_or(0, ExprDeviceBuffer::len) != fact_rows {
-            return Err("derived H3 parent lane length does not match fact rows".to_owned());
+        if hash_where_filter(&resolved_spec)?.is_some() {
+            return Err("H3 WHERE requires fused key evaluation after row rejection".into());
         }
-        let device_bytes = fact_rows
-            .checked_mul(std::mem::size_of::<u64>())
-            .and_then(|bytes| u64::try_from(bytes).ok())
-            .ok_or_else(|| "derived H3 parent byte count overflow".to_owned())?;
+        let device_bytes = h3_artifact_lane_bytes(
+            &resolved_spec,
+            fact_rows,
+            parents.as_ref().map_or(0, ExprDeviceBuffer::len),
+            filter_mask.as_ref().map_or(0, ExprDeviceBuffer::len),
+        )?;
         Ok(Self {
             resolved_spec,
             fact_rows,
-            group_capacity,
+            group_capacity: Cell::new(group_capacity),
             parents,
+            filter_mask,
             device_bytes,
         })
     }
+
+    pub(super) fn group_capacity(&self) -> usize {
+        self.group_capacity.get()
+    }
+
+    /// Call only after exact keys/count partition validation. This is a bound
+    /// proved by complete GPU execution, not a planner estimate. The parent
+    /// values and source NULL sidecar are immutable for this artifact's pinned
+    /// dependency generations; invalidation destroys this learned bound too.
+    pub(super) fn record_validated_groups(&self, emitted: usize) -> Result<(), String> {
+        let bound = learned_hash_group_bound(self.fact_rows, self.group_capacity.get(), emitted)?;
+        self.group_capacity.set(bound);
+        Ok(())
+    }
+}
+
+pub(super) fn learned_hash_group_bound(
+    rows: usize,
+    previous: usize,
+    emitted: usize,
+) -> Result<usize, String> {
+    if previous == 0 || emitted > previous || emitted > rows || (rows != 0 && emitted == 0) {
+        return Err("validated hash group count violates its input/capacity bounds".to_owned());
+    }
+    Ok(emitted.max(1))
 }
 
 impl DerivedArtifact for H3ParentArtifact {
@@ -1159,6 +1458,7 @@ impl DerivedArtifact for H3ParentArtifact {
 
 impl DescriptorAggArtifact {
     pub(super) fn build(prepared: PreparedAggArtifact) -> Result<Self, String> {
+        let program_host_bytes = descriptor_program_bytes(&prepared.resolved_spec, true)?;
         let mut keys = Vec::with_capacity(prepared.keys.len());
         for key in prepared.keys {
             keys.push(match key {
@@ -1201,6 +1501,7 @@ impl DescriptorAggArtifact {
             fact_mask,
             domains: prepared.domains,
             device_bytes: prepared.device_bytes,
+            program_host_bytes,
         })
     }
 }
@@ -1211,7 +1512,7 @@ impl DerivedArtifact for DescriptorAggArtifact {
     }
 
     fn retained_host_exact_bytes(&self) -> u64 {
-        0
+        self.program_host_bytes
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -1221,6 +1522,26 @@ impl DerivedArtifact for DescriptorAggArtifact {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn learned_h3_capacity_requires_a_complete_possible_group_count() {
+        assert_eq!(
+            super::learned_hash_group_bound(12_748_986, 12_748_986, 4467),
+            Ok(4467)
+        );
+        assert_eq!(
+            super::learned_hash_group_bound(12_748_986, 4467, 4467),
+            Ok(4467)
+        );
+        assert_eq!(super::learned_hash_group_bound(0, 1, 0), Ok(1));
+        assert_eq!(
+            super::learned_hash_group_bound(2_000_019, 2_000_019, 1),
+            Ok(1)
+        );
+        for (rows, previous, emitted) in [(100, 10, 11), (10, 100, 11), (10, 10, 0), (0, 0, 0)] {
+            assert!(super::learned_hash_group_bound(rows, previous, emitted).is_err());
+        }
+    }
+
     use super::*;
     use crate::engine::spec::{
         AggregateKind, AggregateOutput, AggregateSource, GroupKeyRef, MeasureExpr, MeasureSpec,
@@ -1235,7 +1556,7 @@ mod tests {
         }
     }
 
-    fn host_columns(fact: HostColumn, dimension: HostColumn) -> HostColumns {
+    fn host_columns<'a>(fact: HostColumn<'a>, dimension: HostColumn<'a>) -> HostColumns<'a> {
         let fact_rows = fact.len();
         let dimension_rows = dimension.len();
         HostColumns {
@@ -1271,6 +1592,53 @@ mod tests {
             star_dims: Vec::new(),
             having: None,
         }
+    }
+
+    #[test]
+    fn descriptor_program_host_accounting_matches_cloned_vector_payloads() {
+        let mut spec = count_star_spec();
+        let mut inputs = Vec::with_capacity(16);
+        inputs.push(column(100, INT4OID));
+        let mut program = Vec::with_capacity(128);
+        program.extend([
+            crate::engine::spec::scalar::SCALAR_PROGRAM_MAGIC,
+            2,
+            1,
+            2,
+            0,
+            0,
+        ]);
+        spec.measures[0].expression = MeasureExpr::Bytecode {
+            inputs,
+            program,
+            result_type_oid: INT4OID,
+        };
+        assert!(
+            descriptor_program_bytes(&spec, true).expect("source capacity")
+                > descriptor_program_clone_bytes(&spec).expect("clone size")
+        );
+        for states in 1..=4 {
+            spec.measures.resize(states, spec.measures[0].clone());
+            let forecast = descriptor_program_clone_bytes(&spec).expect("clone forecast");
+            assert_eq!(
+                forecast,
+                states as u64 * (6 * 4 + size_of::<ColumnRef>() as u64)
+            );
+            let artifact = DescriptorAggArtifact::build(PreparedAggArtifact {
+                resolved_spec: spec.clone(),
+                fact_rows: 0,
+                group_capacity: 1,
+                keys: vec![],
+                dimensions: vec![],
+                fact_mask: None,
+                domains: Rc::from([]),
+                device_bytes: 0,
+            })
+            .expect("empty device artifact with real cloned program vectors");
+            assert_eq!(artifact.device_bytes(), 0);
+            assert_eq!(artifact.retained_host_exact_bytes(), forecast);
+        }
+        assert_eq!(descriptor_program_clone_bytes(&count_star_spec()), Ok(0));
     }
 
     fn spatial_filter() -> FilterSpec {
@@ -1364,6 +1732,75 @@ mod tests {
     }
 
     #[test]
+    fn filtered_h3_artifact_forecast_matches_lanes_and_dependency_union() {
+        let mut spec = count_star_spec();
+        spec.group_keys.push(GroupKeyRef {
+            source: GroupKeySource::H3CellToParent {
+                cell: column(100, 90_001),
+                resolution: 0,
+            },
+            type_oid: 90_001,
+            collation_oid: 0,
+            encoding: GroupKeyEncoding::Hash,
+        });
+        let unfiltered = spec.clone();
+        spec.measures[0].filter = FilterSpec::Mask {
+            input: ColumnRef {
+                attno: 3,
+                ..column(100, BOOLOID)
+            },
+            kind: MaskKind::Sql,
+        };
+        for rows in [0, 1, 65535, 65536, 65537, 12_748_986] {
+            let expected = rows as u64 * 9;
+            assert_eq!(h3_parent_artifact_bytes(&spec, rows), Ok(expected));
+            assert_eq!(
+                h3_artifact_lane_bytes(&spec, rows, rows, rows),
+                Ok(expected)
+            );
+            assert_eq!(
+                estimate_descriptor_artifact_bytes_upper_bound(
+                    &spec,
+                    &BTreeMap::from([(100, rows as u64)])
+                ),
+                Some(expected)
+            );
+            assert_eq!(
+                h3_artifact_lane_bytes(&unfiltered, rows, rows, 0),
+                Ok(rows as u64 * 8)
+            );
+            assert!(h3_artifact_lane_bytes(&spec, rows, rows + 1, rows).is_err());
+            if rows != 0 {
+                assert!(h3_artifact_lane_bytes(&spec, rows, rows, 0).is_err());
+                assert!(h3_artifact_lane_bytes(&unfiltered, rows, rows, rows).is_err());
+            }
+        }
+        assert!(h3_parent_artifact_bytes(&spec, usize::MAX / 9 + 1).is_err());
+        assert_eq!(
+            estimate_descriptor_artifact_bytes_upper_bound(
+                &spec,
+                &BTreeMap::from([(100, u64::MAX / 9 + 1)])
+            ),
+            None
+        );
+        assert_eq!(
+            artifact_column_refs(&spec)
+                .expect("predicate dependency")
+                .iter()
+                .map(|r| r.attno)
+                .collect::<Vec<_>>(),
+            [1, 3]
+        );
+        spec.measures[0].filter = FilterSpec::Mask {
+            input: column(200, BOOLOID),
+            kind: MaskKind::Sql,
+        };
+        assert!(h3_parent_artifact_bytes(&spec, 1).is_err());
+        assert!(artifact_column_refs(&spec).is_err());
+        assert!(H3ParentArtifact::new(spec, 0, 1, None, None).is_err());
+    }
+
+    #[test]
     fn spatial_artifact_estimator_adds_exact_mask_bytes_and_fails_on_overflow() {
         let mut spec = count_star_spec();
         spec.fact_filter = spatial_filter();
@@ -1442,6 +1879,309 @@ mod tests {
         assert_eq!(canonical_text(BPCHAROID, "EU  "), "EU");
         assert_eq!(canonical_text(TEXTOID, "EU  "), "EU  ");
         assert_eq!(canonical_text(VARCHAROID, "EU  "), "EU  ");
+    }
+
+    #[test]
+    fn dictionary_code_cache_matches_rowwise_reference() {
+        let compare = |column: HostColumn<'_>, rows: &[usize]| {
+            column.validate_nulls().expect("fixture null bitmap");
+            let mut reference = DictionaryBuilder::new(column.type_oid(), 950);
+            let mut optimized = DictionaryBuilder::new(column.type_oid(), 950);
+            let mut encoder = ColumnDictionaryEncoder::new(&column);
+            for row in rows {
+                assert_eq!(
+                    encoder.code_for(*row, &mut optimized),
+                    reference.code_for(column.dictionary_value(*row).expect("reference value"))
+                );
+            }
+            assert_eq!(optimized.finish(), reference.finish());
+        };
+        let rows = [0, 1, 2, 3, 4, 5, 6, 6, 0, 2];
+        for type_oid in [TEXTOID, VARCHAROID, BPCHAROID] {
+            compare(
+                HostColumn::Text {
+                    type_oid,
+                    codes: vec![-7, 3, 1, 2, 0, 3, 5],
+                    nulls: Some(vec![1, 0, 0, 0, 0, 0, 1]),
+                    labels: vec![
+                        "x".into(),
+                        "x ".into(),
+                        "z".into(),
+                        "x  ".into(),
+                        "unused".into(),
+                    ]
+                    .into(),
+                },
+                &rows,
+            );
+        }
+        compare(
+            HostColumn::Bool {
+                type_oid: BOOLOID,
+                values: vec![0, 1, 0, 1, 1, 0, 0],
+                nulls: Some(vec![1, 0, 0, 0, 0, 0, 1]),
+            },
+            &rows,
+        );
+        for values in [
+            vec![0, 9001, 9002, 9001, 9003, 9002, i32::MIN],
+            vec![0, i32::MIN, i32::MAX, -1, 0, 1, 0],
+        ] {
+            compare(
+                HostColumn::I32 {
+                    type_oid: DATEOID,
+                    values,
+                    nulls: Some(vec![1, 0, 0, 0, 0, 0, 1]),
+                },
+                &rows,
+            );
+        }
+        // Dimension grouping encodes only matched rows; unused labels must not
+        // reserve codes, and the representative must be the first matched row.
+        compare(
+            HostColumn::Text {
+                type_oid: BPCHAROID,
+                codes: vec![0, 1, 2, 3],
+                nulls: None,
+                labels: vec!["unused".into(), "a ".into(), "a".into(), "b".into()].into(),
+            },
+            &[2, 3, 1],
+        );
+    }
+
+    #[test]
+    fn borrowed_labels_preserve_codes_and_owned_group_representatives() {
+        for type_oid in [TEXTOID, VARCHAROID, BPCHAROID] {
+            let mut labels = vec![
+                "a  ".to_owned(),
+                "a".to_owned(),
+                String::new(),
+                "λ\u{a0}".to_owned(),
+                "unused".to_owned(),
+            ];
+            let (actual, expected) = {
+                let codes = vec![-1, 2, 0, 1, 3, 0, i32::MAX];
+                let nulls = Some(vec![1, 0, 0, 0, 0, 0, 1]);
+                let borrowed = HostColumn::text_from_copied_lanes(
+                    type_oid,
+                    codes.clone(),
+                    nulls.clone(),
+                    &labels,
+                );
+                let owned = HostColumn::Text {
+                    type_oid,
+                    codes,
+                    nulls,
+                    labels: Cow::Owned(labels.clone()),
+                };
+                borrowed.validate_nulls().expect("valid sidecar");
+                let HostColumn::Text {
+                    labels: Cow::Borrowed(view),
+                    ..
+                } = &borrowed
+                else {
+                    panic!("resident labels must not be cloned");
+                };
+                assert!(std::ptr::eq(*view, labels.as_slice()));
+                let mut actual = DictionaryBuilder::new(type_oid, 950);
+                let mut expected = DictionaryBuilder::new(type_oid, 950);
+                let mut encoder = ColumnDictionaryEncoder::new(&borrowed);
+                for row in [2, 0, 1, 3, 4, 5, 6, 2] {
+                    assert_eq!(
+                        encoder.code_for(row, &mut actual),
+                        expected.code_for(owned.dictionary_value(row).expect("owned reference"))
+                    );
+                }
+                (actual.finish(), expected.finish())
+            };
+            // Simulate replacement/removal of the resident decoder only after
+            // the immutable preparation borrow has ended. Final output owns
+            // its representatives, including the first bpchar spelling.
+            labels.iter_mut().for_each(String::clear);
+            drop(labels);
+            assert_eq!(actual, expected);
+            assert_eq!(actual.values[0], GroupDatum::Text("a  ".to_owned()));
+            assert_eq!(actual.null_code, Some(1));
+            assert!(
+                !actual
+                    .values
+                    .contains(&GroupDatum::Text("unused".to_owned()))
+            );
+        }
+    }
+
+    #[test]
+    fn unused_high_cardinality_labels_stay_borrowed() {
+        let labels = (0..100_000)
+            .map(|index| format!("label-{index:06}-{}", "x".repeat(64)))
+            .collect::<Vec<_>>();
+        let clone_payload_bytes = labels.len() * std::mem::size_of::<String>()
+            + labels.iter().map(String::len).sum::<usize>();
+        assert_eq!(
+            clone_payload_bytes,
+            7_700_000 + 100_000 * std::mem::size_of::<String>()
+        );
+        let column =
+            HostColumn::text_from_copied_lanes(TEXTOID, (0..100_000).collect(), None, &labels);
+        let HostColumn::Text {
+            labels: Cow::Borrowed(view),
+            ..
+        } = &column
+        else {
+            panic!("unused strings must remain in resident storage");
+        };
+        assert!(std::ptr::eq(*view, labels.as_slice()));
+        let mut dictionary = DictionaryBuilder::new(TEXTOID, 950);
+        let mut encoder = ColumnDictionaryEncoder::new(&column);
+        // A dimension filter may select just the last row of a complete
+        // resident column; the other labels must not become output groups.
+        assert_eq!(encoder.code_for(99_999, &mut dictionary), Ok(0));
+        assert_eq!(encoder.code_for(99_999, &mut dictionary), Ok(0));
+        let domain = dictionary.finish();
+        assert_eq!(
+            domain.values,
+            vec![GroupDatum::Text(labels[99_999].clone())]
+        );
+        // The existing per-label i32 remap is still allocated. This change
+        // removes only the redundant String vector and label byte clones.
+        let DictionaryCodeCache::Text(remap) = encoder.cache else {
+            panic!("text remap");
+        };
+        assert_eq!(remap.len(), labels.len());
+        assert_eq!(remap.iter().filter(|code| **code >= 0).count(), 1);
+    }
+
+    #[test]
+    fn borrowed_decoder_keeps_empty_and_invalid_input_checks() {
+        let labels = vec!["only".to_owned()];
+        for code in [-1, 1, i32::MAX] {
+            let column = HostColumn::text_from_copied_lanes(TEXTOID, vec![code], None, &labels);
+            let mut dictionary = DictionaryBuilder::new(TEXTOID, 950);
+            let mut encoder = ColumnDictionaryEncoder::new(&column);
+            assert!(encoder.code_for(0, &mut dictionary).is_err());
+            assert!(dictionary.values.is_empty());
+        }
+        for nulls in [vec![], vec![2], vec![0, 0]] {
+            let column = HostColumn::text_from_copied_lanes(TEXTOID, vec![0], Some(nulls), &labels);
+            assert!(column.validate_nulls().is_err());
+        }
+        let empty = HostColumn::text_from_copied_lanes(TEXTOID, Vec::new(), None, &[]);
+        empty.validate_nulls().expect("empty decoder");
+        assert!(empty.dictionary_value(0).is_err());
+        assert_eq!(labels, ["only"]);
+    }
+
+    #[test]
+    fn borrowed_join_decoders_keep_independent_domains_and_owned_outputs() {
+        let prepared = {
+            let fact = vec!["APAC".to_owned(), "EU   ".to_owned(), "NA".to_owned()];
+            let dimension_labels = vec!["EU".to_owned(), "NA".to_owned(), "APAC".to_owned()];
+            let columns = host_columns(
+                HostColumn::text_from_copied_lanes(BPCHAROID, vec![1, 0, 2], None, &fact),
+                HostColumn::text_from_copied_lanes(
+                    BPCHAROID,
+                    vec![2, 0, 1],
+                    None,
+                    &dimension_labels,
+                ),
+            );
+            prepare_dimension(
+                &dimension(BPCHAROID, JoinMultiplicity::Unique),
+                &columns,
+                3,
+                false,
+            )
+            .expect("independent borrowed domains")
+        };
+        assert_eq!(prepared.fact_codes, [1, 0, 2]);
+        assert_eq!(prepared.match_by_key, [1, 1, 1]);
+    }
+
+    #[test]
+    fn dictionary_cache_preserves_invalid_code_and_empty_boundaries() {
+        for code in [-1, 1, i32::MAX] {
+            let column = HostColumn::Text {
+                type_oid: TEXTOID,
+                codes: vec![code],
+                nulls: None,
+                labels: vec!["only-label".into()].into(),
+            };
+            let mut dictionary = DictionaryBuilder::new(TEXTOID, 950);
+            let mut encoder = ColumnDictionaryEncoder::new(&column);
+            assert!(encoder.code_for(0, &mut dictionary).is_err());
+            assert!(encoder.code_for(1, &mut dictionary).is_err());
+            assert!(dictionary.values.is_empty());
+        }
+        let column = HostColumn::Text {
+            type_oid: TEXTOID,
+            codes: Vec::new(),
+            nulls: None,
+            labels: vec!["unused".into()].into(),
+        };
+        let mut dictionary = DictionaryBuilder::new(TEXTOID, 950);
+        let mut encoder = ColumnDictionaryEncoder::new(&column);
+        assert!(encoder.code_for(0, &mut dictionary).is_err());
+        assert_eq!(dictionary.finish().values, vec![GroupDatum::Unused]);
+
+        let all_null = HostColumn::I32 {
+            type_oid: DATEOID,
+            values: vec![i32::MIN, i32::MAX],
+            nulls: Some(vec![1, 1]),
+        };
+        let mut dictionary = DictionaryBuilder::new(DATEOID, 0);
+        let mut encoder = ColumnDictionaryEncoder::new(&all_null);
+        assert!(matches!(encoder.cache, DictionaryCodeCache::None));
+        assert_eq!(encoder.code_for(0, &mut dictionary), Ok(0));
+        assert_eq!(encoder.code_for(1, &mut dictionary), Ok(0));
+        assert_eq!(dictionary.finish().values, vec![GroupDatum::Null]);
+    }
+
+    #[test]
+    fn dictionary_cache_is_bounded_and_lazy_per_resident_label() {
+        let column = HostColumn::Text {
+            type_oid: BPCHAROID,
+            codes: (0..100_000).map(|row| row % 3).collect(),
+            nulls: None,
+            labels: vec!["a ".into(), "a".into(), "b".into(), "unused".into()].into(),
+        };
+        let mut dictionary = DictionaryBuilder::new(BPCHAROID, 950);
+        let mut encoder = ColumnDictionaryEncoder::new(&column);
+        for row in 0..column.len() {
+            assert_eq!(
+                encoder.code_for(row, &mut dictionary),
+                Ok(i32::from(row % 3 == 2))
+            );
+        }
+        let DictionaryCodeCache::Text(remap) = encoder.cache else {
+            panic!("resident text cache")
+        };
+        assert_eq!(remap, [0, 0, 1, -1]);
+        assert_eq!(
+            dictionary.finish().values,
+            vec![GroupDatum::Text("a ".into()), GroupDatum::Text("b".into())]
+        );
+
+        for (maximum, cached) in [(4095, true), (4096, false), (i32::MAX, false)] {
+            let column = HostColumn::I32 {
+                type_oid: INT4OID,
+                values: vec![0, maximum],
+                nulls: None,
+            };
+            let encoder = ColumnDictionaryEncoder::new(&column);
+            assert_eq!(
+                matches!(encoder.cache, DictionaryCodeCache::I32 { .. }),
+                cached
+            );
+        }
+        let column = HostColumn::I32 {
+            type_oid: DATEOID,
+            values: vec![0, 9001, 9003],
+            nulls: Some(vec![1, 0, 0]),
+        };
+        assert!(matches!(
+            ColumnDictionaryEncoder::new(&column).cache,
+            DictionaryCodeCache::I32 { minimum: 9001, .. }
+        ));
     }
 
     #[test]
@@ -1604,13 +2344,13 @@ mod tests {
                 type_oid: BPCHAROID,
                 codes: vec![1, 0, 2],
                 nulls: None,
-                labels: vec!["APAC".into(), "EU   ".into(), "NA".into()],
+                labels: vec!["APAC".into(), "EU   ".into(), "NA".into()].into(),
             },
             HostColumn::Text {
                 type_oid: BPCHAROID,
                 codes: vec![2, 0, 1],
                 nulls: None,
-                labels: vec!["EU".into(), "NA".into(), "APAC".into()],
+                labels: vec!["EU".into(), "NA".into(), "APAC".into()].into(),
             },
         );
         let prepared = prepare_dimension(
@@ -1836,7 +2576,7 @@ mod tests {
             type_oid: BPCHAROID,
             codes: vec![0],
             nulls: None,
-            labels: vec!["EU  ".to_owned()],
+            labels: vec!["EU  ".to_owned()].into(),
         };
         assert_eq!(
             text.dictionary_value(0),
@@ -1858,7 +2598,7 @@ mod tests {
                 type_oid: TEXTOID,
                 codes,
                 nulls: None,
-                labels: vec!["only".to_owned()],
+                labels: vec!["only".to_owned()].into(),
             };
             assert!(invalid.dictionary_value(0).is_err());
         }

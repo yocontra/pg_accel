@@ -21,6 +21,8 @@ pub enum WorkloadCategory {
     Tpch,
     /// Deterministic ClickBench-style high-volume event workloads.
     ClickBench,
+    /// Opt-in pinned real-coordinate NYC taxi corpus (not a synthetic suite).
+    NycTaxi,
     Mixed,
     GpuRaster,
     Regression,
@@ -43,6 +45,7 @@ impl WorkloadCategory {
             Self::StarSchemaSsbm => "ssbm",
             Self::Tpch => "tpch",
             Self::ClickBench => "clickbench",
+            Self::NycTaxi => "nyc_taxi",
             Self::Mixed => "mixed",
             Self::GpuRaster => "gpu_raster",
             Self::Regression => "regression",
@@ -288,10 +291,12 @@ pub struct Phase6DomainContract {
 
 const PHASE6_SMOKE_ROWS: &[usize] = &[10_000];
 const PHASE6_H3_PARENT_ROWS: &[usize] = &[100_000];
+const H3_RESOLUTION_ROWS: &[usize] = &[1_000_000];
 const PHASE6_H3_DECLINE_ROWS: &[usize] = &[100_000, 1_000_000];
 const PHASE6_RASTER_ROWS: &[usize] = &[100];
 const PHASE6_RASTER_EXACT_RECLASS_ROWS: &[usize] = &[10_000, 100_000, 1_000_000];
 const PHASE6_SPATIAL_RESIDENT_AGG_ROWS: &[usize] = &[1_000_000];
+const PHASE6_SPATIAL_TOPOLOGY_ROWS: &[usize] = &[1_000_000, 2_000_000];
 
 /// The old spatial unsafe-row quarantine covered this interval. The executor
 /// now dispatches in bounded 65,536-row chunks, so these are positive live
@@ -422,6 +427,24 @@ pub const PHASE6_DOMAIN_CONTRACTS: &[Phase6DomainContract] = &[
         PHASE6_H3_PARENT_ROWS
     ),
     phase6_contract!(
+        "h3_parent_res4",
+        WorkloadCategory::GpuH3,
+        Phase6DomainOracle::NativeH3,
+        H3_RESOLUTION_ROWS
+    ),
+    phase6_contract!(
+        "h3_parent_res9",
+        WorkloadCategory::GpuH3,
+        Phase6DomainOracle::NativeH3,
+        H3_RESOLUTION_ROWS
+    ),
+    phase6_contract!(
+        "h3_parent_res15",
+        WorkloadCategory::GpuH3,
+        Phase6DomainOracle::NativeH3,
+        H3_RESOLUTION_ROWS
+    ),
+    phase6_contract!(
         "h3_grid_distance",
         WorkloadCategory::GpuH3,
         Phase6DomainOracle::NativeH3FailClosed,
@@ -474,6 +497,36 @@ pub const PHASE6_DOMAIN_CONTRACTS: &[Phase6DomainContract] = &[
         WorkloadCategory::GpuRaster,
         Phase6DomainOracle::PostgisRaster,
         PHASE6_RASTER_ROWS
+    ),
+    phase6_contract!(
+        "spatial_holes_intersects",
+        WorkloadCategory::GpuSpatial,
+        Phase6DomainOracle::PostgisExactRecheck,
+        PHASE6_SPATIAL_TOPOLOGY_ROWS
+    ),
+    phase6_contract!(
+        "spatial_holes_contains",
+        WorkloadCategory::GpuSpatial,
+        Phase6DomainOracle::PostgisExactRecheck,
+        PHASE6_SPATIAL_TOPOLOGY_ROWS
+    ),
+    phase6_contract!(
+        "spatial_holes_within",
+        WorkloadCategory::GpuSpatial,
+        Phase6DomainOracle::PostgisExactRecheck,
+        PHASE6_SPATIAL_TOPOLOGY_ROWS
+    ),
+    phase6_contract!(
+        "spatial_holes_covers",
+        WorkloadCategory::GpuSpatial,
+        Phase6DomainOracle::PostgisExactRecheck,
+        PHASE6_SPATIAL_TOPOLOGY_ROWS
+    ),
+    phase6_contract!(
+        "spatial_holes_coveredby",
+        WorkloadCategory::GpuSpatial,
+        Phase6DomainOracle::PostgisExactRecheck,
+        PHASE6_SPATIAL_TOPOLOGY_ROWS
     ),
     phase6_contract!(
         "raster_slope",
@@ -960,9 +1013,20 @@ const PINS_SSBM_Q4_3: &[ResidentPinSpec] = &[
 ];
 const PINS_TPCH_Q1: &[ResidentPinSpec] = &[pin!(
     "tpch_lineitem",
-    ["l_returnflag", "l_linestatus", "l_shipdate"]
+    [
+        "l_returnflag",
+        "l_linestatus",
+        "l_shipdate",
+        "l_quantity",
+        "l_extendedprice",
+        "l_discount",
+        "l_tax"
+    ]
 )];
-const PINS_TPCH_Q6: &[ResidentPinSpec] = &[pin!("tpch_lineitem", ["l_shipdate"])];
+const PINS_TPCH_Q6: &[ResidentPinSpec] = &[pin!(
+    "tpch_lineitem",
+    ["l_shipdate", "l_discount", "l_quantity", "l_extendedprice"]
+)];
 const PINS_TPCH_Q12: &[ResidentPinSpec] = &[
     pin!("tpch_orders", ["o_orderkey", "o_orderpriority"]),
     pin!(
@@ -1043,6 +1107,176 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
     workload("grouped_int4_sum_avg_candidate", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_GROUPED_INT4_SUM_AVG)
         .evidence(WINNER),
+    workload("grouped_int4_native_having", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_GROUPED_INT4_SUM_AVG)
+        .evidence(WINNER),
+    workload("grouped_int4_hidden_having", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_GROUPED_INT4_SUM_AVG)
+        .evidence(WINNER),
+    workload("grouped_int4_avg_only", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_GROUPED_INT4_SUM_AVG)
+        .evidence(WINNER),
+    workload("grouped_multikey_integer", C::GpuHashAgg, K::HashAgg)
+        .pins(&[ResidentPinSpec {
+            table: "bench_multikey_sales",
+            columns: &["region", "sales_day", "is_return", "amount"],
+        }])
+        .evidence(WINNER),
+    workload("grouped_multimeasure_integer", C::GpuHashAgg, K::HashAgg)
+        .pins(&[ResidentPinSpec {
+            table: "bench_multimeasure_sales",
+            columns: &[
+                "region",
+                "sales_day",
+                "is_return",
+                "amount",
+                "units",
+                "discount",
+            ],
+        }])
+        .evidence(WINNER),
+    workload("grouped_scalar_program", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_scalar_sales",
+        columns: &["region", "price", "adjustment"],
+    }]),
+    workload("global_scalar_program", C::GpuReduce, K::Reduce).pins(&[ResidentPinSpec {
+        table: "bench_scalar_sales",
+        columns: &["price", "adjustment"],
+    }]),
+    workload("grouped_coalesced_integer", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_scalar_sales",
+        columns: &["region", "price", "adjustment"],
+    }]),
+    workload("grouped_simple_case", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_scalar_sales",
+        columns: &["region", "price", "adjustment"],
+    }]),
+    workload("grouped_simple_case_linear", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_scalar_sales",
+        columns: &["region", "price", "adjustment"],
+    }]),
+    workload("grouped_membership_integer", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_scalar_sales",
+        columns: &["region", "price", "adjustment"],
+    }]),
+    workload("grouped_scalar_filter", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_scalar_sales",
+        columns: &["region", "price", "adjustment"],
+    }]),
+    workload("grouped_scalar_where", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_scalar_sales",
+        columns: &["region", "price", "adjustment"],
+    }]),
+    workload("grouped_date_span", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_scalar_sales",
+        columns: &["region", "order_date", "ship_date"],
+    }]),
+    workload("spatial_grouped_date_span", C::GpuHashAgg, K::HashAgg)
+        .pins(&[ResidentPinSpec {
+            table: "bench_scalar_sales",
+            columns: &["region", "order_date", "ship_date", "geom"],
+        }])
+        .extensions(POSTGIS),
+    workload("spatial_grouped_scalar_where", C::GpuHashAgg, K::HashAgg)
+        .pins(&[ResidentPinSpec {
+            table: "bench_scalar_sales",
+            columns: &["region", "price", "adjustment", "geom"],
+        }])
+        .extensions(POSTGIS),
+    workload("grouped_null_safe_where", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_scalar_sales",
+        columns: &["region", "price", "adjustment"],
+    }]),
+    workload("grouped_bounded_ratio", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_scalar_sales",
+        columns: &["region", "price", "adjustment"],
+    }]),
+    workload("grouped_derived_ratio", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_scalar_sales",
+        columns: &["region", "price", "adjustment"],
+    }]),
+    workload("spatial_grouped_derived_ratio", C::GpuHashAgg, K::HashAgg)
+        .pins(&[ResidentPinSpec {
+            table: "bench_scalar_sales",
+            columns: &["region", "price", "adjustment", "geom"],
+        }])
+        .extensions(POSTGIS),
+    workload("spatial_grouped_bounded_ratio", C::GpuHashAgg, K::HashAgg)
+        .pins(&[ResidentPinSpec {
+            table: "bench_scalar_sales",
+            columns: &["region", "price", "adjustment", "geom"],
+        }])
+        .extensions(POSTGIS),
+    workload("spatial_grouped_null_safe_where", C::GpuHashAgg, K::HashAgg)
+        .pins(&[ResidentPinSpec {
+            table: "bench_scalar_sales",
+            columns: &["region", "price", "adjustment", "geom"],
+        }])
+        .extensions(POSTGIS),
+    workload("spatial_grouped_scalar_filter", C::GpuHashAgg, K::HashAgg)
+        .pins(&[ResidentPinSpec {
+            table: "bench_scalar_sales",
+            columns: &["region", "price", "adjustment", "geom"],
+        }])
+        .extensions(POSTGIS),
+    workload(
+        "spatial_grouped_membership_integer",
+        C::GpuHashAgg,
+        K::HashAgg,
+    )
+    .pins(&[ResidentPinSpec {
+        table: "bench_scalar_sales",
+        columns: &["region", "price", "adjustment", "geom"],
+    }])
+    .extensions(POSTGIS),
+    workload("spatial_global_scalar_program", C::GpuReduce, K::Reduce)
+        .pins(&[ResidentPinSpec {
+            table: "bench_scalar_sales",
+            columns: &["price", "adjustment", "geom"],
+        }])
+        .extensions(POSTGIS),
+    workload("spatial_grouped_scalar_program", C::GpuHashAgg, K::HashAgg)
+        .pins(&[ResidentPinSpec {
+            table: "bench_scalar_sales",
+            columns: &["region", "price", "adjustment", "geom"],
+        }])
+        .extensions(POSTGIS),
+    workload("grouped_computed_integer", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_computed_sales",
+        columns: &["region", "price", "adjustment"],
+    }]),
+    workload("global_computed_integer", C::GpuHashAgg, K::HashAgg)
+        .pins(&[ResidentPinSpec {
+            table: "bench_computed_sales",
+            columns: &["price", "adjustment"],
+        }])
+        .evidence(WINNER),
+    workload("grouped_filtered_integer", C::GpuHashAgg, K::HashAgg)
+        .pins(&[ResidentPinSpec {
+            table: "bench_filtered_sales",
+            columns: &["region", "sales_day", "is_return", "amount", "units"],
+        }])
+        .evidence(WINNER),
+    workload(
+        "grouped_boolean_filtered_integer",
+        C::GpuHashAgg,
+        K::HashAgg,
+    )
+    .pins(&[ResidentPinSpec {
+        table: "bench_filtered_sales",
+        columns: &["region", "sales_day", "is_return", "amount", "units"],
+    }])
+    .evidence(WINNER),
+    workload(
+        "grouped_conditional_integer_counts",
+        C::GpuHashAgg,
+        K::HashAgg,
+    )
+    .pins(&[ResidentPinSpec {
+        table: "bench_filtered_sales",
+        columns: &["region", "sales_day", "is_return", "amount", "units"],
+    }])
+    .evidence(WINNER),
     workload("grouped_agg_high_card", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_GROUPED_AGG_HIGH_CARD)
         .evidence(NATIVE_DECLINE),
@@ -1195,6 +1429,26 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
     .extensions(POSTGIS)
     .evidence(WINNER),
     workload("spatial_complex_poly", C::GpuSpatial, K::PointInRing).extensions(POSTGIS),
+    workload("spatial_holes_intersects", C::GpuSpatial, K::PointInRing)
+        .pins(PINS_SPATIAL_RESIDENT_AGG)
+        .extensions(POSTGIS)
+        .evidence(WINNER),
+    workload("spatial_holes_contains", C::GpuSpatial, K::PointInRing)
+        .pins(PINS_SPATIAL_RESIDENT_AGG)
+        .extensions(POSTGIS)
+        .evidence(WINNER),
+    workload("spatial_holes_within", C::GpuSpatial, K::PointInRing)
+        .pins(PINS_SPATIAL_RESIDENT_AGG)
+        .extensions(POSTGIS)
+        .evidence(WINNER),
+    workload("spatial_holes_covers", C::GpuSpatial, K::PointInRing)
+        .pins(PINS_SPATIAL_RESIDENT_AGG)
+        .extensions(POSTGIS)
+        .evidence(WINNER),
+    workload("spatial_holes_coveredby", C::GpuSpatial, K::PointInRing)
+        .pins(PINS_SPATIAL_RESIDENT_AGG)
+        .extensions(POSTGIS)
+        .evidence(WINNER),
     workload("spatial_selectivity", C::GpuSpatial, K::PointInRing)
         .extensions(POSTGIS)
         .evidence(NATIVE_DECLINE),
@@ -1234,6 +1488,27 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
         .h3(H3LaneClass::Parity)
         .evidence(H3_NATIVE_DECLINE),
     workload("h3_cell_to_parent", C::GpuH3, K::H3CellToParent)
+        .pins(PINS_H3_PARENT)
+        .extensions(H3)
+        .h3(H3LaneClass::Winning {
+            min_warm_speedup: 1.15,
+        })
+        .evidence(H3_WINNER),
+    workload("h3_parent_res4", C::GpuH3, K::H3CellToParent)
+        .pins(PINS_H3_PARENT)
+        .extensions(H3)
+        .h3(H3LaneClass::Winning {
+            min_warm_speedup: 1.15,
+        })
+        .evidence(H3_WINNER),
+    workload("h3_parent_res9", C::GpuH3, K::H3CellToParent)
+        .pins(PINS_H3_PARENT)
+        .extensions(H3)
+        .h3(H3LaneClass::Winning {
+            min_warm_speedup: 1.15,
+        })
+        .evidence(H3_WINNER),
+    workload("h3_parent_res15", C::GpuH3, K::H3CellToParent)
         .pins(PINS_H3_PARENT)
         .extensions(H3)
         .h3(H3LaneClass::Winning {
@@ -1343,11 +1618,420 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
         .pins(PINS_SSBM_Q4_3)
         .evidence(NATIVE_DECLINE),
     workload("tpch_q1", C::Tpch, K::HashAgg).pins(PINS_TPCH_Q1),
+    workload("tpch_q2", C::Tpch, K::Sort).pins(&[
+        pin!("tpch_part", ["p_partkey", "p_size", "p_type", "p_mfgr"]),
+        pin!(
+            "tpch_partsupp",
+            ["ps_partkey", "ps_suppkey", "ps_supplycost"]
+        ),
+        pin!(
+            "tpch_supplier",
+            [
+                "s_suppkey",
+                "s_nationkey",
+                "s_acctbal",
+                "s_name",
+                "s_address",
+                "s_phone",
+                "s_comment"
+            ]
+        ),
+        pin!("tpch_nation", ["n_nationkey", "n_regionkey", "n_name"]),
+        pin!("tpch_region", ["r_regionkey", "r_name"]),
+    ]),
+    workload("tpch_q3", C::Tpch, K::HashAgg).pins(&[
+        pin!("tpch_customer", ["c_custkey", "c_mktsegment"]),
+        pin!(
+            "tpch_orders",
+            ["o_orderkey", "o_custkey", "o_orderdate", "o_shippriority"]
+        ),
+        pin!(
+            "tpch_lineitem",
+            ["l_orderkey", "l_extendedprice", "l_discount", "l_shipdate"]
+        ),
+    ]),
+    workload("tpch_q4", C::Tpch, K::HashAgg).pins(&[
+        pin!(
+            "tpch_orders",
+            ["o_orderkey", "o_orderdate", "o_orderpriority"]
+        ),
+        pin!(
+            "tpch_lineitem",
+            ["l_orderkey", "l_commitdate", "l_receiptdate"]
+        ),
+    ]),
+    workload("tpch_q5", C::Tpch, K::HashAgg).pins(&[
+        pin!("tpch_customer", ["c_custkey", "c_nationkey"]),
+        pin!("tpch_orders", ["o_orderkey", "o_custkey", "o_orderdate"]),
+        pin!(
+            "tpch_lineitem",
+            ["l_orderkey", "l_suppkey", "l_extendedprice", "l_discount"]
+        ),
+        pin!("tpch_supplier", ["s_suppkey", "s_nationkey"]),
+        pin!("tpch_nation", ["n_nationkey", "n_regionkey", "n_name"]),
+        pin!("tpch_region", ["r_regionkey", "r_name"]),
+    ]),
     workload("tpch_q6", C::Tpch, K::Reduce).pins(PINS_TPCH_Q6),
+    workload("tpch_q7", C::Tpch, K::HashAgg).pins(&[
+        pin!("tpch_supplier", ["s_suppkey", "s_nationkey"]),
+        pin!(
+            "tpch_lineitem",
+            [
+                "l_suppkey",
+                "l_orderkey",
+                "l_shipdate",
+                "l_extendedprice",
+                "l_discount"
+            ]
+        ),
+        pin!("tpch_orders", ["o_orderkey", "o_custkey"]),
+        pin!("tpch_customer", ["c_custkey", "c_nationkey"]),
+        pin!("tpch_nation", ["n_nationkey", "n_name"]),
+    ]),
+    workload("tpch_q8", C::Tpch, K::HashAgg).pins(&[
+        pin!("tpch_part", ["p_partkey", "p_type"]),
+        pin!(
+            "tpch_lineitem",
+            [
+                "l_partkey",
+                "l_suppkey",
+                "l_orderkey",
+                "l_extendedprice",
+                "l_discount"
+            ]
+        ),
+        pin!("tpch_supplier", ["s_suppkey", "s_nationkey"]),
+        pin!("tpch_orders", ["o_orderkey", "o_custkey", "o_orderdate"]),
+        pin!("tpch_customer", ["c_custkey", "c_nationkey"]),
+        pin!("tpch_nation", ["n_nationkey", "n_regionkey", "n_name"]),
+        pin!("tpch_region", ["r_regionkey", "r_name"]),
+    ]),
+    workload("tpch_q9", C::Tpch, K::HashAgg).pins(&[
+        pin!("tpch_part", ["p_partkey", "p_name"]),
+        pin!(
+            "tpch_lineitem",
+            [
+                "l_partkey",
+                "l_suppkey",
+                "l_orderkey",
+                "l_extendedprice",
+                "l_discount",
+                "l_quantity"
+            ]
+        ),
+        pin!("tpch_supplier", ["s_suppkey", "s_nationkey"]),
+        pin!(
+            "tpch_partsupp",
+            ["ps_partkey", "ps_suppkey", "ps_supplycost"]
+        ),
+        pin!("tpch_orders", ["o_orderkey", "o_orderdate"]),
+        pin!("tpch_nation", ["n_nationkey", "n_name"]),
+    ]),
+    workload("tpch_q10", C::Tpch, K::HashAgg).pins(&[
+        pin!(
+            "tpch_customer",
+            [
+                "c_custkey",
+                "c_name",
+                "c_acctbal",
+                "c_nationkey",
+                "c_address",
+                "c_phone",
+                "c_comment"
+            ]
+        ),
+        pin!("tpch_orders", ["o_orderkey", "o_custkey", "o_orderdate"]),
+        pin!(
+            "tpch_lineitem",
+            [
+                "l_orderkey",
+                "l_extendedprice",
+                "l_discount",
+                "l_returnflag"
+            ]
+        ),
+        pin!("tpch_nation", ["n_nationkey", "n_name"]),
+    ]),
+    workload("tpch_q11", C::Tpch, K::HashAgg).pins(&[
+        pin!(
+            "tpch_partsupp",
+            ["ps_partkey", "ps_suppkey", "ps_supplycost", "ps_availqty"]
+        ),
+        pin!("tpch_supplier", ["s_suppkey", "s_nationkey"]),
+        pin!("tpch_nation", ["n_nationkey", "n_name"]),
+    ]),
     workload("tpch_q12", C::Tpch, K::HashAgg).pins(PINS_TPCH_Q12),
+    workload("tpch_q13", C::Tpch, K::HashAgg).pins(&[
+        pin!("tpch_customer", ["c_custkey"]),
+        pin!("tpch_orders", ["o_custkey", "o_orderkey", "o_comment"]),
+    ]),
+    workload("tpch_q14", C::Tpch, K::Reduce).pins(&[
+        pin!(
+            "tpch_lineitem",
+            ["l_partkey", "l_extendedprice", "l_discount", "l_shipdate"]
+        ),
+        pin!("tpch_part", ["p_partkey", "p_type"]),
+    ]),
+    workload("tpch_q15", C::Tpch, K::HashAgg).pins(&[
+        pin!(
+            "tpch_lineitem",
+            ["l_suppkey", "l_extendedprice", "l_discount", "l_shipdate"]
+        ),
+        pin!(
+            "tpch_supplier",
+            ["s_suppkey", "s_name", "s_address", "s_phone"]
+        ),
+    ]),
+    workload("tpch_q16", C::Tpch, K::HashAgg).pins(&[
+        pin!("tpch_partsupp", ["ps_partkey", "ps_suppkey"]),
+        pin!("tpch_part", ["p_partkey", "p_brand", "p_type", "p_size"]),
+        pin!("tpch_supplier", ["s_suppkey", "s_comment"]),
+    ]),
+    workload("tpch_q17", C::Tpch, K::Reduce).pins(&[
+        pin!(
+            "tpch_lineitem",
+            ["l_partkey", "l_quantity", "l_extendedprice"]
+        ),
+        pin!("tpch_part", ["p_partkey", "p_brand", "p_container"]),
+    ]),
+    workload("tpch_q18", C::Tpch, K::HashAgg).pins(&[
+        pin!("tpch_customer", ["c_name", "c_custkey"]),
+        pin!(
+            "tpch_orders",
+            ["o_custkey", "o_orderkey", "o_orderdate", "o_totalprice"]
+        ),
+        pin!("tpch_lineitem", ["l_orderkey", "l_quantity"]),
+    ]),
+    workload("tpch_q19", C::Tpch, K::Reduce).pins(&[
+        pin!(
+            "tpch_lineitem",
+            [
+                "l_partkey",
+                "l_extendedprice",
+                "l_discount",
+                "l_shipmode",
+                "l_shipinstruct",
+                "l_quantity"
+            ]
+        ),
+        pin!(
+            "tpch_part",
+            ["p_partkey", "p_brand", "p_container", "p_size"]
+        ),
+    ]),
+    workload("tpch_q20", C::Tpch, K::HashJoin).pins(&[
+        pin!(
+            "tpch_supplier",
+            ["s_suppkey", "s_nationkey", "s_name", "s_address"]
+        ),
+        pin!("tpch_nation", ["n_nationkey", "n_name"]),
+        pin!("tpch_partsupp", ["ps_suppkey", "ps_partkey", "ps_availqty"]),
+        pin!("tpch_part", ["p_partkey", "p_name"]),
+        pin!(
+            "tpch_lineitem",
+            ["l_partkey", "l_suppkey", "l_quantity", "l_shipdate"]
+        ),
+    ]),
+    workload("tpch_q21", C::Tpch, K::HashAgg).pins(&[
+        pin!("tpch_supplier", ["s_suppkey", "s_nationkey", "s_name"]),
+        pin!(
+            "tpch_lineitem",
+            ["l_suppkey", "l_orderkey", "l_receiptdate", "l_commitdate"]
+        ),
+        pin!("tpch_orders", ["o_orderkey", "o_orderstatus"]),
+        pin!("tpch_nation", ["n_nationkey", "n_name"]),
+    ]),
+    workload("tpch_q22", C::Tpch, K::HashAgg).pins(&[
+        pin!("tpch_customer", ["c_custkey", "c_phone", "c_acctbal"]),
+        pin!("tpch_orders", ["o_custkey"]),
+    ]),
     workload("clickbench_grouped_events", C::ClickBench, K::HashAgg).pins(PINS_CLICKBENCH_GROUPED),
     workload("clickbench_distinct_users", C::ClickBench, K::HashAgg).pins(PINS_CLICKBENCH_DISTINCT),
     workload("clickbench_top_urls", C::ClickBench, K::Sort).pins(PINS_CLICKBENCH_TOP_URLS),
+    workload("nyc_taxi_h3_res9", C::NycTaxi, K::H3CellToParent)
+        .extensions(H3)
+        .pins(&[ResidentPinSpec {
+            table: "bench_nyc_taxi",
+            columns: &["cell"],
+        }]),
+    workload("nyc_taxi_airport_indexed", C::NycTaxi, K::PointInRing)
+        .extensions(POSTGIS)
+        .pins(&[ResidentPinSpec {
+            table: "bench_nyc_taxi",
+            columns: &["pickup_geom"],
+        }]),
+    workload("nyc_taxi_airport_scan", C::NycTaxi, K::PointInRing)
+        .extensions(POSTGIS)
+        .pins(&[ResidentPinSpec {
+            table: "bench_nyc_taxi",
+            columns: &["pickup_geom"],
+        }]),
+    workload("nyc_taxi_fare_rollup", C::NycTaxi, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_nyc_taxi",
+        columns: &[
+            "vendor_id",
+            "passenger_count",
+            "fare_amount",
+            "trip_distance",
+        ],
+    }]),
+    workload("nyc_taxi_mixed_rollup", C::NycTaxi, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_nyc_taxi",
+        columns: &[
+            "vendor_id",
+            "passenger_count",
+            "fare_amount",
+            "trip_distance",
+        ],
+    }]),
+    workload("numeric_global_sum_avg", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_numeric_rollup",
+        columns: &["v"],
+    }]),
+    workload("bigint_global_sum_avg", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_bigint_rollup",
+        columns: &["v"],
+    }]),
+    workload("bigint_nullable_filters", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_bigint_rollup",
+        columns: &["g", "h", "v"],
+    }]),
+    workload("bigint_grouped_sum_avg", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_bigint_rollup",
+        columns: &["g", "h", "k", "v", "w"],
+    }]),
+    workload("bigint_filtered_mixed", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_bigint_rollup",
+        columns: &["g", "h", "k", "v", "w", "qty"],
+    }]),
+    workload("numeric_global_count", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_numeric_rollup",
+        columns: &["v", "w"],
+    }]),
+    workload("numeric_mixed_global", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_numeric_rollup",
+        columns: &["v", "qty", "g"],
+    }]),
+    workload("integer_where_ranges", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_filtered_sales",
+        columns: &["region", "sales_day", "is_return", "amount", "units"],
+    }]),
+    workload("integer_where_mask", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_filtered_sales",
+        columns: &["is_return", "amount", "units"],
+    }]),
+    workload("global_boolean_filtered_integer", C::GpuHashAgg, K::HashAgg).pins(&[
+        ResidentPinSpec {
+            table: "bench_filtered_sales",
+            columns: &["amount", "units"],
+        },
+    ]),
+    workload(
+        "global_conditional_integer_counts",
+        C::GpuHashAgg,
+        K::HashAgg,
+    )
+    .pins(&[ResidentPinSpec {
+        table: "bench_filtered_sales",
+        columns: &["amount", "units"],
+    }]),
+    workload("numeric_where_ranges", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_numeric_rollup",
+        columns: &["g", "h", "k", "v", "qty"],
+    }]),
+    workload("numeric_where_mask", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_numeric_rollup",
+        columns: &["v", "w", "qty", "b"],
+    }]),
+    workload("nyc_taxi_filtered_rollup", C::NycTaxi, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_nyc_taxi",
+        columns: &["vendor_id", "fare_amount", "trip_distance"],
+    }]),
+    workload("nyc_taxi_airport_passengers", C::NycTaxi, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_nyc_taxi",
+        columns: &["vendor_id", "passenger_count", "pickup_geom"],
+    }]),
+    workload("nyc_taxi_passenger_where", C::NycTaxi, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_nyc_taxi",
+        columns: &["vendor_id", "passenger_count"],
+    }]),
+    workload("nyc_taxi_nullable_passengers", C::NycTaxi, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_nyc_taxi",
+        columns: &["vendor_id", "passenger_count"],
+    }]),
+    workload(
+        "nyc_taxi_airport_nullable_passengers",
+        C::NycTaxi,
+        K::HashAgg,
+    )
+    .pins(&[ResidentPinSpec {
+        table: "bench_nyc_taxi",
+        columns: &["vendor_id", "passenger_count", "pickup_geom"],
+    }]),
+    workload("nyc_taxi_passenger_filters", C::NycTaxi, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_nyc_taxi",
+        columns: &["vendor_id", "passenger_count"],
+    }]),
+    workload("nyc_taxi_airport_passenger_filters", C::NycTaxi, K::HashAgg).pins(&[
+        ResidentPinSpec {
+            table: "bench_nyc_taxi",
+            columns: &["vendor_id", "passenger_count", "pickup_geom"],
+        },
+    ]),
+    workload("nyc_taxi_airport_vendor_passengers", C::NycTaxi, K::HashAgg).pins(&[
+        ResidentPinSpec {
+            table: "bench_nyc_taxi",
+            columns: &["vendor_id", "passenger_count", "pickup_geom"],
+        },
+    ]),
+    workload("nyc_taxi_airport_vendor_rollup", C::NycTaxi, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_nyc_taxi",
+        columns: &["vendor_id", "fare_amount", "trip_distance", "pickup_geom"],
+    }]),
+    workload("nyc_taxi_passenger_extrema", C::NycTaxi, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_nyc_taxi",
+        columns: &["vendor_id", "passenger_count"],
+    }]),
+    workload("nyc_taxi_airport_passenger_extrema", C::NycTaxi, K::HashAgg).pins(&[
+        ResidentPinSpec {
+            table: "bench_nyc_taxi",
+            columns: &["vendor_id", "passenger_count", "pickup_geom"],
+        },
+    ]),
+    workload("nyc_taxi_airport_rollup", C::NycTaxi, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_nyc_taxi",
+        columns: &[
+            "vendor_id",
+            "fare_amount",
+            "trip_distance",
+            "passenger_count",
+            "pickup_geom",
+        ],
+    }]),
+    workload("numeric_mixed_grouped", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_numeric_rollup",
+        columns: &["g", "h", "k", "v", "qty"],
+    }]),
+    workload("numeric_grouped_counts", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_numeric_rollup",
+        columns: &["g", "h", "k", "v", "w"],
+    }]),
+    workload("numeric_grouped_sum_count", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_numeric_rollup",
+        columns: &["g", "h", "v", "w"],
+    }]),
+    workload("numeric_grouped_three_keys", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_numeric_rollup",
+        columns: &["g", "h", "k", "v", "w"],
+    }]),
+    workload("numeric_grouped_wide_scale", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_numeric_rollup",
+        columns: &["g", "v"],
+    }]),
+    workload("numeric_grouped_filtered", C::GpuHashAgg, K::HashAgg).pins(&[ResidentPinSpec {
+        table: "bench_numeric_rollup",
+        columns: &["g", "h", "k", "v", "w"],
+    }]),
     workload("parallel_stress", C::GpuReduce, K::Unclassified),
     workload("parallel_stress_grouped", C::GpuHashAgg, K::Unclassified),
     workload("parallel_stress_sort", C::GpuSort, K::Unclassified),
@@ -1546,8 +2230,20 @@ mod tests {
     fn registry_typed_policy_is_complete_for_special_families() {
         for entry in WORKLOAD_REGISTRY {
             let is_h3 = matches!(entry.kernel_class, K::H3LatLng | K::H3CellToParent);
-            assert_eq!(is_h3, entry.h3_lane.is_some(), "{} H3 policy", entry.name);
+            // Real-data characterization has no pre-declared winner/parity
+            // policy. It must report the observed lane, including losers;
+            // all existing release-H3 policies remain mandatory.
+            let released_h3 = is_h3 && entry.category != C::NycTaxi;
+            assert_eq!(
+                released_h3,
+                entry.h3_lane.is_some(),
+                "{} H3 policy",
+                entry.name
+            );
             if is_h3 {
+                assert!(entry.required_extensions.contains(&RequiredExtension::H3));
+            }
+            if released_h3 {
                 assert!(
                     entry.evidence.function_kernel(),
                     "{} function evidence",

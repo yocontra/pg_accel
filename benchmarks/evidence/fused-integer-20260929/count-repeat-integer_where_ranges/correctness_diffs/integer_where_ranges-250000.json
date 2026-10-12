@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "workload": "integer_where_ranges",
+  "rows": 250000,
+  "status": "pass",
+  "order_sensitive": false,
+  "accel_rows": 224,
+  "baseline_rows": 224,
+  "accel_minus_baseline_count": 0,
+  "baseline_minus_accel_count": 0,
+  "sample_limit": 20,
+  "accel_minus_baseline_samples": [],
+  "baseline_minus_accel_samples": [],
+  "accel_query_sql": "SELECT region, sales_day, is_return, sum(amount) FILTER (WHERE amount BETWEEN 1000 AND 3000 OR amount IN (7,11,NULL)) AS sp, avg(amount) FILTER (WHERE amount BETWEEN 1000 AND 3000 OR amount IN (7,11,NULL)) AS ap, sum(amount) FILTER (WHERE NOT (amount >= -1000 AND amount <= 1000)) AS sn, avg(amount) FILTER (WHERE NOT (amount >= -1000 AND amount <= 1000)) AS an, sum(units) FILTER (WHERE amount IN (-5000,0,5000,NULL)) AS su, avg(units) FILTER (WHERE amount IN (-5000,0,5000,NULL)) AS au, count(*) AS n FROM bench_filtered_sales WHERE amount < -2000 OR amount > 2000 GROUP BY region, sales_day, is_return",
+  "baseline_query_sql": "SELECT region, sales_day, is_return, sum(amount) FILTER (WHERE amount BETWEEN 1000 AND 3000 OR amount IN (7,11,NULL)) AS sp, avg(amount) FILTER (WHERE amount BETWEEN 1000 AND 3000 OR amount IN (7,11,NULL)) AS ap, sum(amount) FILTER (WHERE NOT (amount >= -1000 AND amount <= 1000)) AS sn, avg(amount) FILTER (WHERE NOT (amount >= -1000 AND amount <= 1000)) AS an, sum(units) FILTER (WHERE amount IN (-5000,0,5000,NULL)) AS su, avg(units) FILTER (WHERE amount IN (-5000,0,5000,NULL)) AS au, count(*) AS n FROM bench_filtered_sales WHERE amount < -2000 OR amount > 2000 GROUP BY region, sales_day, is_return",
+  "error": null
+}

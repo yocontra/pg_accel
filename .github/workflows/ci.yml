@@ -205,6 +205,22 @@ jobs:
             "${{ matrix.pg }}" \
             "artifacts/upstream-postgresql-pg${{ matrix.pg }}"
 
+      - name: Verify extension catalog lifecycle
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          just extension-catalog-test "${{ matrix.pg }}" \
+            2>&1 | tee "artifacts/extension-catalog-pg${{ matrix.pg }}.log"
+
+      - name: Upload extension catalog lifecycle evidence
+        if: always() && steps.pg-support.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: extension-catalog-pg${{ matrix.pg }}-macos-arm64
+          path: artifacts/extension-catalog-pg${{ matrix.pg }}.log
+          if-no-files-found: warn
+
       - name: Upload PostgreSQL upstream-suite evidence
         if: always() && steps.upstream-pg.outcome == 'success'
         uses: actions/upload-artifact@v4
@@ -631,8 +647,20 @@ jobs:
             python3 -m unittest discover -s scripts/tests -p 'test_cpu_cheat_audit.py' -v \
             2>&1 | tee "$LINUX_NO_GPU_ARTIFACT_DIR/cpu-cheat-analyzer-tests.log"
           PYTHONDONTWRITEBYTECODE=1 \
+            python3 -m unittest discover -s scripts/tests -p 'test_output_container_escape.py' -v \
+            2>&1 | tee "$LINUX_NO_GPU_ARTIFACT_DIR/output-container-escape-tests.log"
+          PYTHONDONTWRITEBYTECODE=1 \
             python3 -m unittest discover -s scripts/tests -p 'test_workspace*.py' -v \
             2>&1 | tee "$LINUX_NO_GPU_ARTIFACT_DIR/workspace-effect-tests.log"
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 -m unittest discover -s scripts/tests -p 'test_metadata_effects.py' -v \
+            2>&1 | tee "$LINUX_NO_GPU_ARTIFACT_DIR/metadata-effect-tests.log"
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 -m unittest discover -s scripts/tests -p 'test_metadata_build.py' -v \
+            2>&1 | tee "$LINUX_NO_GPU_ARTIFACT_DIR/metadata-build-tests.log"
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 -m unittest discover -s scripts/tests -p 'test_metadata_link.py' -v \
+            2>&1 | tee "$LINUX_NO_GPU_ARTIFACT_DIR/metadata-link-tests.log"
 
       - name: Prove the hosted runtime exposes no GPU device
         if: steps.pg-support.outputs.skip != 'true'

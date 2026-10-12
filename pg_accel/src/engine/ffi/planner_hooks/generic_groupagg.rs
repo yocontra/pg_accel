@@ -16,8 +16,10 @@ use super::shape::{
 use super::{PlannerSubstageGuard, add_gpu_path_with_resident_proof, rel_rows_estimate};
 use crate::engine::cost::{self, PgCost, Rows, TypedCostModel};
 use crate::engine::executor::agg::{
-    estimate_descriptor_artifact_bytes_upper_bound, is_weighted_global_count_descriptor,
-    planned_descriptor_kernel_mode, validate_normal_descriptor_capability,
+    descriptor_program_clone_bytes, estimate_descriptor_artifact_bytes_upper_bound,
+    is_weighted_global_count_descriptor, numeric_descriptor_memory_requirements,
+    planned_descriptor_kernel_mode, scalar_descriptor_memory_requirements,
+    scalar_metadata_peak_bytes, validate_normal_descriptor_capability,
     validate_normal_spatial_candidate_capability,
 };
 use crate::engine::ffi::custom_scan;
@@ -28,13 +30,14 @@ use crate::engine::residency::{
     estimate_selected_relation, resident_budget_snapshot, resident_planner_dependency,
     revalidate_loaded_estimates,
 };
-use crate::engine::spec::{AggOutputProjection, FilterSpec, GroupKeyEncoding, MeasureExpr};
+use crate::engine::spec::{
+    AggOutputProjection, AggregateKind, FilterSpec, GroupKeyEncoding, MeasureExpr,
+};
 use crate::engine::stats;
 use crate::gpu::GroupedAggKernelMode;
 
 const GENERIC_SHAPE_PATH_CONTEXT: &str = "upper_paths_generic_groupagg";
-const AGG_QUERY_SPEC_SENTINEL: c_int = i32::from_be_bytes(*b"AQS3");
-const AGG_OUTPUT_PROJECTION_SENTINEL: c_int = i32::from_be_bytes(*b"AOP2");
+use crate::engine::ffi::custom_scan::{AGG_OUTPUT_PROJECTION_SENTINEL, AGG_QUERY_SPEC_SENTINEL};
 const WEIGHTED_GLOBAL_COUNT_MIN_FACT_ROWS: u64 = 1_000_000;
 
 unsafe extern "C" {
@@ -74,8 +77,14 @@ enum AdmissionDecline {
     DescriptorCapability {
         detail: String,
     },
-    H3ParentResolutionUnqualified {
-        resolution: i32,
+    SpatialResidencyRequired {
+        exact_rows: Option<u64>,
+    },
+    NumericEstimateUnavailable {
+        detail: String,
+    },
+    ScalarEstimateUnavailable {
+        detail: String,
     },
     SerialGenericKernelMode {
         mode: &'static str,
@@ -94,9 +103,11 @@ enum AdmissionDecline {
         current_backend_live_bytes: u64,
         other_backend_live_bytes: u64,
         pinned_unselected_raw_bytes: u64,
+        retained_execution_bytes: u64,
         evictable_or_replaced_local_bytes: u64,
         selected_raw_bytes: u64,
         derived_artifact_bytes: u64,
+        prospective_execution_bytes: u64,
         projected_final_bytes: u64,
         budget_bytes: u64,
     },
@@ -114,12 +125,14 @@ impl AdmissionDecline {
     const fn code(&self) -> &'static str {
         match self {
             Self::Shape(decline) => decline.code(),
+            Self::NumericEstimateUnavailable { .. } => "generic_numeric_estimate_unavailable",
+            Self::ScalarEstimateUnavailable { .. } => "generic_scalar_estimate_unavailable",
             Self::AttributeNumberOutOfRange { .. } => "generic_residency_attno_out_of_range",
             Self::ResidencyEstimateFailed { .. } => "generic_residency_estimate_failed",
             Self::MissingResidencyEstimate { .. } => "generic_residency_estimate_missing",
             Self::UnexpectedResidencyEstimate { .. } => "generic_residency_estimate_unexpected",
             Self::DescriptorCapability { .. } => "generic_descriptor_capability",
-            Self::H3ParentResolutionUnqualified { .. } => "h3_parent_resolution_unqualified",
+            Self::SpatialResidencyRequired { .. } => "generic_spatial_residency_required",
             Self::SerialGenericKernelMode { .. } => "generic_serial_kernel_mode_unqualified",
             Self::AutoLoadDisabled { .. } => "generic_auto_load_disabled",
             Self::ResidencyBytesOverflow => "generic_residency_bytes_overflow",
@@ -277,6 +290,33 @@ fn apply_exact_residency(
     policy: AdmissionPolicy,
     model: &TypedCostModel,
 ) -> Result<(), AdmissionDecline> {
+    apply_exact_residency_with_scalar_memory(
+        shape,
+        estimates,
+        policy,
+        model,
+        |shape, estimates, model| {
+            scalar_planning_memory_with(
+                shape,
+                estimates,
+                model,
+                scalar_descriptor_memory_requirements,
+            )
+        },
+    )
+}
+
+fn apply_exact_residency_with_scalar_memory(
+    shape: &mut ShapePlan,
+    estimates: &[ResidentLoadEstimate],
+    policy: AdmissionPolicy,
+    model: &TypedCostModel,
+    scalar_memory: impl FnOnce(
+        &ShapePlan,
+        &[ResidentLoadEstimate],
+        &TypedCostModel,
+    ) -> Result<u64, AdmissionDecline>,
+) -> Result<(), AdmissionDecline> {
     for estimate in estimates {
         let relation_oid = u32::from(estimate.relid);
         if !shape
@@ -348,10 +388,27 @@ fn apply_exact_residency(
         .collect::<BTreeMap<_, _>>();
     let derived_artifact_bytes =
         estimate_descriptor_artifact_bytes_upper_bound(&shape.spec, &relation_rows)
-            .ok_or(AdmissionDecline::DerivedArtifactEstimateUnavailable)?;
+            .ok_or(AdmissionDecline::DerivedArtifactEstimateUnavailable)?
+            .checked_add(
+                descriptor_program_clone_bytes(&shape.spec)
+                    .map_err(|detail| AdmissionDecline::ScalarEstimateUnavailable { detail })?,
+            )
+            .ok_or(AdmissionDecline::ResidencyBytesOverflow)?;
+    let numeric_resources = numeric_planning_resources(shape, estimates, model)?;
+    let scalar_execution_bytes = scalar_memory(shape, estimates, model)?;
+    let prospective_execution_bytes = numeric_resources
+        .as_ref()
+        .map_or(0, |resources| resources.bytes)
+        .checked_add(
+            scalar_metadata_peak_bytes(&shape.spec)
+                .map_err(|detail| AdmissionDecline::ScalarEstimateUnavailable { detail })?,
+        )
+        .and_then(|bytes| bytes.checked_add(scalar_execution_bytes))
+        .ok_or(AdmissionDecline::ResidencyBytesOverflow)?;
     let projected_final_bytes = policy
         .budget_snapshot
         .projected_final_bytes(total_required_bytes, derived_artifact_bytes)
+        .and_then(|bytes| bytes.checked_add(prospective_execution_bytes))
         .ok_or(AdmissionDecline::ResidencyBytesOverflow)?;
     if projected_final_bytes > policy.budget_bytes {
         return Err(AdmissionDecline::ResidencyBudgetExceeded {
@@ -359,11 +416,13 @@ fn apply_exact_residency(
             current_backend_live_bytes: policy.budget_snapshot.current_backend_live_bytes,
             other_backend_live_bytes: policy.budget_snapshot.other_backend_live_bytes,
             pinned_unselected_raw_bytes: policy.budget_snapshot.pinned_unselected_raw_bytes,
+            retained_execution_bytes: policy.budget_snapshot.retained_execution_bytes,
             evictable_or_replaced_local_bytes: policy
                 .budget_snapshot
                 .evictable_or_replaced_local_bytes,
             selected_raw_bytes: total_required_bytes,
             derived_artifact_bytes,
+            prospective_execution_bytes,
             projected_final_bytes,
             budget_bytes: policy.budget_bytes,
         });
@@ -412,7 +471,39 @@ fn apply_exact_residency(
         shape.cost.replace_aggregate(aggregate);
     }
     let lifecycle_fact_rows = resident_fact_rows.unwrap_or(estimated_fact_rows);
-    if let Some(calls) = planned_dense_lifecycle_calls(shape, lifecycle_fact_rows, model) {
+    if let Some(resolution) = shape
+        .spec
+        .group_keys
+        .iter()
+        .find_map(|key| match key.source {
+            crate::engine::spec::GroupKeySource::H3CellToParent { resolution, .. } => {
+                Some(resolution)
+            }
+            _ => None,
+        })
+    {
+        let bound = super::shape::h3_group_bound(lifecycle_fact_rows, resolution)
+            .expect("validated H3 resolution");
+        let estimated = Rows::new(usize::try_from(bound).unwrap_or(usize::MAX));
+        let maximum = model.memory.gpu_h3_max_groups;
+        if estimated > maximum {
+            return Err(AdmissionDecline::DeviceCostGate(
+                ShapeCostGate::GroupsExceedDeviceMaximum { estimated, maximum },
+            ));
+        }
+        if matches!(
+            shape.cost_gate,
+            ShapeCostGate::GroupsExceedDeviceMaximum { .. }
+        ) {
+            shape.cost_gate = ShapeCostGate::Eligible;
+        }
+    }
+    if let Some(resources) = numeric_resources {
+        shape.cost.replace_aggregate(resources.aggregate);
+        shape
+            .cost
+            .replace_additional_aggregate_launches(resources.launches);
+    } else if let Some(calls) = planned_dense_lifecycle_calls(shape, lifecycle_fact_rows, model) {
         let additional_calls = calls.saturating_sub(1);
         shape
             .cost
@@ -423,6 +514,23 @@ fn apply_exact_residency(
         shape
             .cost
             .replace_additional_aggregate_launches(PgCost::ZERO);
+    }
+    if shape_kernel_mode(shape) == GroupedAggKernelMode::ParallelDenseNumeric
+        && matches!(
+            shape.cost_gate,
+            ShapeCostGate::Eligible | ShapeCostGate::FactRowsBelowDeviceMinimum { .. }
+        )
+    {
+        let rows = Rows::new(usize::try_from(lifecycle_fact_rows).unwrap_or(usize::MAX));
+        let required = super::shape::numeric_fact_row_floor(model);
+        shape.cost_gate = if rows < required {
+            ShapeCostGate::FactRowsBelowDeviceMinimum {
+                estimated: rows,
+                required,
+            }
+        } else {
+            ShapeCostGate::Eligible
+        };
     }
     if dense_atomic_sum_count_lifecycle(&shape.spec, &shape.descriptor_resolution, model)
         && matches!(
@@ -467,12 +575,337 @@ fn shape_kernel_mode(shape: &ShapePlan) -> GroupedAggKernelMode {
     planned_descriptor_kernel_mode(&shape.spec, hash_grouping)
 }
 
+struct NumericPlanningResources {
+    bytes: u64,
+    aggregate: PgCost,
+    launches: PgCost,
+}
+
+fn scalar_planning_memory_with(
+    shape: &ShapePlan,
+    estimates: &[ResidentLoadEstimate],
+    model: &TypedCostModel,
+    memory_query: impl FnOnce(
+        &crate::engine::spec::AggQuerySpec,
+        &[i16],
+        usize,
+        usize,
+        usize,
+        usize,
+    ) -> Result<crate::gpu::GroupedAggMemoryRequirements, String>,
+) -> Result<u64, AdmissionDecline> {
+    if !shape
+        .spec
+        .measures
+        .iter()
+        .any(|measure| matches!(measure.expression, MeasureExpr::Bytecode { .. }))
+    {
+        return Ok(0);
+    }
+    let unavailable = |detail: &str| AdmissionDecline::ScalarEstimateUnavailable {
+        detail: detail.to_owned(),
+    };
+    let estimate = estimates
+        .iter()
+        .find(|estimate| u32::from(estimate.relid) == shape.spec.fact_rel && estimate.loaded)
+        .ok_or_else(|| {
+            unavailable("scalar layout forecast requires a complete resident snapshot")
+        })?;
+    let rows = usize::try_from(
+        estimate
+            .resident_rows
+            .ok_or_else(|| unavailable("missing scalar resident row count"))?,
+    )
+    .map_err(|_| unavailable("scalar resident rows exceed usize"))?;
+    let nullable = estimate
+        .resident_nullable_columns
+        .as_deref()
+        .ok_or_else(|| unavailable("missing scalar per-column NULL metadata"))?;
+    let cardinalities = shape
+        .estimated_dense_key_cardinalities
+        .as_deref()
+        .ok_or_else(|| unavailable("missing scalar dense-slot estimates"))?;
+    let nullable_keys = shape
+        .spec
+        .group_keys
+        .iter()
+        .map(|key| {
+            let crate::engine::spec::GroupKeySource::FactColumn(column) = key.source else {
+                return Err(unavailable("scalar grouping requires fact-column keys"));
+            };
+            Ok(nullable
+                .iter()
+                .any(|attno| i32::from(*attno) == column.attno))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let groups = super::shape::dense_slot_product(cardinalities, &nullable_keys)
+        .and_then(|groups| usize::try_from(groups).ok())
+        .ok_or_else(|| unavailable("scalar dense-slot estimates mismatch or overflow"))?;
+    let maximum = match &shape.descriptor_resolution {
+        DescriptorResolution::BeginTimeArtifacts {
+            max_group_count, ..
+        } => model
+            .memory
+            .gpu_hash_agg_max_groups
+            .get()
+            .min(*max_group_count),
+        DescriptorResolution::Ready => model.memory.gpu_hash_agg_max_groups.get(),
+    };
+    if groups > maximum {
+        return Err(unavailable(
+            "scalar dense-slot estimate exceeds dictionary capacity",
+        ));
+    }
+    let memory = memory_query(
+        &shape.spec,
+        nullable,
+        groups,
+        rows,
+        model.executor.gpu_reduce_max_chunk.get(),
+        model.executor.gpu_grouped_agg_one_shot_max_rows.get(),
+    )
+    .map_err(|detail| AdmissionDecline::ScalarEstimateUnavailable { detail })?;
+    let bytes = u64::try_from(memory.total_bytes)
+        .map_err(|_| unavailable("scalar execution bytes exceed u64"))?;
+    // Spatial preparation reserves a transient program owner in addition to
+    // the published clone already included in derived_artifact_bytes. Cover
+    // that staged overlap as well as scalar execution, conservatively even
+    // though construction and aggregate dispatch are separate phases.
+    let transient_program_bytes = if shape.spec.fact_filter.spatial().is_some() {
+        descriptor_program_clone_bytes(&shape.spec)
+            .map_err(|detail| AdmissionDecline::ScalarEstimateUnavailable { detail })?
+    } else {
+        0
+    };
+    bytes
+        .checked_add(transient_program_bytes)
+        .ok_or_else(|| unavailable("scalar spatial execution bytes exceed u64"))
+}
+
+/// Exact resident decimal work combined with the planner's dense-slot estimate.
+/// Memory is queried from the native layout without allocating or dispatching.
+/// Runtime reservations still enforce the cap if cardinality estimates change.
+fn numeric_planning_resources(
+    shape: &ShapePlan,
+    estimates: &[ResidentLoadEstimate],
+    model: &TypedCostModel,
+) -> Result<Option<NumericPlanningResources>, AdmissionDecline> {
+    numeric_planning_resources_with(
+        shape,
+        estimates,
+        model,
+        numeric_descriptor_memory_requirements,
+    )
+}
+
+fn numeric_planning_resources_with(
+    shape: &ShapePlan,
+    estimates: &[ResidentLoadEstimate],
+    model: &TypedCostModel,
+    memory_query: impl FnOnce(
+        &crate::engine::spec::AggQuerySpec,
+        &[crate::engine::residency::ResidentNumericColumnStats],
+        &[i16],
+        usize,
+    ) -> Result<crate::gpu::GroupedAggMemoryRequirements, String>,
+) -> Result<Option<NumericPlanningResources>, AdmissionDecline> {
+    if shape_kernel_mode(shape) != GroupedAggKernelMode::ParallelDenseNumeric {
+        return Ok(None);
+    }
+    let unavailable = |detail: &str| AdmissionDecline::NumericEstimateUnavailable {
+        detail: detail.to_owned(),
+    };
+    let estimate = estimates
+        .iter()
+        .find(|estimate| u32::from(estimate.relid) == shape.spec.fact_rel && estimate.loaded)
+        .ok_or_else(|| unavailable("NUMERIC requires a complete resident snapshot"))?;
+    let rows = estimate
+        .resident_rows
+        .ok_or_else(|| unavailable("missing exact NUMERIC row count"))?;
+    let columns = estimate
+        .resident_numeric_columns
+        .as_deref()
+        .ok_or_else(|| unavailable("missing resident NUMERIC digit metadata"))?;
+    let nullable = estimate
+        .resident_nullable_columns
+        .as_deref()
+        .ok_or_else(|| unavailable("missing per-column NULL metadata"))?;
+    let cardinalities = shape
+        .estimated_dense_key_cardinalities
+        .as_deref()
+        .ok_or_else(|| unavailable("missing per-key dense-slot estimates"))?;
+    let nullable_keys = shape
+        .spec
+        .group_keys
+        .iter()
+        .map(|key| {
+            let crate::engine::spec::GroupKeySource::FactColumn(column) = key.source else {
+                return Err(unavailable("NUMERIC grouping requires fact-column keys"));
+            };
+            Ok(nullable
+                .iter()
+                .any(|attno| i32::from(*attno) == column.attno))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let groups = super::shape::dense_slot_product(cardinalities, &nullable_keys)
+        .ok_or_else(|| unavailable("NUMERIC dense-slot estimates mismatch or overflow"))?;
+    let groups = usize::try_from(groups)
+        .map_err(|_| unavailable("NUMERIC dense-slot estimate exceeds usize"))?;
+    let configured_maximum = model.memory.gpu_hash_agg_max_groups.get();
+    let maximum = match &shape.descriptor_resolution {
+        DescriptorResolution::BeginTimeArtifacts {
+            max_group_count, ..
+        } => configured_maximum.min(*max_group_count),
+        DescriptorResolution::Ready => configured_maximum,
+    };
+    if groups > maximum {
+        // Per-key statistics and NULL evidence are not structural shape facts;
+        // keep this decline transient rather than caching joint output rows.
+        return Err(unavailable(
+            "NUMERIC dense-slot estimate exceeds dictionary capacity",
+        ));
+    }
+    let memory = memory_query(&shape.spec, columns, nullable, groups)
+        .map_err(|detail| AdmissionDecline::NumericEstimateUnavailable { detail })?;
+    let mut digit_count = 0_u64;
+    let mut max_digits_per_row = 1_u64;
+    let mut values = 0_u64;
+    for measure in &shape.spec.measures {
+        if let Some(column) = match measure.expression {
+            MeasureExpr::Column(column) => Some(column),
+            _ => measure.filtered_count_input(),
+        } {
+            values += 1;
+            if column.type_oid == u32::from(pg_sys::INT8OID) {
+                if measure
+                    .outputs
+                    .iter()
+                    .any(|output| matches!(output.kind, AggregateKind::Sum | AggregateKind::Avg))
+                {
+                    digit_count = digit_count
+                        .checked_add(
+                            rows.checked_mul(5)
+                                .ok_or_else(|| unavailable("INT8 digit-work overflow"))?,
+                        )
+                        .ok_or_else(|| unavailable("INT8 digit-work overflow"))?;
+                    max_digits_per_row += 5;
+                }
+                continue;
+            }
+            if column.type_oid != u32::from(pg_sys::NUMERICOID) {
+                if rows > (i64::MAX as u64) / (1_u64 << 31)
+                    && measure.outputs.iter().any(|output| {
+                        matches!(output.kind, AggregateKind::Sum | AggregateKind::Avg)
+                    })
+                {
+                    return Err(unavailable(
+                        "mixed integer SUM exceeds exact prefix-safe row bound",
+                    ));
+                }
+                continue;
+            }
+            let stats = columns
+                .iter()
+                .find(|stats| i32::from(stats.attno) == column.attno)
+                .ok_or_else(|| unavailable("NUMERIC column metadata disappeared"))?;
+            if measure
+                .outputs
+                .iter()
+                .any(|output| matches!(output.kind, AggregateKind::Sum | AggregateKind::Avg))
+            {
+                digit_count = digit_count
+                    .checked_add(stats.digit_count)
+                    .ok_or_else(|| unavailable("NUMERIC digit-work overflow"))?;
+                max_digits_per_row += u64::from(stats.bounds.max_ndigits);
+            }
+        }
+    }
+    let chunk = model
+        .executor
+        .gpu_reduce_max_chunk
+        .get()
+        .min(model.executor.gpu_grouped_agg_one_shot_max_rows.get()) as u64;
+    let (row_work, additional_launches) =
+        numeric_work_units(rows, values, digit_count, max_digits_per_row, chunk).ok_or_else(
+            || unavailable("NUMERIC row/chunk work exceeds its exact lifecycle domain"),
+        )?;
+    let mut predicate_work = 0_u64;
+    for filter in std::iter::once(&shape.spec.fact_filter)
+        .chain(shape.spec.measures.iter().map(|measure| &measure.filter))
+    {
+        if let Some((_, ranges, accept_null)) = filter.scalar().range_parts() {
+            // The numeric kernel specializes singleton ranges to equality on
+            // the host. Charge one comparison for those, two for intervals;
+            // retain the worst case over all ranges and all input rows.
+            let comparisons = ranges
+                .iter()
+                .try_fold(u64::from(accept_null), |count, range| {
+                    count.checked_add(if range.lo == range.hi { 1 } else { 2 })
+                })
+                .and_then(|count| count.checked_mul(rows))
+                .ok_or_else(|| unavailable("NUMERIC predicate work overflow"))?;
+            predicate_work = predicate_work
+                .checked_add(comparisons)
+                .ok_or_else(|| unavailable("NUMERIC predicate/transition work overflow"))?;
+        }
+        if matches!(filter, FilterSpec::Mask { .. }) || filter.spatial().is_some() {
+            predicate_work = predicate_work
+                .checked_add(rows)
+                .ok_or_else(|| unavailable("NUMERIC SQL-mask work overflow"))?;
+        }
+    }
+    // Keys are already dense dictionary codes: a decimal limb update performs
+    // reduction/atomic work, not a hash-table build and probe. Charging the
+    // hash coefficient once per digit overprices measured dense decimal work.
+    let aggregate = (memory.workspace_bytes as f64 / 8.0).mul_add(
+        model.coefficients.gpu_op_cost_reduce.get(),
+        row_work as f64 * model.coefficients.gpu_op_cost_reduce.get(),
+    );
+    let aggregate =
+        (predicate_work as f64).mul_add(model.coefficients.gpu_op_cost_filter.get(), aggregate);
+    Ok(Some(NumericPlanningResources {
+        bytes: memory.total_bytes as u64,
+        aggregate: PgCost::new(aggregate),
+        launches: PgCost::new(additional_launches as f64 * cost::GPU_LAUNCH_OVERHEAD),
+    }))
+}
+
+fn numeric_work_units(
+    rows: u64,
+    values: u64,
+    digits: u64,
+    max_digits_per_row: u64,
+    chunk: u64,
+) -> Option<(u64, u64)> {
+    if rows > i64::MAX as u64 / 10000
+        || !(1..=4).contains(&values)
+        || chunk == 0
+        || max_digits_per_row == 0
+    {
+        return None;
+    }
+    let row_work = rows.checked_mul(values + 1)?.checked_add(digits)?;
+    // Match the native NUMERIC launch digit cap, preserving outer chunk tails.
+    let launch_rows = (1_048_576 / max_digits_per_row).max(1);
+    let data_launches = (rows / chunk)
+        .checked_mul(chunk.div_ceil(launch_rows))?
+        .checked_add((rows % chunk).div_ceil(launch_rows))?;
+    // The base dispatch charge already covers the single finalization call.
+    let extra_lifecycle_calls = rows.div_ceil(chunk);
+    Some((row_work, data_launches.checked_add(extra_lifecycle_calls)?))
+}
+
 fn planned_dense_lifecycle_calls(
     shape: &ShapePlan,
     fact_rows: u64,
     model: &TypedCostModel,
 ) -> Option<u64> {
-    if matches!(shape.spec.fact_filter, FilterSpec::Spatial { .. })
+    if (shape.spec.fact_filter.spatial().is_some()
+        && !shape
+            .spec
+            .measures
+            .iter()
+            .any(|measure| matches!(measure.expression, MeasureExpr::Bytecode { .. })))
         || shape.spec.group_keys.iter().any(|key| {
             matches!(
                 key.source,
@@ -498,7 +931,7 @@ fn validate_shape_capability(shape: &ShapePlan) -> Result<(), AdmissionDecline> 
     let projection = AggOutputProjection {
         slots: shape.projections.clone(),
     };
-    let result = if matches!(shape.spec.fact_filter, FilterSpec::Spatial { .. }) {
+    let result = if shape.spec.fact_filter.spatial().is_some() {
         validate_normal_spatial_candidate_capability(&shape.spec, &projection)
     } else {
         validate_normal_descriptor_capability(&shape.spec, &projection)
@@ -529,40 +962,17 @@ fn validate_shape_capability(shape: &ShapePlan) -> Result<(), AdmissionDecline> 
     Ok(())
 }
 
-fn validate_released_h3_parent_envelope(shape: &ShapePlan) -> Result<(), AdmissionDecline> {
-    let resolution = shape
-        .spec
-        .group_keys
-        .iter()
-        .find_map(|key| match key.source {
-            crate::engine::spec::GroupKeySource::H3CellToParent { resolution, .. } => {
-                Some(resolution)
-            }
-            _ => None,
-        });
-    match resolution {
-        // The 1.0 release evidence qualifies only the exact res7-to-res0
-        // grouped COUNT lane. Preserve the broader wire/runtime implementation
-        // for differential and backstop tests, but do not select another
-        // resolution until that exact cell has independent winning evidence.
-        Some(resolution) if resolution != 0 => {
-            Err(AdmissionDecline::H3ParentResolutionUnqualified { resolution })
-        }
-        Some(_) | None => Ok(()),
-    }
-}
-
-const NORMAL_SPATIAL_PROMOTION_ROWS: u64 = 1_000_000;
-
 fn normal_spatial_promotion_rows(exact_rows: Option<u64>) -> bool {
-    exact_rows == Some(NORMAL_SPATIAL_PROMOTION_ROWS)
+    // Residency, vertex-work and memory gates remain separate. An exact row
+    // count proves the snapshot; it is not a benchmark-fixture identity.
+    exact_rows.is_some_and(|rows| rows > 0 && usize::try_from(rows).is_ok())
 }
 
 fn validate_normal_spatial_residency_envelope(
     shape: &ShapePlan,
     snapshot: &ExactResidencySnapshot,
 ) -> Result<(), AdmissionDecline> {
-    if !matches!(shape.spec.fact_filter, FilterSpec::Spatial { .. }) {
+    if shape.spec.fact_filter.spatial().is_none() {
         return Ok(());
     }
     let exact_rows = snapshot
@@ -572,11 +982,10 @@ fn validate_normal_spatial_residency_envelope(
         .filter(|estimate| estimate.loaded)
         .and_then(|estimate| estimate.resident_rows);
     if !normal_spatial_promotion_rows(exact_rows) {
-        return Err(AdmissionDecline::DescriptorCapability {
-            detail: format!(
-                "normal spatial admission requires exactly {NORMAL_SPATIAL_PROMOTION_ROWS} resident fact rows; observed {exact_rows:?}"
-            ),
-        });
+        // A missing/invalidated resident snapshot is transient, not a
+        // structural descriptor failure. Never cache it as query identity:
+        // a later explicit pin must allow this same query to be reconsidered.
+        return Err(AdmissionDecline::SpatialResidencyRequired { exact_rows });
     }
     Ok(())
 }
@@ -587,12 +996,23 @@ fn stable_device_cost_gate_before_residency(
 ) -> Option<ShapeCostGate> {
     match shape.cost_gate {
         ShapeCostGate::Eligible => None,
+        ShapeCostGate::GroupsExceedDeviceMaximum { .. }
+            if shape.spec.group_keys.iter().any(|key| {
+                matches!(
+                    key.source,
+                    crate::engine::spec::GroupKeySource::H3CellToParent { .. }
+                )
+            }) =>
+        {
+            None
+        }
         ShapeCostGate::FactRowsBelowDeviceMinimum { .. }
-            if dense_atomic_sum_count_lifecycle(
-                &shape.spec,
-                &shape.descriptor_resolution,
-                model,
-            ) =>
+            if shape_kernel_mode(shape) == GroupedAggKernelMode::ParallelDenseNumeric
+                || dense_atomic_sum_count_lifecycle(
+                    &shape.spec,
+                    &shape.descriptor_resolution,
+                    model,
+                ) =>
         {
             // Exact loaded-row evidence may replace the planner estimate for
             // this lifecycle, so residency must retain the chance to refine it.
@@ -664,8 +1084,16 @@ fn cheap_exact_dense_row_gate_with(
 
 #[cfg(any(test, feature = "pg_test"))]
 fn test_force_spatial_groupagg(shape: &ShapePlan) -> bool {
-    gucs::test_force_spatial_groupagg()
-        && matches!(&shape.spec.fact_filter, FilterSpec::Spatial { .. })
+    gucs::test_force_spatial_groupagg() && shape.spec.fact_filter.spatial().is_some()
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+fn test_force_numeric_groupagg(shape: &ShapePlan) -> bool {
+    gucs::test_force_numeric_groupagg()
+        && shape.spec.measures.iter().any(|measure| {
+            matches!(measure.expression, MeasureExpr::Column(column)
+                if column.type_oid == u32::from(pg_sys::NUMERICOID))
+        })
 }
 
 #[cfg(any(test, feature = "pg_test"))]
@@ -717,6 +1145,28 @@ fn effective_path_cost(shape: &ShapePlan, multiplier: f64) -> EffectivePathCost 
     EffectivePathCost { startup, total }
 }
 
+/// Charge native HAVING on every pre-filter output group. The GPU multiplier
+/// must not discount work executed by PostgreSQL's expression evaluator.
+unsafe fn add_native_having_cost(
+    root: *mut pg_sys::PlannerInfo,
+    output_rows: u64,
+    mut cost: EffectivePathCost,
+) -> EffectivePathCost {
+    // SAFETY: caller supplies the live upper-path PlannerInfo and Query.
+    let having = unsafe { (*(*root).parse).havingQual };
+    if !having.is_null() {
+        let mut qual_cost = pg_sys::QualCost::default();
+        // SAFETY: planner preprocessing canonicalizes HAVING to a qual List;
+        // qual_cost is writable storage for PostgreSQL's own cost estimator.
+        unsafe { pg_sys::cost_qual_eval(&raw mut qual_cost, having.cast(), root) };
+        cost.startup += qual_cost.startup;
+        cost.total += qual_cost
+            .per_tuple
+            .mul_add(output_rows as f64, qual_cost.startup);
+    }
+    cost
+}
+
 fn maximum_cost_ratio(shape: &ShapePlan, model: &TypedCostModel) -> f64 {
     if shape.spec.star_dims.is_empty() {
         model.planner.gpu_agg_cost_ratio
@@ -744,17 +1194,17 @@ fn encode_shape_path_private(
 }
 
 fn shape_stages(shape: &ShapePlan) -> (Vec<ResidentOperatorStage>, bool) {
-    let has_spatial = matches!(shape.spec.fact_filter, FilterSpec::Spatial { .. })
+    let has_spatial = shape.spec.fact_filter.spatial().is_some()
         || shape
             .spec
             .measures
             .iter()
-            .any(|measure| matches!(measure.filter, FilterSpec::Spatial { .. }))
+            .any(|measure| measure.filter.spatial().is_some())
         || shape
             .spec
             .star_dims
             .iter()
-            .any(|dimension| matches!(dimension.filter, FilterSpec::Spatial { .. }));
+            .any(|dimension| dimension.filter.spatial().is_some());
     let has_non_spatial_filter = (!matches!(shape.spec.fact_filter, FilterSpec::None)
         && !matches!(shape.spec.fact_filter, FilterSpec::Spatial { .. }))
         || shape.spec.measures.iter().any(|measure| {
@@ -850,7 +1300,7 @@ unsafe fn inject_childless_shape_path(
     })?);
     if digest_words != shape.digest_words {
         return Err(ShapeDecline::Codec(
-            "shape digest words do not match the serialized AQS3/AOP2 contract".to_owned(),
+            "shape digest words do not match the serialized AQS6/AOP2 contract".to_owned(),
         ));
     }
 
@@ -1538,6 +1988,9 @@ pub(super) unsafe fn try_inject(
     if !gucs::gpu_enabled() {
         return false;
     }
+    // SAFETY: preserve role-sensitive permission decisions before any decline
+    // cache can return early; root is the live hook planner state.
+    unsafe { super::shape::mark_permission_role_dependency(root) };
     // SAFETY: root is the live PlannerInfo supplied to this hook.
     let query_fingerprint = unsafe { decline_cache::query_fingerprint(root) };
     let structural_cache_key = query_fingerprint.as_ref().map(|fingerprint| {
@@ -1619,8 +2072,13 @@ pub(super) unsafe fn try_inject(
         .map_err(AdmissionDecline::Shape)?;
 
         #[cfg(any(test, feature = "pg_test"))]
-        if test_force_spatial_groupagg(&shape) {
-            crate::engine::executor::agg::validate_test_forced_spatial_capability(
+        if test_force_spatial_groupagg(&shape) || test_force_numeric_groupagg(&shape) {
+            let validate = if test_force_numeric_groupagg(&shape) {
+                crate::engine::executor::agg::validate_test_forced_numeric_capability
+            } else {
+                crate::engine::executor::agg::validate_test_forced_spatial_capability
+            };
+            validate(
                 &shape.spec,
                 &AggOutputProjection {
                     slots: shape.projections.clone(),
@@ -1670,7 +2128,6 @@ pub(super) unsafe fn try_inject(
         if let Some(gate) = stable_device_cost_gate_before_residency(&shape, &model) {
             return Err(AdmissionDecline::DeviceCostGate(gate));
         }
-        validate_released_h3_parent_envelope(&shape)?;
         if let Some((gate, dependency)) = cheap_exact_dense_row_gate(&shape, &model)? {
             cache_dependencies.push(dependency);
             return Err(AdmissionDecline::DeviceCostGate(gate));
@@ -1705,7 +2162,14 @@ pub(super) unsafe fn try_inject(
             },
             &model,
         )?;
-        let effective_cost = effective_path_cost(&shape, gucs::cost_multiplier());
+        // SAFETY: root and parse belong to this live upper-path invocation.
+        let effective_cost = unsafe {
+            add_native_having_cost(
+                root,
+                shape.estimated_output_rows,
+                effective_path_cost(&shape, gucs::cost_multiplier()),
+            )
+        };
         gate_cost(
             &shape,
             native_cost,
@@ -1727,7 +2191,6 @@ pub(super) unsafe fn try_inject(
             let cache_key = match &decline {
                 AdmissionDecline::Shape(_)
                 | AdmissionDecline::DescriptorCapability { .. }
-                | AdmissionDecline::H3ParentResolutionUnqualified { .. }
                 | AdmissionDecline::SerialGenericKernelMode { .. } => {
                     structural_cache_key.map(|key| (key, Vec::new()))
                 }
@@ -2257,6 +2720,7 @@ mod tests {
                 attnos: Vec::new(),
             }],
             estimated_output_rows: 1,
+            estimated_dense_key_cardinalities: Some(vec![]),
             digest_words,
             descriptor_resolution: DescriptorResolution::Ready,
             descriptor_measures: DescriptorMeasurePlan {
@@ -2295,17 +2759,12 @@ mod tests {
     }
 
     #[test]
-    fn normal_spatial_row_envelope_requires_exact_loaded_release_evidence() {
-        assert!(normal_spatial_promotion_rows(Some(
-            NORMAL_SPATIAL_PROMOTION_ROWS
-        )));
+    fn normal_spatial_row_envelope_requires_exact_loaded_evidence_not_a_fixture_size() {
+        assert!(normal_spatial_promotion_rows(Some(1_000_000)));
         assert!(!normal_spatial_promotion_rows(None));
-        assert!(!normal_spatial_promotion_rows(Some(
-            NORMAL_SPATIAL_PROMOTION_ROWS - 1
-        )));
-        assert!(!normal_spatial_promotion_rows(Some(
-            NORMAL_SPATIAL_PROMOTION_ROWS + 1
-        )));
+        assert!(!normal_spatial_promotion_rows(Some(0)));
+        assert!(normal_spatial_promotion_rows(Some(999_999)));
+        assert!(normal_spatial_promotion_rows(Some(1_000_001)));
     }
 
     fn estimate(loaded: bool, bytes: u64) -> ResidentLoadEstimate {
@@ -2330,6 +2789,8 @@ mod tests {
             resident_selected_columns: loaded.then_some(vec![1]),
             resident_rows: loaded.then_some(100_000),
             selected_columns_have_no_null_sidecars: loaded.then_some(true),
+            resident_numeric_columns: loaded.then(Vec::new),
+            resident_nullable_columns: loaded.then(Vec::new),
             pinned: false,
             estimated_bytes: bytes,
             fixed_width,
@@ -2365,6 +2826,7 @@ mod tests {
             current_backend_live_bytes,
             other_backend_live_bytes: other_backend_bytes,
             pinned_unselected_raw_bytes,
+            retained_execution_bytes: 0,
             evictable_or_replaced_local_bytes,
         }
     }
@@ -2960,6 +3422,52 @@ mod tests {
         shape
     }
 
+    #[test]
+    fn h3_capacity_uses_exact_resident_rows_before_selecting_a_path() {
+        for (exact_rows, fits) in [(499_999, true), (500_000, true), (500_001, false)] {
+            let mut shape = h3_parent_shape();
+            let GroupKeySource::H3CellToParent { resolution, .. } =
+                &mut shape.spec.group_keys[0].source
+            else {
+                panic!("H3 fixture");
+            };
+            *resolution = 15;
+            let mut model = model();
+            model.memory.gpu_h3_max_groups = Rows::new(500_000);
+            shape.cost_gate = ShapeCostGate::GroupsExceedDeviceMaximum {
+                estimated: Rows::new(1_000_000),
+                maximum: Rows::new(500_000),
+            };
+            assert_eq!(
+                stable_device_cost_gate_before_residency(&shape, &model),
+                None
+            );
+            let mut evidence = estimate(true, 4_096);
+            evidence.resident_rows = Some(exact_rows);
+            let result = apply_exact_residency(
+                &mut shape,
+                &[evidence],
+                AdmissionPolicy {
+                    auto_load: false,
+                    budget_bytes: u64::MAX,
+                    budget_snapshot: budget_snapshot(0, 0, 0),
+                },
+                &model,
+            );
+            if fits {
+                assert_eq!(result, Ok(()));
+                assert_eq!(shape.cost_gate, ShapeCostGate::Eligible);
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(AdmissionDecline::DeviceCostGate(
+                        ShapeCostGate::GroupsExceedDeviceMaximum { .. }
+                    ))
+                ));
+            }
+        }
+    }
+
     fn integer_measure_shape(kind: AggregateKind) -> ShapePlan {
         let mut shape = count_shape();
         shape.spec.measures[0] = MeasureSpec {
@@ -3048,6 +3556,8 @@ mod tests {
                 resident_selected_columns: None,
                 resident_rows: None,
                 selected_columns_have_no_null_sidecars: None,
+                resident_numeric_columns: None,
+                resident_nullable_columns: None,
                 pinned: false,
                 estimated_bytes: 4096,
                 fixed_width: true,
@@ -3168,6 +3678,427 @@ mod tests {
     }
 
     #[test]
+    fn numeric_work_accounts_for_digits_chunk_tails_and_limits() {
+        for rows in [0, 1, 99, 4093, 100017] {
+            for chunk in [1, 7, 4093, 1000000] {
+                for max_digits in [1, 5, 36865, 4 * 65535 + 1] {
+                    let mut data_launches = 0;
+                    let mut calls = 0;
+                    let mut remaining = rows;
+                    while remaining != 0 {
+                        let batch = remaining.min(chunk);
+                        let launch_rows = (1_048_576 / max_digits).max(1);
+                        let mut batch_rows = batch;
+                        while batch_rows != 0 {
+                            batch_rows -= batch_rows.min(launch_rows);
+                            data_launches += 1;
+                        }
+                        calls += 1;
+                        remaining -= batch;
+                    }
+                    assert_eq!(
+                        numeric_work_units(rows, 2, rows * 3, max_digits, chunk),
+                        Some((rows * 6, data_launches + calls))
+                    );
+                }
+            }
+        }
+        assert!(numeric_work_units(u64::MAX, 1, 0, 1, 1).is_none());
+        assert!(numeric_work_units(1, 0, 0, 1, 1).is_none());
+        assert!(numeric_work_units(1, 5, 0, 1, 1).is_none());
+        assert!(numeric_work_units(1, 1, u64::MAX, 1, 1).is_none());
+        assert!(numeric_work_units(1, 1, 0, 0, 1).is_none());
+        assert!(numeric_work_units(1, 1, 0, 1, 0).is_none());
+    }
+
+    #[test]
+    fn numeric_planning_charges_exact_digits_memory_and_rejects_missing_evidence() {
+        let mut shape = count_shape();
+        shape.spec.measures[0].expression = MeasureExpr::Column(ColumnRef {
+            relation_oid: 42,
+            attno: 1,
+            type_oid: 1700,
+        });
+        shape.spec.measures[0].outputs =
+            [AggregateKind::Sum, AggregateKind::Avg, AggregateKind::Count]
+                .into_iter()
+                .map(|kind| AggregateOutput {
+                    source: AggregateSource::Value,
+                    kind,
+                })
+                .collect();
+        let mut estimate = estimate(true, 4096);
+        estimate.resident_numeric_columns =
+            Some(vec![crate::engine::residency::ResidentNumericColumnStats {
+                attno: 1,
+                digit_count: 200000,
+                bounds: crate::engine::residency::NumericDigitBounds {
+                    min_weight: -1,
+                    max_weight: 0,
+                    max_ndigits: 2,
+                },
+            }]);
+        let model = model();
+        let query = |spec: &crate::engine::spec::AggQuerySpec,
+                     columns: &[crate::engine::residency::ResidentNumericColumnStats],
+                     nullable: &[i16],
+                     groups| {
+            assert_eq!(
+                spec.measures.len(),
+                1,
+                "shared SUM/AVG/COUNT is one transition state"
+            );
+            assert_eq!(columns[0].digit_count, 200000);
+            assert!(nullable.is_empty());
+            assert_eq!(groups, 1);
+            Ok(crate::gpu::GroupedAggMemoryRequirements {
+                workspace_bytes: 4096,
+                output_bytes: 49,
+                total_bytes: 4145,
+            })
+        };
+        let result = numeric_planning_resources_with(&shape, &[estimate.clone()], &model, query)
+            .expect("numeric resources")
+            .expect("numeric shape");
+        assert_eq!(result.bytes, 4145);
+        assert_eq!(
+            result.aggregate.get(),
+            512.0_f64.mul_add(
+                model.coefficients.gpu_op_cost_reduce.get(),
+                400000.0 * model.coefficients.gpu_op_cost_reduce.get()
+            )
+        );
+        assert!(result.launches.get() > 0.0);
+        let mut count_only = shape.clone();
+        count_only.spec.measures[0]
+            .outputs
+            .retain(|output| output.kind == AggregateKind::Count);
+        let count_resources =
+            numeric_planning_resources_with(&count_only, &[estimate.clone()], &model, query)
+                .expect("count-only pricing")
+                .expect("numeric resources");
+        assert_eq!(
+            count_resources.aggregate.get(),
+            512.0_f64.mul_add(
+                model.coefficients.gpu_op_cost_reduce.get(),
+                200000.0 * model.coefficients.gpu_op_cost_reduce.get()
+            )
+        );
+        let mut wide_count_estimate = estimate.clone();
+        let wide_stats = &mut wide_count_estimate
+            .resident_numeric_columns
+            .as_mut()
+            .expect("numeric stats")[0];
+        wide_stats.digit_count = u64::MAX;
+        wide_stats.bounds.max_ndigits = 36864;
+        let count_query = |spec: &crate::engine::spec::AggQuerySpec,
+                           _: &[crate::engine::residency::ResidentNumericColumnStats],
+                           nullable: &[i16],
+                           groups| {
+            // Query only tests the cost model; native layout tests separately
+            // prove count-only workspace is also independent of digit extents.
+            query(
+                spec,
+                estimate
+                    .resident_numeric_columns
+                    .as_ref()
+                    .expect("metadata"),
+                nullable,
+                groups,
+            )
+        };
+        let wide_resources = numeric_planning_resources_with(
+            &count_only,
+            &[wide_count_estimate],
+            &model,
+            count_query,
+        )
+        .expect("count-only ignores digit volume")
+        .expect("numeric resources");
+        assert_eq!(wide_resources.aggregate, count_resources.aggregate);
+        assert_eq!(wide_resources.launches, count_resources.launches);
+        let mut mixed = shape.clone();
+        let mut integer = mixed.spec.measures[0].clone();
+        integer.expression = MeasureExpr::Column(ColumnRef {
+            relation_oid: 42,
+            attno: 2,
+            type_oid: 23,
+        });
+        mixed.spec.measures.push(integer);
+        let mixed_query = |_: &crate::engine::spec::AggQuerySpec,
+                           _: &[crate::engine::residency::ResidentNumericColumnStats],
+                           _: &[i16],
+                           _: usize| {
+            Ok(crate::gpu::GroupedAggMemoryRequirements {
+                workspace_bytes: 8192,
+                output_bytes: 98,
+                total_bytes: 8290,
+            })
+        };
+        let mixed_cost =
+            numeric_planning_resources_with(&mixed, &[estimate.clone()], &model, mixed_query)
+                .expect("integer needs no decimal metadata")
+                .expect("mixed numeric mode");
+        assert!(mixed_cost.aggregate.get() > result.aggregate.get());
+        let mut bigint = shape.clone();
+        bigint.spec.measures[0].expression = MeasureExpr::Column(ColumnRef {
+            relation_oid: 42,
+            attno: 1,
+            type_oid: 20,
+        });
+        let mut bigint_estimate = estimate.clone();
+        bigint_estimate.resident_numeric_columns = Some(vec![]);
+        let bigint_query = |_: &crate::engine::spec::AggQuerySpec,
+                            columns: &[crate::engine::residency::ResidentNumericColumnStats],
+                            _: &[i16],
+                            groups: usize| {
+            assert!(
+                columns.is_empty(),
+                "raw bigint has no resident decimal metadata"
+            );
+            assert_eq!(groups, 1);
+            Ok(crate::gpu::GroupedAggMemoryRequirements {
+                workspace_bytes: 8192,
+                output_bytes: 98,
+                total_bytes: 8290,
+            })
+        };
+        let bigint_cost = numeric_planning_resources_with(
+            &bigint,
+            &[bigint_estimate.clone()],
+            &model,
+            bigint_query,
+        )
+        .expect("raw bigint pricing")
+        .expect("decimal accumulator family");
+        assert_eq!(
+            bigint_cost.aggregate.get(),
+            (8192.0_f64 / 8.0).mul_add(
+                model.coefficients.gpu_op_cost_reduce.get(),
+                bigint_estimate.resident_rows.expect("rows") as f64
+                    * 7.0
+                    * model.coefficients.gpu_op_cost_reduce.get(),
+            ),
+            "one row plus one value plus five conservative digit transitions"
+        );
+        bigint_estimate.resident_rows = Some((i64::MAX as u64) / (1_u64 << 31) + 1);
+        assert!(
+            numeric_planning_resources_with(
+                &bigint,
+                &[bigint_estimate.clone()],
+                &model,
+                bigint_query,
+            )
+            .is_ok(),
+            "bigint decimal sums do not inherit the INT4 prefix bound"
+        );
+        bigint_estimate.resident_rows = Some(i64::MAX as u64 / 10000 + 1);
+        assert!(
+            numeric_planning_resources_with(&bigint, &[bigint_estimate], &model, bigint_query,)
+                .is_err(),
+            "decimal lifecycle bound remains enforced"
+        );
+        let mut where_shape = mixed.clone();
+        where_shape.spec.fact_filter = FilterSpec::Ranges {
+            input: ColumnRef {
+                relation_oid: 42,
+                attno: 2,
+                type_oid: 23,
+            },
+            ranges: vec![
+                crate::engine::spec::ScalarRange {
+                    lo: crate::engine::spec::ScalarValue::I32(1),
+                    hi: crate::engine::spec::ScalarValue::I32(1),
+                },
+                crate::engine::spec::ScalarRange {
+                    lo: crate::engine::spec::ScalarValue::I32(3),
+                    hi: crate::engine::spec::ScalarValue::I32(5),
+                },
+            ],
+        };
+        let where_cost =
+            numeric_planning_resources_with(&where_shape, &[estimate.clone()], &model, mixed_query)
+                .expect("WHERE pricing")
+                .expect("numeric mode");
+        assert_eq!(
+            where_cost.aggregate.get(),
+            (3.0 * estimate.resident_rows.expect("rows") as f64).mul_add(
+                model.coefficients.gpu_op_cost_filter.get(),
+                mixed_cost.aggregate.get()
+            )
+        );
+        let mut too_many = estimate.clone();
+        too_many.resident_rows = Some((i64::MAX as u64) / (1_u64 << 31) + 1);
+        assert!(
+            numeric_planning_resources_with(&mixed, &[too_many], &model, mixed_query,).is_err()
+        );
+        let mut repriced = model.clone();
+        repriced.coefficients.gpu_op_cost_hash_agg = PgCost::new(1000.0);
+        let dense = numeric_planning_resources_with(&shape, &[estimate.clone()], &repriced, query)
+            .expect("dense decimal cost")
+            .expect("numeric resources");
+        assert_eq!(
+            dense.aggregate, result.aggregate,
+            "dense limbs do not build/probe a hash table"
+        );
+        repriced.coefficients.gpu_op_cost_reduce =
+            PgCost::new(model.coefficients.gpu_op_cost_reduce.get() * 2.0);
+        let repriced =
+            numeric_planning_resources_with(&shape, &[estimate.clone()], &repriced, query)
+                .expect("repriced decimal cost")
+                .expect("numeric resources");
+        assert_eq!(repriced.aggregate.get(), result.aggregate.get() * 2.0);
+        assert_eq!(repriced.launches, result.launches);
+        let mut filtered = shape.clone();
+        filtered.spec.measures[0].filter = FilterSpec::Ranges {
+            input: ColumnRef {
+                relation_oid: 42,
+                attno: 2,
+                type_oid: 23,
+            },
+            ranges: vec![crate::engine::spec::ScalarRange {
+                lo: crate::engine::spec::ScalarValue::I32(1),
+                hi: crate::engine::spec::ScalarValue::I32(3),
+            }],
+        };
+        let filtered =
+            numeric_planning_resources_with(&filtered, &[estimate.clone()], &model, query)
+                .expect("numeric predicate costing")
+                .expect("numeric resources");
+        assert_eq!(
+            filtered.bytes, result.bytes,
+            "fused predicates allocate no mask"
+        );
+        assert_eq!(
+            filtered.launches, result.launches,
+            "fused predicates add no launch"
+        );
+        assert_eq!(
+            filtered.aggregate.get(),
+            (estimate.resident_rows.expect("exact rows") as f64 * 2.0).mul_add(
+                model.coefficients.gpu_op_cost_filter.get(),
+                result.aggregate.get()
+            )
+        );
+        let mut singleton_shape = shape.clone();
+        singleton_shape.spec.measures[0].filter = FilterSpec::Ranges {
+            input: ColumnRef {
+                relation_oid: 42,
+                attno: 2,
+                type_oid: 23,
+            },
+            ranges: vec![
+                crate::engine::spec::ScalarRange {
+                    lo: crate::engine::spec::ScalarValue::I32(i32::MIN),
+                    hi: crate::engine::spec::ScalarValue::I32(i32::MIN),
+                },
+                crate::engine::spec::ScalarRange {
+                    lo: crate::engine::spec::ScalarValue::I32(1),
+                    hi: crate::engine::spec::ScalarValue::I32(2),
+                },
+                crate::engine::spec::ScalarRange {
+                    lo: crate::engine::spec::ScalarValue::I32(i32::MAX),
+                    hi: crate::engine::spec::ScalarValue::I32(i32::MAX),
+                },
+            ],
+        };
+        let singleton =
+            numeric_planning_resources_with(&singleton_shape, &[estimate.clone()], &model, query)
+                .expect("singleton and interval predicate costing")
+                .expect("numeric resources");
+        assert_eq!(singleton.bytes, result.bytes);
+        assert_eq!(singleton.launches, result.launches);
+        assert_eq!(
+            singleton.aggregate.get(),
+            (estimate.resident_rows.expect("exact rows") as f64 * 4.0).mul_add(
+                model.coefficients.gpu_op_cost_filter.get(),
+                result.aggregate.get()
+            ),
+            "two singleton equalities plus one inclusive interval cost four comparisons"
+        );
+        let mut grouped = shape.clone();
+        grouped.descriptor_resolution = dense_sum_count_shape(100_000).descriptor_resolution;
+        grouped.spec.group_keys = (2..=4)
+            .map(|attno| GroupKeyRef {
+                source: GroupKeySource::FactColumn(ColumnRef {
+                    relation_oid: 42,
+                    attno,
+                    type_oid: u32::from(pg_sys::INT4OID),
+                }),
+                type_oid: u32::from(pg_sys::INT4OID),
+                collation_oid: 0,
+                encoding: GroupKeyEncoding::Hash,
+            })
+            .collect();
+        grouped.estimated_output_rows = 11;
+        grouped.estimated_dense_key_cardinalities = Some(vec![10; 3]);
+        let mut grouped_estimate = estimate.clone();
+        grouped_estimate.resident_nullable_columns = Some(vec![2, 4]);
+        let result = numeric_planning_resources_with(
+            &grouped,
+            &[grouped_estimate.clone()],
+            &model,
+            |_, _, nullable, groups| {
+                assert_eq!(nullable, [2, 4]);
+                assert_eq!(groups, 1210, "independent domains plus resident NULL codes");
+                Err("native layout rejected".to_owned())
+            },
+        );
+        assert!(
+            matches!(result, Err(AdmissionDecline::NumericEstimateUnavailable { detail })
+            if detail == "native layout rejected")
+        );
+        let mut tight_model = model.clone();
+        tight_model.memory.gpu_hash_agg_max_groups = Rows::new(1209);
+        assert!(
+            numeric_planning_resources_with(
+                &grouped,
+                &[grouped_estimate.clone()],
+                &tight_model,
+                |_, _, _, _| panic!("capacity gate must use dense slots, not 11 output rows")
+            )
+            .is_err()
+        );
+        for cardinalities in [vec![10], vec![u64::MAX; 3]] {
+            grouped.estimated_dense_key_cardinalities = Some(cardinalities);
+            assert!(
+                numeric_planning_resources_with(
+                    &grouped,
+                    &[grouped_estimate.clone()],
+                    &model,
+                    |_, _, _, _| panic!("invalid dense capacity must fail before native query")
+                )
+                .is_err()
+            );
+        }
+        for missing in 0..4 {
+            let mut incomplete = estimate.clone();
+            match missing {
+                0 => incomplete.loaded = false,
+                1 => incomplete.resident_rows = None,
+                2 => incomplete.resident_numeric_columns = None,
+                _ => incomplete.resident_nullable_columns = None,
+            }
+            assert!(
+                numeric_planning_resources_with(
+                    &shape,
+                    &[incomplete],
+                    &model,
+                    |_, _, _, _| panic!("missing metadata must fail before native query")
+                )
+                .is_err()
+            );
+        }
+        shape.estimated_dense_key_cardinalities = None;
+        assert!(
+            numeric_planning_resources_with(&shape, &[estimate], &model, |_, _, _, _| panic!(
+                "missing capacity must not use joint output rows"
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn derived_artifact_upper_bound_participates_in_tight_budget_gate() {
         let mut shape = grouped_count_shape();
         let decline = apply_exact_residency(
@@ -3191,6 +4122,210 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn retained_execution_memory_participates_in_planner_budget_gate() {
+        let mut shape = count_shape();
+        let mut snapshot = budget_snapshot(0, 0, 0);
+        snapshot.retained_execution_bytes = 4097;
+        snapshot.current_backend_live_bytes = 4097;
+        snapshot.cluster_live_bytes = 4097;
+        let decline = apply_exact_residency(
+            &mut shape,
+            &[estimate(false, 4096)],
+            AdmissionPolicy {
+                auto_load: true,
+                budget_bytes: 8192,
+                budget_snapshot: snapshot,
+            },
+            &model(),
+        )
+        .expect_err("retained executor allocations cannot be reclaimed by the relation LRU");
+        assert!(matches!(
+            decline,
+            AdmissionDecline::ResidencyBudgetExceeded {
+                retained_execution_bytes: 4097,
+                selected_raw_bytes: 4096,
+                projected_final_bytes: 8193,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn scalar_execution_and_metadata_peak_participate_in_planner_budget_before_costing() {
+        let mut shape = count_shape();
+        shape.spec.measures[0].expression = MeasureExpr::Bytecode {
+            inputs: vec![],
+            program: vec![
+                crate::engine::spec::scalar::SCALAR_PROGRAM_MAGIC,
+                2,
+                0,
+                1,
+                42,
+            ],
+            result_type_oid: u32::from(pg_sys::INT4OID),
+        };
+        let policy = AdmissionPolicy {
+            auto_load: true,
+            budget_bytes: 4096 + 20 + 240 + 8192 - 1,
+            budget_snapshot: budget_snapshot(0, 0, 0),
+        };
+        let decline = apply_exact_residency_with_scalar_memory(
+            &mut shape,
+            &[estimate(true, 4096)],
+            policy,
+            &model(),
+            |_, _, _| Ok(8192),
+        )
+        .expect_err("native layout plus four scalar snapshots must fit too");
+        assert!(matches!(
+            decline,
+            AdmissionDecline::ResidencyBudgetExceeded {
+                prospective_execution_bytes: 8432,
+                derived_artifact_bytes: 20,
+                projected_final_bytes: 12548,
+                ..
+            }
+        ));
+        let MeasureExpr::Bytecode { program, .. } = &mut shape.spec.measures[0].expression else {
+            unreachable!()
+        };
+        program[0] = 0;
+        let decline = apply_exact_residency_with_scalar_memory(
+            &mut shape,
+            &[estimate(false, 4096)],
+            AdmissionPolicy {
+                auto_load: true,
+                budget_bytes: u64::MAX,
+                budget_snapshot: budget_snapshot(0, 0, 0),
+            },
+            &model(),
+            |_, _, _| Ok(8192),
+        )
+        .expect_err("opaque words cannot be budgeted as scalar programs");
+        assert_eq!(decline.code(), "generic_scalar_estimate_unavailable");
+    }
+
+    #[test]
+    fn scalar_layout_planning_requires_exact_rows_nulls_and_dense_slots() {
+        let mut shape = count_shape();
+        shape.spec.measures[0].expression = MeasureExpr::Bytecode {
+            inputs: vec![],
+            program: vec![
+                crate::engine::spec::scalar::SCALAR_PROGRAM_MAGIC,
+                2,
+                0,
+                1,
+                42,
+            ],
+            result_type_oid: u32::from(pg_sys::INT4OID),
+        };
+        let estimate = estimate(true, 4096);
+        let model = model();
+        let quote = scalar_planning_memory_with(
+            &shape,
+            std::slice::from_ref(&estimate),
+            &model,
+            |spec, nullable, groups, rows, chunk, one_shot| {
+                assert_eq!(spec, &shape.spec);
+                assert!(nullable.is_empty());
+                assert_eq!((groups, rows), (1, 100_000));
+                assert_eq!(chunk, model.executor.gpu_reduce_max_chunk.get());
+                assert_eq!(
+                    one_shot,
+                    model.executor.gpu_grouped_agg_one_shot_max_rows.get()
+                );
+                Ok(crate::gpu::GroupedAggMemoryRequirements {
+                    workspace_bytes: 8000,
+                    output_bytes: 192,
+                    total_bytes: 8192,
+                })
+            },
+        )
+        .expect("native layout quote");
+        assert_eq!(quote, 8192);
+        let mut spatial = shape.clone();
+        let metadata = crate::engine::spec::SpatialValueMetadata {
+            kind: crate::engine::spec::SpatialValueKind::Geometry,
+            typmod: -1,
+            srid: Some(4326),
+        };
+        // This test exercises resource accounting, not polygon validation;
+        // descriptor tests separately qualify the exact geometry contract.
+        spatial.spec.fact_filter = FilterSpec::Spatial {
+            predicate: crate::engine::spec::SpatialPredicateKind::Intersects,
+            left: crate::engine::spec::SpatialOperand::Column {
+                column: crate::engine::spec::ColumnRef {
+                    relation_oid: spatial.spec.fact_rel,
+                    attno: 1,
+                    type_oid: 9000,
+                },
+                metadata,
+            },
+            right: crate::engine::spec::SpatialOperand::Constant {
+                metadata,
+                bytes: Box::new([]),
+            },
+            distance: None,
+        };
+        let spatial_quote = scalar_planning_memory_with(
+            &spatial,
+            std::slice::from_ref(&estimate),
+            &model,
+            |_, _, _, _, _, _| {
+                Ok(crate::gpu::GroupedAggMemoryRequirements {
+                    workspace_bytes: 8000,
+                    output_bytes: 192,
+                    total_bytes: 8192,
+                })
+            },
+        )
+        .expect("spatial staged program overlap");
+        assert_eq!(spatial_quote, quote + 20);
+        let rows = u64::try_from(model.executor.gpu_grouped_agg_one_shot_max_rows.get())
+            .expect("test rows")
+            + 1;
+        assert_eq!(
+            planned_dense_lifecycle_calls(&spatial, rows, &model),
+            planned_dense_lifecycle_calls(&shape, rows, &model),
+            "spatial scalar costs the same bounded aggregation lifecycle"
+        );
+        assert!(planned_dense_lifecycle_calls(&spatial, rows, &model).is_some());
+        for missing in 0..3 {
+            let mut incomplete = estimate.clone();
+            match missing {
+                0 => incomplete.loaded = false,
+                1 => incomplete.resident_rows = None,
+                _ => incomplete.resident_nullable_columns = None,
+            }
+            assert!(
+                scalar_planning_memory_with(
+                    &shape,
+                    &[incomplete],
+                    &model,
+                    |_, _, _, _, _, _| panic!(
+                        "incomplete resident evidence must fail before layout query"
+                    )
+                )
+                .is_err()
+            );
+        }
+        shape.estimated_dense_key_cardinalities = None;
+        assert!(
+            scalar_planning_memory_with(&shape, &[estimate], &model, |_, _, _, _, _, _| panic!(
+                "missing dense slots must fail before layout query"
+            ))
+            .is_err()
+        );
+        assert_eq!(
+            scalar_planning_memory_with(&count_shape(), &[], &model, |_, _, _, _, _, _| panic!(
+                "non-scalar shapes do not query scalar layouts"
+            ))
+            .expect("no scalar allocation"),
+            0
+        );
     }
 
     #[test]
@@ -3516,29 +4651,6 @@ mod tests {
     }
 
     #[test]
-    fn released_h3_parent_envelope_admits_only_resolution_zero() {
-        let nonzero = h3_parent_shape();
-        assert_eq!(
-            validate_released_h3_parent_envelope(&nonzero),
-            Err(AdmissionDecline::H3ParentResolutionUnqualified { resolution: 4 })
-        );
-
-        let mut released = nonzero;
-        let GroupKeySource::H3CellToParent { resolution, .. } =
-            &mut released.spec.group_keys[0].source
-        else {
-            panic!("H3 parent fixture must retain its semantic group key");
-        };
-        *resolution = 0;
-        assert_eq!(validate_released_h3_parent_envelope(&released), Ok(()));
-        assert_eq!(
-            validate_released_h3_parent_envelope(&count_shape()),
-            Ok(()),
-            "the H3 release guard must not affect non-H3 descriptors"
-        );
-    }
-
-    #[test]
     fn global_cost_multiplier_controls_gate_and_scales_auto_load() {
         let mut shape = count_shape();
         shape.cost.amortized_auto_load = PgCost::new(100.0);
@@ -3722,10 +4834,8 @@ mod tests {
             unreachable!("range fixture")
         };
         ranges[0].lo = ScalarValue::I32(i32::MIN);
-        assert!(matches!(
-            validate_shape_capability(&range).expect_err("one-sided range must remain native"),
-            AdmissionDecline::SerialGenericKernelMode { .. }
-        ));
+        validate_shape_capability(&range)
+            .expect("one-sided ranges use the computed-integer parallel lane");
     }
 
     #[test]
@@ -3737,11 +4847,11 @@ mod tests {
         let spec_start = 1;
         let spec_len =
             crate::engine::spec::AggQuerySpec::encoded_i32_prefix_len(&words[spec_start..])
-                .expect("AQS3 body has a strict length");
+                .expect("AQS6 body has a strict length");
         let decoded_spec = crate::engine::spec::AggQuerySpec::decode_i32(
             &words[spec_start..spec_start + spec_len],
         )
-        .expect("AQS3 body decodes");
+        .expect("AQS6 body decodes");
         assert_eq!(decoded_spec, spec);
 
         let projection_sentinel = spec_start + spec_len;
@@ -3811,6 +4921,10 @@ mod tests {
                 "generic_residency_estimate_missing",
             ),
             (
+                AdmissionDecline::SpatialResidencyRequired { exact_rows: None },
+                "generic_spatial_residency_required",
+            ),
+            (
                 AdmissionDecline::UnexpectedResidencyEstimate { relation_oid: 1 },
                 "generic_residency_estimate_unexpected",
             ),
@@ -3819,10 +4933,6 @@ mod tests {
                     detail: "unsupported".to_owned(),
                 },
                 "generic_descriptor_capability",
-            ),
-            (
-                AdmissionDecline::H3ParentResolutionUnqualified { resolution: 3 },
-                "h3_parent_resolution_unqualified",
             ),
             (
                 AdmissionDecline::AutoLoadDisabled {
@@ -3857,9 +4967,11 @@ mod tests {
                     current_backend_live_bytes: 1,
                     other_backend_live_bytes: 0,
                     pinned_unselected_raw_bytes: 0,
+                    retained_execution_bytes: 0,
                     evictable_or_replaced_local_bytes: 0,
                     selected_raw_bytes: 1,
                     derived_artifact_bytes: 1,
+                    prospective_execution_bytes: 0,
                     projected_final_bytes: 2,
                     budget_bytes: 1,
                 },

@@ -1,0 +1,3 @@
+pgaccel-kernels/build/test_join_rows_layout:
+	/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 2100.43.0)
+	/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1356.0.0)

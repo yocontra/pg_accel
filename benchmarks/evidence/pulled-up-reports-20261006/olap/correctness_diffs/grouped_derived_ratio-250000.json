@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "workload": "grouped_derived_ratio",
+  "rows": 250000,
+  "status": "pass",
+  "order_sensitive": false,
+  "accel_rows": 33,
+  "baseline_rows": 33,
+  "accel_minus_baseline_count": 0,
+  "baseline_minus_accel_count": 0,
+  "sample_limit": 20,
+  "accel_minus_baseline_samples": [],
+  "baseline_minus_accel_samples": [],
+  "accel_query_sql": "WITH report AS NOT MATERIALIZED (SELECT region,LEAST(GREATEST(price/NULLIF(adjustment,0),-100),100) value FROM bench_scalar_sales) SELECT region,sum(value) total,avg(value) mean,count(value) present,min(value) lo,max(value) hi,count(*) n FROM (SELECT region,value FROM report) derived GROUP BY region",
+  "baseline_query_sql": "WITH report AS NOT MATERIALIZED (SELECT region,LEAST(GREATEST(price/NULLIF(adjustment,0),-100),100) value FROM bench_scalar_sales) SELECT region,sum(value) total,avg(value) mean,count(value) present,min(value) lo,max(value) hi,count(*) n FROM (SELECT region,value FROM report) derived GROUP BY region",
+  "error": null
+}

@@ -32,7 +32,7 @@ const PLAN_PAYLOAD_START: usize = PLAN_PRIVATE_HEADER_INTS;
 pub(super) const PLAN_WIRE_MAGIC: c_int = 0x5043_5732; // b"PCW2"
 pub(super) const PLAN_WIRE_VERSION: c_int = 2;
 pub(super) const PLAN_WIRE_FOOTER_INTS: usize = 4;
-pub(in crate::engine::ffi) const AGG_QUERY_SPEC_SENTINEL: c_int = 0x4151_5333; // b"AQS3"
+pub(in crate::engine::ffi) const AGG_QUERY_SPEC_SENTINEL: c_int = 0x4151_5336; // b"AQS6"
 pub(in crate::engine::ffi) const AGG_OUTPUT_PROJECTION_SENTINEL: c_int = 0x414F_5032; // b"AOP2"
 const MAX_WINDOW_SPECS: usize = 64;
 const MAX_FUNCTION_ARGS: usize = 100;
@@ -2010,7 +2010,7 @@ fn decode_agg_query_contract_at(
     Ok((spec, projection))
 }
 
-/// Decode the strict AQS3/AOP2 trailer carried by a selected aggregate path.
+/// Decode the strict AQS6/AOP2 trailer carried by a selected aggregate path.
 ///
 /// # Safety
 /// `path_private` must be a valid PostgreSQL `List<Integer>` emitted by this
@@ -2584,16 +2584,58 @@ unsafe fn validate_projection_plan_lists(
     projection: &AggOutputProjection,
     cscan: *mut pg_sys::CustomScan,
 ) -> Result<(), DecodeError> {
-    // PG18 nodeCustom.c builds the scan and result slots from different lists;
-    // a neutral aggregate plan promises both are one-to-one with projection.
+    // The neutral projection binds the internal scan layout, not SQL output.
     // SAFETY: the caller promises cscan is a valid planner/executor-owned node.
     let custom_scan_tlist = unsafe { (*cscan).custom_scan_tlist };
     // SAFETY: custom_scan_tlist belongs to cscan and is valid for this call.
     unsafe { validate_projection_target_list(projection, custom_scan_tlist) }?;
     // SAFETY: the caller promises cscan is a valid planner/executor-owned node.
     let plan_targetlist = unsafe { (*cscan).scan.plan.targetlist };
-    // SAFETY: plan_targetlist belongs to cscan and is valid for this call.
-    unsafe { validate_projection_target_list(projection, plan_targetlist) }?;
+    // The final result may reorder or omit internal attributes. Before setrefs
+    // each expression must match an internal target; afterwards it must be a
+    // correctly typed INDEX_VAR. Do not accept arbitrary unbound expressions.
+    // SAFETY: all lists and expressions belong to the live CustomScan plan.
+    unsafe {
+        for index in 0..pg_sys::list_length(plan_targetlist) {
+            let node = pg_sys::list_nth(plan_targetlist, index);
+            let mismatch = || DecodeError::ProjectionTargetMismatch {
+                index: index as usize,
+                field: "SQL result binding",
+            };
+            if node.is_null()
+                || (*node.cast::<pg_sys::Node>()).type_ != pg_sys::NodeTag::T_TargetEntry
+            {
+                return Err(mismatch());
+            }
+            let target = &*node.cast::<pg_sys::TargetEntry>();
+            if target.expr.is_null() || i32::from(target.resno) != index + 1 {
+                return Err(mismatch());
+            }
+            let expression = target.expr.cast::<pg_sys::Node>();
+            if (*expression).type_ == pg_sys::NodeTag::T_Var
+                && (*expression.cast::<pg_sys::Var>()).varno == pg_sys::INDEX_VAR
+            {
+                let var = &*expression.cast::<pg_sys::Var>();
+                let slot = usize::try_from(var.varattno).ok().and_then(|attno| {
+                    attno
+                        .checked_sub(1)
+                        .and_then(|index| projection.slots.get(index))
+                });
+                let Some(slot) = slot else {
+                    return Err(mismatch());
+                };
+                if var.varlevelsup != 0
+                    || var.vartype.to_u32() != slot.result_type_oid
+                    || var.vartypmod != slot.result_typmod
+                    || var.varcollid.to_u32() != slot.result_collation_oid
+                {
+                    return Err(mismatch());
+                }
+            } else if pg_sys::tlist_member(target.expr, custom_scan_tlist).is_null() {
+                return Err(mismatch());
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2776,8 +2818,8 @@ pub(super) unsafe fn deserialize_custom_private(
 ///
 /// # Safety
 /// Must be called in a valid PostgreSQL planner memory context. `cscan` must
-/// own one-to-one `custom_scan_tlist` and `plan.targetlist` lists matching the
-/// ordered projection.
+/// own a `custom_scan_tlist` matching the ordered internal projection and a
+/// `plan.targetlist` whose expressions bind to those scan attributes.
 pub(in crate::engine::ffi) unsafe fn append_agg_query_plan(
     list: *mut pg_sys::List,
     spec: &AggQuerySpec,

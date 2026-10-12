@@ -1,0 +1,1399 @@
+{
+  "backtraceGraph" : 
+  {
+    "commands" : 
+    [
+      "add_test",
+      "add_pgaccel_gpu_test"
+    ],
+    "files" : 
+    [
+      "/Users/contra/Projects/pg_accel/pgaccel-kernels/CMakeLists.txt"
+    ],
+    "nodes" : 
+    [
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 399,
+        "parent" : 0
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 1
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 401,
+        "parent" : 3
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 4
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 403,
+        "parent" : 6
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 7
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 406,
+        "parent" : 9
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 10
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 407,
+        "parent" : 12
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 13
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 408,
+        "parent" : 15
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 16
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 409,
+        "parent" : 18
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 19
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 410,
+        "parent" : 21
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 22
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 411,
+        "parent" : 24
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 25
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 412,
+        "parent" : 27
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 28
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 413,
+        "parent" : 30
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 31
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 414,
+        "parent" : 33
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 34
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 415,
+        "parent" : 36
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 37
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 416,
+        "parent" : 39
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 40
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 417,
+        "parent" : 42
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 43
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 418,
+        "parent" : 45
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 46
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 419,
+        "parent" : 48
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 49
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 420,
+        "parent" : 51
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 52
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 421,
+        "parent" : 54
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 55
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 422,
+        "parent" : 57
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 58
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 423,
+        "parent" : 60
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 61
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 424,
+        "parent" : 63
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 64
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 425,
+        "parent" : 66
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 67
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 426,
+        "parent" : 69
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 70
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 427,
+        "parent" : 72
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 73
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 428,
+        "parent" : 75
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 76
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 429,
+        "parent" : 78
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 79
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 430,
+        "parent" : 81
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 82
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 431,
+        "parent" : 84
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 85
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 432,
+        "parent" : 87
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 88
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 433,
+        "parent" : 90
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 91
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 434,
+        "parent" : 93
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 94
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 435,
+        "parent" : 96
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 97
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 440,
+        "parent" : 99
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 100
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 441,
+        "parent" : 102
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 103
+      },
+      {
+        "file" : 0
+      },
+      {
+        "command" : 1,
+        "file" : 0,
+        "line" : 442,
+        "parent" : 105
+      },
+      {
+        "command" : 0,
+        "file" : 0,
+        "line" : 385,
+        "parent" : 106
+      }
+    ]
+  },
+  "kind" : "ctestInfo",
+  "tests" : 
+  [
+    {
+      "backtrace" : 2,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_host_api_contract",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_host_api_contract"
+      ],
+      "name" : "test_host_api_contract",
+      "properties" : 
+      [
+        {
+          "name" : "LABELS",
+          "value" : 
+          [
+            "host"
+          ]
+        },
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 5,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_join_rows_layout",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_join_rows_layout"
+      ],
+      "name" : "test_join_rows_layout",
+      "properties" : 
+      [
+        {
+          "name" : "LABELS",
+          "value" : 
+          [
+            "host"
+          ]
+        },
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 8,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_raster_lookup",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_raster_lookup"
+      ],
+      "name" : "test_raster_lookup",
+      "properties" : 
+      [
+        {
+          "name" : "LABELS",
+          "value" : 
+          [
+            "host"
+          ]
+        },
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 11,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_device",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_device"
+      ],
+      "name" : "test_device",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 14,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_bbox",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_bbox"
+      ],
+      "name" : "test_bbox",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 17,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_spatial",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_spatial"
+      ],
+      "name" : "test_spatial",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 20,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_spatial_dispatch",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_spatial_dispatch"
+      ],
+      "name" : "test_spatial_dispatch",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 23,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_spatial_pairwise_boundary",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_spatial_pairwise_boundary"
+      ],
+      "name" : "test_spatial_pairwise_boundary",
+      "properties" : 
+      [
+        {
+          "name" : "TIMEOUT",
+          "value" : 1800.0
+        },
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 26,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_spatial_resident",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_spatial_resident"
+      ],
+      "name" : "test_spatial_resident",
+      "properties" : 
+      [
+        {
+          "name" : "TIMEOUT",
+          "value" : 1800.0
+        },
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 29,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_h3",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_h3"
+      ],
+      "name" : "test_h3",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 32,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_raster_resident",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_raster_resident"
+      ],
+      "name" : "test_raster_resident",
+      "properties" : 
+      [
+        {
+          "name" : "TIMEOUT",
+          "value" : 600.0
+        },
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 35,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_correctness",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_correctness"
+      ],
+      "name" : "test_correctness",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 38,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_exec_gpu",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_exec_gpu"
+      ],
+      "name" : "test_exec_gpu",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 41,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_fork",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_fork"
+      ],
+      "name" : "test_fork",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 44,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_fork_warmed",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_fork_warmed"
+      ],
+      "name" : "test_fork_warmed",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 47,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_fork_cold",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_fork_cold"
+      ],
+      "name" : "test_fork_cold",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 50,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_fork_cold_barrier",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_fork_cold_barrier"
+      ],
+      "name" : "test_fork_cold_barrier",
+      "properties" : 
+      [
+        {
+          "name" : "TIMEOUT",
+          "value" : 1200.0
+        },
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 53,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_sycl_basic",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_sycl_basic"
+      ],
+      "name" : "test_sycl_basic",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 56,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_scalar",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_scalar"
+      ],
+      "name" : "test_scalar",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 59,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_reduce_stats",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_reduce_stats"
+      ],
+      "name" : "test_reduce_stats",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 62,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_reduce_bool_bit",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_reduce_bool_bit"
+      ],
+      "name" : "test_reduce_bool_bit",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 65,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_grouped_agg",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_grouped_agg"
+      ],
+      "name" : "test_grouped_agg",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 68,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_grouped_agg_hash",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_grouped_agg_hash"
+      ],
+      "name" : "test_grouped_agg_hash",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 71,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_grouped_agg_workspace",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_grouped_agg_workspace"
+      ],
+      "name" : "test_grouped_agg_workspace",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 74,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_hash_agg_partial",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_hash_agg_partial"
+      ],
+      "name" : "test_hash_agg_partial",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 77,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_hash_agg_keys",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_hash_agg_keys"
+      ],
+      "name" : "test_hash_agg_keys",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 80,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_hash_join",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_hash_join"
+      ],
+      "name" : "test_hash_join",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 83,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_join_rows",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_join_rows"
+      ],
+      "name" : "test_join_rows",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 86,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_hash_domain_matrix",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_hash_domain_matrix"
+      ],
+      "name" : "test_hash_domain_matrix",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 89,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_hashagg_spatial_matrix",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_hashagg_spatial_matrix"
+      ],
+      "name" : "test_hashagg_spatial_matrix",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 92,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_reduce_matrix",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_reduce_matrix"
+      ],
+      "name" : "test_reduce_matrix",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 95,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_expr_memory",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_expr_memory"
+      ],
+      "name" : "test_expr_memory",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 98,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_expr_vm_matrix",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_expr_vm_matrix"
+      ],
+      "name" : "test_expr_vm_matrix",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 101,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_oom_invariant",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_oom_invariant"
+      ],
+      "name" : "test_oom_invariant",
+      "properties" : 
+      [
+        {
+          "name" : "TIMEOUT",
+          "value" : 900.0
+        },
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 104,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_fp64_mul_probe",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_fp64_mul_probe"
+      ],
+      "name" : "test_fp64_mul_probe",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    },
+    {
+      "backtrace" : 107,
+      "command" : 
+      [
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../scripts/filter_gpu_output.py",
+        "--label",
+        "test_kernel_failure_status",
+        "--log-dir",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs",
+        "--",
+        "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_kernel_failure_status"
+      ],
+      "name" : "test_kernel_failure_status",
+      "properties" : 
+      [
+        {
+          "name" : "WORKING_DIRECTORY",
+          "value" : "/Users/contra/Projects/pg_accel/pgaccel-kernels/build"
+        }
+      ]
+    }
+  ],
+  "version" : 
+  {
+    "major" : 1,
+    "minor" : 0
+  }
+}

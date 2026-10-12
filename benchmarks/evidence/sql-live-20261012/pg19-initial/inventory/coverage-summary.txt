@@ -1,0 +1,4 @@
+SQL semantic assertion coverage: FAIL
+assertions: 460/462 (99.57%)
+files completed: 99/100
+threshold: 90.00%

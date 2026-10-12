@@ -1,0 +1,8 @@
+source: /Users/contra/.pgrx/data-19/pg_accel_traces.jsonl
+run_start_offset_bytes: 4813
+delta_start_offset_bytes: 4813
+capture_end_offset_bytes: 4813
+delta_max_bytes: 262144
+truncated_to_last_delta_bytes: false
+---
+

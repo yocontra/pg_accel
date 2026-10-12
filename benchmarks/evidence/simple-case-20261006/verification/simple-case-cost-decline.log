@@ -1,0 +1,21 @@
+SET
+SELECT 250017
+ANALYZE
+ pg_accel_pin 
+--------------
+       250017
+(1 row)
+
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ HashAggregate  (cost=6687.45..6687.51 rows=5 width=68)
+   Group Key: g
+   ->  Seq Scan on _scalar_program  (cost=0.00..4725.21 rows=35677 width=12)
+         Filter: ((flag = 2) OR (flag IS NULL))
+(4 rows)
+
+ pg_accel_last_planner_rejection_reason 
+----------------------------------------
+ generic_cost_not_competitive
+(1 row)
+

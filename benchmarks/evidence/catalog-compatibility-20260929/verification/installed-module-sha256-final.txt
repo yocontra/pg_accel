@@ -1,0 +1,2 @@
+e1f3462cb05e53ae4a0ffe5d8ae752397f39b8472fb36765ffe6d37868f41b3c  .pgaccel/postgres/install/18.4/lib/pg_accel.dylib
+4ebe48656208ee07c2112a7f764d87134cf07176d9a3f0656a0ecee9c1a1f97a  .pgaccel/postgres/install/19beta1/lib/pg_accel.dylib

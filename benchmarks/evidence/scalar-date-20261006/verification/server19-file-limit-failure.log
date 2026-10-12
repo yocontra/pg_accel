@@ -1,0 +1,150 @@
+	            END LOOP;
+	            mode := CASE WHEN value_column IN ('big','d') THEN 'parallel_dense_numeric' ELSE 'parallel_dense_integer' END;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: '||mode IN plan)=0) THEN
+	                RAISE EXCEPTION '125 missing NULL-aware dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _null_expected,_null_actual;
+	        END LOOP;
+	       END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-10-06 02:15:02.209 MST [49288] LOG:  out of file descriptors: Too many open files; release and retry
+2026-10-06 02:15:02.209 MST [49288] CONTEXT:  SQL statement "CREATE TEMP TABLE _null_actual AS SELECT g,sum(d) FILTER (WHERE g IS NULL) s,avg(d) FILTER (WHERE g IS NULL) a,count(*) FILTER (WHERE g IS NULL) missing,count(g) present,count(*) n FROM _null_predicate GROUP BY g"
+	PL/pgSQL function inline_code_block line 34 at EXECUTE
+2026-10-06 02:15:02.209 MST [49288] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    value_column text;
+	    predicate text;
+	    restriction text;
+	    query text;
+	    mode text;
+	    spatial text := format('ST_Intersects(p,%L::geometry)',
+	        ST_AsEWKT(ST_Segmentize(ST_MakeEnvelope(5,5,15,15,4326),10.0/128)));
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_null_predicate'::regclass,ARRAY['id','g','h','k','v','big','qty','d','p']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH value_column IN ARRAY ARRAY['v','big','qty','d'] LOOP
+	       FOREACH predicate IN ARRAY ARRAY['g IS NULL', 'g IS NULL OR g IN (0,2,NULL)',
+	          'NOT (g IS NOT NULL AND g<=2)', 'g IS NULL OR NOT (g IN (1,NULL))',
+	          'g IS NULL OR g IS NOT NULL'] LOOP
+	        FOREACH restriction IN ARRAY ARRAY['',' WHERE g IS NULL OR g IN (0,2)',
+	          ' WHERE '||spatial||' AND (g IS NULL OR g=2)'] LOOP
+	            query := 'SELECT '||CASE WHEN keys='' THEN '' ELSE keys||',' END||
+	                format('sum(%1$I) FILTER (WHERE %2$s) s,avg(%1$I) FILTER (WHERE %2$s) a,count(*) FILTER (WHERE g IS NULL) missing,count(g) present,count(*) n',value_column,predicate)||
+	                ' FROM _null_predicate'||restriction||CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _null_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _null_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _null_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _null_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _null_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _null_expected nr)) THEN
+	                RAISE EXCEPTION '125 NULL-aware exact mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            mode := CASE WHEN value_column IN ('big','d') THEN 'parallel_dense_numeric' ELSE 'parallel_dense_integer' END;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: '||mode IN plan)=0) THEN
+	                RAISE EXCEPTION '125 missing NULL-aware dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _null_expected,_null_actual;
+	        END LOOP;
+	       END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/9636036650450711250.315201410295872048.metalar.49288.6406532300174743200.tmp (kernels_added=1 skipped=0)
+[;35m[AdaptiveCpp Warning] [0mmetal_code_object: cannot open staged archive /Users/contra/.acpp/apps/global/jit-cache/9636036650450711250.315201410295872048.metalar.49288.6406532300174743200.tmp for validation: Too many open files
+[1;31m[AdaptiveCpp Error] [0mfrom /Users/contra/Projects/pg_accel/.pgaccel/src/AdaptiveCpp/src/runtime/metal/metal_code_object.cpp:831 @ get_or_create_kernel_pipeline(): metal: Failed to create compute pipeline state after bounded retries: Unable to reach MTLCompilerService. The process is unavailable because the compiler is no longer active. Latest invalidation reason: Connection init failed at lookup with error 3 - No such process
+[1;31m[AdaptiveCpp Error] [0mfrom /Users/contra/Projects/pg_accel/.pgaccel/src/AdaptiveCpp/src/runtime/metal/metal_code_object.cpp:831 @ get_or_create_kernel_pipeline(): metal: Failed to create compute pipeline state after bounded retries: Unable to reach MTLCompilerService. The process is unavailable because the compiler is no longer active. Latest invalidation reason: Connection init failed at lookup with error 3 - No such process
+pgaccel: async SYCL error: from /Users/contra/Projects/pg_accel/.pgaccel/src/AdaptiveCpp/src/runtime/metal/metal_code_object.cpp:831 @ get_or_create_kernel_pipeline(): metal: Failed to create compute pipeline state after bounded retries: Unable to reach MTLCompilerService. The process is unavailable because the compiler is no longer active. Latest invalidation reason: Connection init failed at lookup with error 3 - No such process
+pgaccel: pgaccel_grouped_agg_execute_ex: GPU kernel failure: from /Users/contra/Projects/pg_accel/.pgaccel/src/AdaptiveCpp/src/runtime/metal/metal_code_object.cpp:831 @ get_or_create_kernel_pipeline(): metal: Failed to create compute pipeline state after bounded retries: Unable to reach MTLCompilerService. The process is unavailable because the compiler is no longer active. Latest invalidation reason: Connection init failed at lookup with error 3 - No such process
+2026-10-06T09:15:02.428265Z ERROR GPU kernel dispatch failed func="pgaccel_grouped_agg_execute_ex" status=Error raw=-1 domain="grouped_agg"
+2026-10-06 02:15:02.428 MST [49288] ERROR:  pg_accel: generic aggregate dispatch failed (grouped chunk kernel failed: GPU grouped_agg kernel(grouped_agg_execute) failed with execution_failed); refusing CPU fallback
+2026-10-06 02:15:02.428 MST [49288] CONTEXT:  SQL statement "CREATE TEMP TABLE _null_actual AS SELECT g,sum(d) FILTER (WHERE g IS NULL) s,avg(d) FILTER (WHERE g IS NULL) a,count(*) FILTER (WHERE g IS NULL) missing,count(g) present,count(*) n FROM _null_predicate GROUP BY g"
+	PL/pgSQL function inline_code_block line 34 at EXECUTE
+2026-10-06 02:15:02.428 MST [49288] STATEMENT:  DO $$
+	DECLARE
+	    has_gpu bool;
+	    keys text;
+	    value_column text;
+	    predicate text;
+	    restriction text;
+	    query text;
+	    mode text;
+	    spatial text := format('ST_Intersects(p,%L::geometry)',
+	        ST_AsEWKT(ST_Segmentize(ST_MakeEnvelope(5,5,15,15,4326),10.0/128)));
+	    plan text;
+	    line record;
+	    kernels bigint;
+	BEGIN
+	    SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
+	    IF has_gpu THEN
+	        PERFORM pg_accel_pin('_null_predicate'::regclass,ARRAY['id','g','h','k','v','big','qty','d','p']);
+	    END IF;
+	    FOREACH keys IN ARRAY ARRAY['','g','g,h','g,h,k'] LOOP
+	      FOREACH value_column IN ARRAY ARRAY['v','big','qty','d'] LOOP
+	       FOREACH predicate IN ARRAY ARRAY['g IS NULL', 'g IS NULL OR g IN (0,2,NULL)',
+	          'NOT (g IS NOT NULL AND g<=2)', 'g IS NULL OR NOT (g IN (1,NULL))',
+	          'g IS NULL OR g IS NOT NULL'] LOOP
+	        FOREACH restriction IN ARRAY ARRAY['',' WHERE g IS NULL OR g IN (0,2)',
+	          ' WHERE '||spatial||' AND (g IS NULL OR g=2)'] LOOP
+	            query := 'SELECT '||CASE WHEN keys='' THEN '' ELSE keys||',' END||
+	                format('sum(%1$I) FILTER (WHERE %2$s) s,avg(%1$I) FILTER (WHERE %2$s) a,count(*) FILTER (WHERE g IS NULL) missing,count(g) present,count(*) n',value_column,predicate)||
+	                ' FROM _null_predicate'||restriction||CASE WHEN keys='' THEN '' ELSE ' GROUP BY '||keys END;
+	            PERFORM set_config('pg_accel.enabled','off',false);
+	            EXECUTE 'CREATE TEMP TABLE _null_expected AS '||query;
+	            PERFORM set_config('pg_accel.enabled','on',false);
+	            kernels := pg_accel_kernel_executions();
+	            EXECUTE 'CREATE TEMP TABLE _null_actual AS '||query;
+	            IF EXISTS ((SELECT row_to_json(nr)::text FROM _null_expected nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _null_actual nr) UNION ALL
+	                       (SELECT row_to_json(nr)::text FROM _null_actual nr EXCEPT ALL
+	                        SELECT row_to_json(nr)::text FROM _null_expected nr)) THEN
+	                RAISE EXCEPTION '125 NULL-aware exact mismatch: %',query;
+	            END IF;
+	            plan := '';
+	            FOR line IN EXECUTE 'EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF) '||query LOOP
+	                plan := plan||line."QUERY PLAN"||E'\n';
+	            END LOOP;
+	            mode := CASE WHEN value_column IN ('big','d') THEN 'parallel_dense_numeric' ELSE 'parallel_dense_integer' END;
+	            IF has_gpu AND (pg_accel_kernel_executions()<=kernels OR
+	                position('GPU Dispatched Physical Kernel Mode: '||mode IN plan)=0) THEN
+	                RAISE EXCEPTION '125 missing NULL-aware dispatch: % / % / %',query,pg_accel_last_planner_rejection_reason(),plan;
+	            END IF;
+	            DROP TABLE _null_expected,_null_actual;
+	        END LOOP;
+	       END LOOP;
+	      END LOOP;
+	    END LOOP;
+	END $$;
+2026-10-06 02:15:28.403 MST [46420] LOG:  received fast shutdown request
+2026-10-06 02:15:28.404 MST [46420] LOG:  aborting any active transactions
+2026-10-06 02:15:28.405 MST [46420] LOG:  background worker "logical replication launcher" (PID 46428) exited with exit code 1
+2026-10-06 02:15:28.405 MST [46423] LOG:  shutting down
+2026-10-06 02:15:28.405 MST [46423] LOG:  checkpoint starting: shutdown fast
+2026-10-06 02:15:28.414 MST [46423] LOG:  checkpoint complete: shutdown fast: wrote 461 buffers (2.8%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 1 recycled; write=0.003 s, sync=0.005 s, total=0.009 s; sync files=53, longest=0.001 s, average=0.001 s; distance=12176 kB, estimate=12176 kB; lsn=1/39BB1758, redo lsn=1/39BB1758
+2026-10-06 02:15:28.417 MST [46420] LOG:  database system is shut down
+2026-10-06 02:15:28.793 MST [49420] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-06 02:15:28.793 MST [49420] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-06 02:15:28.795 MST [49420] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-06 02:15:28.796 MST [49420] LOG:  listening on IPv6 address "::", port 28819
+2026-10-06 02:15:28.796 MST [49420] LOG:  listening on IPv4 address "0.0.0.0", port 28819
+2026-10-06 02:15:28.796 MST [49420] LOG:  listening on Unix socket "/Users/contra/.pgrx/.s.PGSQL.28819"
+2026-10-06 02:15:28.799 MST [49425] LOG:  database system was shut down at 2026-10-06 02:15:28 MST
+2026-10-06 02:15:28.801 MST [49420] LOG:  database system is ready to accept connections

@@ -1,0 +1,41 @@
+PGACCEL_TEST_START name=test_oom_invariant
+Device: Apple M2 Max backend=metal has_native_fp64=0 max_alloc_bytes=41747087360
+PGACCEL_DEVICE_PROOF device="Apple M2 Max" backend="metal" compute_units=38 max_alloc_bytes=41747087360 real_device=1
+
+Plan:
+  N (doubles) = 2 * max_alloc / sizeof(double) = 10436771840
+  N_capped    = 268435456 (2.15 GB per-family input)
+  RSS ceiling = 3 * max_alloc = 125.24 GB
+
+-- reduce_f64 @ N=268435456 (2.00 GB raw input) --
+   status=0 (OK=1) got=268435456 expected=268435456 correct=1  dispatches=1 rss_before=2.19GB peak=4.36GB delta=2.17GB ceiling=125.24GB under=1
+
+-- expr_vm_f64 @ values=268435456 (2.00 GB logical raw input, 8 cols x 33554432 rows) --
+   status=0 (OK=1) values_ok=1 processed_values=268435456 logical_bytes=2147483648 rss_before=4.39GB peak=4.39GB delta=0.00GB ceiling=125.24GB dispatches=64 under=1
+
+-- grouped_agg_i32_mul @ rows=67108864 (2.00 GB logical input, 32 B/row: 3 int32 keys + 3 int32 dimension keys + 2 int32 MUL inputs, 65536 groups) --
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.742238140712028563.metalar.5931.14795370946891123710.tmp (kernels_added=1 skipped=0)
+   status=0 detail=0 status_ok=1 correct=1 processed_rows=67108864 lifecycle_calls=69 logical_bytes=2147483648 rss_before=2.23GB peak=4.39GB delta=2.17GB ceiling=125.24GB dispatches=69 under=1
+
+-- spatial_f64 (PIP) @ N=134217728 points (2.00 GB raw input) --
+   status=0 (OK=1) all_inside=1  rss_before=4.54GB peak=6.38GB delta=1.84GB ceiling=125.24GB dispatches=1 under=1
+
+-- h3_f64 @ N=134217728 (2.00 GB raw lat+lng input) --
+   status=0 (OK=1) all_same_valid=1  rss_before=7.38GB peak=7.52GB delta=0.14GB ceiling=125.24GB dispatches=129 under=1
+
+=== OOM-never invariant summary ===
+  reduce_f64     PASS  peak_rss=4.36GB ceiling=125.24GB status_ok=1 correct=1 under_ceiling=1 note=""
+PGACCEL_OOM_FAMILY family=reduce_f64 result=PASS dispatches=1 peak_rss_bytes=4359077888 rss_baseline_bytes=2192932864 rss_delta_bytes=2166145024 rss_limit_bytes=125241262080
+  expr_vm_f64    PASS  peak_rss=4.39GB ceiling=125.24GB status_ok=1 correct=1 under_ceiling=1 note=""
+PGACCEL_OOM_FAMILY family=expr_vm_f64 result=PASS dispatches=64 peak_rss_bytes=4393418752 rss_baseline_bytes=4392648704 rss_delta_bytes=770048 rss_limit_bytes=125241262080
+  grouped_agg_i32_mul PASS  peak_rss=4.39GB ceiling=125.24GB status_ok=1 correct=1 under_ceiling=1 note=""
+PGACCEL_OOM_FAMILY family=grouped_agg_i32_mul result=PASS dispatches=69 peak_rss_bytes=4393418752 rss_baseline_bytes=2225913856 rss_delta_bytes=2167504896 rss_limit_bytes=125241262080
+  spatial_f64    PASS  peak_rss=6.38GB ceiling=125.24GB status_ok=1 correct=1 under_ceiling=1 note=""
+PGACCEL_OOM_FAMILY family=spatial_f64 result=PASS dispatches=1 peak_rss_bytes=6383190016 rss_baseline_bytes=4543823872 rss_delta_bytes=1839366144 rss_limit_bytes=125241262080
+  h3_f64         PASS  peak_rss=7.52GB ceiling=125.24GB status_ok=1 correct=1 under_ceiling=1 note=""
+PGACCEL_OOM_FAMILY family=h3_f64 result=PASS dispatches=129 peak_rss_bytes=7521353728 rss_baseline_bytes=7381270528 rss_delta_bytes=140083200 rss_limit_bytes=125241262080
+PGACCEL_OOM_INVARIANT result=PASS families=5 max_alloc_bytes=41747087360 input_doubles=268435456 rss_limit_bytes=125241262080
+
+PASS — all live kernel families honor OOM-never invariant.
+PGACCEL_TEST_RESULT name=test_oom_invariant exit_code=0 result=PASS raw_lines=39 body_sha256=416ee40f17cdec8a23ed2910bb45faa5f9b7036e887a1d282acf42c18ec28bac binding_sha256=5163d340d4b7de9b4284a415972d78a50918ef06778a7e3f8010600b82b46f36

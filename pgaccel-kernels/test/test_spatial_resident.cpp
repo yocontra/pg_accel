@@ -1,8 +1,11 @@
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -140,10 +143,11 @@ struct DeviceLane {
   size_t row_count = 0;
   size_t coordinate_pair_count = 0;
   size_t ring_count = 0;
+  uint32_t flags = 0;
 
   pgaccel_resident_geometry_view view() const {
     return {PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION,
-            0,
+            flags,
             coordinates.get(),
             bboxes.get(),
             geometry_offsets.get(),
@@ -186,7 +190,7 @@ pgaccel_status run_resident_request(const pgaccel_spatial_resident_request* requ
   return status;
 }
 
-DeviceLane make_lane(const std::vector<HostGeometry>& geometries) {
+DeviceLane make_lane(const std::vector<HostGeometry>& geometries, bool edge_index = false) {
   std::vector<double> coordinates;
   std::vector<double> bboxes;
   std::vector<uint64_t> geometry_offsets{0};
@@ -232,6 +236,22 @@ DeviceLane make_lane(const std::vector<HostGeometry>& geometries) {
   lane.row_count = geometries.size();
   lane.coordinate_pair_count = coordinates.size() / 2;
   lane.ring_count = ring_offsets.size();
+  if (edge_index) {
+    lane.flags = PGACCEL_RESIDENT_GEOMETRY_EDGE_INDEX;
+    constexpr size_t block_pairs = PGACCEL_RESIDENT_GEOMETRY_EDGE_BLOCK_PAIRS;
+    for (size_t first = 0; first < lane.coordinate_pair_count; first += block_pairs) {
+      const size_t end = std::min(first + block_pairs + 1, lane.coordinate_pair_count);
+      double box[4] = {coordinates[first * 2], coordinates[first * 2 + 1], coordinates[first * 2],
+                       coordinates[first * 2 + 1]};
+      for (size_t pair = first; pair < end; ++pair) {
+        box[0] = std::min(box[0], coordinates[pair * 2]);
+        box[1] = std::min(box[1], coordinates[pair * 2 + 1]);
+        box[2] = std::max(box[2], coordinates[pair * 2]);
+        box[3] = std::max(box[3], coordinates[pair * 2 + 1]);
+      }
+      bboxes.insert(bboxes.end(), box, box + 4);
+    }
+  }
   lane.coordinates.copy(coordinates);
   lane.bboxes.copy(bboxes);
   lane.geometry_offsets.copy(geometry_offsets);
@@ -268,8 +288,7 @@ PredicateRun run_predicate(const DeviceLane& left, bool left_constant, const Dev
 }
 
 void check_results(const char* label, const PredicateRun& run,
-                   std::initializer_list<int8_t> expected) {
-  const std::vector<int8_t> expected_results(expected);
+                   const std::vector<int8_t>& expected_results) {
   const bool matches = run.status == PGACCEL_OK && run.detail == PGACCEL_SPATIAL_DETAIL_NONE &&
                        run.results == expected_results;
   if (!matches) {
@@ -481,6 +500,291 @@ void test_holes_boundaries_and_predicates() {
       "NULL and EMPTY filters",
       run_predicate(null_empty, false, square, true, 2, PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
       {-1, -1});
+}
+
+void test_segmented_polygon_ray_pruning() {
+  HostGeometry shape{PGACCEL_RESIDENT_GEOMETRY_POLYGON, {}, {}, 4326, false};
+  for (const auto bounds : {std::pair{0.0, 4.0}, std::pair{1.0, 3.0}}) {
+    shape.rings.push_back(shape.coordinates.size() / 2);
+    const double lo = bounds.first;
+    const double hi = bounds.second;
+    for (int edge = 0; edge < 4; ++edge) {
+      for (int step = 0; step < 256; ++step) {
+        const double offset = (hi - lo) * step / 256.0;
+        const double x = edge == 0 ? lo + offset : edge == 1 ? hi : edge == 2 ? hi - offset : lo;
+        const double y = edge == 0 ? lo : edge == 1 ? lo + offset : edge == 2 ? hi : hi - offset;
+        shape.coordinates.push_back(x);
+        shape.coordinates.push_back(y);
+      }
+    }
+    shape.coordinates.insert(shape.coordinates.end(), {lo, lo, lo, lo});
+  }
+  std::vector<HostGeometry> points;
+  std::vector<int8_t> expected;
+  for (int ix = -1; ix <= 9; ++ix) {
+    for (int iy = -1; iy <= 9; ++iy) {
+      const double x = ix * 0.5;
+      const double y = iy * 0.5;
+      points.push_back(point(x, y));
+      const bool outside = ix < 0 || ix > 8 || iy < 0 || iy > 8;
+      const bool shell = ix == 0 || ix == 8 || iy == 0 || iy == 8;
+      const bool hole = ix >= 2 && ix <= 6 && iy >= 2 && iy <= 6;
+      const bool hole_edge = hole && (ix == 2 || ix == 6 || iy == 2 || iy == 6);
+      expected.push_back(outside ? -1 : shell || hole_edge ? 0 : hole ? -1 : 1);
+    }
+  }
+  points.push_back(point(-0.0, 1.0));
+  points.push_back(point(1.0, -0.0));
+  expected.insert(expected.end(), {0, 0});
+  for (const auto sample : {std::pair{std::nextafter(1.0, 0.0), int8_t{1}},
+                            std::pair{std::nextafter(1.0, 2.0), int8_t{-1}},
+                            std::pair{std::nextafter(3.0, 2.0), int8_t{-1}},
+                            std::pair{std::nextafter(3.0, 4.0), int8_t{1}}}) {
+    points.push_back(point(2.0, sample.first));
+    expected.push_back(sample.second);
+  }
+  const DeviceLane point_lane = make_lane(points);
+  for (const bool indexed : {false, true}) {
+    const DeviceLane polygon_lane = make_lane({shape}, indexed);
+    check_results("segmented polygon ray pruning with holes and degenerate edges",
+                  run_predicate(point_lane, false, polygon_lane, true, points.size(),
+                                PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+                  expected);
+    check_results("segmented polygon reverse Intersects",
+                  run_predicate(polygon_lane, true, point_lane, false, points.size(),
+                                PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+                  expected);
+    check_results("segmented polygon Contains",
+                  run_predicate(polygon_lane, true, point_lane, false, points.size(),
+                                PGACCEL_SPATIAL_PREDICATE_CONTAINS),
+                  expected);
+    check_results("segmented polygon Within",
+                  run_predicate(point_lane, false, polygon_lane, true, points.size(),
+                                PGACCEL_SPATIAL_PREDICATE_WITHIN),
+                  expected);
+  }
+}
+
+void test_multipolygon_components() {
+  constexpr uint64_t shell = PGACCEL_RESIDENT_GEOMETRY_RING_COMPONENT_START;
+  const HostGeometry multi{PGACCEL_RESIDENT_GEOMETRY_MULTIPOLYGON,
+                           {0,   0,   4,   0,   4,   4,   0,   4,   0,   0,    // shell
+                            1,   1,   3,   1,   3,   3,   1,   3,   1,   1,    // hole
+                            1.5, 1.5, 2.5, 1.5, 2.5, 2.5, 1.5, 2.5, 1.5, 1.5,  // island in the hole
+                            8,   0,   10,  0,   10,  2,   8,   2,   8,   0},
+                           {shell, 5, shell | 10, shell | 15},
+                           4326,
+                           false};
+  const DeviceLane area = make_lane({multi});
+  const DeviceLane probes = make_lane({point(.5, .5), point(1.25, 1.25), point(2, 2), point(9, 1),
+                                       point(6, 1), point(0, 2), point(1, 2), point(1.5, 2),
+                                       point(10, 1), point(-1, 2), null_geometry(), empty_point()});
+  const std::vector<int8_t> expected{1, -1, 1, 1, -1, 0, 0, 0, 0, -1, -1, -1};
+  check_results("multipolygon intersects",
+                run_predicate(probes, false, area, true, expected.size(),
+                              PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+                expected);
+  check_results("multipolygon reversed intersects",
+                run_predicate(area, true, probes, false, expected.size(),
+                              PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+                expected);
+  check_results(
+      "multipolygon contains",
+      run_predicate(area, true, probes, false, expected.size(), PGACCEL_SPATIAL_PREDICATE_CONTAINS),
+      expected);
+  check_results(
+      "multipolygon within",
+      run_predicate(probes, false, area, true, expected.size(), PGACCEL_SPATIAL_PREDICATE_WITHIN),
+      expected);
+  const DeviceLane repeated =
+      make_lane({multi, multi, {PGACCEL_RESIDENT_GEOMETRY_MULTIPOLYGON, {}, {}, 4326, false}});
+  const DeviceLane repeated_points = make_lane({point(2, 2), point(9, 1), point(2, 2)});
+  check_results("multipolygon absolute ring offsets and empty rows",
+                run_predicate(repeated_points, false, repeated, false, 3,
+                              PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+                {1, 1, -1});
+  // Overlapping components must use union, never ring parity across components.
+  auto overlap = multi;
+  overlap.rings = {shell, shell | 5, shell | 10, shell | 15};
+  const DeviceLane overlapping = make_lane({overlap});
+  const DeviceLane hole_point = make_lane({point(1.25, 1.25)});
+  check_results(
+      "multipolygon component union",
+      run_predicate(hole_point, true, overlapping, true, 1, PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+      {1});
+  const DeviceLane shapes =
+      make_lane({line({0, 2, 10, 2}), polygon({0, 0, 9, 0, 9, 9, 0, 9, 0, 0})});
+  check_results("non-point multipolygon intersections recheck",
+                run_predicate(shapes, false, area, true, 2, PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+                {0, 0});
+  const auto distances = run_distance(shapes, false, area, true, 2);
+  CHECK("non-point multipolygon distances recheck",
+        distances.status == PGACCEL_OK && distances.uncertain == std::vector<uint8_t>({1, 1}));
+  auto invalid = multi;
+  invalid.rings[0] = 0;
+  const auto bad = run_predicate(probes, false, make_lane({invalid}), true, expected.size(),
+                                 PGACCEL_SPATIAL_PREDICATE_INTERSECTS);
+  CHECK("multipolygon missing initial component rejected", bad.status != PGACCEL_OK);
+  invalid = multi;
+  invalid.type = PGACCEL_RESIDENT_GEOMETRY_POLYGON;
+  const auto tagged_polygon = run_predicate(probes, false, make_lane({invalid}), true,
+                                            expected.size(), PGACCEL_SPATIAL_PREDICATE_INTERSECTS);
+  CHECK("polygon cannot carry component tags", tagged_polygon.status != PGACCEL_OK);
+}
+
+void test_edge_index_contract() {
+  HostGeometry shape{PGACCEL_RESIDENT_GEOMETRY_MULTIPOLYGON, {}, {}, 4326, false};
+  const auto ring = [&](double lo, double bottom, double hi, double top, size_t steps, bool shell) {
+    const uint64_t start = shape.coordinates.size() / 2;
+    shape.rings.push_back(start | (shell ? PGACCEL_RESIDENT_GEOMETRY_RING_COMPONENT_START : 0));
+    for (size_t edge = 0; edge < 4; ++edge) {
+      for (size_t step = 0; step < steps; ++step) {
+        const double t = static_cast<double>(step) / static_cast<double>(steps);
+        const double x = edge == 0   ? lo + (hi - lo) * t
+                         : edge == 1 ? hi
+                         : edge == 2 ? hi - (hi - lo) * t
+                                     : lo;
+        const double y = edge == 0   ? bottom
+                         : edge == 1 ? bottom + (top - bottom) * t
+                         : edge == 2 ? top
+                                     : top - (top - bottom) * t;
+        shape.coordinates.insert(shape.coordinates.end(), {x, y});
+      }
+    }
+    shape.coordinates.insert(shape.coordinates.end(), {lo, bottom});
+  };
+  ring(0, 0, 16, 16, 64, true);
+  ring(4, 4, 12, 12, 33, false);
+  ring(6, 6, 10, 10, 17, true);
+  ring(20, 0, 24, 4, 9, true);
+  const auto rectangle = [](double x, double y, double lo, double bottom, double hi,
+                            double top) -> int8_t {
+    if (x < lo || x > hi || y < bottom || y > top)
+      return -1;
+    return x == lo || x == hi || y == bottom || y == top ? 0 : 1;
+  };
+  std::vector<HostGeometry> points{null_geometry(), empty_point()};
+  std::vector<int8_t> expected{-1, -1};
+  for (int x = -1; x <= 25; ++x) {
+    for (int y = -1; y <= 17; ++y) {
+      points.push_back(point(x, y));
+      int8_t outer = rectangle(x, y, 0, 0, 16, 16);
+      const int8_t hole = rectangle(x, y, 4, 4, 12, 12);
+      if (outer == 1 && hole >= 0)
+        outer = hole == 0 ? 0 : -1;
+      const int8_t island = rectangle(x, y, 6, 6, 10, 10);
+      const int8_t remote = rectangle(x, y, 20, 0, 24, 4);
+      expected.push_back(outer == 1 || island == 1 || remote == 1   ? 1
+                         : outer == 0 || island == 0 || remote == 0 ? 0
+                                                                    : -1);
+    }
+  }
+  const DeviceLane probes = make_lane(points);
+  DeviceLane indexed = make_lane({shape}, true);
+  for (const bool enabled : {false, true}) {
+    indexed.flags = enabled ? PGACCEL_RESIDENT_GEOMETRY_EDGE_INDEX : 0;
+    check_results("edge-index multipolygon Cartesian oracle",
+                  run_predicate(probes, false, indexed, true, points.size(),
+                                PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+                  expected);
+    check_results("edge-index multipolygon reverse Intersects",
+                  run_predicate(indexed, true, probes, false, points.size(),
+                                PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+                  expected);
+    check_results("edge-index multipolygon Contains",
+                  run_predicate(indexed, true, probes, false, points.size(),
+                                PGACCEL_SPATIAL_PREDICATE_CONTAINS),
+                  expected);
+    check_results("edge-index multipolygon Within",
+                  run_predicate(probes, false, indexed, true, points.size(),
+                                PGACCEL_SPATIAL_PREDICATE_WITHIN),
+                  expected);
+  }
+
+  const auto rejects_without_writes = [&](const DeviceLane& area, int32_t expected_detail,
+                                          size_t budget, size_t bbox_bytes) {
+    DeviceBuffer<int8_t> output(std::vector<int8_t>(points.size(), 53));
+    pgaccel_spatial_resident_request request{};
+    request.abi_version = PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION;
+    request.predicate = PGACCEL_SPATIAL_PREDICATE_INTERSECTS;
+    request.count = points.size();
+    request.max_referenced_bytes = budget;
+    request.left = {probes.view(), 0, 1};
+    request.right = {area.view(), 0, 0};
+    request.right.view.bboxes_bytes = bbox_bytes;
+    request.predicate_results = output.get();
+    request.predicate_results_bytes = points.size();
+    request.output_capacity = points.size();
+    int32_t detail = -1;
+    CHECK("edge-index invalid metadata has typed failure and no output writes",
+          run_resident_request(&request, &detail) == PGACCEL_INVALID_ARGUMENT &&
+              detail == expected_detail &&
+              output.to_host() == std::vector<int8_t>(points.size(), 53));
+  };
+  const auto original_boxes = indexed.bboxes.to_host();
+  for (const double bad : {std::numeric_limits<double>::quiet_NaN(),
+                           std::numeric_limits<double>::infinity(), -100.0}) {
+    auto boxes = original_boxes;
+    boxes[7] = bad;  // first edge-block ymax
+    CHECK("edge-index malformed bound setup",
+          pgaccel_expr_device_copy_from_host(indexed.bboxes.get(), boxes.data(),
+                                             boxes.size() * sizeof(double)) == PGACCEL_OK);
+    rejects_without_writes(indexed, PGACCEL_SPATIAL_DETAIL_GEOMETRY, 256 * 1024 * 1024,
+                           boxes.size() * sizeof(double));
+  }
+  CHECK("edge-index restore bounds",
+        pgaccel_expr_device_copy_from_host(indexed.bboxes.get(), original_boxes.data(),
+                                           original_boxes.size() * sizeof(double)) == PGACCEL_OK);
+  rejects_without_writes(indexed, PGACCEL_SPATIAL_DETAIL_CONTRACT, 256 * 1024 * 1024,
+                         original_boxes.size() * sizeof(double) - 32);
+  indexed.flags = 2;
+  rejects_without_writes(indexed, PGACCEL_SPATIAL_DETAIL_CONTRACT, 256 * 1024 * 1024,
+                         original_boxes.size() * sizeof(double));
+  indexed.flags = PGACCEL_RESIDENT_GEOMETRY_EDGE_INDEX;
+  // Conservative (not necessarily tight) boxes are legal and exact.
+  auto wide_boxes = original_boxes;
+  for (size_t entry = 4; entry < wide_boxes.size(); entry += 4) {
+    wide_boxes[entry] = -100;
+    wide_boxes[entry + 1] = -100;
+    wide_boxes[entry + 2] = 100;
+    wide_boxes[entry + 3] = 100;
+  }
+  CHECK("edge-index wide bounds setup",
+        pgaccel_expr_device_copy_from_host(indexed.bboxes.get(), wide_boxes.data(),
+                                           wide_boxes.size() * sizeof(double)) == PGACCEL_OK);
+  check_results("edge-index conservative boxes remain exact",
+                run_predicate(probes, false, indexed, true, points.size(),
+                              PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+                expected);
+  const DeviceLane one_point = make_lane({point(0.5, 0.5)});
+  const size_t plain_bytes = shape.coordinates.size() * sizeof(double) +
+                             shape.rings.size() * sizeof(uint64_t) +
+                             sizeof(pgaccel_resident_geometry_row) + 4 * sizeof(double) +
+                             2 * sizeof(uint64_t) + sizeof(uint8_t);
+  indexed.flags = 0;
+  CHECK("edge-index budget control fits unindexed geometry",
+        run_predicate(one_point, true, indexed, true, 1, PGACCEL_SPATIAL_PREDICATE_INTERSECTS, 0.0,
+                      2 * plain_bytes)
+                .status == PGACCEL_OK);
+  indexed.flags = PGACCEL_RESIDENT_GEOMETRY_EDGE_INDEX;
+  const auto underbudget =
+      run_predicate(one_point, true, indexed, true, 1, PGACCEL_SPATIAL_PREDICATE_INTERSECTS, 0.0,
+                    2 * plain_bytes);
+  CHECK("edge-index boxes consume the native referenced-byte budget",
+        underbudget.status == PGACCEL_INVALID_ARGUMENT &&
+            underbudget.detail == PGACCEL_SPATIAL_DETAIL_BYTE_BUDGET);
+
+  HostGeometry crossing{
+      PGACCEL_RESIDENT_GEOMETRY_POLYGON, std::vector<double>(64, 0.0), {0}, 4326, false};
+  crossing.coordinates.insert(crossing.coordinates.end(), {10, 10, 20, 0, 0, 0});
+  DeviceLane crossing_lane = make_lane({crossing}, true);
+  auto crossing_boxes = crossing_lane.bboxes.to_host();
+  crossing_boxes[7] = 0;  // omits vertex 32 only from the PREVIOUS block
+  CHECK("edge-index crossing endpoint setup",
+        pgaccel_expr_device_copy_from_host(crossing_lane.bboxes.get(), crossing_boxes.data(),
+                                           crossing_boxes.size() * sizeof(double)) == PGACCEL_OK);
+  rejects_without_writes(crossing_lane, PGACCEL_SPATIAL_DETAIL_GEOMETRY, 256 * 1024 * 1024,
+                         crossing_boxes.size() * sizeof(double));
 }
 
 void test_contains_geometry_family_matrix() {
@@ -1426,19 +1730,239 @@ void test_large_rows_and_vertices() {
       {1, -1});
 }
 
+// Exercise compaction independently of geometry evaluation: the tri-state
+// stream is the input contract, and a zero failure word starts a valid chain.
+// Timings are optional diagnostics, never a correctness/performance gate.
+void test_compaction_blocks(bool benchmark) {
+  const std::vector<size_t> sizes =
+      benchmark ? std::vector<size_t>{30000, PGACCEL_SPATIAL_MAX_CHUNK_ROWS}
+                : std::vector<size_t>{1, 1023, 1024, 1025, 2049, 30000, 65535, 65536};
+  for (const size_t rows : sizes) {
+    for (int pattern = 0; pattern < 4; ++pattern) {
+      std::vector<int8_t> values(rows);
+      std::vector<int8_t> expected_mask(rows);
+      std::vector<uint64_t> expected_indices(rows, UINT64_MAX);
+      size_t expected_count = 0;
+      for (size_t row = 0; row < rows; ++row) {
+        // No uncertainty, all uncertain, sparse across tile boundaries,
+        // and irregular dense uncertainty (including both signs).
+        values[row] = pattern == 0   ? (row % 2 == 0 ? 1 : -1)
+                      : pattern == 1 ? 0
+                      : pattern == 2 ? (row % 1024 == 0 || row % 1024 == 1023 ? 0 : -1)
+                                     : static_cast<int8_t>((row * 1664525u + 1013904223u) % 3) - 1;
+        expected_mask[row] = values[row] == 1 ? 1 : -1;
+        if (values[row] == 0)
+          expected_indices[expected_count++] = row;
+      }
+      DeviceBuffer<int8_t> input(values);
+      DeviceBuffer<int8_t> mask(std::vector<int8_t>(rows, 41));
+      DeviceBuffer<uint64_t> indices(std::vector<uint64_t>(rows, UINT64_MAX));
+      DeviceBuffer<uint64_t> count(std::vector<uint64_t>{43});
+      DeviceWorkspace workspace;
+      const auto workspace_view = workspace.view();
+      const uint32_t zero = 0;
+      CHECK("compaction fresh chain",
+            pgaccel_expr_device_copy_from_host(workspace.failure_flags.get(), &zero,
+                                               sizeof(zero)) == PGACCEL_OK);
+      pgaccel_spatial_recheck_compact_request request{};
+      request.abi_version = PGACCEL_SPATIAL_RECHECK_ABI_VERSION;
+      request.tri_state = input.get();
+      request.tri_state_bytes = rows;
+      request.final_mask = mask.get();
+      request.final_mask_bytes = rows;
+      request.uncertain_indices = indices.get();
+      request.uncertain_indices_bytes = rows * sizeof(uint64_t);
+      request.uncertain_count = count.get();
+      request.uncertain_count_bytes = sizeof(uint64_t);
+      request.row_count = rows;
+      request.uncertain_capacity = rows;
+      int32_t detail = -1;
+      const int iterations = benchmark ? 15 : 1;
+      for (int iteration = 0; iteration < iterations; ++iteration) {
+        const auto start = std::chrono::steady_clock::now();
+        const auto status =
+            pgaccel_spatial_recheck_compact_launch(&request, &workspace_view, &detail);
+        const auto end = std::chrono::steady_clock::now();
+        CHECK("block compaction launch", status == PGACCEL_OK);
+        if (benchmark && iteration >= 5)
+          std::printf("compact rows=%zu pattern=%d sample=%d us=%.3f\n", rows, pattern,
+                      iteration - 5,
+                      std::chrono::duration<double, std::micro>(end - start).count());
+      }
+      CHECK("block compaction finish",
+            pgaccel_spatial_workspace_finish(&workspace_view, &detail) == PGACCEL_OK &&
+                detail == PGACCEL_SPATIAL_DETAIL_NONE);
+      CHECK("block compaction exact mask", mask.to_host() == expected_mask);
+      CHECK("block compaction ordered indices and untouched tail",
+            indices.to_host() == expected_indices);
+      CHECK("block compaction exact count",
+            count.to_host() == std::vector<uint64_t>{expected_count});
+
+      if (!benchmark) {
+        for (size_t byte_offset = 1; byte_offset < 4; ++byte_offset) {
+          std::vector<int8_t> guarded_values(rows + 8, 41);
+          DeviceBuffer<int8_t> guarded_mask(guarded_values);
+          auto shifted_request = request;
+          shifted_request.final_mask = guarded_mask.get() + byte_offset;
+          auto expected_guarded = guarded_values;
+          std::copy(expected_mask.begin(), expected_mask.end(),
+                    expected_guarded.begin() + byte_offset);
+          for (int repeat = 0; repeat < 4; ++repeat) {
+            CHECK("byte-offset compaction guard reset",
+                  pgaccel_expr_device_copy_from_host(guarded_mask.get(), guarded_values.data(),
+                                                     guarded_values.size()) == PGACCEL_OK);
+            CHECK("byte-offset compaction status",
+                  pgaccel_spatial_recheck_compact_launch(&shifted_request, &workspace_view,
+                                                         &detail) == PGACCEL_OK &&
+                      pgaccel_spatial_workspace_finish(&workspace_view, &detail) == PGACCEL_OK);
+            CHECK("byte-offset compaction has no lost words or guard writes",
+                  guarded_mask.to_host() == expected_guarded);
+            CHECK("byte-offset compaction preserves ordered output",
+                  indices.to_host() == expected_indices &&
+                      count.to_host() == std::vector<uint64_t>{expected_count});
+          }
+        }
+      }
+
+      if (benchmark || pattern != 3)
+        continue;
+      // A bad byte in any tile must suppress ALL public output, including
+      // tiles that validated earlier. The sticky failure survives another call.
+      for (const size_t bad_row : {size_t{0}, rows / 2, rows - 1}) {
+        auto malformed = values;
+        malformed[bad_row] = 2;
+        const std::vector<int8_t> mask_sentinel(rows, 41);
+        const std::vector<uint64_t> index_sentinel(rows, 42);
+        const uint64_t count_sentinel = 43;
+        CHECK(
+            "block compaction malformed setup",
+            pgaccel_expr_device_copy_from_host(input.get(), malformed.data(), rows) == PGACCEL_OK &&
+                pgaccel_expr_device_copy_from_host(mask.get(), mask_sentinel.data(), rows) ==
+                    PGACCEL_OK &&
+                pgaccel_expr_device_copy_from_host(indices.get(), index_sentinel.data(),
+                                                   rows * 8) == PGACCEL_OK &&
+                pgaccel_expr_device_copy_from_host(count.get(), &count_sentinel, 8) == PGACCEL_OK);
+        CHECK("block compaction rejects invalid stream",
+              pgaccel_spatial_recheck_compact_launch(&request, &workspace_view, &detail) ==
+                      PGACCEL_OK &&
+                  pgaccel_spatial_workspace_finish(&workspace_view, &detail) ==
+                      PGACCEL_INVALID_ARGUMENT &&
+                  detail == PGACCEL_SPATIAL_DETAIL_TRISTATE);
+        CHECK("block compaction no partial publication",
+              mask.to_host() == mask_sentinel && indices.to_host() == index_sentinel &&
+                  count.to_host() == std::vector<uint64_t>{count_sentinel});
+        CHECK("block compaction restore input",
+              pgaccel_expr_device_copy_from_host(input.get(), values.data(), rows) == PGACCEL_OK);
+        CHECK("block compaction sticky failure",
+              pgaccel_spatial_recheck_compact_launch(&request, &workspace_view, &detail) ==
+                      PGACCEL_OK &&
+                  pgaccel_spatial_workspace_finish(&workspace_view, &detail) ==
+                      PGACCEL_INVALID_ARGUMENT &&
+                  mask.to_host() == mask_sentinel && indices.to_host() == index_sentinel &&
+                  count.to_host() == std::vector<uint64_t>{count_sentinel});
+        CHECK("block compaction new chain reset",
+              pgaccel_expr_device_copy_from_host(workspace.failure_flags.get(), &zero,
+                                                 sizeof(zero)) == PGACCEL_OK);
+        CHECK("block compaction recovery",
+              pgaccel_spatial_recheck_compact_launch(&request, &workspace_view, &detail) ==
+                      PGACCEL_OK &&
+                  pgaccel_spatial_workspace_finish(&workspace_view, &detail) == PGACCEL_OK &&
+                  mask.to_host() == expected_mask &&
+                  count.to_host() == std::vector<uint64_t>{expected_count});
+        const auto recovered_indices = indices.to_host();
+        CHECK("block compaction recovery ordered prefix",
+              std::equal(expected_indices.begin(), expected_indices.begin() + expected_count,
+                         recovered_indices.begin()));
+      }
+    }
+  }
+}
+
+// Diagnostic paired timings of fresh geometry classification, not predicate-
+// mask reuse. The integer-radius oracle is separated from this fine polygon's
+// boundary by much more than its inscribed-circle approximation error.
+void benchmark_edge_index() {
+  constexpr size_t vertices = 4096;
+  constexpr size_t row_count = 8192;
+  HostGeometry shape{PGACCEL_RESIDENT_GEOMETRY_POLYGON, {}, {0}, 4326, false};
+  for (size_t vertex = 0; vertex < vertices; ++vertex) {
+    const double theta = static_cast<double>(vertex) * 6.28318530717958647692 / vertices;
+    shape.coordinates.insert(shape.coordinates.end(), {std::cos(theta), std::sin(theta)});
+  }
+  shape.coordinates.insert(shape.coordinates.end(), {1.0, 0.0});
+  const DeviceLane area = make_lane({shape}, true);
+  std::vector<HostGeometry> points;
+  std::vector<int8_t> expected;
+  for (size_t row = 0; row < row_count; ++row) {
+    const int x = static_cast<int>(row % 193) - 96;
+    const int y = static_cast<int>((row / 193) % 193) - 96;
+    points.push_back(point(x / 128.0, y / 128.0));
+    expected.push_back(x * x + y * y < 128 * 128 ? 1 : -1);
+  }
+  const DeviceLane probes = make_lane(points);
+  DeviceBuffer<int8_t> output(row_count);
+  DeviceWorkspace workspace;
+  const auto native_workspace = workspace.view();
+  pgaccel_spatial_resident_request request{};
+  request.abi_version = PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION;
+  request.predicate = PGACCEL_SPATIAL_PREDICATE_INTERSECTS;
+  request.count = row_count;
+  request.max_referenced_bytes = 256 * 1024 * 1024;
+  request.left = {probes.view(), 0, 1};
+  request.right = {area.view(), 0, 0};
+  request.predicate_results = output.get();
+  request.predicate_results_bytes = row_count;
+  request.output_capacity = row_count;
+  for (int iteration = 0; iteration < 15; ++iteration) {
+    for (int side = 0; side < 2; ++side) {
+      const bool indexed = ((iteration + side) % 2) != 0;
+      request.right.view.flags = indexed ? PGACCEL_RESIDENT_GEOMETRY_EDGE_INDEX : 0;
+      int32_t detail = -1;
+      const auto start = std::chrono::steady_clock::now();
+      const auto status =
+          pgaccel_spatial_eval_resident_launch(&request, &native_workspace, &detail);
+      const auto end = std::chrono::steady_clock::now();
+      CHECK("edge-index benchmark exact classification",
+            status == PGACCEL_OK &&
+                pgaccel_spatial_workspace_finish(&native_workspace, &detail) == PGACCEL_OK &&
+                output.to_host() == expected);
+      if (iteration >= 5)
+        std::printf("edge_index enabled=%d rows=%zu pairs=%zu sample=%d us=%.3f\n", indexed,
+                    row_count, vertices + 1, iteration - 5,
+                    std::chrono::duration<double, std::micro>(end - start).count());
+    }
+  }
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
   if (pgaccel_init() != PGACCEL_OK) {
     std::fprintf(stderr, "pgaccel_init failed\n");
     return 1;
   }
+  if (argc == 2 && std::string(argv[1]) == "--bench-compaction") {
+    test_compaction_blocks(true);
+    CHECK("shutdown", pgaccel_shutdown() == PGACCEL_OK);
+    std::printf("test_spatial_resident compaction: %d passed, %d failed\n", passed, failed);
+    return failed == 0 ? 0 : 1;
+  }
+  if (argc == 2 && std::string(argv[1]) == "--bench-edge-index") {
+    benchmark_edge_index();
+    CHECK("shutdown", pgaccel_shutdown() == PGACCEL_OK);
+    std::printf("test_spatial_resident edge index: %d passed, %d failed\n", passed, failed);
+    return failed == 0 ? 0 : 1;
+  }
   test_intersects_pair_matrix();
   test_holes_boundaries_and_predicates();
+  test_segmented_polygon_ray_pruning();
+  test_multipolygon_components();
+  test_edge_index_contract();
   test_contains_geometry_family_matrix();
   test_distance();
   test_hard_failures();
   test_recheck_helpers();
+  test_compaction_blocks(false);
   test_large_rows_and_vertices();
   CHECK("shutdown", pgaccel_shutdown() == PGACCEL_OK);
   std::printf("test_spatial_resident: %d passed, %d failed\n", passed, failed);

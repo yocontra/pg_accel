@@ -1,0 +1,14 @@
+Finalize GroupAggregate
+  Output: region, sum((price * adjustment)), avg((price - adjustment)), min((price + adjustment)), max((price + adjustment)), count(*)
+  Group Key: bench_computed_sales.region
+  ->  Gather Merge
+        Output: region, (PARTIAL sum((price * adjustment))), (PARTIAL avg((price - adjustment))), (PARTIAL min((price + adjustment))), (PARTIAL max((price + adjustment))), (PARTIAL count(*))
+        Workers Planned: 7
+        ->  Sort
+              Output: region, (PARTIAL sum((price * adjustment))), (PARTIAL avg((price - adjustment))), (PARTIAL min((price + adjustment))), (PARTIAL max((price + adjustment))), (PARTIAL count(*))
+              Sort Key: bench_computed_sales.region
+              ->  Partial HashAggregate
+                    Output: region, PARTIAL sum((price * adjustment)), PARTIAL avg((price - adjustment)), PARTIAL min((price + adjustment)), PARTIAL max((price + adjustment)), PARTIAL count(*)
+                    Group Key: bench_computed_sales.region
+                    ->  Parallel Seq Scan on public.bench_computed_sales
+                          Output: region, price, adjustment

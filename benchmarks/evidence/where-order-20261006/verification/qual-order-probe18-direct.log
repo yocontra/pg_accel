@@ -1,0 +1,88 @@
+SET
+SELECT 1000017
+ANALYZE
+ pg_accel_pin 
+--------------
+      1000017
+(1 row)
+
+SET
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ HashAggregate
+   Output: g, sum(a)
+   Group Key: _qual_order.g
+   ->  Seq Scan on pg_temp._qual_order
+         Output: g, a, b, flag
+         Filter: (_qual_order.flag AND ((_qual_order.a / _qual_order.b) > 0))
+(6 rows)
+
+ g  |  sum   
+----+--------
+ 29 | 151520
+  4 | 151520
+  0 | 151520
+ 32 | 151510
+ 10 | 151520
+  9 | 151520
+  7 | 151520
+ 15 | 151520
+  6 | 151520
+ 26 | 151510
+ 12 | 151520
+ 24 | 151510
+ 19 | 151520
+ 25 | 151520
+ 31 | 151520
+ 30 | 151510
+ 21 | 151520
+ 14 | 151520
+  3 | 151520
+ 17 | 151520
+ 28 | 151510
+ 22 | 151510
+ 20 | 151510
+ 13 | 151520
+  1 | 151520
+  5 | 151520
+ 18 | 151520
+  2 | 151520
+ 16 | 151520
+ 27 | 151520
+ 23 | 151520
+  8 | 151520
+ 11 | 151520
+(33 rows)
+
+SET
+                                                                                                 QUERY PLAN                                                                                                  
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuAccelAgg)
+   Output: g, (sum(a))
+   Strategy: GpuAgg
+   Plan Selected: true
+   Batch Size: 65536
+   Expected Threads: 1
+   GPU Resident Pipeline: true
+   GPU Resident Proof Version: 2
+   GPU Resident Operator Class: resident_groupagg
+   GPU Physical Kernel Mode: parallel_dense_integer
+   GPU Descriptor Strategy: descriptor_grouped_aggregate
+   GPU Descriptor Specialization: dense_scalar_programs_plain
+   GPU Descriptor Specialization Cache: miss
+   GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+   GPU Descriptor Group Keys: k0:fact(2464189.1:type=23) type=23 collation=0 encoding=hash
+   GPU Descriptor Aggregates: m0:column(2464189.2:type=23) -> value.sum; m1:bytecode(inputs=3, words=24, result_type=16) -> value.count
+   GPU Descriptor Filter: fact=bytecode(inputs=3, words=24); measures=[m0=none; m1=none]; dimensions=[none]
+   GPU Descriptor Star Dimensions: none
+   GPU Descriptor Output: slot0:group[k0] source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true
+   GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+   GPU Descriptor Artifact: not initialized
+   GPU Descriptor Generations: not inspected
+   GPU Descriptor Bytes: not inspected
+   GPU Resident Stage Mask: 16395
+   GPU Resident Device Columns: 4
+   GPU Resident Boundary: none: no CPU boundary
+(26 rows)
+
+psql:.codex/scratch/qual-order-probe.sql:13: ERROR:  pg_accel: aggregate expression division by zero; refusing CPU fallback

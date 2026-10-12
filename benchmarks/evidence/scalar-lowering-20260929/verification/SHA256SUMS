@@ -1,0 +1,3 @@
+97d9713f305cfd22ba1bd029261c4c9c66b3ae9c36a5133d9cc93ba3a5032555  .pgaccel/postgres/install/18.4/lib/pg_accel.dylib
+ef1292a465b7ef7e60109364fb5108d60053bce5583c4542450d01687349a409  .pgaccel/postgres/install/19beta1/lib/pg_accel.dylib
+f3397cd53ffa98897f598fb10f8e670981dadcec48f6c07c63425ead7e7c209a  benchmarks/evidence/scalar-lowering-20260929/source-snapshot.tar.gz

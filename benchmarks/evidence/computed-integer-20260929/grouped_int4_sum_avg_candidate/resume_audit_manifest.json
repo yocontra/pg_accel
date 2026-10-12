@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "generated_unix_seconds": 1790736774,
+  "artifact_root": "benchmarks/evidence/computed-integer-20260929/grouped_int4_sum_avg_candidate",
+  "known_paths": {
+    "run_manifest_path": "manifest.json",
+    "resume_audit_manifest_path": "resume_audit_manifest.json",
+    "artifact_index_path": "artifact_index.json",
+    "artifact_checklist_path": "artifact_checklist.md"
+  },
+  "bounded_log_policy": {
+    "log_tail_bytes": 65536,
+    "log_delta_bytes": 262144,
+    "telemetry_tail_bytes": 65536,
+    "max_log_candidates": 32,
+    "log_candidates": [
+      "/Users/contra/.pgrx/18.log",
+      "/Users/contra/.pgrx/data-18/pg_accel_panic.log",
+      "/Users/contra/.pgrx/data-18/pg_accel_traces.jsonl",
+      "/Users/contra/.pgrx/data-18/pg_accel_otel.jsonl",
+      "/tmp/pg_accel_panic.log"
+    ],
+    "telemetry_candidates": [
+      "/Users/contra/.pgrx/data-18/pg_accel_traces.jsonl",
+      "/Users/contra/.pgrx/data-18/pg_accel_otel.jsonl"
+    ]
+  },
+  "log_offset_provenance": [
+    {
+      "path": "/Users/contra/.pgrx/18.log",
+      "existed": true,
+      "len_bytes": 2004875
+    },
+    {
+      "path": "/Users/contra/.pgrx/data-18/pg_accel_panic.log",
+      "existed": true,
+      "len_bytes": 0
+    },
+    {
+      "path": "/Users/contra/.pgrx/data-18/pg_accel_traces.jsonl",
+      "existed": true,
+      "len_bytes": 9752
+    },
+    {
+      "path": "/Users/contra/.pgrx/data-18/pg_accel_otel.jsonl",
+      "existed": true,
+      "len_bytes": 0
+    },
+    {
+      "path": "/tmp/pg_accel_panic.log",
+      "existed": false,
+      "len_bytes": 0
+    }
+  ],
+  "inventory": {
+    "completed_artifacts": [
+      "benchmark_failure_ledger.json",
+      "benchmark_failure_ledger.md",
+      "guc_snapshot.json",
+      "no_dispatch_audit.json",
+      "no_dispatch_audit.md",
+      "report.csv",
+      "report.json",
+      "report.md",
+      "resident_boundary_audit.json",
+      "resident_boundary_audit.md"
+    ],
+    "correctness_artifacts": [
+      "correctness_diffs/grouped_int4_sum_avg_candidate-1000000.json",
+      "correctness_diffs/grouped_int4_sum_avg_candidate-250000.json"
+    ],
+    "pre_risk_artifacts": [
+      "pre_risk_contexts/grouped_int4_sum_avg_candidate-1000000.json",
+      "pre_risk_contexts/grouped_int4_sum_avg_candidate-250000.json"
+    ],
+    "plan_artifacts": [
+      "plan_snippets/grouped_int4_sum_avg_candidate-1000000.txt",
+      "plan_snippets/grouped_int4_sum_avg_candidate-250000.txt"
+    ],
+    "crash_artifacts": [
+      "crashes.json",
+      "crashes.md"
+    ],
+    "log_artifacts": [
+      "log_tails/run-complete/00-18.log.delta",
+      "log_tails/run-complete/00-18.log.tail",
+      "log_tails/run-complete/01-pg_accel_panic.log.delta",
+      "log_tails/run-complete/01-pg_accel_panic.log.tail",
+      "log_tails/run-complete/02-pg_accel_traces.jsonl.delta",
+      "log_tails/run-complete/02-pg_accel_traces.jsonl.tail",
+      "log_tails/run-complete/03-pg_accel_otel.jsonl.delta",
+      "log_tails/run-complete/03-pg_accel_otel.jsonl.tail"
+    ],
+    "provenance_artifacts": [
+      "provenance.json"
+    ],
+    "failure_artifacts": [
+      "benchmark_failure_ledger.json",
+      "benchmark_failure_ledger.md"
+    ]
+  }
+}

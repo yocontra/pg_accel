@@ -1,0 +1,3 @@
+{"table": "[53]", "rows": 8, "duration_sum_ns": 266542, "interval_union_ns": 266542, "first_start_ns": 17100075333, "last_end_ns": 19791589750}
+{"table": "[54]", "rows": 159, "duration_sum_ns": 3314580, "interval_union_ns": 3314580, "first_start_ns": 15464907125, "last_end_ns": 19835226208}
+{"table": "[109]", "rows": 81, "duration_sum_ns": 23995128, "interval_union_ns": 23995128, "first_start_ns": 17103277583, "last_end_ns": 19830736083}

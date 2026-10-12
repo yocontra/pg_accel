@@ -1,0 +1,4 @@
+Warnings:
+- pg_config sharedir control default_version is 0.1.0, expected 1.0.0-rc1
+- pg_config installed pg_accel binary hash 1269890d8a364bbf50ed88d4e7ff99d954cf3f4d0edf4e1a8fbf2d95530e5433 does not match local build hash d2c92132520c9451e75d26be19b933f8bb428ef89e9943f06d051a80a28f2696
+- live backend loaded pg_accel hash d2c92132520c9451e75d26be19b933f8bb428ef89e9943f06d051a80a28f2696 from /Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/lib/pg_accel.dylib, but pg_config pkglibdir binary hash is 1269890d8a364bbf50ed88d4e7ff99d954cf3f4d0edf4e1a8fbf2d95530e5433

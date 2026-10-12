@@ -1,0 +1,42 @@
+{
+  "assertion_count": 416,
+  "assertion_percent": 100.0,
+  "covered_assertions": 416,
+  "covered_units": 416,
+  "description": "Fixed-manifest SQL semantic assertion coverage.",
+  "errors": [],
+  "execution": {
+    "exit_code": 0,
+    "stages_complete": true,
+    "status": "complete"
+  },
+  "generated_at_utc": "2026-09-30T02:54:30.089295+00:00",
+  "kind": "coverage-layer-summary",
+  "layer_id": "sql",
+  "manifest": {
+    "baseline_assertions": 306,
+    "baseline_files": 58,
+    "caught_exception_lines": [],
+    "completed_files": 89,
+    "declared_assertions": 416,
+    "declared_files": 89,
+    "duplicate_declaration_ids": [],
+    "duplicate_observation_ids": [],
+    "hash_drift_files": [],
+    "passed_test_files": 89,
+    "sha256": "be804b599e5ea4b17e6545062c18012f0f4a2ff6c60afadaac188010b4a1f585",
+    "skip_lines": [],
+    "test_files": 89,
+    "unknown_observation_ids": [],
+    "valid": true,
+    "warning_lines": []
+  },
+  "metric_kind": "semantic_assertions",
+  "passed": true,
+  "percent": 100.0,
+  "schema_version": 2,
+  "threshold_percent": 90.0,
+  "total_units": 416,
+  "uncovered_assertions": 0,
+  "uncovered_units": 0
+}

@@ -1,0 +1,10 @@
+{"event": "backend", "value": {"pid": 10498, "version": "PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit"}}
+{"event": "settings_before", "value": [{"name": "pg_accel.assert_dispatch", "setting": "off", "unit": null}, {"name": "pg_accel.auto_load", "setting": "on", "unit": null}, {"name": "pg_accel.cost_multiplier", "setting": "1", "unit": null}, {"name": "pg_accel.enabled", "setting": "on", "unit": null}, {"name": "pg_accel.execution_profiling", "setting": "off", "unit": null}, {"name": "pg_accel.fp64_enabled", "setting": "on", "unit": null}, {"name": "pg_accel.gpu_enabled", "setting": "on", "unit": null}, {"name": "pg_accel.kernel_timeout_ms", "setting": "5000", "unit": "ms"}, {"name": "pg_accel.log_level", "setting": "Notice", "unit": null}, {"name": "pg_accel.max_workers_total", "setting": "0", "unit": null}, {"name": "pg_accel.min_batch_size", "setting": "65536", "unit": null}, {"name": "pg_accel.otel_log_max_mb", "setting": "256", "unit": "MB"}, {"name": "pg_accel.otel_log_max_rotations", "setting": "4", "unit": null}, {"name": "pg_accel.parallel_fused_count", "setting": "off", "unit": null}, {"name": "pg_accel.planner_profiling", "setting": "off", "unit": null}, {"name": "pg_accel.resident_memory_budget_mb", "setting": "-1", "unit": "MB"}, {"name": "pg_accel.soft_fp64_cost_multiplier", "setting": "32", "unit": null}]}
+Traceback (most recent call last):
+  File "/private/tmp/pgaccel-numeric-latency-probe.lIrAM4/probe.py", line 134, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/private/tmp/pgaccel-numeric-latency-probe.lIrAM4/probe.py", line 56, in main
+    if int(cur.fetchone()["value"]) != 5000:
+       ~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: invalid literal for int() with base 10: '5s'

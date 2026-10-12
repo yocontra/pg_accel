@@ -230,6 +230,12 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
     };
     let _span = tracing::info_span!("planner.upper_paths", stage = stage).entered();
 
+    #[cfg(feature = "pg_test")]
+    if stage == pg_sys::UpperRelationKind::UPPERREL_GROUP_AGG {
+        // SAFETY: this read-only test observer sees the same live planner root.
+        unsafe { shape::observe_test_dense_slots(root) };
+    }
+
     // Dispatch by upper relation stage.
     match stage {
         pg_sys::UpperRelationKind::UPPERREL_SETOP => {

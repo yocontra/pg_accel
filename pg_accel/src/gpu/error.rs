@@ -92,6 +92,8 @@ pub enum GpuStatusDetail {
     ShapeMismatch,
     CapacityOverflow,
     NumericOverflow,
+    DivisionByZero,
+    DateOutOfRange,
 }
 
 impl GpuStatusDetail {
@@ -130,6 +132,8 @@ impl fmt::Display for GpuStatusDetail {
             Self::ShapeMismatch => "shape_mismatch",
             Self::CapacityOverflow => "capacity_overflow",
             Self::NumericOverflow => "numeric_overflow",
+            Self::DivisionByZero => "division_by_zero",
+            Self::DateOutOfRange => "date_out_of_range",
         };
         f.write_str(label)
     }
@@ -362,6 +366,8 @@ mod tests {
                 false,
             ),
             (GpuStatusDetail::NumericOverflow, "numeric_overflow", false),
+            (GpuStatusDetail::DivisionByZero, "division_by_zero", false),
+            (GpuStatusDetail::DateOutOfRange, "date_out_of_range", false),
         ];
         for (detail, label, is_ok) in details {
             assert_eq!(detail.to_string(), label);

@@ -1,0 +1,24 @@
+source: /Users/contra/.pgrx/data-19/pg_accel_traces.jsonl
+tail_bytes: 65536
+---
+{"timestamp":"   0.000241375s","level":"DEBUG","fields":{"message":"pg_accel: tracing initialized","trace_path":"/Users/contra/.pgrx/data-19/pg_accel_traces.jsonl"},"target":"pg_accel::engine::otel"}
+{"timestamp":"   0.000582084s","level":"DEBUG","fields":{"message":"close","time.busy":"78.6µs","time.idle":"126µs"},"target":"pg_accel::engine::ffi::custom_scan","span":{"name":"ffi.begin_custom_scan"},"spans":[]}
+{"timestamp":"   0.000725125s","level":"DEBUG","fields":{"message":"close","time.busy":"31.1µs","time.idle":"59.2µs"},"target":"pg_accel::engine::ffi::custom_scan::explain","span":{"name":"ffi.explain_custom_scan"},"spans":[]}
+{"timestamp":"   0.000809334s","level":"DEBUG","fields":{"message":"close","time.busy":"4.25µs","time.idle":"51.5µs"},"target":"pg_accel::engine::ffi::custom_scan","span":{"name":"ffi.end_custom_scan"},"spans":[]}
+{"timestamp":"   0.001120917s","level":"INFO","fields":{"message":"close","time.busy":"2.88µs","time.idle":"72.3µs"},"target":"pg_accel::engine::ffi::planner_hooks","span":{"stage":7,"name":"planner.upper_paths"},"spans":[]}
+{"timestamp":"   0.001418000s","level":"INFO","fields":{"message":"stats.planner_rejected","reason":"sort_heap_full_output","n_rows_estimate":262144},"target":"pg_accel::stats","span":{"relid":18413,"name":"planner.rel_pathlist"},"spans":[{"relid":18413,"name":"planner.rel_pathlist"}]}
+{"timestamp":"   0.001464209s","level":"INFO","fields":{"message":"stats.planner_rejected","reason":"no_gpu_resident_pipeline","n_rows_estimate":262144},"target":"pg_accel::stats","span":{"relid":18413,"name":"planner.rel_pathlist"},"spans":[{"relid":18413,"name":"planner.rel_pathlist"}]}
+{"timestamp":"   0.001601875s","level":"INFO","fields":{"message":"close","time.busy":"103µs","time.idle":"115µs"},"target":"pg_accel::engine::ffi::planner_hooks::rel_pathlist","span":{"relid":18413,"name":"planner.rel_pathlist"},"spans":[]}
+{"timestamp":"   0.001937584s","level":"INFO","fields":{"message":"close","time.busy":"243µs","time.idle":"54.2µs"},"target":"pg_accel::engine::ffi::planner_hooks","span":{"stage":2,"name":"planner.upper_paths"},"spans":[]}
+{"timestamp":"   0.002020459s","level":"INFO","fields":{"message":"close","time.busy":"1.67µs","time.idle":"51.6µs"},"target":"pg_accel::engine::ffi::planner_hooks","span":{"stage":6,"name":"planner.upper_paths"},"spans":[]}
+{"timestamp":"   0.002104500s","level":"INFO","fields":{"message":"close","time.busy":"1.83µs","time.idle":"54.7µs"},"target":"pg_accel::engine::ffi::planner_hooks","span":{"stage":7,"name":"planner.upper_paths"},"spans":[]}
+{"timestamp":"   0.002145250s","level":"INFO","fields":{"message":"plan_custom_path_agg: start"},"target":"pg_accel::engine::ffi::custom_scan","span":{"name":"ffi.plan_custom_path_agg"},"spans":[{"name":"ffi.plan_custom_path_agg"}]}
+{"timestamp":"   0.002263709s","level":"INFO","fields":{"message":"plan_custom_path_agg: end"},"target":"pg_accel::engine::ffi::custom_scan","span":{"name":"ffi.plan_custom_path_agg"},"spans":[{"name":"ffi.plan_custom_path_agg"}]}
+{"timestamp":"   0.002365875s","level":"DEBUG","fields":{"message":"close","time.busy":"151µs","time.idle":"85.5µs"},"target":"pg_accel::engine::ffi::custom_scan","span":{"name":"ffi.plan_custom_path_agg"},"spans":[]}
+{"timestamp":"   0.002474917s","level":"DEBUG","fields":{"message":"close","time.busy":"35.1µs","time.idle":"48.6µs"},"target":"pg_accel::engine::ffi::custom_scan","span":{"name":"ffi.create_custom_scan_state"},"spans":[]}
+{"timestamp":"   0.002604292s","level":"DEBUG","fields":{"message":"close","time.busy":"56.5µs","time.idle":"48.8µs"},"target":"pg_accel::engine::ffi::custom_scan","span":{"name":"ffi.begin_custom_scan"},"spans":[]}
+{"timestamp":"   0.002710084s","level":"DEBUG","fields":{"message":"close","time.busy":"21.0µs","time.idle":"51.0µs"},"target":"pg_accel::engine::ffi::custom_scan::explain","span":{"name":"ffi.explain_custom_scan"},"spans":[]}
+{"timestamp":"   0.002782667s","level":"DEBUG","fields":{"message":"close","time.busy":"2.92µs","time.idle":"47.4µs"},"target":"pg_accel::engine::ffi::custom_scan","span":{"name":"ffi.end_custom_scan"},"spans":[]}
+{"timestamp":"   0.003046375s","level":"INFO","fields":{"message":"close","time.busy":"2.42µs","time.idle":"62.1µs"},"target":"pg_accel::engine::ffi::planner_hooks","span":{"stage":7,"name":"planner.upper_paths"},"spans":[]}
+{"timestamp":"   3.009578833s","level":"ERROR","fields":{"message":"GPU kernel dispatch failed","func":"pgaccel_grouped_agg_execute_ex","status":"Error","raw":-1,"domain":"grouped_agg"},"target":"pg_accel::gpu"}
+{"timestamp":"   3.394354958s","level":"ERROR","fields":{"message":"GPU kernel dispatch failed","func":"pgaccel_grouped_agg_execute_ex","status":"Error","raw":-1,"domain":"grouped_agg"},"target":"pg_accel::gpu"}

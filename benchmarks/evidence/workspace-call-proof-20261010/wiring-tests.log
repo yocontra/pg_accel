@@ -1,0 +1,10 @@
+test_cli_never_implicitly_discovers_release_objects (test_cpu_cheat_audit.ReleaseWiringTests.test_cli_never_implicitly_discovers_release_objects) ... ok
+test_green_ci_uses_integrity_suite_and_release_keeps_real_gate (test_cpu_cheat_audit.ReleaseWiringTests.test_green_ci_uses_integrity_suite_and_release_keeps_real_gate) ... ok
+test_local_packages_run_real_audit_before_creating_artifacts (test_cpu_cheat_audit.ReleaseWiringTests.test_local_packages_run_real_audit_before_creating_artifacts) ... ok
+test_precommit_keeps_fixture_gate_and_real_recipe_has_headers (test_cpu_cheat_audit.ReleaseWiringTests.test_precommit_keeps_fixture_gate_and_real_recipe_has_headers) ... ok
+test_release_matrix_builds_before_real_audit (test_cpu_cheat_audit.ReleaseWiringTests.test_release_matrix_builds_before_real_audit) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.001s
+
+OK

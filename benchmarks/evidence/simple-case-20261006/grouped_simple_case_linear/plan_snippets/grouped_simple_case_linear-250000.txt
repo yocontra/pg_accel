@@ -1,0 +1,14 @@
+Finalize GroupAggregate
+  Output: region, sum(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), avg(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), count(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), min(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), max(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), count(*)
+  Group Key: bench_scalar_sales.region
+  ->  Gather Merge
+        Output: region, (PARTIAL sum(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL avg(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL count(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL min(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL max(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL count(*))
+        Workers Planned: 7
+        ->  Sort
+              Output: region, (PARTIAL sum(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL avg(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL count(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL min(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL max(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END)), (PARTIAL count(*))
+              Sort Key: bench_scalar_sales.region
+              ->  Partial HashAggregate
+                    Output: region, PARTIAL sum(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), PARTIAL avg(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), PARTIAL count(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), PARTIAL min(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), PARTIAL max(CASE adjustment WHEN 0 THEN (price * 2) ELSE (price - adjustment) END), PARTIAL count(*)
+                    Group Key: bench_scalar_sales.region
+                    ->  Parallel Seq Scan on public.bench_scalar_sales
+                          Output: region, price, adjustment

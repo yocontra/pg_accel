@@ -1,0 +1,8 @@
+PGACCEL_TEST_START name=test_hash_agg_keys
+=== resident grouped COUNT key tests ===
+--- resident count invalid/empty contract ---
+--- resident count duplicate/extreme keys ---
+--- resident count high cardinality/hints ---
+--- resident count underestimated bound ---
+resident grouped COUNT keys: 58 checks, 0 failures
+PGACCEL_TEST_RESULT name=test_hash_agg_keys exit_code=0 result=PASS raw_lines=6 body_sha256=b87e067775793fbd71753a7454d3b20d6cb96fc903ebdd6fbe953536ed2af098 binding_sha256=84f6ac0b2293ca45c13f9dd04b7d9fbc0f88a61ed903e46b6a7f6c70abf677e2

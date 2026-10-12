@@ -1,0 +1,28 @@
+{
+  "workload": "grouped_int4_sum_avg_candidate",
+  "rows": 250000,
+  "seed": 42,
+  "iterations": 10,
+  "warmup": 5,
+  "timing_mode": "raw",
+  "cache_mode": "warm",
+  "realistic_gucs": false,
+  "skip_guc_verify": false,
+  "capture_plans": true,
+  "capture_planner_stages": false,
+  "native_parity_pairing": false,
+  "backend_pid": 29736,
+  "backend_pid_error": null,
+  "setup_sql": [
+    "DROP TABLE IF EXISTS bench_grouped_int4_sum_avg",
+    "CREATE TABLE bench_grouped_int4_sum_avg (id int8 PRIMARY KEY, bool_key bool, observed int4)",
+    "INSERT INTO bench_grouped_int4_sum_avg (id, bool_key, observed) SELECT i, CASE WHEN i % 19 = 0 THEN NULL ELSE i % 2 = 0 END, CASE WHEN i % 19 = 0 OR i % 11 = 0 THEN NULL ELSE CASE i WHEN 1 THEN '-2147483648'::int4 WHEN 2 THEN '2147483647'::int4 ELSE (((i::int8 * 7919) % 4294967296) - 2147483648)::int4 END END FROM generate_series(1, 250000) AS rows(i)",
+    "ANALYZE bench_grouped_int4_sum_avg"
+  ],
+  "pre_query_sql": [],
+  "accel_query_sql": "SELECT bool_key, sum(observed) AS observed_sum, avg(observed) AS observed_avg, count(*) AS input_rows FROM bench_grouped_int4_sum_avg GROUP BY bool_key",
+  "baseline_query_sql": "SELECT bool_key, sum(observed) AS observed_sum, avg(observed) AS observed_avg, count(*) AS input_rows FROM bench_grouped_int4_sum_avg GROUP BY bool_key",
+  "explain_sql": "EXPLAIN (VERBOSE, COSTS OFF) SELECT bool_key, sum(observed) AS observed_sum, avg(observed) AS observed_avg, count(*) AS input_rows FROM bench_grouped_int4_sum_avg GROUP BY bool_key",
+  "explain": "Custom Scan (GpuAccelAgg)\n  Output: bool_key, (sum(observed)), (avg(observed)), (count(*))\n  Strategy: GpuAgg\n  Plan Selected: true\n  Batch Size: 65536\n  Expected Threads: 1\n  GPU Resident Pipeline: true\n  GPU Resident Proof Version: 2\n  GPU Resident Operator Class: resident_groupagg\n  GPU Physical Kernel Mode: parallel_dense_integer\n  GPU Descriptor Strategy: descriptor_grouped_aggregate\n  GPU Descriptor Specialization: dense_int4_sum_avg_plain\n  GPU Descriptor Specialization Cache: miss\n  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)\n  GPU Descriptor Group Keys: k0:fact(2346221.2:type=16) type=16 collation=0 encoding=hash\n  GPU Descriptor Aggregates: m0:column(2346221.3:type=23) -> value.sum; value.avg; m1:count_star -> value.count\n  GPU Descriptor Filter: fact=none; measures=[m0=none; m1=none]; dimensions=[none]\n  GPU Descriptor Star Dimensions: none\n  GPU Descriptor Output: slot0:group[k0] source_type=16 result_type=16 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot2:aggregate[m0].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot3:aggregate[m1].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false\n  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)\n  GPU Descriptor Artifact: not initialized\n  GPU Descriptor Generations: not inspected\n  GPU Descriptor Bytes: not inspected\n  GPU Resident Stage Mask: 16393\n  GPU Resident Device Columns: 2\n  GPU Resident Boundary: none: no CPU boundary\n",
+  "explain_error": null
+}

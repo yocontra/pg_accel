@@ -1,0 +1,207 @@
+{
+  "calls": [
+    {
+      "base_declaration": "0x9fb4c5c38",
+      "base_parameter": 4,
+      "callee_id": "0x9fb496240",
+      "conditional": false,
+      "destination_id": "0x9fb4c6750",
+      "destination_name": "device_request",
+      "destination_path": [],
+      "end": 5575470,
+      "local_reads": [],
+      "nullable": false,
+      "start": 5575413
+    },
+    {
+      "base_declaration": "0x9fb4c5c38",
+      "base_parameter": 4,
+      "callee_id": "0x9fb494a50",
+      "conditional": false,
+      "destination_id": "0x9fb4c6c18",
+      "destination_name": "heads",
+      "destination_path": [],
+      "end": 5575524,
+      "local_reads": [],
+      "nullable": false,
+      "start": 5575488
+    },
+    {
+      "base_declaration": "0x9fb4c5c38",
+      "base_parameter": 4,
+      "callee_id": "0x9fb494a50",
+      "conditional": false,
+      "destination_id": "0x9fb4c70e8",
+      "destination_name": "next",
+      "destination_path": [],
+      "end": 5575576,
+      "local_reads": [],
+      "nullable": false,
+      "start": 5575541
+    },
+    {
+      "base_declaration": "0x9fb4c5c38",
+      "base_parameter": 4,
+      "callee_id": "0x9fb495810",
+      "conditional": false,
+      "destination_id": "0x9fb4c75b8",
+      "destination_name": "counts",
+      "destination_path": [],
+      "end": 5575633,
+      "local_reads": [],
+      "nullable": false,
+      "start": 5575595
+    },
+    {
+      "base_declaration": "0x9fb4c5c38",
+      "base_parameter": 4,
+      "callee_id": "0x9fb494a50",
+      "conditional": false,
+      "destination_id": "0x9fb4c7a88",
+      "destination_name": "cursors",
+      "destination_path": [],
+      "end": 5575691,
+      "local_reads": [],
+      "nullable": false,
+      "start": 5575653
+    },
+    {
+      "base_declaration": "0x9fb4c5c38",
+      "base_parameter": 4,
+      "callee_id": "0x9fb495810",
+      "conditional": false,
+      "destination_id": "0x9fb4c7f58",
+      "destination_name": "positions",
+      "destination_path": [],
+      "end": 5575754,
+      "local_reads": [],
+      "nullable": false,
+      "start": 5575713
+    },
+    {
+      "base_declaration": "0x9fb4c5c38",
+      "base_parameter": 4,
+      "callee_id": "0x9fb4c8950",
+      "conditional": false,
+      "destination_id": "0x9fb4c8428",
+      "destination_name": "pending",
+      "destination_path": [],
+      "end": 5575813,
+      "local_reads": [],
+      "nullable": false,
+      "start": 5575774
+    },
+    {
+      "base_declaration": "0x9fb4c5c38",
+      "base_parameter": 4,
+      "callee_id": "0x9fb495810",
+      "conditional": true,
+      "destination_id": "0x9fb4def10",
+      "destination_name": "input",
+      "destination_path": [],
+      "end": 5579689,
+      "local_reads": [
+        "0x9fb4de968"
+      ],
+      "nullable": false,
+      "start": 5579635
+    },
+    {
+      "base_declaration": "0x9fb4c5c38",
+      "base_parameter": 4,
+      "callee_id": "0x9fb495810",
+      "conditional": false,
+      "destination_id": "0x9fb4df5e0",
+      "destination_name": "offsets",
+      "destination_path": [],
+      "end": 5579749,
+      "local_reads": [
+        "0x9fb4de968",
+        "0x9fb4deb30"
+      ],
+      "nullable": false,
+      "start": 5579711
+    },
+    {
+      "base_declaration": "0x9fb4c5c38",
+      "base_parameter": 4,
+      "callee_id": "0x9fb495810",
+      "conditional": false,
+      "destination_id": "0x9fb4dfaa8",
+      "destination_name": "sums",
+      "destination_path": [],
+      "end": 5579803,
+      "local_reads": [
+        "0x9fb4deb30"
+      ],
+      "nullable": false,
+      "start": 5579768
+    },
+    {
+      "base_declaration": "0x9fb4c5c38",
+      "base_parameter": 4,
+      "callee_id": "0x9fb495810",
+      "conditional": false,
+      "destination_id": "0x9fb4e6048",
+      "destination_name": "total",
+      "destination_path": [],
+      "end": 5580527,
+      "local_reads": [],
+      "nullable": false,
+      "start": 5580460
+    },
+    {
+      "base_declaration": "0x9fb4c5c38",
+      "base_parameter": 4,
+      "callee_id": "0x9fb495810",
+      "conditional": false,
+      "destination_id": "0x9fb4e7038",
+      "destination_name": "child",
+      "destination_path": [],
+      "end": 5580870,
+      "local_reads": [
+        "0x9fb4e6b78",
+        "0x9fb4e6d98"
+      ],
+      "nullable": false,
+      "start": 5580832
+    },
+    {
+      "base_declaration": "0x9fb4c5c38",
+      "base_parameter": 4,
+      "callee_id": "0x9fb495810",
+      "conditional": false,
+      "destination_id": "0x9fb4e7508",
+      "destination_name": "parent",
+      "destination_path": [],
+      "end": 5580950,
+      "local_reads": [
+        "0x9fb4e6b78"
+      ],
+      "nullable": false,
+      "start": 5580897
+    },
+    {
+      "base_declaration": "0x9fb4c5c38",
+      "base_parameter": 4,
+      "callee_id": "0x9fb495810",
+      "conditional": false,
+      "destination_id": "0x9fb4ebca8",
+      "destination_name": "offsets",
+      "destination_path": [],
+      "end": 5581499,
+      "local_reads": [],
+      "nullable": false,
+      "start": 5581450
+    }
+  ],
+  "detail": "stable workspace parameter, checked offset initializer/update expressions, typed call arguments and returned-alias facts; caller not approved",
+  "offset_inputs": [
+    "0x9fb4de968",
+    "0x9fb4deb30",
+    "0x9fb4e6b78",
+    "0x9fb4e6d98"
+  ],
+  "ok": true,
+  "source_sha256": "86b60452b6c99098ddb8088eda7087119a5f7a109ea37064b32707320403fe10"
+}

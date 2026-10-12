@@ -1,0 +1,46 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error[E0027]: pattern does not mention field `type_oid`
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:4610:13
+     |
+4610 |             ResidentColumnView::Bool { values, nulls } => {
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing field `type_oid`
+     |
+help: include the missing field in the pattern
+     |
+4610 |             ResidentColumnView::Bool { values, nulls, type_oid } => {
+     |                                                     ++++++++++
+help: if you don't care about this missing field, you can explicitly ignore it
+     |
+4610 |             ResidentColumnView::Bool { values, nulls, type_oid: _ } => {
+     |                                                     +++++++++++++
+help: or always ignore missing fields here
+     |
+4610 |             ResidentColumnView::Bool { values, nulls, .. } => {
+     |                                                     ++++
+
+error[E0599]: no variant, associated function, or constant named `Expr` found for enum `gpu::error::GpuErrorDomain` in the current scope
+  --> pg_accel/src/gpu/expr.rs:44:33
+   |
+44 |                 GpuErrorDomain::Expr,
+   |                                 ^^^^ variant, associated function, or constant not found in `gpu::error::GpuErrorDomain`
+   |
+  ::: pg_accel/src/gpu/error.rs:16:1
+   |
+16 | pub enum GpuErrorDomain {
+   | ----------------------- variant, associated function, or constant `Expr` not found for this enum
+
+error[E0599]: no variant, associated function, or constant named `Expr` found for enum `gpu::error::GpuErrorDomain` in the current scope
+  --> pg_accel/src/gpu/expr.rs:87:33
+   |
+87 |                 GpuErrorDomain::Expr,
+   |                                 ^^^^ variant, associated function, or constant not found in `gpu::error::GpuErrorDomain`
+   |
+  ::: pg_accel/src/gpu/error.rs:16:1
+   |
+16 | pub enum GpuErrorDomain {
+   | ----------------------- variant, associated function, or constant `Expr` not found for this enum
+
+Some errors have detailed explanations: E0027, E0599.
+For more information about an error, try `rustc --explain E0027`.
+error: could not compile `pg_accel` (lib test) due to 3 previous errors
+error: Recipe `test-standalone` failed with exit code 101

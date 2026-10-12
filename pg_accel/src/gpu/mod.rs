@@ -23,6 +23,9 @@ pub mod bridge;
 
 pub mod grouped_agg;
 
+pub mod join_project;
+pub mod join_rows;
+
 pub mod three_layer;
 
 // Types are declared once in `types.rs` and re-exported so callers don't

@@ -2,6 +2,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
+use std::mem::ManuallyDrop;
 
 use pgrx::pg_sys;
 
@@ -90,7 +91,8 @@ mod shared {
 
     // A Rust test thread models one PostgreSQL backend, just like the
     // backend-local residency STORE. Shared-ledger algorithms are tested
-    // directly below; live PostgreSQL tests exercise the process-shared path.
+    // directly below. pg_test uses a process-local Mutex; release SQL tests
+    // exercise the real process-shared ledger.
     thread_local! {
         static LEDGER: RefCell<ResidencyLedger> = RefCell::new(ResidencyLedger::default());
     }
@@ -340,6 +342,15 @@ impl LedgerCharge {
         self.bytes
     }
 
+    /// Transfer two reservations owned by this backend into one owner without
+    /// releasing/re-reserving bytes or opening a race in the cluster budget.
+    pub(super) fn merge(mut self, mut other: Self) -> Result<Self, ()> {
+        let bytes = self.bytes.checked_add(other.bytes).ok_or(())?;
+        self.bytes = bytes;
+        other.bytes = 0;
+        Ok(self)
+    }
+
     /// Release this charge while PostgreSQL shared memory is still attached.
     ///
     /// Store-owned charges use this explicit path before their device buffers
@@ -372,6 +383,69 @@ impl Drop for LedgerCharge {
     fn drop(&mut self) {
         self.release();
     }
+}
+
+thread_local! {
+    // PID tags prevent copied post-fork counters from becoming child evidence.
+    static EXECUTION_BYTES: Cell<(u32, u64)> = const { Cell::new((0, 0)) };
+}
+
+/// Cluster-budget ownership for executor buffers, including cached buffers.
+/// Does not borrow the resident store or evict inputs during dispatch.
+pub struct ExecutionMemoryCharge {
+    charge: ManuallyDrop<LedgerCharge>,
+    owner_pid: u32,
+    _not_send_sync: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl ExecutionMemoryCharge {
+    /// Bytes owned by this process; inherited post-fork handles cannot release
+    /// or offer the parent's charge as reclaimable query memory.
+    pub(crate) fn bytes(&self) -> u64 {
+        if self.owner_pid == std::process::id() {
+            self.charge.bytes()
+        } else {
+            0
+        }
+    }
+
+    pub(crate) fn reserve(bytes: u64, budget: u64) -> Result<Self, u64> {
+        let retained = execution_memory_bytes();
+        let next = retained.checked_add(bytes).ok_or(u64::MAX)?;
+        let charge = LedgerCharge::reserve(bytes, budget)?;
+        let owner_pid = std::process::id();
+        EXECUTION_BYTES.with(|counter| counter.set((owner_pid, next)));
+        Ok(Self {
+            charge: ManuallyDrop::new(charge),
+            owner_pid,
+            _not_send_sync: std::marker::PhantomData,
+        })
+    }
+}
+
+impl Drop for ExecutionMemoryCharge {
+    fn drop(&mut self) {
+        if self.owner_pid != std::process::id() {
+            return;
+        }
+        let bytes = self.charge.bytes();
+        let _ = EXECUTION_BYTES.try_with(|counter| {
+            let (pid, retained) = counter.get();
+            if pid == self.owner_pid {
+                counter.set((pid, retained.saturating_sub(bytes)));
+            }
+        });
+        // SAFETY: only the process that reserved this non-cloneable charge
+        // releases it, exactly once. LedgerCharge handles late backend teardown.
+        unsafe { ManuallyDrop::drop(&mut self.charge) };
+    }
+}
+
+pub(super) fn execution_memory_bytes() -> u64 {
+    EXECUTION_BYTES.with(|counter| {
+        let (pid, bytes) = counter.get();
+        if pid == std::process::id() { bytes } else { 0 }
+    })
 }
 
 fn backend_can_access_shared_memory() -> bool {
@@ -596,6 +670,69 @@ mod tests {
         drop(charge);
         assert_eq!(total_bytes(), 0);
         assert_eq!(byte_snapshot(), (0, 0));
+    }
+
+    #[test]
+    fn execution_charges_reserve_atomically_and_follow_ownership() {
+        let _guard = test_guard();
+        cleanup_backend();
+        assert_eq!(execution_memory_bytes(), 0);
+        let raw = LedgerCharge::reserve(100, 1024).expect("resident bytes");
+        let first = ExecutionMemoryCharge::reserve(400, 1024).expect("execution bytes");
+        assert_eq!(total_bytes(), 500);
+        assert_eq!(execution_memory_bytes(), 400);
+        assert!(ExecutionMemoryCharge::reserve(525, 1024).is_err());
+        assert_eq!(total_bytes(), 500);
+        assert_eq!(execution_memory_bytes(), 400);
+        let second = ExecutionMemoryCharge::reserve(524, 1024).expect("exact budget boundary");
+        let retained_pool_owner = first;
+        assert_eq!(execution_memory_bytes(), 924);
+        drop(second);
+        assert_eq!(total_bytes(), 500);
+        drop(retained_pool_owner);
+        assert_eq!(execution_memory_bytes(), 0);
+        assert_eq!(total_bytes(), 100);
+        drop(raw);
+        assert_eq!(total_bytes(), 0);
+    }
+
+    #[test]
+    fn merging_charges_transfers_ownership_without_changing_the_ledger() {
+        let _guard = test_guard();
+        cleanup_backend();
+        let host = LedgerCharge::reserve(100, 257).expect("host reserve");
+        let device = LedgerCharge::reserve(157, 257).expect("device reserve");
+        let combined = host.merge(device).expect("merge");
+        assert_eq!(combined.bytes(), 257);
+        assert_eq!(total_bytes(), 257);
+        assert!(LedgerCharge::reserve(1, 257).is_err());
+        let combined = combined
+            .merge(LedgerCharge::reserve(0, 0).expect("empty charge"))
+            .expect("merge zero");
+        assert_eq!(total_bytes(), 257);
+        drop(combined);
+        assert_eq!(total_bytes(), 0);
+    }
+
+    #[test]
+    fn copied_execution_charge_never_releases_another_process_owner() {
+        let _guard = test_guard();
+        cleanup_backend();
+        let mut copied = ExecutionMemoryCharge::reserve(311, 1024).expect("parent charge");
+        assert_eq!(copied.bytes(), 311);
+        copied.owner_pid = std::process::id().wrapping_add(1);
+        assert_eq!(
+            copied.bytes(),
+            0,
+            "foreign-owner charges are not locally reclaimable"
+        );
+        drop(copied);
+        assert_eq!(total_bytes(), 311);
+        assert_eq!(execution_memory_bytes(), 311);
+        // This models reclaiming the original owner's ledger after the child
+        // deliberately abandoned its copy; no real device buffer exists here.
+        cleanup_backend();
+        EXECUTION_BYTES.with(|counter| counter.set((0, 0)));
     }
 
     #[test]

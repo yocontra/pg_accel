@@ -1,0 +1,181 @@
+    Checking pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error: used `unwrap()` on an `Option` value
+   --> pg_accel/src/tests/scalar_lowering.rs:121:37
+    |
+121 |                         let group = row.get::<i32>(1).unwrap().unwrap() as usize;
+    |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: consider using `expect()` to provide a better panic message
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+    = note: requested on the command line with `-D clippy::unwrap-used`
+
+error: used `unwrap()` on a `Result` value
+   --> pg_accel/src/tests/scalar_lowering.rs:121:37
+    |
+121 |                         let group = row.get::<i32>(1).unwrap().unwrap() as usize;
+    |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: consider using `expect()` to provide a better panic message
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> pg_accel/src/tests/scalar_lowering.rs:122:37
+    |
+122 |                         let count = row.get::<i64>(5).unwrap().unwrap() as u64;
+    |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: consider using `expect()` to provide a better panic message
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> pg_accel/src/tests/scalar_lowering.rs:122:37
+    |
+122 |                         let count = row.get::<i64>(5).unwrap().unwrap() as u64;
+    |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: consider using `expect()` to provide a better panic message
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> pg_accel/src/tests/scalar_lowering.rs:123:36
+    |
+123 |                         assert_eq!(output.measure_count(0).unwrap()[group], count);
+    |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: consider using `expect()` to provide a better panic message
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+
+error: used `unwrap()` on an `Option` value
+   --> pg_accel/src/tests/scalar_lowering.rs:124:36
+    |
+124 |                         assert_eq!(output.measure_nonnull_count(0).unwrap()[group], count);
+    |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is `None`, it will panic
+    = help: consider using `expect()` to provide a better panic message
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> pg_accel/src/tests/scalar_lowering.rs:127:50
+    |
+127 | ...                   if let Some(value) = row.get::<i64>(index).unwrap() {
+    |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: consider using `expect()` to provide a better panic message
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> pg_accel/src/tests/scalar_lowering.rs:128:44
+    |
+128 | ...                   assert_eq!(output.measure_i64_at(0,lane,group).unwrap(), value,
+    |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: consider using `expect()` to provide a better panic message
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> pg_accel/src/tests/scalar_lowering.rs:140:38
+    |
+140 |                         .accumulate(&plan.row_chunk(first, (4097 - first).min(113)).unwrap())
+    |                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: consider using `expect()` to provide a better panic message
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> pg_accel/src/tests/scalar_lowering.rs:144:34
+    |
+144 |                     .accumulate(&plan.row_chunk(4097, 0).unwrap())
+    |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: consider using `expect()` to provide a better panic message
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> pg_accel/src/tests/scalar_lowering.rs:146:35
+    |
+146 |                 let mut chunked = GroupedAggOutputStorage::new(&plan).unwrap();
+    |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: consider using `expect()` to provide a better panic message
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> pg_accel/src/tests/scalar_lowering.rs:163:34
+    |
+163 |                     .accumulate(&plan.row_chunk(0, 113).unwrap())
+    |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: consider using `expect()` to provide a better panic message
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> pg_accel/src/tests/scalar_lowering.rs:167:35
+    |
+167 |                     let failing = lower("SELECT a/b FROM scalar_fused_rows").unwrap();
+    |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: consider using `expect()` to provide a better panic message
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> pg_accel/src/tests/scalar_lowering.rs:193:38
+    |
+193 |                     let fault_plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.unwrap();
+    |                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: consider using `expect()` to provide a better panic message
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+
+error: used `unwrap()` on a `Result` value
+   --> pg_accel/src/tests/scalar_lowering.rs:194:44
+    |
+194 |                     let mut fault_output = GroupedAggOutputStorage::new(&fault_plan).unwrap();
+    |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: consider using `expect()` to provide a better panic message
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+
+error: could not compile `pg_accel` (lib) due to 15 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: implicit borrow as raw pointer
+    --> pg_accel/src/gpu/grouped_agg.rs:3740:21
+     |
+3740 |             inputs: &input,
+     |                     ^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#borrow_as_ptr
+     = note: `-D clippy::borrow-as-ptr` implied by `-D clippy::pedantic`
+     = help: to override `-D clippy::pedantic` add `#[allow(clippy::borrow_as_ptr)]`
+help: use a raw pointer instead
+     |
+3740 |             inputs: &raw const input,
+     |                      +++++++++
+
+error: implicit borrow as raw pointer
+    --> pg_accel/src/gpu/grouped_agg.rs:3763:31
+     |
+3763 |                 view.inputs = &bound;
+     |                               ^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#borrow_as_ptr
+help: use a raw pointer instead
+     |
+3763 |                 view.inputs = &raw const bound;
+     |                                +++++++++
+
+error: could not compile `pg_accel` (lib test) due to 17 previous errors

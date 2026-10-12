@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "kind": "metadata-link-binding",
+  "working_directory": "/Users/contra/Projects/pg_accel/pgaccel-kernels/build",
+  "library": "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/libpgaccel_kernels_shared.dylib",
+  "library_sha256": "9c84d3d7bbd10720e2f416c13078fb4a3e7b479b4a0d0f75fadd5f0b84ad5fc7",
+  "linker_map": "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/libpgaccel_kernels_shared.dylib.map",
+  "map_sha256": "39c93db76cc3d1a8aec87a46181b6a9016d331ed86675b5193b39f690d301930",
+  "object": "/Users/contra/Projects/pg_accel/pgaccel-kernels/build/CMakeFiles/pgaccel_metadata.dir/Release/join_rows_layout.cpp.o",
+  "object_sha256": "7409cf40ac5a10a7da7d4ee135e23e13638ba6c96073b60d817f77fddebec295",
+  "receipt_sha256": "88f2250cf88c8c3ab693fad1b0912500ea85cd6e66af407eb96f600b589eb571",
+  "link_driver_sha256": "bd3d6c5ade817e3e00bf82191c6cb614b70d13f41e73ce7f36b8a0e5c0ae19cb",
+  "exports": {
+    "pgaccel_join_rows_controlled_workspace_bytes": 2482372,
+    "pgaccel_join_rows_workspace_bytes": 2479288
+  }
+}

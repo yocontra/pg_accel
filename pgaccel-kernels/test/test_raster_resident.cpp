@@ -457,6 +457,70 @@ void test_float_epsilon_nan_and_infinity() {
   expect_valid(&f64_case, {9, 9, 0, 0, 0, 0}, {PGACCEL_RASTER_ROW_RECLASSIFIED});
 }
 
+void test_lookup_launch_specializations() {
+  constexpr double epsilon = 1.1920928955078125e-7;
+  // Exercise both sides of the launch-policy boundary and the public cap.
+  // This oracle deliberately does not call either production lookup helper.
+  for (size_t count : {size_t{16}, size_t{17}, size_t{64}}) {
+    for (int64_t first : {INT64_C(-2147483648), INT64_C(-32), INT64_C(4294967232)}) {
+      std::vector<pgaccel_resident_raster_reclass_rule> rules;
+      std::vector<double> values = {0.0,
+                                    -0.0,
+                                    std::numeric_limits<double>::denorm_min(),
+                                    std::numeric_limits<double>::quiet_NaN(),
+                                    std::numeric_limits<double>::infinity(),
+                                    -std::numeric_limits<double>::infinity()};
+      for (size_t index = 0; index < count; ++index) {
+        const int64_t destination = static_cast<int64_t>(index + 1) * (index % 2 ? -1 : 1);
+        rules.push_back({first + static_cast<int64_t>(index), destination});
+        const double source = static_cast<double>(rules.back().source);
+        for (double value : {source, source - epsilon, source + epsilon, source + 0.25}) {
+          values.push_back(value);
+          values.push_back(std::nextafter(value, -std::numeric_limits<double>::infinity()));
+          values.push_back(std::nextafter(value, std::numeric_limits<double>::infinity()));
+        }
+      }
+      std::vector<uint8_t> pixels, expected;
+      for (double value : values) {
+        append_f64_le(&pixels, value);
+        int64_t destination = 0;
+        for (const auto& rule : rules) {
+          const double source = static_cast<double>(rule.source);
+          if (source == value || std::fabs(source - value) <= epsilon) {
+            destination = rule.destination;
+            break;
+          }
+        }
+        append_integer_le(&expected, static_cast<uint64_t>(destination), 2);
+      }
+      CaseData data = single_band_case(PGACCEL_RESIDENT_RASTER_FLOAT64, pixels, values.size(),
+                                       rules, PGACCEL_RESIDENT_RASTER_INT16);
+      data.max_chunk_pixels = 127;  // Multiple launches, with a partial final launch.
+      ResidentCase test_case(data);
+      expect_valid(&test_case, expected, {PGACCEL_RASTER_ROW_RECLASSIFIED});
+      require(test_case.input_pixels() == pixels, "lookup specialization modified source pixels");
+
+      // Both kernel variants must respect the prior validation failure barrier.
+      data.rules[count / 2].source = data.rules[count / 2 - 1].source;
+      ResidentCase invalid(data);
+      expect_device_failure(&invalid, PGACCEL_RASTER_DETAIL_RULES);
+
+      // IS_NODATA supplies the source value instead of decoding the pixel lane.
+      data.rules = rules;
+      const auto& nodata_rule = rules[count / 2];
+      data.bands[0] =
+          band(PGACCEL_RESIDENT_RASTER_FLOAT64,
+               PGACCEL_RESIDENT_RASTER_BAND_HAS_NODATA | PGACCEL_RESIDENT_RASTER_BAND_IS_NODATA,
+               static_cast<double>(nodata_rule.source));
+      expected.clear();
+      for (size_t index = 0; index < values.size(); ++index)
+        append_integer_le(&expected, static_cast<uint64_t>(nodata_rule.destination), 2);
+      ResidentCase nodata(data);
+      expect_valid(&nodata, expected, {PGACCEL_RASTER_ROW_RECLASSIFIED});
+    }
+  }
+}
+
 void test_nodata_flags_are_ordinary_source_values() {
   std::vector<uint8_t> pixels;
   append_integer_le(&pixels, 1, 2);
@@ -982,6 +1046,8 @@ int main() {
            test_row_actions_and_multiband_preservation);
   run_test("integer source and output extrema matrix", test_integer_source_and_output_matrix);
   run_test("float32/64 FLT_EQ epsilon, NaN, and infinity", test_float_epsilon_nan_and_infinity);
+  run_test("linear/indexed launch parity, chunking, validation, and NODATA",
+           test_lookup_launch_specializations);
   run_test("HAS_NODATA/IS_NODATA source semantics", test_nodata_flags_are_ordinary_source_values);
   run_test("little/big WKB normalized source lanes", test_endian_normalized_source_lanes);
   run_test("nonzero slices, zero output, 64-rule cap, and unmatched zero",

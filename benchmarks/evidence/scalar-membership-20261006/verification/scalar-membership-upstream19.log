@@ -1,0 +1,4 @@
+PostgreSQL 19beta1 tarball already present: /Users/contra/Projects/pg_accel/.pgaccel/postgres/distfiles/postgresql-19beta1.tar.bz2
+PostgreSQL 19beta1 source already unpacked: /Users/contra/Projects/pg_accel/.pgaccel/postgres/src/postgresql-19beta1
+PostgreSQL 19beta1 already installed: /Users/contra/Projects/pg_accel/.pgaccel/postgres/install/19beta1
+PostgreSQL 19 upstream compatibility gate passed; evidence: /Users/contra/Projects/pg_accel/.codex/scratch/scalar-membership-upstream19-20261006

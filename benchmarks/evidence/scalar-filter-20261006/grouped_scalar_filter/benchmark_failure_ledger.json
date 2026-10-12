@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "total_measured_rows": 3,
+  "ship_gate_failure_count": 0,
+  "h3_lane_gate_failure_count": 0,
+  "crash_count": 0,
+  "rows_below_parity_count": 3,
+  "gpu_dispatched_below_parity_count": 0,
+  "native_below_parity_count": 3,
+  "planner_declined_below_parity_count": 3,
+  "stock_fallback_rows": 0,
+  "custom_scan_selected_not_dispatched_rows": 0,
+  "unique_work_items": 3,
+  "rows": [
+    {
+      "workload": "grouped_scalar_filter",
+      "rows": 250000,
+      "category": "gpu_hashagg",
+      "kernel_class": "hash_agg",
+      "classification": "planner_declined_native",
+      "priority": "p2_architecture_gap",
+      "next_track": "resident_groupagg_small_input_overhead",
+      "sources": [
+        "native_below_parity"
+      ],
+      "speedup_median_vs_parallel": 0.9649921651554365,
+      "accel_median_ms": 13.993896,
+      "parallel_median_ms": 13.504000000000001,
+      "details": [
+        "native/planner-declined row below 0.98x parity"
+      ]
+    },
+    {
+      "workload": "grouped_scalar_filter",
+      "rows": 1000000,
+      "category": "gpu_hashagg",
+      "kernel_class": "hash_agg",
+      "classification": "planner_declined_native",
+      "priority": "p2_architecture_gap",
+      "next_track": "resident_groupagg_small_input_overhead",
+      "sources": [
+        "native_below_parity"
+      ],
+      "speedup_median_vs_parallel": 0.9678014236261654,
+      "accel_median_ms": 30.2342715,
+      "parallel_median_ms": 29.260771,
+      "details": [
+        "native/planner-declined row below 0.98x parity"
+      ]
+    },
+    {
+      "workload": "grouped_scalar_filter",
+      "rows": 2000000,
+      "category": "gpu_hashagg",
+      "kernel_class": "hash_agg",
+      "classification": "planner_declined_native",
+      "priority": "p3_parity_noise",
+      "next_track": "resident_groupagg_small_input_overhead",
+      "sources": [
+        "native_below_parity"
+      ],
+      "speedup_median_vs_parallel": 0.9820022116956265,
+      "accel_median_ms": 49.286167,
+      "parallel_median_ms": 48.399125,
+      "details": [
+        "native/planner-declined row below 1.00x parity"
+      ]
+    }
+  ]
+}

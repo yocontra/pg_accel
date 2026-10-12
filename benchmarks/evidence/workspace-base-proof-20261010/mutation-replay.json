@@ -1,0 +1,12 @@
+{
+  "previous": {
+    "ok": true,
+    "detail": "typed call arguments and returned-alias facts; caller not approved",
+    "calls": 1
+  },
+  "current": {
+    "ok": false,
+    "detail": "workspace parameter is reassigned or escapes a pointer-value read",
+    "calls": 0
+  }
+}

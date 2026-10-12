@@ -1,0 +1,145 @@
+=== 40_gpu_expr_where ===
+BEGIN
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT 100000
+ANALYZE
+SET
+SELECT 1
+SET
+ pg_accel_reset_stats 
+----------------------
+ 
+(1 row)
+
+DO
+PGACCEL_ASSERT_OK:40_gpu_expr_where.assert_001
+SELECT 1
+DO
+DROP TABLE
+COMMIT
+PGACCEL_ASSERT_OK:40_gpu_expr_where.assert_002
+BEGIN
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT 100000
+ANALYZE
+SET
+SELECT 1
+SET
+SELECT 1
+DO
+DROP TABLE
+COMMIT
+PGACCEL_ASSERT_OK:40_gpu_expr_where.assert_003
+BEGIN
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT 100000
+ANALYZE
+SET
+SELECT 1
+SET
+SELECT 1
+DO
+DROP TABLE
+COMMIT
+PGACCEL_ASSERT_OK:40_gpu_expr_where.assert_004
+BEGIN
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT 100000
+ANALYZE
+SET
+SELECT 1
+SET
+SELECT 1
+DO
+DROP TABLE
+COMMIT
+PGACCEL_ASSERT_OK:40_gpu_expr_where.assert_005
+BEGIN
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT 100000
+ANALYZE
+SET
+SELECT 1
+SET
+SELECT 1
+DO
+DROP TABLE
+COMMIT
+PGACCEL_ASSERT_OK:40_gpu_expr_where.assert_006
+BEGIN
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT 100000
+ANALYZE
+SET
+SELECT 1
+SET
+SELECT 1
+DO
+DROP TABLE
+COMMIT
+PGACCEL_ASSERT_OK:40_gpu_expr_where.assert_007
+BEGIN
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT 100000
+ANALYZE
+SET
+SELECT 1
+SET
+SELECT 1
+DO
+DROP TABLE
+COMMIT
+PGACCEL_ASSERT_OK:40_gpu_expr_where.assert_008
+BEGIN
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT 100000
+ANALYZE
+SET
+SELECT 1
+SET
+SELECT 1
+DO
+DROP TABLE
+COMMIT
+PGACCEL_ASSERT_OK:40_gpu_expr_where.assert_009
+BEGIN
+SELECT 1000
+ANALYZE
+SET
+SELECT 1
+DO
+DROP TABLE
+COMMIT
+PGACCEL_FILE_OK:40_gpu_expr_where

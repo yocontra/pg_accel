@@ -1,0 +1,2 @@
+0000000000130dc0 t hipsycl::sycl::event hipsycl::sycl::queue::parallel_for<(anonymous namespace)::RasterResidentReclassKernel, pgaccel_raster_reclass_resident_ex::$_6>(hipsycl::sycl::range<1>, pgaccel_raster_reclass_resident_ex::$_6 const&)
+0000000000132b30 t hipsycl::sycl::event hipsycl::sycl::queue::parallel_for<(anonymous namespace)::RasterResidentReclassIndexedKernel, pgaccel_raster_reclass_resident_ex::$_7>(hipsycl::sycl::range<1>, pgaccel_raster_reclass_resident_ex::$_7 const&)

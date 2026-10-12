@@ -1,0 +1,19 @@
+=== 98_aggregate_filter_contract ===
+SET
+SET
+CREATE TABLE
+INSERT 0 500000
+ANALYZE
+SET
+SELECT 257
+CREATE TABLE
+DO
+PGACCEL_ASSERT_OK:98_aggregate_filter_contract.assert_001
+TRUNCATE TABLE
+DO
+PGACCEL_ASSERT_OK:98_aggregate_filter_contract.assert_002
+DROP TABLE
+DROP TABLE
+DROP TABLE
+DROP TABLE
+PGACCEL_FILE_OK:98_aggregate_filter_contract

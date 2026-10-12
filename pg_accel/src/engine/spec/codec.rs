@@ -10,7 +10,7 @@ use super::{
     SpecValidationError, abi,
 };
 
-pub const AGG_QUERY_SPEC_WIRE_MAGIC: i32 = 0x5047_4133; // "PGA3"
+pub const AGG_QUERY_SPEC_WIRE_MAGIC: i32 = 0x5047_4136; // "PGA6"
 pub const AGG_QUERY_SPEC_HEADER_WORDS: usize = 3;
 const MAX_COLUMN_LIST_WORDS: usize = 1 + MAX_PROGRAM_INPUTS * 3;
 const MAX_BYTECODE_BLOCK_WORDS: usize = 1 + MAX_BYTECODE_WORDS;
@@ -20,8 +20,10 @@ const MAX_SPATIAL_CONSTANT_OPERAND_WORDS: usize = 1 + 4 + 1 + MAX_PACKED_SPATIAL
 const MAX_SPATIAL_FILTER_WORDS: usize =
     1 + 1 + MAX_SPATIAL_COLUMN_OPERAND_WORDS + MAX_SPATIAL_CONSTANT_OPERAND_WORDS + 1 + 3;
 const MAX_BYTECODE_FILTER_WORDS: usize = 1 + MAX_COLUMN_LIST_WORDS + MAX_BYTECODE_BLOCK_WORDS;
-const MAX_FILTER_WORDS: usize = if MAX_SPATIAL_FILTER_WORDS > MAX_BYTECODE_FILTER_WORDS {
-    MAX_SPATIAL_FILTER_WORDS
+const MAX_SPATIAL_AND_WORDS: usize =
+    1 + MAX_SPATIAL_FILTER_WORDS + 1 + 3 + 1 + abi::PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES * 4;
+const MAX_FILTER_WORDS: usize = if MAX_SPATIAL_AND_WORDS > MAX_BYTECODE_FILTER_WORDS {
+    MAX_SPATIAL_AND_WORDS
 } else {
     MAX_BYTECODE_FILTER_WORDS
 };
@@ -43,7 +45,7 @@ const MAX_MEASURE_WORDS: usize = if MAX_BYTECODE_MEASURE_WORDS > MAX_STATS_PAIR_
 const MAX_DIM_WORDS: usize = 1 + 3 + 3 + 1 + 1 + MAX_FILTER_WORDS;
 const MAX_HAVING_WORDS: usize = 1 + 1 + MAX_PROGRAM_INPUTS * 3 + MAX_BYTECODE_BLOCK_WORDS;
 
-/// Exact maximum word length of any semantically valid v3 spec.
+/// Exact maximum word length of any semantically valid v5 spec.
 pub const AGG_QUERY_SPEC_MAX_WORDS: usize = AGG_QUERY_SPEC_HEADER_WORDS
     + 1
     + 1
@@ -335,9 +337,18 @@ impl Encoder {
 
     fn push_filter(&mut self, filter: &FilterSpec) -> Result<(), SpecCodecError> {
         match filter {
+            FilterSpec::SpatialAnd { spatial, scalar } => {
+                self.push(5);
+                self.push_filter(spatial)?;
+                self.push_filter(scalar)?;
+            }
             FilterSpec::None => self.push(0),
-            FilterSpec::Ranges { input, ranges } => {
-                self.push(1);
+            FilterSpec::Ranges { input, ranges } | FilterSpec::NullOrRanges { input, ranges } => {
+                self.push(if matches!(filter, FilterSpec::NullOrRanges { .. }) {
+                    6
+                } else {
+                    1
+                });
                 self.push_column(*input);
                 self.push_len(ranges.len())?;
                 for range in ranges {
@@ -375,6 +386,8 @@ impl Encoder {
                     SpatialPredicateKind::Touches => 6,
                     SpatialPredicateKind::Crosses => 7,
                     SpatialPredicateKind::Overlaps => 8,
+                    SpatialPredicateKind::Covers => 9,
+                    SpatialPredicateKind::CoveredBy => 10,
                 });
                 self.push_spatial_operand(left)?;
                 self.push_spatial_operand(right)?;
@@ -466,6 +479,7 @@ impl Encoder {
                 self.push(match op {
                     BinaryMeasureOp::Mul => 0,
                     BinaryMeasureOp::Sub => 1,
+                    BinaryMeasureOp::Add => 2,
                 });
                 self.push_column(*lhs);
                 self.push_column(*rhs);
@@ -753,9 +767,25 @@ impl<'a> Decoder<'a> {
     }
 
     fn read_filter(&mut self) -> Result<FilterSpec, SpecCodecError> {
-        match self.read_tag("filter", 4)? {
+        self.read_filter_level(true)
+    }
+
+    fn read_filter_level(&mut self, allow_conjunction: bool) -> Result<FilterSpec, SpecCodecError> {
+        let tag = self.read_tag("filter", 6)?;
+        if tag == 5 && !allow_conjunction {
+            return Err(SpecCodecError::InvalidTag {
+                index: self.index.saturating_sub(1),
+                context: "filter",
+                tag,
+            });
+        }
+        match tag {
+            5 => Ok(FilterSpec::SpatialAnd {
+                spatial: Box::new(self.read_filter_level(false)?),
+                scalar: Box::new(self.read_filter_level(false)?),
+            }),
             0 => Ok(FilterSpec::None),
-            1 => {
+            1 | 6 => {
                 let input = self.read_column()?;
                 let len =
                     self.read_count("range count", abi::PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES, 4)?;
@@ -766,7 +796,11 @@ impl<'a> Decoder<'a> {
                         hi: self.read_scalar()?,
                     });
                 }
-                Ok(FilterSpec::Ranges { input, ranges })
+                Ok(if tag == 6 {
+                    FilterSpec::NullOrRanges { input, ranges }
+                } else {
+                    FilterSpec::Ranges { input, ranges }
+                })
             }
             2 => {
                 let input = self.read_column()?;
@@ -782,7 +816,7 @@ impl<'a> Decoder<'a> {
                 program: self.read_words("bytecode word count")?,
             }),
             4 => {
-                let predicate = match self.read_tag("spatial predicate", 8)? {
+                let predicate = match self.read_tag("spatial predicate", 10)? {
                     0 => SpatialPredicateKind::Intersects,
                     1 => SpatialPredicateKind::Contains,
                     2 => SpatialPredicateKind::Within,
@@ -792,6 +826,8 @@ impl<'a> Decoder<'a> {
                     6 => SpatialPredicateKind::Touches,
                     7 => SpatialPredicateKind::Crosses,
                     8 => SpatialPredicateKind::Overlaps,
+                    9 => SpatialPredicateKind::Covers,
+                    10 => SpatialPredicateKind::CoveredBy,
                     _ => unreachable!(),
                 };
                 let left = self.read_spatial_operand()?;
@@ -874,9 +910,10 @@ impl<'a> Decoder<'a> {
             0 => MeasureExpr::CountStar,
             1 => MeasureExpr::Column(self.read_column()?),
             2 => {
-                let op = match self.read_tag("binary measure operation", 1)? {
+                let op = match self.read_tag("binary measure operation", 2)? {
                     0 => BinaryMeasureOp::Mul,
                     1 => BinaryMeasureOp::Sub,
+                    2 => BinaryMeasureOp::Add,
                     _ => unreachable!(),
                 };
                 MeasureExpr::Binary {
@@ -1332,7 +1369,7 @@ mod tests {
             typmod: -1,
             srid: Some(4_326),
         };
-        FilterSpec::Spatial {
+        let spatial = FilterSpec::Spatial {
             predicate: SpatialPredicateKind::DWithin,
             left: SpatialOperand::Column {
                 column: column(relation_oid, 1, 9_999),
@@ -1343,6 +1380,19 @@ mod tests {
                 bytes: vec![0xA5; MAX_SPATIAL_CONSTANT_BYTES].into_boxed_slice(),
             },
             distance: Some(ScalarValue::F64(f64::MAX)),
+        };
+        FilterSpec::SpatialAnd {
+            spatial: Box::new(spatial),
+            scalar: Box::new(FilterSpec::Ranges {
+                input: column(relation_oid, 2, INT4_OID),
+                ranges: vec![
+                    ScalarRange {
+                        lo: ScalarValue::I32(i32::MIN),
+                        hi: ScalarValue::I32(i32::MAX)
+                    };
+                    abi::PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES
+                ],
+            }),
         }
     }
 
@@ -1466,7 +1516,7 @@ mod tests {
 
     #[test]
     fn exported_max_words_is_reached_by_a_valid_maximal_spec() {
-        assert_eq!(AGG_QUERY_SPEC_MAX_WORDS, 2_885_444);
+        assert_eq!(AGG_QUERY_SPEC_MAX_WORDS, 2_885_642);
         let spec = maximal_spec();
         let encoded = spec.encode_i32().expect("maximal valid spec encodes");
         assert_eq!(encoded.len(), AGG_QUERY_SPEC_MAX_WORDS);
@@ -1524,10 +1574,155 @@ mod tests {
     }
 
     #[test]
+    fn checked_arithmetic_tags_round_trip_and_reject_v5() {
+        for op in [
+            BinaryMeasureOp::Mul,
+            BinaryMeasureOp::Sub,
+            BinaryMeasureOp::Add,
+        ] {
+            let mut spec = minimal_spec();
+            spec.measures[0].expression = MeasureExpr::Binary {
+                op,
+                lhs: column(spec.fact_rel, 1, INT4_OID),
+                rhs: column(spec.fact_rel, 2, INT4_OID),
+            };
+            let encoded = spec.encode_i32().expect("arithmetic encodes");
+            assert_eq!(
+                AggQuerySpec::decode_i32(&encoded).expect("round trip"),
+                spec
+            );
+            let mut old = encoded.clone();
+            old[0] = 0x5047_4135;
+            assert!(matches!(
+                AggQuerySpec::decode_i32(&old),
+                Err(SpecCodecError::InvalidMagic(_))
+            ));
+            old = encoded;
+            old[1] = 5;
+            assert_eq!(
+                AggQuerySpec::decode_i32(&old),
+                Err(SpecCodecError::UnsupportedVersion(5))
+            );
+        }
+    }
+
+    #[test]
+    fn null_accepting_ranges_have_distinct_bounded_versioned_semantics() {
+        let mut spec = minimal_spec();
+        for count in 0..=abi::PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES {
+            spec.fact_filter = FilterSpec::NullOrRanges {
+                input: column(spec.fact_rel, 9, INT4_OID),
+                ranges: (0..count)
+                    .map(|i| ScalarRange {
+                        lo: ScalarValue::I32(i as i32 * 10),
+                        hi: ScalarValue::I32(i as i32 * 10 + 3),
+                    })
+                    .collect(),
+            };
+            let encoded = spec.encode_i32().expect("NULL-aware predicate");
+            assert_eq!(AggQuerySpec::decode_i32(&encoded).expect("decode"), spec);
+            for end in 0..encoded.len() {
+                assert!(AggQuerySpec::decode_i32(&encoded[..end]).is_err());
+            }
+            let mut old = encoded.clone();
+            old[0] = 0x5047_4134;
+            assert!(matches!(
+                AggQuerySpec::decode_i32(&old),
+                Err(SpecCodecError::InvalidMagic(_))
+            ));
+            let mut ordinary = spec.clone();
+            let FilterSpec::NullOrRanges { input, ranges } = &spec.fact_filter else {
+                unreachable!()
+            };
+            ordinary.fact_filter = FilterSpec::Ranges {
+                input: *input,
+                ranges: ranges.clone(),
+            };
+            if count == 0 {
+                assert!(ordinary.encode_i32().is_err());
+            } else {
+                assert_ne!(ordinary.encode_i32().expect("ordinary ranges"), encoded);
+            }
+            let mut foreign = spec.clone();
+            let FilterSpec::NullOrRanges { input, .. } = &mut foreign.fact_filter else {
+                unreachable!()
+            };
+            input.relation_oid += 1;
+            assert!(foreign.encode_i32().is_err());
+            for oid in [20, 1700, 16] {
+                let mut invalid = spec.clone();
+                let FilterSpec::NullOrRanges { input, .. } = &mut invalid.fact_filter else {
+                    unreachable!()
+                };
+                input.type_oid = oid;
+                assert!(invalid.encode_i32().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn spatial_conjunction_is_canonical_bounded_and_relation_scoped() {
+        let mut spec = minimal_spec();
+        spec.fact_filter = maximal_filter(spec.fact_rel);
+        let FilterSpec::SpatialAnd { spatial, .. } = &mut spec.fact_filter else {
+            unreachable!()
+        };
+        let FilterSpec::Spatial {
+            right: SpatialOperand::Constant { bytes, .. },
+            ..
+        } = spatial.as_mut()
+        else {
+            unreachable!()
+        };
+        *bytes = vec![0x11, 0x22, 0x33].into_boxed_slice();
+        let encoded = spec.encode_i32().expect("bounded conjunction");
+        assert_eq!(
+            AggQuerySpec::decode_i32(&encoded).expect("round trip"),
+            spec
+        );
+        for end in 0..encoded.len() {
+            assert!(AggQuerySpec::decode_i32(&encoded[..end]).is_err());
+        }
+        for old_version in [2, 3, 4, 5] {
+            let mut old = encoded.clone();
+            old[1] = old_version;
+            assert!(matches!(
+                AggQuerySpec::decode_i32(&old),
+                Err(SpecCodecError::UnsupportedVersion(_))
+            ));
+        }
+        let tag = encoded
+            .windows(3)
+            .position(|words| words == [5, 4, 3])
+            .expect("conjunction/spatial/DWithin tags");
+        let mut nested_wire = encoded;
+        nested_wire[tag + 1] = 5;
+        assert!(matches!(
+            AggQuerySpec::decode_i32(&nested_wire),
+            Err(SpecCodecError::InvalidTag { .. })
+        ));
+        let mut foreign = spec.clone();
+        let FilterSpec::SpatialAnd { scalar, .. } = &mut foreign.fact_filter else {
+            unreachable!()
+        };
+        let FilterSpec::Ranges { input, .. } = scalar.as_mut() else {
+            unreachable!()
+        };
+        input.relation_oid += 1;
+        assert!(foreign.encode_i32().is_err());
+        let original = spec.fact_filter.clone();
+        let FilterSpec::SpatialAnd { scalar, .. } = &mut spec.fact_filter else {
+            unreachable!()
+        };
+        **scalar = original;
+        assert!(spec.encode_i32().is_err());
+    }
+
+    #[test]
     fn aqs2_and_unknown_wire_headers_fail_closed() {
         let encoded = minimal_spec()
             .encode_i32()
-            .expect("valid AQS3 spec encodes");
+            .expect("valid AQS6 spec encodes");
 
         let mut old_magic = encoded.clone();
         old_magic[0] = 0x5047_4132; // "PGA2"
@@ -1573,9 +1768,9 @@ mod tests {
         };
         let encoded = spec.encode_i32().expect("spatial constant encodes");
         assert_eq!(
-            AggQuerySpec::decode_i32(&encoded).expect("spatial AQS3 decodes"),
+            AggQuerySpec::decode_i32(&encoded).expect("spatial AQS6 decodes"),
             spec,
-            "spatial AQS3 round-trip must preserve exact operand metadata and bytes"
+            "spatial AQS6 round-trip must preserve exact operand metadata and bytes"
         );
         let payload_index = encoded
             .iter()
@@ -2236,6 +2431,8 @@ mod tests {
             (SpatialPredicateKind::Touches, None),
             (SpatialPredicateKind::Crosses, None),
             (SpatialPredicateKind::Overlaps, None),
+            (SpatialPredicateKind::Covers, None),
+            (SpatialPredicateKind::CoveredBy, None),
         ] {
             let metadata = SpatialValueMetadata {
                 kind: SpatialValueKind::Geography,
@@ -2256,12 +2453,27 @@ mod tests {
             };
             let mut encoder = Encoder { words: Vec::new() };
             encoder.push_filter(&filter).expect("encode spatial filter");
+            if predicate == SpatialPredicateKind::Covers {
+                assert_eq!(encoder.words[1], 9, "Covers appends a stable wire tag");
+            } else if predicate == SpatialPredicateKind::CoveredBy {
+                assert_eq!(encoder.words[1], 10, "CoveredBy appends a stable wire tag");
+            }
             let mut decoder = Decoder::new(&encoder.words);
             assert_eq!(
                 decoder.read_filter().expect("decode spatial filter"),
                 filter
             );
             assert_eq!(decoder.index, encoder.words.len());
+            let mut unknown = encoder.words;
+            unknown[1] = 11;
+            assert!(matches!(
+                Decoder::new(&unknown).read_filter(),
+                Err(SpecCodecError::InvalidTag {
+                    context: "spatial predicate",
+                    tag: 11,
+                    ..
+                })
+            ));
         }
 
         let metadata_without_srid = SpatialValueMetadata {

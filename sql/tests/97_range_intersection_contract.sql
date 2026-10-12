@@ -1,7 +1,8 @@
--- 97_range_intersection_contract.sql: exact selected-path boundary for two
+-- 97_range_intersection_contract.sql: exact selected-path boundary for three
 -- same-column int4 bounds fused into one predicate inside a dense grouped
--- product SUM/COUNT. Adjacent one-sided, RHS, and third-bound shapes remain
--- PostgreSQL-native.
+-- product SUM/COUNT. One-sided and RHS ranges now use the computed-integer
+-- lane. Cross-column typed predicates now use SPG1; this adjacent negative
+-- includes an unsupported function so it still exercises the native boundary.
 
 \echo '=== 97_range_intersection_contract ==='
 
@@ -29,7 +30,7 @@ SET pg_accel.enabled = off;
 CREATE TEMP TABLE _range_native AS
 SELECT product_id, sum(price * quantity) AS total, count(*) AS rows
 FROM _range_contract
-WHERE price >= 200 AND price <= 800
+WHERE price >= 200 AND price <= 800 AND price >= 250
 GROUP BY product_id;
 
 CREATE TEMP TABLE _range_plan (
@@ -50,14 +51,14 @@ BEGIN
     SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
     SELECT count(*) INTO STRICT expected_rows
     FROM _range_contract
-    WHERE price >= 200 AND price <= 800;
+    WHERE price >= 200 AND price <= 800 AND price >= 250;
     IF (SELECT sum(rows) FROM _range_native) IS DISTINCT FROM expected_rows
        OR NOT EXISTS (
            SELECT 1 FROM _range_native
            WHERE product_id = 7 AND total IS NULL AND rows > 0
        )
        OR NOT EXISTS (
-           SELECT 1 FROM _range_contract WHERE price IN (200, 800)
+           SELECT 1 FROM _range_contract WHERE price IN (250, 800)
        ) THEN
         RAISE EXCEPTION
             '97 range contract FAILED: PostgreSQL oracle did not cover boundaries/NULL SUM';
@@ -82,14 +83,14 @@ BEGIN
     CREATE TEMP TABLE _range_accel AS
     SELECT product_id, sum(price * quantity) AS total, count(*) AS rows
     FROM _range_contract
-    WHERE price >= 200 AND price <= 800
+    WHERE price >= 200 AND price <= 800 AND price >= 250
     GROUP BY product_id;
 
     FOR plan_row IN
         EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
         SELECT product_id, sum(price * quantity), count(*)
         FROM _range_contract
-        WHERE price >= 200 AND price <= 800
+        WHERE price >= 200 AND price <= 800 AND price >= 250
         GROUP BY product_id
     LOOP
         INSERT INTO _range_plan VALUES ('selected', plan_row."QUERY PLAN");
@@ -126,7 +127,7 @@ BEGIN
         ) OR NOT EXISTS (
             SELECT 1 FROM _range_plan
             WHERE family = 'selected'
-              AND line LIKE '%GPU Descriptor Specialization: dense_integer_multiply_range%'
+              AND line LIKE '%GPU Descriptor Specialization: dense_integer_expressions_plain%'
         ) OR kernels_after <= kernels_before THEN
             RAISE EXCEPTION
                 '97 range contract FAILED: selected fast path incomplete (kernels % -> %)',
@@ -150,7 +151,6 @@ DECLARE
     kernels_before bigint;
     kernels_after bigint;
     stock_after bigint;
-    serial_declines bigint;
     multi_declines bigint;
     plan_row record;
 BEGIN
@@ -180,29 +180,33 @@ BEGIN
         EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
         SELECT product_id, sum(price * quantity), count(*)
         FROM _range_contract
-        WHERE price >= 200 AND price <= 800 AND price >= 250
+        WHERE price >= 200 AND price <= 800 AND quantity >= 3 AND abs(quantity)>=3
         GROUP BY product_id
     LOOP
-        INSERT INTO _range_plan VALUES ('third_bound', plan_row."QUERY PLAN");
+        INSERT INTO _range_plan VALUES ('cross_column', plan_row."QUERY PLAN");
     END LOOP;
 
     SELECT pg_accel_kernel_executions() INTO STRICT kernels_after;
     SELECT stock_exec_count INTO STRICT stock_after FROM pg_accel_stats();
-    SELECT pg_accel_planner_rejection_count('generic_serial_kernel_mode_unqualified')
-    INTO STRICT serial_declines;
     SELECT pg_accel_planner_rejection_count('shape_multiple_range_predicates')
     INTO STRICT multi_declines;
     IF EXISTS (
-        SELECT 1 FROM _range_plan WHERE line LIKE '%Custom Scan (%GpuAccel%'
-    ) OR kernels_after <> kernels_before OR stock_after <> 0 THEN
+        SELECT 1 FROM _range_plan WHERE family='cross_column' AND line LIKE '%Custom Scan (%GpuAccel%'
+    ) OR stock_after <> 0 THEN
         RAISE EXCEPTION
             '97 range adjacent contract FAILED: selected/dispatched (kernels % -> %, stock %)',
             kernels_before, kernels_after, stock_after;
     END IF;
-    IF has_gpu AND (serial_declines < 2 OR multi_declines < 1) THEN
+    IF has_gpu AND (multi_declines < 1 OR kernels_after<=kernels_before OR
+        (SELECT count(DISTINCT family) FROM _range_plan
+         WHERE family IN ('one_sided','rhs_range') AND
+            line LIKE '%GPU Dispatched Physical Kernel Mode: parallel_dense_integer%')<>2) THEN
         RAISE EXCEPTION
-            '97 range adjacent contract FAILED: decline counts serial %, multiple %',
-            serial_declines, multi_declines;
+            '97 expanded range contract FAILED: dispatch missing or cross-column decline absent (%)',multi_declines;
+    END IF;
+    IF NOT has_gpu AND (kernels_after<>kernels_before OR EXISTS (
+        SELECT 1 FROM _range_plan WHERE line LIKE '%Custom Scan (%GpuAccel%')) THEN
+        RAISE EXCEPTION '97 CPU-only host must retain native execution';
     END IF;
 END $$;
 \echo 'PGACCEL_ASSERT_OK:97_range_intersection_contract.assert_002'

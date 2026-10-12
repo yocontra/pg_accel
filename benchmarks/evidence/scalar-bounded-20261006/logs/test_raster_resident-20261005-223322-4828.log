@@ -1,0 +1,18 @@
+PGACCEL_TEST_START name=test_raster_resident
+=== pgaccel exact resident raster tests ===
+
+  PASS: ABI layout and public failure bits
+  PASS: NULL/empty/zero-band actions and multiband preservation
+  PASS: integer source and output extrema matrix
+  PASS: float32/64 FLT_EQ epsilon, NaN, and infinity
+  PASS: HAS_NODATA/IS_NODATA source semantics
+  PASS: little/big WKB normalized source lanes
+  PASS: nonzero slices, zero output, 64-rule cap, and unmatched zero
+  PASS: signed-zero and NaN nodata semantics
+  PASS: device validation is typed and output-atomic
+  PASS: host spans/caps/overlap/overflow are hard failures
+  PASS: contract and device-validation boundary matrix
+  PASS: >chunk row and pixel stress
+
+=== Results: 12 passed, 0 failed ===
+PGACCEL_TEST_RESULT name=test_raster_resident exit_code=0 result=PASS raw_lines=16 body_sha256=807df1a5d6d7aa0b46ada9e543afabf15a190a552cf2c15af016027e9f8dfe38 binding_sha256=61333503993fd54f61220591ca4fdde50882ef95cb4c7a376dd4f9f2e73a3b6d

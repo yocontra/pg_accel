@@ -1,0 +1,548 @@
+========================================
+ pg_accel integration tests
+========================================
+
+PASS: 00_smoke.sql
+PASS: 01_core_engine.sql
+PASS: 02_aggregates.sql
+PASS: 03_large_table.sql
+PASS: 04_null_handling.sql
+PASS: 05_quals_correctness.sql
+PASS: 06_mixed_queries.sql
+PASS: 07_regression_small.sql
+PASS: 08_extension_toggle.sql
+PASS: 09_explain_plans.sql
+PASS: 10_result_correctness.sql
+PASS: 100_grouped_count_int8_contract.sql
+PASS: 101_grouped_count_date_contract.sql
+PASS: 102_grouped_count_timestamp_contract.sql
+PASS: 103_grouped_count_float_contract.sql
+PASS: 104_grouped_integer_sum_avg_contract.sql
+PASS: 105_native_having_contract.sql
+PASS: 106_h3_resolution_contract.sql
+PASS: 107_optional_integer_aggregates.sql
+PASS: 108_multikey_integer_aggregates.sql
+PASS: 109_text_residency_interning.sql
+PASS: 11_geometry_extractor.sql
+PASS: 110_multimeasure_integer_aggregates.sql
+PASS: 111_independent_aggregate_filters.sql
+PASS: 112_spatial_polygon_topology.sql
+PASS: 113_h3_large_hash_contract.sql
+FAIL: 114_spatial_multipolygon_contract.sql
+  | PL/pgSQL function pg_temp_29.check_multi() line 58 at EXECUTE
+  | psql:/Users/contra/Projects/pg_accel/sql/tests/114_spatial_multipolygon_contract.sql:120: server closed the connection unexpectedly
+  | 	This probably means the server terminated abnormally
+  | 	before or while processing the request.
+  | psql:/Users/contra/Projects/pg_accel/sql/tests/114_spatial_multipolygon_contract.sql:120: error: connection to server was lost
+
+FAIL: 115_filtered_integer_counts.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: FATAL:  the database system is shutting down
+
+FAIL: 116_numeric_residency.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: FATAL:  the database system is shutting down
+
+FAIL: 117_numeric_aggregates.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: server closed the connection unexpectedly
+  | 	This probably means the server terminated abnormally
+  | 	before or while processing the request.
+
+FAIL: 118_spatial_numeric_rollups.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 119_global_integer_aggregates.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 12_h3_operations.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 120_spatial_integer_rollups.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 121_integer_where_aggregates.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 122_spatial_scalar_conjunction.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 123_integer_extrema.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 124_bigint_numeric_aggregates.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 125_null_accepting_predicates.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 126_computed_integer_aggregates.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 127_fused_integer_rows.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 128_scalar_program_aggregates.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 129_spatial_scalar_programs.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 13_sort_orderby.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 130_scalar_aggregate_filters.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 131_scalar_date_expressions.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 132_scalar_where.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 133_where_qualifier_order.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 134_spatial_scalar_where.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 135_null_safe_scalar.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 136_scalar_nullif_extrema.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 137_pulled_up_reports.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 14_complex_predicates.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 15_distinct_having.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 16_limit_offset.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 17_multitable_agg.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 18_window_functions.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 19_spatial_predicates.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 20_spatial_advanced.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 21_join_types.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 22_regression_oltp.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 23_null_edge_cases.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 24_basic_scan.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 25_spatial_sort.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 30_expr_arithmetic.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 31_expr_comparison.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 32_expr_boolean.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 33_expr_null.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 34_expr_case.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 40_gpu_expr_where.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 41_gpu_expr_projection.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 42_gpu_expr_edge_cases.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 43_sort_topk.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 50_hash_agg_groupby.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 51_hash_agg_edge_cases.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 55_hash_join.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 56_hash_join_edge_cases.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 60_window_functions.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 61_window_edge_cases.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 70_zero_overhead_oltp.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 80_null_exhaustive.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 81_degenerate_geometry.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 82_srid_mismatch.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 83_plan_patterns.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 84_transaction_semantics.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 85_function_matrix.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 86_batch_boundary.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 87_type_coercion.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 88_concurrent_features.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 89_regression_guards.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 90_selected_path_contract.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 91_selected_family_contracts.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 92_spatial_resident_agg_contract.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 93_raster_resident_reclass_contract.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 94_grouped_count_bool_contract.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 95_selected_lifecycle_contract.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 96_declined_lifecycle_contract.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 97_range_intersection_contract.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 98_aggregate_filter_contract.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+FAIL: 99_grouped_count_int2_contract.sql
+  | psql: error: connection to server at "localhost" (::1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+  | connection to server at "localhost" (127.0.0.1), port 28818 failed: Connection refused
+  | 	Is the server running on that host and accepting TCP/IP connections?
+
+
+========================================
+ Results: 26 passed, 74 failed, 100 total
+========================================
+
+Failed tests:
+  - 114_spatial_multipolygon_contract.sql
+  - 115_filtered_integer_counts.sql
+  - 116_numeric_residency.sql
+  - 117_numeric_aggregates.sql
+  - 118_spatial_numeric_rollups.sql
+  - 119_global_integer_aggregates.sql
+  - 12_h3_operations.sql
+  - 120_spatial_integer_rollups.sql
+  - 121_integer_where_aggregates.sql
+  - 122_spatial_scalar_conjunction.sql
+  - 123_integer_extrema.sql
+  - 124_bigint_numeric_aggregates.sql
+  - 125_null_accepting_predicates.sql
+  - 126_computed_integer_aggregates.sql
+  - 127_fused_integer_rows.sql
+  - 128_scalar_program_aggregates.sql
+  - 129_spatial_scalar_programs.sql
+  - 13_sort_orderby.sql
+  - 130_scalar_aggregate_filters.sql
+  - 131_scalar_date_expressions.sql
+  - 132_scalar_where.sql
+  - 133_where_qualifier_order.sql
+  - 134_spatial_scalar_where.sql
+  - 135_null_safe_scalar.sql
+  - 136_scalar_nullif_extrema.sql
+  - 137_pulled_up_reports.sql
+  - 14_complex_predicates.sql
+  - 15_distinct_having.sql
+  - 16_limit_offset.sql
+  - 17_multitable_agg.sql
+  - 18_window_functions.sql
+  - 19_spatial_predicates.sql
+  - 20_spatial_advanced.sql
+  - 21_join_types.sql
+  - 22_regression_oltp.sql
+  - 23_null_edge_cases.sql
+  - 24_basic_scan.sql
+  - 25_spatial_sort.sql
+  - 30_expr_arithmetic.sql
+  - 31_expr_comparison.sql
+  - 32_expr_boolean.sql
+  - 33_expr_null.sql
+  - 34_expr_case.sql
+  - 40_gpu_expr_where.sql
+  - 41_gpu_expr_projection.sql
+  - 42_gpu_expr_edge_cases.sql
+  - 43_sort_topk.sql
+  - 50_hash_agg_groupby.sql
+  - 51_hash_agg_edge_cases.sql
+  - 55_hash_join.sql
+  - 56_hash_join_edge_cases.sql
+  - 60_window_functions.sql
+  - 61_window_edge_cases.sql
+  - 70_zero_overhead_oltp.sql
+  - 80_null_exhaustive.sql
+  - 81_degenerate_geometry.sql
+  - 82_srid_mismatch.sql
+  - 83_plan_patterns.sql
+  - 84_transaction_semantics.sql
+  - 85_function_matrix.sql
+  - 86_batch_boundary.sql
+  - 87_type_coercion.sql
+  - 88_concurrent_features.sql
+  - 89_regression_guards.sql
+  - 90_selected_path_contract.sql
+  - 91_selected_family_contracts.sql
+  - 92_spatial_resident_agg_contract.sql
+  - 93_raster_resident_reclass_contract.sql
+  - 94_grouped_count_bool_contract.sql
+  - 95_selected_lifecycle_contract.sql
+  - 96_declined_lifecycle_contract.sql
+  - 97_range_intersection_contract.sql
+  - 98_aggregate_filter_contract.sql
+  - 99_grouped_count_int2_contract.sql

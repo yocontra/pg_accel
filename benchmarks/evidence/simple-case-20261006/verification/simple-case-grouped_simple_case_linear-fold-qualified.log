@@ -1,0 +1,144 @@
+[artifacts] writing benchmark artifacts to benchmarks/evidence/simple-case-20261006/grouped_simple_case_linear-fold-qualified
+[diagnostics] RUST_BACKTRACE=1 (set-by-runner)
+[setup] installing extensions: pg_accel
+[setup] pg_accel: ok
+[detect] installed extensions: plpgsql, h3, postgis, postgis_raster, h3_postgis, pg_accel
+[provenance] pg_accel extension provenance accepted
+
+[scale] grouped_simple_case_linear @ 250K rows
+[setup] grouped_simple_case_linear -- seed 42 (setseed=0.000042), 250000 rows
+[quiescence] setup checkpoint completed at 2026-10-05 23:38:06.111344-07 (wal_lsn=547/E7EA50B0)
+[grouped_simple_case_linear] warmup 1/10 [warm]: accel=34.86ms  parallel=18.51ms
+[grouped_simple_case_linear] warmup 2/10 [warm]: accel=5.16ms  parallel=13.69ms
+[grouped_simple_case_linear] warmup 3/10 [warm]: accel=4.67ms  parallel=16.78ms
+[grouped_simple_case_linear] warmup 4/10 [warm]: accel=4.04ms  parallel=16.89ms
+[grouped_simple_case_linear] warmup 5/10 [warm]: accel=3.41ms  parallel=14.06ms
+[grouped_simple_case_linear] warmup 6/10 [warm]: accel=4.17ms  parallel=15.69ms
+[grouped_simple_case_linear] warmup 7/10 [warm]: accel=4.51ms  parallel=19.66ms
+[grouped_simple_case_linear] warmup 8/10 [warm]: accel=3.91ms  parallel=20.38ms
+[grouped_simple_case_linear] warmup 9/10 [warm]: accel=2.45ms  parallel=19.93ms
+[grouped_simple_case_linear] warmup 10/10 [warm]: accel=4.30ms  parallel=19.23ms
+[grouped_simple_case_linear] bench 1/30 [warm]: accel=3.94ms  parallel=17.81ms
+[grouped_simple_case_linear] bench 2/30 [warm]: accel=4.38ms  parallel=20.64ms
+[grouped_simple_case_linear] bench 3/30 [warm]: accel=3.30ms  parallel=23.51ms
+[grouped_simple_case_linear] bench 4/30 [warm]: accel=3.50ms  parallel=25.58ms
+[grouped_simple_case_linear] bench 5/30 [warm]: accel=5.50ms  parallel=20.35ms
+[grouped_simple_case_linear] bench 6/30 [warm]: accel=4.58ms  parallel=20.31ms
+[grouped_simple_case_linear] bench 7/30 [warm]: accel=3.30ms  parallel=24.67ms
+[grouped_simple_case_linear] bench 8/30 [warm]: accel=3.57ms  parallel=20.35ms
+[grouped_simple_case_linear] bench 9/30 [warm]: accel=3.33ms  parallel=16.58ms
+[grouped_simple_case_linear] bench 10/30 [warm]: accel=4.06ms  parallel=18.30ms
+[grouped_simple_case_linear] bench 11/30 [warm]: accel=4.80ms  parallel=18.07ms
+[grouped_simple_case_linear] bench 12/30 [warm]: accel=2.67ms  parallel=17.40ms
+[grouped_simple_case_linear] bench 13/30 [warm]: accel=2.69ms  parallel=18.11ms
+[grouped_simple_case_linear] bench 14/30 [warm]: accel=5.57ms  parallel=19.07ms
+[grouped_simple_case_linear] bench 15/30 [warm]: accel=3.19ms  parallel=21.14ms
+[grouped_simple_case_linear] bench 16/30 [warm]: accel=3.39ms  parallel=24.34ms
+[grouped_simple_case_linear] bench 17/30 [warm]: accel=4.32ms  parallel=17.97ms
+[grouped_simple_case_linear] bench 18/30 [warm]: accel=2.45ms  parallel=18.23ms
+[grouped_simple_case_linear] bench 19/30 [warm]: accel=2.93ms  parallel=16.17ms
+[grouped_simple_case_linear] bench 20/30 [warm]: accel=3.21ms  parallel=19.46ms
+[grouped_simple_case_linear] bench 21/30 [warm]: accel=3.63ms  parallel=18.25ms
+[grouped_simple_case_linear] bench 22/30 [warm]: accel=5.09ms  parallel=20.79ms
+[grouped_simple_case_linear] bench 23/30 [warm]: accel=3.58ms  parallel=19.46ms
+[grouped_simple_case_linear] bench 24/30 [warm]: accel=5.96ms  parallel=15.99ms
+[grouped_simple_case_linear] bench 25/30 [warm]: accel=6.81ms  parallel=18.71ms
+[grouped_simple_case_linear] bench 26/30 [warm]: accel=3.52ms  parallel=16.85ms
+[grouped_simple_case_linear] bench 27/30 [warm]: accel=3.20ms  parallel=16.45ms
+[grouped_simple_case_linear] bench 28/30 [warm]: accel=3.08ms  parallel=18.51ms
+[grouped_simple_case_linear] bench 29/30 [warm]: accel=3.10ms  parallel=16.70ms
+[grouped_simple_case_linear] bench 30/30 [warm]: accel=3.10ms  parallel=16.87ms
+[quiescence] checkpointer counters remained unchanged through 2026-10-05 23:38:07.337435-07
+[cleanup] grouped_simple_case_linear -- tables dropped
+
+[scale] grouped_simple_case_linear @ 1M rows
+[setup] grouped_simple_case_linear -- seed 42 (setseed=0.000042), 1000000 rows
+[quiescence] setup checkpoint completed at 2026-10-05 23:38:08.998284-07 (wal_lsn=547/EC2C26F8)
+[grouped_simple_case_linear] warmup 1/10 [warm]: accel=47.02ms  parallel=44.58ms
+[grouped_simple_case_linear] warmup 2/10 [warm]: accel=7.95ms  parallel=40.45ms
+[grouped_simple_case_linear] warmup 3/10 [warm]: accel=5.10ms  parallel=44.84ms
+[grouped_simple_case_linear] warmup 4/10 [warm]: accel=6.55ms  parallel=45.81ms
+[grouped_simple_case_linear] warmup 5/10 [warm]: accel=5.37ms  parallel=45.50ms
+[grouped_simple_case_linear] warmup 6/10 [warm]: accel=5.53ms  parallel=40.88ms
+[grouped_simple_case_linear] warmup 7/10 [warm]: accel=8.89ms  parallel=39.42ms
+[grouped_simple_case_linear] warmup 8/10 [warm]: accel=8.62ms  parallel=44.41ms
+[grouped_simple_case_linear] warmup 9/10 [warm]: accel=5.90ms  parallel=42.47ms
+[grouped_simple_case_linear] warmup 10/10 [warm]: accel=4.81ms  parallel=42.26ms
+[grouped_simple_case_linear] bench 1/30 [warm]: accel=6.13ms  parallel=41.13ms
+[grouped_simple_case_linear] bench 2/30 [warm]: accel=6.87ms  parallel=41.98ms
+[grouped_simple_case_linear] bench 3/30 [warm]: accel=8.42ms  parallel=42.75ms
+[grouped_simple_case_linear] bench 4/30 [warm]: accel=6.76ms  parallel=43.49ms
+[grouped_simple_case_linear] bench 5/30 [warm]: accel=7.42ms  parallel=46.84ms
+[grouped_simple_case_linear] bench 6/30 [warm]: accel=6.25ms  parallel=40.50ms
+[grouped_simple_case_linear] bench 7/30 [warm]: accel=6.05ms  parallel=41.47ms
+[grouped_simple_case_linear] bench 8/30 [warm]: accel=6.24ms  parallel=42.76ms
+[grouped_simple_case_linear] bench 9/30 [warm]: accel=5.31ms  parallel=43.71ms
+[grouped_simple_case_linear] bench 10/30 [warm]: accel=7.73ms  parallel=48.95ms
+[grouped_simple_case_linear] bench 11/30 [warm]: accel=4.62ms  parallel=52.86ms
+[grouped_simple_case_linear] bench 12/30 [warm]: accel=6.13ms  parallel=44.90ms
+[grouped_simple_case_linear] bench 13/30 [warm]: accel=7.26ms  parallel=56.84ms
+[grouped_simple_case_linear] bench 14/30 [warm]: accel=4.03ms  parallel=51.29ms
+[grouped_simple_case_linear] bench 15/30 [warm]: accel=7.55ms  parallel=53.80ms
+[grouped_simple_case_linear] bench 16/30 [warm]: accel=7.84ms  parallel=47.89ms
+[grouped_simple_case_linear] bench 17/30 [warm]: accel=7.82ms  parallel=42.86ms
+[grouped_simple_case_linear] bench 18/30 [warm]: accel=6.77ms  parallel=52.70ms
+[grouped_simple_case_linear] bench 19/30 [warm]: accel=5.99ms  parallel=50.09ms
+[grouped_simple_case_linear] bench 20/30 [warm]: accel=6.88ms  parallel=48.58ms
+[grouped_simple_case_linear] bench 21/30 [warm]: accel=6.43ms  parallel=44.09ms
+[grouped_simple_case_linear] bench 22/30 [warm]: accel=6.18ms  parallel=40.63ms
+[grouped_simple_case_linear] bench 23/30 [warm]: accel=5.75ms  parallel=40.59ms
+[grouped_simple_case_linear] bench 24/30 [warm]: accel=7.08ms  parallel=47.43ms
+[grouped_simple_case_linear] bench 25/30 [warm]: accel=7.32ms  parallel=51.79ms
+[grouped_simple_case_linear] bench 26/30 [warm]: accel=4.98ms  parallel=49.76ms
+[grouped_simple_case_linear] bench 27/30 [warm]: accel=8.29ms  parallel=62.61ms
+[grouped_simple_case_linear] bench 28/30 [warm]: accel=7.08ms  parallel=49.13ms
+[grouped_simple_case_linear] bench 29/30 [warm]: accel=7.45ms  parallel=53.24ms
+[grouped_simple_case_linear] bench 30/30 [warm]: accel=7.52ms  parallel=63.70ms
+[quiescence] checkpointer counters remained unchanged through 2026-10-05 23:38:11.619707-07
+[cleanup] grouped_simple_case_linear -- tables dropped
+
+[scale] grouped_simple_case_linear @ 2M rows
+[setup] grouped_simple_case_linear -- seed 42 (setseed=0.000042), 2000000 rows
+[quiescence] setup checkpoint completed at 2026-10-05 23:38:14.57395-07 (wal_lsn=547/F4AC8718)
+[grouped_simple_case_linear] warmup 1/10 [warm]: accel=59.21ms  parallel=85.30ms
+[grouped_simple_case_linear] warmup 2/10 [warm]: accel=18.54ms  parallel=108.36ms
+[grouped_simple_case_linear] warmup 3/10 [warm]: accel=15.38ms  parallel=94.83ms
+[grouped_simple_case_linear] warmup 4/10 [warm]: accel=12.71ms  parallel=88.38ms
+[grouped_simple_case_linear] warmup 5/10 [warm]: accel=12.48ms  parallel=87.39ms
+[grouped_simple_case_linear] warmup 6/10 [warm]: accel=10.26ms  parallel=78.86ms
+[grouped_simple_case_linear] warmup 7/10 [warm]: accel=17.26ms  parallel=90.58ms
+[grouped_simple_case_linear] warmup 8/10 [warm]: accel=14.69ms  parallel=84.51ms
+[grouped_simple_case_linear] warmup 9/10 [warm]: accel=14.70ms  parallel=101.38ms
+[grouped_simple_case_linear] warmup 10/10 [warm]: accel=12.81ms  parallel=92.81ms
+[grouped_simple_case_linear] bench 1/30 [warm]: accel=16.95ms  parallel=81.61ms
+[grouped_simple_case_linear] bench 2/30 [warm]: accel=12.02ms  parallel=84.07ms
+[grouped_simple_case_linear] bench 3/30 [warm]: accel=15.89ms  parallel=87.78ms
+[grouped_simple_case_linear] bench 4/30 [warm]: accel=11.26ms  parallel=77.92ms
+[grouped_simple_case_linear] bench 5/30 [warm]: accel=13.13ms  parallel=79.02ms
+[grouped_simple_case_linear] bench 6/30 [warm]: accel=15.32ms  parallel=76.11ms
+[grouped_simple_case_linear] bench 7/30 [warm]: accel=11.36ms  parallel=80.14ms
+[grouped_simple_case_linear] bench 8/30 [warm]: accel=20.93ms  parallel=84.33ms
+[grouped_simple_case_linear] bench 9/30 [warm]: accel=11.06ms  parallel=107.03ms
+[grouped_simple_case_linear] bench 10/30 [warm]: accel=13.51ms  parallel=81.18ms
+[grouped_simple_case_linear] bench 11/30 [warm]: accel=11.91ms  parallel=74.62ms
+[grouped_simple_case_linear] bench 12/30 [warm]: accel=20.66ms  parallel=77.53ms
+[grouped_simple_case_linear] bench 13/30 [warm]: accel=15.69ms  parallel=77.24ms
+[grouped_simple_case_linear] bench 14/30 [warm]: accel=10.97ms  parallel=76.48ms
+[grouped_simple_case_linear] bench 15/30 [warm]: accel=17.10ms  parallel=75.65ms
+[grouped_simple_case_linear] bench 16/30 [warm]: accel=14.71ms  parallel=82.22ms
+[grouped_simple_case_linear] bench 17/30 [warm]: accel=11.80ms  parallel=73.75ms
+[grouped_simple_case_linear] bench 18/30 [warm]: accel=14.52ms  parallel=79.62ms
+[grouped_simple_case_linear] bench 19/30 [warm]: accel=14.23ms  parallel=95.73ms
+[grouped_simple_case_linear] bench 20/30 [warm]: accel=15.75ms  parallel=84.43ms
+[grouped_simple_case_linear] bench 21/30 [warm]: accel=13.97ms  parallel=80.14ms
+[grouped_simple_case_linear] bench 22/30 [warm]: accel=13.13ms  parallel=78.89ms
+[grouped_simple_case_linear] bench 23/30 [warm]: accel=15.35ms  parallel=72.18ms
+[grouped_simple_case_linear] bench 24/30 [warm]: accel=11.59ms  parallel=72.84ms
+[grouped_simple_case_linear] bench 25/30 [warm]: accel=12.95ms  parallel=74.34ms
+[grouped_simple_case_linear] bench 26/30 [warm]: accel=10.87ms  parallel=78.83ms
+[grouped_simple_case_linear] bench 27/30 [warm]: accel=14.51ms  parallel=72.49ms
+[grouped_simple_case_linear] bench 28/30 [warm]: accel=15.68ms  parallel=77.74ms
+[grouped_simple_case_linear] bench 29/30 [warm]: accel=15.26ms  parallel=77.93ms
+[grouped_simple_case_linear] bench 30/30 [warm]: accel=13.24ms  parallel=71.96ms
+[quiescence] checkpointer counters remained unchanged through 2026-10-05 23:38:19.132704-07
+[cleanup] grouped_simple_case_linear -- tables dropped

@@ -1,0 +1,5 @@
+PGACCEL_TEST_START name=test_join_rows
+[;35m[AdaptiveCpp Warning] [0mmetal_hardware_manager: MTLCopyAllDevices returned no devices
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+No GPU for resident join-row tests
+PGACCEL_TEST_RESULT name=test_join_rows exit_code=77 result=FAIL raw_lines=3 body_sha256=d6d959fbfbac97c3101b871a28578c83c94aecd2680316e29870e5fd98bc26c4 binding_sha256=a0fd0700fd4bf59693d365a035e793e5f21b378579a3e3e3b80760b4ec67fcab

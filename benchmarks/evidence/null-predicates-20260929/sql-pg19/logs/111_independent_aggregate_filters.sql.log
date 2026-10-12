@@ -1,0 +1,30 @@
+=== 111_independent_aggregate_filters ===
+SET
+SET
+SELECT 300000
+ANALYZE
+DO
+PGACCEL_ASSERT_OK:111_independent_aggregate_filters.assert_001
+DO
+PGACCEL_ASSERT_OK:111_independent_aggregate_filters.assert_003
+SET
+PREPARE
+DO
+PGACCEL_ASSERT_OK:111_independent_aggregate_filters.assert_002
+DEALLOCATE
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ f
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:111_independent_aggregate_filters

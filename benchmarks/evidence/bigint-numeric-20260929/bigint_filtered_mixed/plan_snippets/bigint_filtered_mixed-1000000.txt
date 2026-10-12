@@ -1,0 +1,14 @@
+Finalize GroupAggregate
+  Output: g, sum(v) FILTER (WHERE (h = ANY ('{1,3,5}'::integer[]))), avg(w) FILTER (WHERE (k = 1)), sum(qty), count(*)
+  Group Key: bench_bigint_rollup.g
+  ->  Gather Merge
+        Output: g, (PARTIAL sum(v) FILTER (WHERE (h = ANY ('{1,3,5}'::integer[])))), (PARTIAL avg(w) FILTER (WHERE (k = 1))), (PARTIAL sum(qty)), (PARTIAL count(*))
+        Workers Planned: 8
+        ->  Sort
+              Output: g, (PARTIAL sum(v) FILTER (WHERE (h = ANY ('{1,3,5}'::integer[])))), (PARTIAL avg(w) FILTER (WHERE (k = 1))), (PARTIAL sum(qty)), (PARTIAL count(*))
+              Sort Key: bench_bigint_rollup.g
+              ->  Partial HashAggregate
+                    Output: g, PARTIAL sum(v) FILTER (WHERE (h = ANY ('{1,3,5}'::integer[]))), PARTIAL avg(w) FILTER (WHERE (k = 1)), PARTIAL sum(qty), PARTIAL count(*)
+                    Group Key: bench_bigint_rollup.g
+                    ->  Parallel Seq Scan on public.bench_bigint_rollup
+                          Output: g, h, k, v, w, qty

@@ -1,0 +1,10 @@
+PGACCEL_TEST_START name=test_fork_cold_barrier
+=== Synchronized cold-fork GPU boundary test ===
+parent_pid=4868 workers=2 rounds=1 stage_timeout_s=180
+parent will not call pgaccel_init or any other pgaccel API
+round=1 releasing 2 children into pgaccel_init
+round=1 releasing 2 children into first GPU dispatch
+worker=0 pid=4871 init_ms=46.99 dispatch_ms=35.06 sum=100000.0 gpu_delta=1 exit=ok
+worker=1 pid=4872 init_ms=48.70 dispatch_ms=35.58 sum=100000.0 gpu_delta=1 exit=ok
+RESULT: PASS - 2 synchronized children x 1 rounds
+PGACCEL_TEST_RESULT name=test_fork_cold_barrier exit_code=0 result=PASS raw_lines=8 body_sha256=d0462a9b7cb7e919266fdf6ada127b91b8c5531f922ab6b79eba1fbc874ee6f1 binding_sha256=488cd39924f6bdbbb023c8633b00d23e33146f78f2d43222c7f77c9be1aa40f6

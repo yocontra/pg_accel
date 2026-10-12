@@ -1,0 +1,157 @@
+test_both_real_queries_have_bounded_typed_metadata_effects (test_metadata_effects.ProductionMetadataEffectsTests.test_both_real_queries_have_bounded_typed_metadata_effects) ... 
+  test_both_real_queries_have_bounded_typed_metadata_effects (test_metadata_effects.ProductionMetadataEffectsTests.test_both_real_queries_have_bounded_typed_metadata_effects) (name='pgaccel_join_rows_workspace_bytes') ... FAIL
+  test_both_real_queries_have_bounded_typed_metadata_effects (test_metadata_effects.ProductionMetadataEffectsTests.test_both_real_queries_have_bounded_typed_metadata_effects) (name='pgaccel_join_rows_controlled_workspace_bytes') ... FAIL
+test_real_transitive_helper_mutations_fail_closed (test_metadata_effects.ProductionMetadataEffectsTests.test_real_transitive_helper_mutations_fail_closed) ... ok
+test_array_bounds_are_not_inferred_from_unknown_scalar_values (test_metadata_effects.TypedMetadataEffectsTests.test_array_bounds_are_not_inferred_from_unknown_scalar_values) ... ok
+test_effect_proof_is_specific_to_compiler_preprocessing (test_metadata_effects.TypedMetadataEffectsTests.test_effect_proof_is_specific_to_compiler_preprocessing) ... FAIL
+test_global_and_static_side_effects_are_rejected (test_metadata_effects.TypedMetadataEffectsTests.test_global_and_static_side_effects_are_rejected) ... ok
+test_invalid_cpp_is_not_proof_evidence (test_metadata_effects.TypedMetadataEffectsTests.test_invalid_cpp_is_not_proof_evidence) ... ok
+test_loops_need_fixed_bounds_and_immutable_induction (test_metadata_effects.TypedMetadataEffectsTests.test_loops_need_fixed_bounds_and_immutable_induction) ... ok
+test_memcmp_requires_exact_metadata_objects_and_trusted_linkage (test_metadata_effects.TypedMetadataEffectsTests.test_memcmp_requires_exact_metadata_objects_and_trusted_linkage) ... FAIL
+test_nested_metadata_work_and_storage_have_total_bounds (test_metadata_effects.TypedMetadataEffectsTests.test_nested_metadata_work_and_storage_have_total_bounds) ... FAIL
+test_object_lifecycle_cannot_hide_row_reads (test_metadata_effects.TypedMetadataEffectsTests.test_object_lifecycle_cannot_hide_row_reads) ... ok
+test_one_verifier_cannot_reuse_publication_or_record_state (test_metadata_effects.TypedMetadataEffectsTests.test_one_verifier_cannot_reuse_publication_or_record_state) ... FAIL
+test_pointer_escape_and_reconstruction_are_rejected (test_metadata_effects.TypedMetadataEffectsTests.test_pointer_escape_and_reconstruction_are_rejected) ... ok
+test_publication_must_cover_success_and_failure_guards_cannot_go_stale (test_metadata_effects.TypedMetadataEffectsTests.test_publication_must_cover_success_and_failure_guards_cannot_go_stale) ... FAIL
+test_resolved_helper_parameters_keep_metadata_permissions (test_metadata_effects.TypedMetadataEffectsTests.test_resolved_helper_parameters_keep_metadata_permissions) ... FAIL
+test_row_reads_writes_and_same_typed_pointer_fields_are_rejected (test_metadata_effects.TypedMetadataEffectsTests.test_row_reads_writes_and_same_typed_pointer_fields_are_rejected) ... ok
+test_scalar_metadata_and_fixed_descriptor_arrays (test_metadata_effects.TypedMetadataEffectsTests.test_scalar_metadata_and_fixed_descriptor_arrays) ... 
+  test_scalar_metadata_and_fixed_descriptor_arrays (test_metadata_effects.TypedMetadataEffectsTests.test_scalar_metadata_and_fixed_descriptor_arrays) (body='*out = req->rows * 8; return PGACCEL_OK;') ... FAIL
+  test_scalar_metadata_and_fixed_descriptor_arrays (test_metadata_effects.TypedMetadataEffectsTests.test_scalar_metadata_and_fixed_descriptor_arrays) (body='out[0] = req->rows * 8; return PGACCEL_OK;') ... FAIL
+  test_scalar_metadata_and_fixed_descriptor_arrays (test_metadata_effects.TypedMetadataEffectsTests.test_scalar_metadata_and_fixed_descriptor_arrays) (body='auto& result = *out; result = req->rows; return PGACCEL_OK;') ... FAIL
+  test_scalar_metadata_and_fixed_descriptor_arrays (test_metadata_effects.TypedMetadataEffectsTests.test_scalar_metadata_and_fixed_descriptor_arrays) (body='uint64_t total = 0; for (uint64_t k = 0; k < 4; ++k) total += req->counts[k]; *out = total; return PGACCEL_OK;') ... FAIL
+  test_scalar_metadata_and_fixed_descriptor_arrays (test_metadata_effects.TypedMetadataEffectsTests.test_scalar_metadata_and_fixed_descriptor_arrays) (body='*out = req->values == nullptr ? 0 : req->rows * 8; return PGACCEL_OK;') ... FAIL
+test_sizeof_variable_length_array_cannot_hide_evaluated_calls (test_metadata_effects.TypedMetadataEffectsTests.test_sizeof_variable_length_array_cannot_hide_evaluated_calls) ... ok
+test_transitive_row_reader_is_not_a_metadata_helper (test_metadata_effects.TypedMetadataEffectsTests.test_transitive_row_reader_is_not_a_metadata_helper) ... FAIL
+test_unknown_calls_callbacks_and_recursion_are_rejected (test_metadata_effects.TypedMetadataEffectsTests.test_unknown_calls_callbacks_and_recursion_are_rejected) ... ok
+
+======================================================================
+FAIL: test_both_real_queries_have_bounded_typed_metadata_effects (test_metadata_effects.ProductionMetadataEffectsTests.test_both_real_queries_have_bounded_typed_metadata_effects) (name='pgaccel_join_rows_workspace_bytes')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_metadata_effects.py", line 309, in test_both_real_queries_have_bounded_typed_metadata_effects
+    self.assertTrue(result.ok, result.detail)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true : metadata definition is not the exact C ABI symbol
+
+======================================================================
+FAIL: test_both_real_queries_have_bounded_typed_metadata_effects (test_metadata_effects.ProductionMetadataEffectsTests.test_both_real_queries_have_bounded_typed_metadata_effects) (name='pgaccel_join_rows_controlled_workspace_bytes')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_metadata_effects.py", line 309, in test_both_real_queries_have_bounded_typed_metadata_effects
+    self.assertTrue(result.ok, result.detail)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true : metadata definition is not the exact C ABI symbol
+
+======================================================================
+FAIL: test_effect_proof_is_specific_to_compiler_preprocessing (test_metadata_effects.TypedMetadataEffectsTests.test_effect_proof_is_specific_to_compiler_preprocessing)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_metadata_effects.py", line 285, in test_effect_proof_is_specific_to_compiler_preprocessing
+    self.assertTrue(prove(source).ok)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true
+
+======================================================================
+FAIL: test_memcmp_requires_exact_metadata_objects_and_trusted_linkage (test_metadata_effects.TypedMetadataEffectsTests.test_memcmp_requires_exact_metadata_objects_and_trusted_linkage)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_metadata_effects.py", line 113, in test_memcmp_requires_exact_metadata_objects_and_trusted_linkage
+    self.assertTrue(result.ok, result.detail)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true : metadata definition is not the exact C ABI symbol
+
+======================================================================
+FAIL: test_nested_metadata_work_and_storage_have_total_bounds (test_metadata_effects.TypedMetadataEffectsTests.test_nested_metadata_work_and_storage_have_total_bounds)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_metadata_effects.py", line 244, in test_nested_metadata_work_and_storage_have_total_bounds
+    self.assertIn("budget", result.detail)
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'budget' not found in 'metadata definition is not the exact C ABI symbol'
+
+======================================================================
+FAIL: test_one_verifier_cannot_reuse_publication_or_record_state (test_metadata_effects.TypedMetadataEffectsTests.test_one_verifier_cannot_reuse_publication_or_record_state)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_metadata_effects.py", line 261, in test_one_verifier_cannot_reuse_publication_or_record_state
+    self.assertTrue(verifier.prove("pgaccel_metadata", ("Request",)).ok)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true
+
+======================================================================
+FAIL: test_publication_must_cover_success_and_failure_guards_cannot_go_stale (test_metadata_effects.TypedMetadataEffectsTests.test_publication_must_cover_success_and_failure_guards_cannot_go_stale)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_metadata_effects.py", line 200, in test_publication_must_cover_success_and_failure_guards_cannot_go_stale
+    self.assertTrue(result.ok, result.detail)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true : metadata definition is not the exact C ABI symbol
+
+======================================================================
+FAIL: test_resolved_helper_parameters_keep_metadata_permissions (test_metadata_effects.TypedMetadataEffectsTests.test_resolved_helper_parameters_keep_metadata_permissions)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_metadata_effects.py", line 66, in test_resolved_helper_parameters_keep_metadata_permissions
+    self.assertTrue(result.ok, result.detail)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true : metadata definition is not the exact C ABI symbol
+
+======================================================================
+FAIL: test_scalar_metadata_and_fixed_descriptor_arrays (test_metadata_effects.TypedMetadataEffectsTests.test_scalar_metadata_and_fixed_descriptor_arrays) (body='*out = req->rows * 8; return PGACCEL_OK;')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_metadata_effects.py", line 57, in test_scalar_metadata_and_fixed_descriptor_arrays
+    self.assertTrue(result.ok, result.detail)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true : metadata definition is not the exact C ABI symbol
+
+======================================================================
+FAIL: test_scalar_metadata_and_fixed_descriptor_arrays (test_metadata_effects.TypedMetadataEffectsTests.test_scalar_metadata_and_fixed_descriptor_arrays) (body='out[0] = req->rows * 8; return PGACCEL_OK;')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_metadata_effects.py", line 57, in test_scalar_metadata_and_fixed_descriptor_arrays
+    self.assertTrue(result.ok, result.detail)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true : metadata definition is not the exact C ABI symbol
+
+======================================================================
+FAIL: test_scalar_metadata_and_fixed_descriptor_arrays (test_metadata_effects.TypedMetadataEffectsTests.test_scalar_metadata_and_fixed_descriptor_arrays) (body='auto& result = *out; result = req->rows; return PGACCEL_OK;')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_metadata_effects.py", line 57, in test_scalar_metadata_and_fixed_descriptor_arrays
+    self.assertTrue(result.ok, result.detail)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true : metadata definition is not the exact C ABI symbol
+
+======================================================================
+FAIL: test_scalar_metadata_and_fixed_descriptor_arrays (test_metadata_effects.TypedMetadataEffectsTests.test_scalar_metadata_and_fixed_descriptor_arrays) (body='uint64_t total = 0; for (uint64_t k = 0; k < 4; ++k) total += req->counts[k]; *out = total; return PGACCEL_OK;')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_metadata_effects.py", line 57, in test_scalar_metadata_and_fixed_descriptor_arrays
+    self.assertTrue(result.ok, result.detail)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true : metadata definition is not the exact C ABI symbol
+
+======================================================================
+FAIL: test_scalar_metadata_and_fixed_descriptor_arrays (test_metadata_effects.TypedMetadataEffectsTests.test_scalar_metadata_and_fixed_descriptor_arrays) (body='*out = req->values == nullptr ? 0 : req->rows * 8; return PGACCEL_OK;')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_metadata_effects.py", line 57, in test_scalar_metadata_and_fixed_descriptor_arrays
+    self.assertTrue(result.ok, result.detail)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true : metadata definition is not the exact C ABI symbol
+
+======================================================================
+FAIL: test_transitive_row_reader_is_not_a_metadata_helper (test_metadata_effects.TypedMetadataEffectsTests.test_transitive_row_reader_is_not_a_metadata_helper)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_metadata_effects.py", line 92, in test_transitive_row_reader_is_not_a_metadata_helper
+    self.assertIn("opaque row storage", result.detail)
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'opaque row storage' not found in 'metadata definition is not the exact C ABI symbol'
+
+----------------------------------------------------------------------
+Ran 19 tests in 2.286s
+
+FAILED (failures=14)

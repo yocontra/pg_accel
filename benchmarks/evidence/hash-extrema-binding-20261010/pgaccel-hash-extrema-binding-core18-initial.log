@@ -1,0 +1,15 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error[E0425]: cannot find type `MeasureSpec` in this scope
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:6661:33
+     |
+6661 | fn hash_integer_lanes(measure: &MeasureSpec) -> u32 {
+     |                                 ^^^^^^^^^^^ not found in this scope
+     |
+help: consider importing this struct
+     |
+   3 + use crate::engine::spec::MeasureSpec;
+     |
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `pg_accel` (lib test) due to 1 previous error
+error: Recipe `test-standalone` failed with exit code 101

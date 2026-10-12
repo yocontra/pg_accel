@@ -1,0 +1,8 @@
+=== 132_scalar_where ===
+SET
+SET
+SELECT 250017
+ANALYZE
+psql:sql/tests/132_scalar_where.sql:65: ERROR:  unrecognized node type: 1
+CONTEXT:  SQL statement "CREATE TEMP TABLE _where_actual AS SELECT sum(a) s,avg(a) av,count(a) c,min(a) lo,max(a) hi,count(*) n FROM _scalar_where WHERE a>b"
+PL/pgSQL function inline_code_block line 30 at EXECUTE

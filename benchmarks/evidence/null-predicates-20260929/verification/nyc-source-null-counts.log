@@ -1,0 +1,6 @@
+SET
+   rows   | missing_passenger_rows | ordinary_accepted_rows 
+----------+------------------------+------------------------
+ 12748986 |                      0 |               11590178
+(1 row)
+

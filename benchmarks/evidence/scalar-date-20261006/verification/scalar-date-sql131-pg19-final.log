@@ -1,0 +1,10 @@
+=== 131_scalar_date_expressions ===
+SET
+SET
+SELECT 250017
+ANALYZE
+psql:sql/tests/131_scalar_date_expressions.sql:64: NOTICE:  131 date arithmetic selected 24 of 24 shapes
+DO
+PGACCEL_ASSERT_OK:131_scalar_date_expressions.assert_001
+psql:sql/tests/131_scalar_date_expressions.sql:97: ERROR:  131 date result/filter not dispatched: SELECT g,min(z+n) lo,max(z+n) hi,count(z+n) c,count(*) n FROM _scalar_date GROUP BY g / generic_scalar_estimate_unavailable / HashAggregate (actual rows=6.00 loops=1)  Group Key: g  Batches: 1  Memory Usage: 32kB  Buffers: local read=1856  ->  Seq Scan on _scalar_date (actual rows=250017.00 loops=1)        Buffers: local read=1856Planning:  Buffers: shared hit=66Planning Time: 0.330 msExecution Time: 32.764 ms
+CONTEXT:  PL/pgSQL function inline_code_block line 25 at RAISE

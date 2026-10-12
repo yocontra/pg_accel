@@ -1,0 +1,7 @@
+PGACCEL_TEST_START name=test_hashagg_spatial_matrix
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/6383914516030137234.277092327870385419.metalar.61786.16796637761046924279.tmp (kernels_added=1 skipped=0)
+resident-count/spatial matrix: 180 checks, 0 failures
+PGACCEL_TEST_RESULT name=test_hashagg_spatial_matrix exit_code=0 result=PASS raw_lines=5 body_sha256=308321da90f63339bcf530bc5a04e5a49850fdf3853d672597cd95e76e4d6780 binding_sha256=9d076aa8253bf949712696e7875f80ee68e02ecc3ca5635a93cbb6d7c32ae8bf

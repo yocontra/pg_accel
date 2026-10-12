@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "status": "warning",
+  "expected_extension_version": "1.0.0-rc1",
+  "postgres": {
+    "backend_pid": 28127,
+    "server_version": "18.4",
+    "data_directory": "/Users/contra/.pgrx/data-18",
+    "config_file": "/Users/contra/.pgrx/data-18/postgresql.conf",
+    "shared_preload_libraries": "pg_accel",
+    "postmaster_start_time": "2026-10-05 21:09:59.530617-07",
+    "postmaster_start_unix_seconds": 1791259800
+  },
+  "sql": {
+    "extversion": "1.0.0-rc1",
+    "pg_accel_version": "1.0.0-rc1",
+    "function_probin": "pg_accel",
+    "function_prosrc": "pg_accel_version_wrapper"
+  },
+  "live_smoke": {
+    "backend_pid": 28127,
+    "pg_accel_version": "1.0.0-rc1",
+    "kernel_executions": 0,
+    "stats_rows": 1,
+    "error": null
+  },
+  "pg_config": {
+    "command": "pg_config",
+    "pkglibdir": "/opt/homebrew/lib/postgresql@18",
+    "sharedir": "/opt/homebrew/share/postgresql@18",
+    "error": null,
+    "control_file": {
+      "path": "/opt/homebrew/share/postgresql@18/extension/pg_accel.control",
+      "exists": true,
+      "sha256": "fe651dfc627ccecd54f2375433374fa689bef6285cedb2f4e83d3dc6e4925a92",
+      "len_bytes": 177,
+      "modified_unix_seconds": 1785697824,
+      "mapping_deleted": false,
+      "error": null
+    },
+    "control_default_version": "0.1.0",
+    "sql_files": [
+      {
+        "path": "/opt/homebrew/share/postgresql@18/extension/pg_accel--0.1.0.sql",
+        "exists": true,
+        "sha256": "51adbb95631395302ffffc219ac93a07c3e658172248abdf38590cf62dcfb230",
+        "len_bytes": 8987,
+        "modified_unix_seconds": 1785697824,
+        "mapping_deleted": false,
+        "error": null
+      }
+    ]
+  },
+  "expected_binary": {
+    "path": "/Users/contra/Projects/pg_accel/target/release/libpg_accel.dylib",
+    "exists": true,
+    "sha256": "d2c92132520c9451e75d26be19b933f8bb428ef89e9943f06d051a80a28f2696",
+    "len_bytes": 8369344,
+    "modified_unix_seconds": 1791259798,
+    "mapping_deleted": false,
+    "error": null
+  },
+  "installed_binary": {
+    "path": "/opt/homebrew/lib/postgresql@18/pg_accel.dylib",
+    "exists": true,
+    "sha256": "1269890d8a364bbf50ed88d4e7ff99d954cf3f4d0edf4e1a8fbf2d95530e5433",
+    "len_bytes": 5675872,
+    "modified_unix_seconds": 1785697824,
+    "mapping_deleted": false,
+    "error": null
+  },
+  "loaded_binaries": [
+    {
+      "path": "/Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/lib/pg_accel.dylib",
+      "exists": true,
+      "sha256": "d2c92132520c9451e75d26be19b933f8bb428ef89e9943f06d051a80a28f2696",
+      "len_bytes": 8369344,
+      "modified_unix_seconds": 1791259798,
+      "mapping_deleted": false,
+      "error": null
+    }
+  ],
+  "mapped_library_discovery": {
+    "method": "lsof",
+    "mapped_paths": [
+      "/Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/lib/pg_accel.dylib"
+    ],
+    "warning": null
+  },
+  "device_limits_sources": [
+    "hardware_derived"
+  ],
+  "warnings": [
+    "pg_config sharedir control default_version is 0.1.0, expected 1.0.0-rc1",
+    "pg_config installed pg_accel binary hash 1269890d8a364bbf50ed88d4e7ff99d954cf3f4d0edf4e1a8fbf2d95530e5433 does not match local build hash d2c92132520c9451e75d26be19b933f8bb428ef89e9943f06d051a80a28f2696",
+    "live backend loaded pg_accel hash d2c92132520c9451e75d26be19b933f8bb428ef89e9943f06d051a80a28f2696 from /Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/lib/pg_accel.dylib, but pg_config pkglibdir binary hash is 1269890d8a364bbf50ed88d4e7ff99d954cf3f4d0edf4e1a8fbf2d95530e5433"
+  ],
+  "errors": []
+}

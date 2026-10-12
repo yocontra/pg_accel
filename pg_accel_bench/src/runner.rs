@@ -2187,7 +2187,8 @@ fn capture_dispatch_stats(
                 (SELECT calls FROM pg_accel_grouped_kernel_mode_stats() WHERE mode = 'parallel_hash'), \
                 (SELECT calls FROM pg_accel_grouped_kernel_mode_stats() WHERE mode = 'parallel_dense_count'), \
                 (SELECT calls FROM pg_accel_grouped_kernel_mode_stats() WHERE mode = 'parallel_dense_integer'), \
-                (SELECT calls FROM pg_accel_grouped_kernel_mode_stats() WHERE mode = 'serial_generic') \
+                (SELECT calls FROM pg_accel_grouped_kernel_mode_stats() WHERE mode = 'serial_generic'), \
+                COALESCE((SELECT calls FROM pg_accel_grouped_kernel_mode_stats() WHERE mode = 'parallel_dense_numeric'), 0::bigint) \
            FROM pg_accel_stats()",
         &[],
     )?;
@@ -2207,6 +2208,10 @@ fn capture_dispatch_stats(
                 row.get(9),
             )?,
             serial_generic: nonnegative_dispatch_counter("serial_generic", row.get(10))?,
+            parallel_dense_numeric: nonnegative_dispatch_counter(
+                "parallel_dense_numeric",
+                row.get(11),
+            )?,
         },
     })
 }
@@ -2659,6 +2664,11 @@ fn dispatch_stats_delta(
                 before.physical_kernel_modes.serial_generic,
                 after.physical_kernel_modes.serial_generic,
             )?,
+            parallel_dense_numeric: delta(
+                "parallel_dense_numeric",
+                before.physical_kernel_modes.parallel_dense_numeric,
+                after.physical_kernel_modes.parallel_dense_numeric,
+            )?,
         },
     })
 }
@@ -2721,6 +2731,11 @@ fn accumulate_dispatch_stats(
         "serial_generic",
         total.physical_kernel_modes.serial_generic,
         delta.physical_kernel_modes.serial_generic,
+    )?;
+    total.physical_kernel_modes.parallel_dense_numeric = add(
+        "parallel_dense_numeric",
+        total.physical_kernel_modes.parallel_dense_numeric,
+        delta.physical_kernel_modes.parallel_dense_numeric,
     )?;
     Ok(())
 }
@@ -2799,6 +2814,10 @@ fn merge_cache_mode_dispatch_counter_fields(
             cold.physical_kernel_mode_counts.serial_generic,
             warm.physical_kernel_mode_counts.serial_generic,
         ),
+        add(
+            cold.physical_kernel_mode_counts.parallel_dense_numeric,
+            warm.physical_kernel_mode_counts.parallel_dense_numeric,
+        ),
     );
     if let (
         Some(queries),
@@ -2820,12 +2839,13 @@ fn merge_cache_mode_dispatch_counter_fields(
     } else {
         target.dispatch_counter_captured = false;
     }
-    if let (Some(hash), Some(count), Some(integer), Some(serial)) = merged_modes {
+    if let (Some(hash), Some(count), Some(integer), Some(serial), Some(numeric)) = merged_modes {
         target.physical_kernel_mode_counts = report::PhysicalKernelModeCounts {
             parallel_hash: hash,
             parallel_dense_count: count,
             parallel_dense_integer: integer,
             serial_generic: serial,
+            parallel_dense_numeric: numeric,
         };
         target.physical_kernel_mode = target
             .physical_kernel_mode_counts
@@ -3519,7 +3539,18 @@ pub fn run_one_report_with_config(
 }
 
 fn apply_config_methodology(report: &mut report::BenchReport, config: &BenchConfig) {
-    report.headline_speedup_allowed = config.headline_speedup_allowed;
+    // Applies equally to run, single-cell diagnostics and resumed runs. An
+    // opt-in corpus slice must never become a whole-suite headline by retrying.
+    let has_external_fixture = report
+        .workloads
+        .iter()
+        .map(|result| result.name.as_str())
+        .chain(report.crashes.iter().map(|crash| crash.workload.as_str()))
+        .any(|name| {
+            crate::workloads::find_workload(name)
+                .is_some_and(|workload| workload.external_fixture_manifest().is_some())
+        });
+    report.headline_speedup_allowed = config.headline_speedup_allowed && !has_external_fixture;
     report.methodology.native_parity_pairing = config.native_parity_pairing;
     report.methodology.native_parity_repetitions_per_arm = if config.native_parity_pairing {
         NATIVE_PARITY_REPETITIONS_PER_ARM
@@ -4261,6 +4292,14 @@ fn run_workload_with_config(
 ) -> Result<WorkloadResult, Box<dyn std::error::Error>> {
     let query_identity =
         BenchmarkQueryIdentity::resolve(workload.query_sql(), workload.baseline_query_sql())?;
+    if let (Some(manifest), Some(writer)) = (workload.external_fixture_manifest(), artifacts) {
+        let directory = writer.root().join("fixture_manifests");
+        std::fs::create_dir_all(&directory)?;
+        std::fs::write(
+            directory.join(format!("{}-{rows}.json", workload.name())),
+            manifest,
+        )?;
+    }
     setup(connection, workload, rows, config.seed)?;
 
     // VACUUM (ANALYZE, VERBOSE) after load, before timing begins. This proves the parallel
@@ -4531,7 +4570,9 @@ fn capture_and_write_correctness_diff(
 ) -> Result<String, Box<dyn std::error::Error>> {
     let artifact = match capture_correctness_diff(connection, workload, rows, query_identity) {
         Ok(artifact) => artifact,
-        Err(e) => correctness_error_artifact(workload, rows, query_identity, e.to_string()),
+        // postgres::Error's Display can be only "db error"; retain the server
+        // message and SQLSTATE so an oracle failure is actually diagnosable.
+        Err(e) => correctness_error_artifact(workload, rows, query_identity, format!("{e:?}")),
     };
     let path = artifact_writer.write_correctness_diff(workload.name(), rows, &artifact)?;
     let relative_path = path
@@ -6044,6 +6085,29 @@ mod tests {
             crashes: Vec::new(),
             postmaster_start_time: None,
         }
+    }
+
+    #[test]
+    fn external_fixture_results_and_failed_retries_cannot_publish_headlines() {
+        let config = BenchConfig::default();
+        let mut report = mock_report_missing_resident_boundary();
+        apply_config_methodology(&mut report, &config);
+        assert!(report.headline_speedup_allowed);
+        report.workloads[0].name = "nyc_taxi_h3_res9".to_owned();
+        apply_config_methodology(&mut report, &config);
+        assert!(!report.headline_speedup_allowed);
+        report.workloads.clear();
+        report.crashes.push(report::CrashedScale {
+            workload: "nyc_taxi_airport_indexed".to_owned(),
+            rows: 1_000_000,
+            error: "fixture missing".to_owned(),
+            repro_command: None,
+            plan_snippet_artifact: None,
+            correctness_diff_artifact: None,
+            log_tail_artifacts: Vec::new(),
+        });
+        apply_config_methodology(&mut report, &config);
+        assert!(!report.headline_speedup_allowed);
     }
 
     #[test]
@@ -7580,6 +7644,63 @@ mod tests {
             vec![iter_at(1.0, 2.0, CacheState::Warm)],
             true,
         )
+    }
+
+    #[test]
+    fn numeric_mode_counters_survive_capture_accumulation_and_cache_merge() {
+        let mut before = DispatchStatsSnapshot::default();
+        before.physical_kernel_modes.parallel_dense_numeric = 4;
+        let mut after = before;
+        after.physical_kernel_modes.parallel_dense_numeric = 11;
+        let delta = dispatch_stats_delta(before, after).expect("monotonic numeric calls");
+        assert_eq!(delta.physical_kernel_modes.parallel_dense_numeric, 7);
+        let mut total = DispatchStatsDelta::default();
+        accumulate_dispatch_stats(&mut total, delta).expect("first numeric sample");
+        accumulate_dispatch_stats(&mut total, delta).expect("second numeric sample");
+        assert_eq!(total.physical_kernel_modes.parallel_dense_numeric, 14);
+        assert_eq!(
+            total.physical_kernel_modes.unique_mode(),
+            Some("parallel_dense_numeric")
+        );
+        let mut cold = dispatch_test_result();
+        let mut warm = dispatch_test_result();
+        cold.dispatch_counter_captured = true;
+        warm.dispatch_counter_captured = true;
+        cold.physical_kernel_mode_counts = delta.physical_kernel_modes;
+        warm.physical_kernel_mode_counts = total.physical_kernel_modes;
+        let mut merged = dispatch_test_result();
+        merge_cache_mode_dispatch_counter_fields(&mut merged, &cold, &warm);
+        assert!(merged.dispatch_counter_captured);
+        assert_eq!(
+            merged.physical_kernel_mode_counts.parallel_dense_numeric,
+            21
+        );
+        assert_eq!(
+            merged.physical_kernel_mode.as_deref(),
+            Some("parallel_dense_numeric")
+        );
+        assert!(
+            dispatch_stats_delta(after, before)
+                .expect_err("numeric counter regression must fail")
+                .contains("parallel_dense_numeric")
+        );
+        total.physical_kernel_modes.parallel_dense_numeric = u64::MAX;
+        assert!(
+            accumulate_dispatch_stats(&mut total, delta)
+                .expect_err("numeric counter overflow must fail")
+                .contains("parallel_dense_numeric")
+        );
+        warm.physical_kernel_mode_counts.parallel_dense_numeric = u64::MAX;
+        merge_cache_mode_dispatch_counter_fields(&mut merged, &cold, &warm);
+        assert!(!merged.dispatch_counter_captured);
+        let mut mixed = delta.physical_kernel_modes;
+        mixed.parallel_dense_integer = 1;
+        assert_eq!(mixed.unique_mode(), None);
+        let legacy: report::PhysicalKernelModeCounts = serde_json::from_str(
+            r#"{"parallel_hash":0,"parallel_dense_count":1,"parallel_dense_integer":0,"serial_generic":0}"#,
+        ).expect("old reports decode without inventing numeric dispatch");
+        assert_eq!(legacy.parallel_dense_numeric, 0);
+        assert_eq!(legacy.unique_mode(), Some("parallel_dense_count"));
     }
 
     #[test]

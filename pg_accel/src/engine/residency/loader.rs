@@ -24,11 +24,12 @@ use super::geometry::{
     ResidentGeometryBuilder, ResidentGeometryColumn, ResidentGeometryReferencedBytes,
 };
 use super::ledger::{self, GenerationStamp, LedgerCharge};
+use super::numeric::{NumericColumnBuilder, ResidentNumericColumn, ResidentNumericData};
 use super::store::{
     InvalidationTriggerFingerprint, RelationFingerprint, ResidentColumn, ResidentRelation,
 };
 
-const LOAD_INTERRUPT_CHECK_ROWS: usize = 8192;
+const LOAD_INTERRUPT_CHECK_ROWS: usize = super::nulls::STAGING_ROWS;
 const REPRESENTATION_BLOCK_ROWS: usize = LOAD_INTERRUPT_CHECK_ROWS;
 
 #[cfg(feature = "pg_test")]
@@ -59,55 +60,36 @@ impl FromDatum for RawH3Datum {
     }
 }
 
-/// Owned detoasted GSERIALIZED bytes. The dynamic type is proved before this
-/// wrapper is ever requested from SPI.
-struct RawGeometryDatum(Vec<u8>);
-
-impl FromDatum for RawGeometryDatum {
-    unsafe fn from_polymorphic_datum(
-        datum: pg_sys::Datum,
-        is_null: bool,
-        _type_oid: pg_sys::Oid,
-    ) -> Option<Self> {
-        if is_null {
-            return None;
-        }
-        // SAFETY: SPI supplied a non-NULL Datum of the catalog-proved PostGIS
-        // varlena type on the backend main thread.
-        let original = datum.cast_mut_ptr::<pg_sys::varlena>();
-        // SAFETY: `original` is the non-null catalog-proved geometry varlena
-        // supplied by SPI and the conversion runs synchronously on its thread.
-        let detoasted = unsafe { pg_sys::pg_detoast_datum(original) };
-        if detoasted.is_null() {
-            return Some(Self(Vec::new()));
-        }
-        // SAFETY: pg_detoast_datum returned a flat varlena whose complete
-        // allocation is readable for VARSIZE bytes during this SPI callback.
-        let length = unsafe { pgrx::varsize(detoasted.cast()) };
-        // SAFETY: `varsize` proves exactly `length` readable bytes in the flat
-        // detoasted allocation; to_vec copies them before any pfree or SPI exit.
-        let bytes = unsafe { std::slice::from_raw_parts(detoasted.cast::<u8>(), length) }.to_vec();
-        if detoasted != original {
-            // SAFETY: a distinct pg_detoast_datum result is a palloc-owned
-            // flat copy; the owned Vec above no longer borrows it.
-            unsafe { pg_sys::pfree(detoasted.cast()) };
-        }
-        Some(Self(bytes))
+/// Consume a catalog-proved geometry on the backend thread. The builder copies
+/// directly from the live flat Datum into its retained storage, eliminating
+/// the temporary per-row exact-byte Vec. Distinct detoast copies are released
+/// on both successful staging and validation/allocation errors.
+unsafe fn stage_geometry_datum(
+    builder: &mut ResidentGeometryBuilder,
+    datum: pg_sys::Datum,
+    is_null: bool,
+) -> Result<(), String> {
+    if is_null {
+        return builder.push_borrowed(None);
     }
-}
-
-impl IntoDatum for RawGeometryDatum {
-    fn into_datum(self) -> Option<pg_sys::Datum> {
-        None
+    let original = datum.cast_mut_ptr::<pg_sys::varlena>();
+    // SAFETY: caller proved a live geometry varlena in the current table slot.
+    let detoasted = unsafe { pg_sys::pg_detoast_datum(original) };
+    if detoasted.is_null() {
+        return Err("could not detoast geometry".to_owned());
     }
-
-    fn type_oid() -> pg_sys::Oid {
-        pg_sys::InvalidOid
+    // SAFETY: pg_detoast_datum returned a complete flat, four-byte-header varlena.
+    let length = unsafe { pgrx::varsize(detoasted.cast()) };
+    // SAFETY: the flat allocation is readable for length bytes until pfree
+    // below. push_borrowed retains copies, never a reference to this allocation.
+    let bytes = unsafe { std::slice::from_raw_parts(detoasted.cast::<u8>(), length) };
+    let result = builder.push_borrowed(Some(bytes));
+    if detoasted != original {
+        // SAFETY: this is our distinct palloc-owned detoast copy; all builder
+        // references have expired, including when staging returned an error.
+        unsafe { pg_sys::pfree(detoasted.cast()) };
     }
-
-    fn is_compatible_with(_other: pg_sys::Oid) -> bool {
-        true
-    }
+    result
 }
 
 impl IntoDatum for RawH3Datum {
@@ -167,6 +149,10 @@ pub(super) enum TriggerInstall {
 }
 
 enum StagedColumn {
+    Numeric {
+        type_oid: pg_sys::Oid,
+        data: ResidentNumericData,
+    },
     Empty {
         type_oid: pg_sys::Oid,
     },
@@ -367,6 +353,9 @@ impl StagedColumn {
                 .ok_or_else(|| "resident column byte count overflow".to_owned())
         };
         match self {
+            Self::Numeric { data, .. } => data
+                .device_bytes()
+                .ok_or_else(|| "resident NUMERIC byte count overflow".to_owned()),
             Self::Empty { .. } => Ok(0),
             Self::Bool { values, nulls, .. } => {
                 checked(values.len(), 1, nulls.as_ref().map_or(0, Vec::len))
@@ -403,6 +392,10 @@ impl StagedColumn {
 
     fn materialize(self, label: &str) -> Result<ResidentColumn, String> {
         match self {
+            Self::Numeric { type_oid, data } => Ok(ResidentColumn::Numeric {
+                type_oid,
+                data: ResidentNumericColumn::materialize(&data)?,
+            }),
             Self::Empty { type_oid } => Ok(ResidentColumn::Empty { type_oid }),
             Self::Bool {
                 type_oid,
@@ -565,6 +558,22 @@ impl StagedColumn {
             ))
         };
         match self {
+            Self::Numeric { data, .. } => {
+                // Source logical size is the lossless send payload: eight
+                // header bytes per non-NULL value and two bytes per digit.
+                let nonnull = data.rows.len()
+                    - data
+                        .nulls
+                        .as_ref()
+                        .map_or(0, |nulls| nulls.iter().filter(|null| **null != 0).count());
+                evidence.source_logical_bytes = checked_lane_bytes(nonnull, 8, "NUMERIC headers")?
+                    .checked_add(checked_lane_bytes(data.digits.len(), 2, "NUMERIC digits")?)
+                    .ok_or("NUMERIC source byte count overflow")?;
+                (
+                    evidence.null_sidecar_bytes,
+                    evidence.projected_null_bitmap_bytes,
+                ) = null_projection(data.nulls.as_deref())?;
+            }
             Self::Empty { .. } => {}
             Self::Bool { values, nulls, .. } => {
                 evidence.source_logical_bytes = checked_lane_bytes(values.len(), 1, "bool source")?;
@@ -871,7 +880,7 @@ impl RasterColumnBuilder {
                 .map_err(|error| format!("resident raster host staging allocation failed: {error}"))
         };
         reserve(self.rows.try_reserve(additional))?;
-        reserve(self.nulls.try_reserve(additional))?;
+        super::nulls::reserve(&mut self.nulls, self.saw_null, self.rows.len(), additional)?;
         reserve(self.exact_offsets.try_reserve(additional))
     }
 
@@ -982,9 +991,9 @@ impl RasterColumnBuilder {
         let data = ResidentRasterData {
             pixels: self.pixels,
             band_offsets: self.band_offsets,
+            nulls: super::nulls::finish(self.nulls, self.saw_null, self.rows.len())?,
             rows: self.rows,
             bands: self.bands,
-            nulls: self.saw_null.then_some(self.nulls),
             exact: RetainedExactValues {
                 offsets: self.exact_offsets.into_boxed_slice(),
                 bytes: self.exact_bytes.into_boxed_slice(),
@@ -1005,7 +1014,87 @@ impl RasterColumnBuilder {
     }
 }
 
+/// Intern text as it is scanned: retain one owned label per distinct value,
+/// not one String per row. Finalization restores the established sorted-label
+/// representation by remapping first-seen codes, leaving NULL payloads zero.
+#[derive(Default)]
+struct TextColumnBuilder {
+    by_label: BTreeMap<String, i32>,
+    codes: Vec<i32>,
+    nulls: Vec<u8>,
+    saw_null: bool,
+}
+
+fn next_text_dictionary_code(labels: usize) -> Result<i32, String> {
+    if labels >= i32::MAX as usize {
+        return Err("text dictionary exceeds int32 code space".to_owned());
+    }
+    i32::try_from(labels).map_err(|_| "text dictionary exceeds int32 code space".to_owned())
+}
+
+impl TextColumnBuilder {
+    fn try_reserve(&mut self, additional: usize) -> Result<(), String> {
+        self.codes
+            .try_reserve(additional)
+            .map_err(|error| format!("resident host staging allocation failed: {error}"))?;
+        super::nulls::reserve(&mut self.nulls, self.saw_null, self.codes.len(), additional)
+    }
+
+    fn push(&mut self, value: Option<&str>) -> Result<(), String> {
+        if let Some(label) = value {
+            let code = if let Some(code) = self.by_label.get(label) {
+                *code
+            } else {
+                let code = next_text_dictionary_code(self.by_label.len())?;
+                self.by_label.insert(label.to_owned(), code);
+                code
+            };
+            self.codes.push(code);
+            self.nulls.push(0);
+        } else {
+            self.codes.push(0);
+            self.nulls.push(1);
+            self.saw_null = true;
+        }
+        Ok(())
+    }
+
+    fn finish(mut self, type_oid: pg_sys::Oid) -> Result<StagedColumn, String> {
+        let nulls = super::nulls::finish(self.nulls, self.saw_null, self.codes.len())?;
+        let mut remap = vec![0_i32; self.by_label.len()];
+        let mut labels = Vec::with_capacity(self.by_label.len());
+        for (sorted, (label, first_seen)) in self.by_label.into_iter().enumerate() {
+            let first_seen = usize::try_from(first_seen)
+                .map_err(|_| "text dictionary contains a negative code".to_owned())?;
+            *remap
+                .get_mut(first_seen)
+                .ok_or("text dictionary code exceeds label cardinality")? =
+                i32::try_from(sorted).map_err(|_| "text dictionary exceeds int32 code space")?;
+            labels.push(label);
+        }
+        for (index, code) in self.codes.iter_mut().enumerate() {
+            if nulls.as_ref().is_none_or(|mask| mask[index] == 0) {
+                let first_seen = usize::try_from(*code)
+                    .map_err(|_| "text dictionary contains a negative code".to_owned())?;
+                *code = *remap
+                    .get(first_seen)
+                    .ok_or("text dictionary code exceeds label cardinality")?;
+            }
+        }
+        Ok(StagedColumn::TextDictionary {
+            type_oid,
+            codes: self.codes,
+            nulls,
+            labels,
+        })
+    }
+}
+
 enum ColumnBuilder {
+    Numeric {
+        type_oid: pg_sys::Oid,
+        builder: NumericColumnBuilder,
+    },
     Bool {
         type_oid: pg_sys::Oid,
         values: Vec<u8>,
@@ -1049,7 +1138,7 @@ enum ColumnBuilder {
     },
     Text {
         type_oid: pg_sys::Oid,
-        values: Vec<Option<String>>,
+        builder: TextColumnBuilder,
     },
 }
 
@@ -1140,7 +1229,7 @@ pub(super) fn columns_have_fixed_width_load(requests: &[ColumnRequest]) -> Resul
             | pg_sys::TIMESTAMPTZOID
             | pg_sys::FLOAT4OID
             | pg_sys::FLOAT8OID => true,
-            pg_sys::TEXTOID | pg_sys::VARCHAROID | pg_sys::BPCHAROID => false,
+            pg_sys::TEXTOID | pg_sys::VARCHAROID | pg_sys::BPCHAROID | pg_sys::NUMERICOID => false,
             _ => matches!(
                 classify_extension_column_type(request.type_oid)?,
                 ExtensionColumnKind::H3
@@ -1154,7 +1243,8 @@ impl ColumnBuilder {
     fn type_oid(&self) -> pg_sys::Oid {
         match self {
             Self::Raster(builder) => builder.type_oid,
-            Self::Bool { type_oid, .. }
+            Self::Numeric { type_oid, .. }
+            | Self::Bool { type_oid, .. }
             | Self::I32 { type_oid, .. }
             | Self::I64 { type_oid, .. }
             | Self::H3 { type_oid, .. }
@@ -1176,6 +1266,10 @@ impl ColumnBuilder {
 
     fn for_type(type_oid: pg_sys::Oid) -> Result<Self, String> {
         match type_oid {
+            pg_sys::NUMERICOID => Ok(Self::Numeric {
+                type_oid,
+                builder: NumericColumnBuilder::default(),
+            }),
             pg_sys::BOOLOID => Ok(Self::Bool {
                 type_oid,
                 values: Vec::new(),
@@ -1208,7 +1302,7 @@ impl ColumnBuilder {
             }),
             pg_sys::TEXTOID | pg_sys::VARCHAROID | pg_sys::BPCHAROID => Ok(Self::Text {
                 type_oid,
-                values: Vec::new(),
+                builder: TextColumnBuilder::default(),
             }),
             _ => match classify_extension_column_type(type_oid)? {
                 ExtensionColumnKind::H3 => Ok(Self::H3 {
@@ -1240,33 +1334,64 @@ impl ColumnBuilder {
             result.map_err(|error| format!("resident host staging allocation failed: {error}"))
         };
         match self {
-            Self::Bool { values, nulls, .. } => {
+            Self::Numeric { builder, .. } => builder.try_reserve_rows(additional),
+            Self::Bool {
+                values,
+                nulls,
+                saw_null,
+                ..
+            } => {
                 reserve(values.try_reserve(additional))?;
-                reserve(nulls.try_reserve(additional))
+                super::nulls::reserve(nulls, *saw_null, values.len(), additional)
             }
-            Self::I32 { values, nulls, .. } => {
+            Self::I32 {
+                values,
+                nulls,
+                saw_null,
+                ..
+            } => {
                 reserve(values.try_reserve(additional))?;
-                reserve(nulls.try_reserve(additional))
+                super::nulls::reserve(nulls, *saw_null, values.len(), additional)
             }
-            Self::I64 { values, nulls, .. } => {
+            Self::I64 {
+                values,
+                nulls,
+                saw_null,
+                ..
+            } => {
                 reserve(values.try_reserve(additional))?;
-                reserve(nulls.try_reserve(additional))
+                super::nulls::reserve(nulls, *saw_null, values.len(), additional)
             }
-            Self::H3 { values, nulls, .. } => {
+            Self::H3 {
+                values,
+                nulls,
+                saw_null,
+                ..
+            } => {
                 reserve(values.try_reserve(additional))?;
-                reserve(nulls.try_reserve(additional))
+                super::nulls::reserve(nulls, *saw_null, values.len(), additional)
             }
             Self::Geometry { builder, .. } => builder.try_reserve_rows(additional),
             Self::Raster(builder) => builder.reserve_rows(additional),
-            Self::F32 { values, nulls, .. } => {
+            Self::F32 {
+                values,
+                nulls,
+                saw_null,
+                ..
+            } => {
                 reserve(values.try_reserve(additional))?;
-                reserve(nulls.try_reserve(additional))
+                super::nulls::reserve(nulls, *saw_null, values.len(), additional)
             }
-            Self::F64 { values, nulls, .. } => {
+            Self::F64 {
+                values,
+                nulls,
+                saw_null,
+                ..
+            } => {
                 reserve(values.try_reserve(additional))?;
-                reserve(nulls.try_reserve(additional))
+                super::nulls::reserve(nulls, *saw_null, values.len(), additional)
             }
-            Self::Text { values, .. } => reserve(values.try_reserve(additional)),
+            Self::Text { builder, .. } => builder.try_reserve(additional),
         }
     }
 
@@ -1284,6 +1409,56 @@ impl ColumnBuilder {
             }};
         }
         match self {
+            Self::Numeric { builder, .. } => {
+                if is_null {
+                    builder.push(None)?;
+                } else {
+                    // SAFETY: ColumnBuilder::for_type accepts only the exact
+                    // built-in NUMERIC OID for this branch. The slot Datum is
+                    // live on the backend thread. numeric_send returns a fresh
+                    // flat bytea; no private Numeric varlena layout is read.
+                    let original = datum.cast_mut_ptr::<pg_sys::varlena>();
+                    // SAFETY: original is a live NUMERIC varlena. Own any
+                    // detoast copy explicitly: numeric_send itself does not
+                    // release a PG_GETARG_NUMERIC copy on this scan path.
+                    let flat = unsafe { pg_sys::pg_detoast_datum(original) };
+                    if flat.is_null() {
+                        return Err("could not detoast NUMERIC".to_owned());
+                    }
+                    // SAFETY: built-in numeric_send accepts this flat NUMERIC
+                    // Datum. Direct dispatch avoids a catalog lookup per row.
+                    let wire = unsafe {
+                        pgrx::direct_function_call_as_datum(
+                            pg_sys::numeric_send,
+                            &[Some(pg_sys::Datum::from(flat))],
+                        )
+                    };
+                    if flat != original {
+                        // SAFETY: flat is a distinct palloc-owned detoast copy;
+                        // numeric_send has copied its complete digit payload.
+                        unsafe { pg_sys::pfree(flat.cast()) };
+                    }
+                    let wire = wire.map_or(
+                        std::ptr::null_mut(),
+                        pg_sys::Datum::cast_mut_ptr::<pg_sys::varlena>,
+                    );
+                    if wire.is_null() {
+                        return Err("numeric_send returned NULL".to_owned());
+                    }
+                    // SAFETY: numeric_send returned the complete flat bytea.
+                    let bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            pgrx::vardata_any(wire).cast::<u8>(),
+                            pgrx::varsize_any_exhdr(wire),
+                        )
+                    };
+                    let result = builder.push(Some(bytes));
+                    // SAFETY: wire is the fresh numeric_send result and push
+                    // has copied its digits; no reference escapes this call.
+                    unsafe { pg_sys::pfree(wire.cast()) };
+                    result?;
+                }
+            }
             Self::Bool {
                 values,
                 nulls,
@@ -1341,9 +1516,10 @@ impl ColumnBuilder {
                 nulls.push(u8::from(value.is_none()));
                 *saw_null |= value.is_none();
             }
-            Self::Geometry { type_oid, builder } => {
-                let value = decode_datum!(RawGeometryDatum, *type_oid);
-                builder.push(value.map(|value| value.0))?;
+            Self::Geometry { builder, .. } => {
+                // SAFETY: the builder's dynamic geometry type was catalog-
+                // validated; this table-slot Datum is live on the backend thread.
+                unsafe { stage_geometry_datum(builder, datum, is_null) }?;
             }
             Self::Raster(builder) => {
                 let datum = decode_datum!(RawRasterDatum, builder.type_oid);
@@ -1382,9 +1558,27 @@ impl ColumnBuilder {
                 nulls.push(u8::from(value.is_none()));
                 *saw_null |= value.is_none();
             }
-            Self::Text { type_oid, values } => {
-                let value = decode_datum!(String, *type_oid);
-                values.push(value);
+            Self::Text { type_oid, builder } => {
+                if is_null || datum.is_null() {
+                    builder.push(None)?;
+                } else {
+                    // SAFETY: this is a live text-family varlena from the
+                    // validated slot. Inline values can be borrowed only for
+                    // this call; push owns every newly interned label. Keep
+                    // pgrx's owning decoder for external/compressed values so
+                    // its detoast allocation is freed exactly as before.
+                    let toasted = unsafe {
+                        pgrx::varlena::varatt_is_1b_e(datum.cast_mut_ptr())
+                            || pgrx::varlena::varatt_is_4b_c(datum.cast_mut_ptr())
+                    };
+                    if toasted {
+                        let value = decode_datum!(String, *type_oid);
+                        builder.push(value.as_deref())?;
+                    } else {
+                        let value = decode_datum!(&str, *type_oid);
+                        builder.push(value)?;
+                    }
+                }
             }
         }
         Ok(())
@@ -1392,6 +1586,10 @@ impl ColumnBuilder {
 
     fn finish(self) -> Result<StagedColumn, String> {
         Ok(match self {
+            Self::Numeric { type_oid, builder } => StagedColumn::Numeric {
+                type_oid,
+                data: builder.finish()?,
+            },
             Self::Bool {
                 type_oid,
                 values,
@@ -1399,8 +1597,8 @@ impl ColumnBuilder {
                 saw_null,
             } => StagedColumn::Bool {
                 type_oid,
+                nulls: super::nulls::finish(nulls, saw_null, values.len())?,
                 values,
-                nulls: saw_null.then_some(nulls),
             },
             Self::I32 {
                 type_oid,
@@ -1409,8 +1607,8 @@ impl ColumnBuilder {
                 saw_null,
             } => StagedColumn::I32 {
                 type_oid,
+                nulls: super::nulls::finish(nulls, saw_null, values.len())?,
                 values,
-                nulls: saw_null.then_some(nulls),
             },
             Self::I64 {
                 type_oid,
@@ -1419,8 +1617,8 @@ impl ColumnBuilder {
                 saw_null,
             } => StagedColumn::I64 {
                 type_oid,
+                nulls: super::nulls::finish(nulls, saw_null, values.len())?,
                 values,
-                nulls: saw_null.then_some(nulls),
             },
             Self::H3 {
                 type_oid,
@@ -1429,8 +1627,8 @@ impl ColumnBuilder {
                 saw_null,
             } => StagedColumn::H3 {
                 type_oid,
+                nulls: super::nulls::finish(nulls, saw_null, values.len())?,
                 values,
-                nulls: saw_null.then_some(nulls),
             },
             Self::Geometry { type_oid, builder } => {
                 let max_exact_value_bytes =
@@ -1460,8 +1658,8 @@ impl ColumnBuilder {
                 saw_null,
             } => StagedColumn::F32 {
                 type_oid,
+                nulls: super::nulls::finish(nulls, saw_null, values.len())?,
                 values,
-                nulls: saw_null.then_some(nulls),
             },
             Self::F64 {
                 type_oid,
@@ -1470,50 +1668,10 @@ impl ColumnBuilder {
                 saw_null,
             } => StagedColumn::F64 {
                 type_oid,
+                nulls: super::nulls::finish(nulls, saw_null, values.len())?,
                 values,
-                nulls: saw_null.then_some(nulls),
             },
-            Self::Text { type_oid, values } => {
-                let labels = values
-                    .iter()
-                    .flatten()
-                    .cloned()
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect::<Vec<_>>();
-                if labels.len() > i32::MAX as usize {
-                    return Err("text dictionary exceeds int32 code space".to_owned());
-                }
-                let by_label = labels
-                    .iter()
-                    .enumerate()
-                    .map(|(index, label)| {
-                        (label.as_str(), i32::try_from(index).unwrap_or(i32::MAX))
-                    })
-                    .collect::<BTreeMap<_, _>>();
-                let saw_null = values.iter().any(Option::is_none);
-                let mut codes = Vec::with_capacity(values.len());
-                let mut nulls = Vec::with_capacity(values.len());
-                for value in &values {
-                    if let Some(label) = value {
-                        codes.push(
-                            *by_label
-                                .get(label.as_str())
-                                .ok_or("text dictionary code disappeared")?,
-                        );
-                        nulls.push(0);
-                    } else {
-                        codes.push(0);
-                        nulls.push(1);
-                    }
-                }
-                StagedColumn::TextDictionary {
-                    type_oid,
-                    codes,
-                    nulls: saw_null.then_some(nulls),
-                    labels,
-                }
-            }
+            Self::Text { type_oid, builder } => return builder.finish(type_oid),
         })
     }
 }
@@ -1735,6 +1893,13 @@ pub(super) fn estimate_resident_bytes(
     })?;
     requests.iter().try_fold(0_u64, |total, request| {
         let width = match request.type_oid {
+            pg_sys::NUMERICOID => {
+                // A width estimate only: staging computes the exact digit
+                // arena and 16-byte row-header charge before publication.
+                // SAFETY: validated attribute identity, backend main thread.
+                let average = unsafe { pg_sys::get_attavgwidth(relid, request.attno) };
+                u64::try_from(average.max(8)).map_err(|_| "NUMERIC width exceeds u64")? + 16
+            }
             pg_sys::BOOLOID => 1_u64,
             pg_sys::INT2OID
             | pg_sys::INT4OID
@@ -2524,6 +2689,13 @@ mod unit_tests {
             }]),
             Ok(false)
         );
+        assert_eq!(
+            columns_have_fixed_width_load(&[ColumnRequest {
+                attno: 1,
+                type_oid: pg_sys::NUMERICOID,
+            }]),
+            Ok(false)
+        );
     }
 
     #[test]
@@ -2614,6 +2786,150 @@ mod unit_tests {
         };
         assert_eq!(values, vec![-17, 0]);
         assert_eq!(nulls, Some(vec![0, 1]));
+    }
+
+    #[test]
+    fn primitive_null_masks_are_lazy_and_backfill_late_nulls() {
+        for oid in [
+            pg_sys::BOOLOID,
+            pg_sys::INT2OID,
+            pg_sys::INT4OID,
+            pg_sys::INT8OID,
+            pg_sys::DATEOID,
+            pg_sys::TIMESTAMPOID,
+            pg_sys::TIMESTAMPTZOID,
+            pg_sys::FLOAT4OID,
+            pg_sys::FLOAT8OID,
+        ] {
+            for first_null in [None, Some(0), Some(16385)] {
+                let mut builder = ColumnBuilder::for_type(oid).expect("builtin type");
+                builder.try_reserve(8192).expect("reserve values");
+                for row in 0..16387 {
+                    if row % LOAD_INTERRUPT_CHECK_ROWS == 0 {
+                        builder
+                            .try_reserve(LOAD_INTERRUPT_CHECK_ROWS)
+                            .expect("next batch");
+                    }
+                    let is_null = first_null == Some(row);
+                    // SAFETY: zero is a valid by-value Datum for each listed
+                    // builtin, and NULL suppresses payload decoding.
+                    unsafe { builder.push_datum(pg_sys::Datum::from(0_usize), is_null, 1) }
+                        .expect("stage builtin row");
+                    let (nulls, saw_null) = match &builder {
+                        ColumnBuilder::Bool {
+                            nulls, saw_null, ..
+                        }
+                        | ColumnBuilder::I32 {
+                            nulls, saw_null, ..
+                        }
+                        | ColumnBuilder::I64 {
+                            nulls, saw_null, ..
+                        }
+                        | ColumnBuilder::F32 {
+                            nulls, saw_null, ..
+                        }
+                        | ColumnBuilder::F64 {
+                            nulls, saw_null, ..
+                        } => (nulls, saw_null),
+                        _ => panic!("unexpected primitive builder"),
+                    };
+                    if first_null.is_none_or(|first| row < first) {
+                        assert!(!saw_null);
+                        assert!(nulls.capacity() <= LOAD_INTERRUPT_CHECK_ROWS);
+                    } else {
+                        assert!(*saw_null);
+                        assert!(nulls.len() <= row + 1);
+                        assert_eq!(nulls.last(), Some(&u8::from(is_null)));
+                    }
+                }
+                let staged = builder.finish().expect("finish primitive column");
+                let nulls = match staged {
+                    StagedColumn::Bool { nulls, .. }
+                    | StagedColumn::I32 { nulls, .. }
+                    | StagedColumn::I64 { nulls, .. }
+                    | StagedColumn::F32 { nulls, .. }
+                    | StagedColumn::F64 { nulls, .. } => nulls,
+                    _ => panic!("unexpected primitive column"),
+                };
+                assert_eq!(
+                    nulls,
+                    first_null.map(|first| {
+                        let mut mask = vec![0; 16387];
+                        mask[first] = 1;
+                        mask
+                    })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn text_remapping_handles_absent_and_late_null_masks() {
+        for late_null in [false, true] {
+            let mut builder = TextColumnBuilder::default();
+            builder.try_reserve(8192).expect("reserve codes only");
+            for row in 0..16385 {
+                if row % LOAD_INTERRUPT_CHECK_ROWS == 0 {
+                    builder
+                        .try_reserve(LOAD_INTERRUPT_CHECK_ROWS)
+                        .expect("next text batch");
+                }
+                builder
+                    .push(Some(if row % 2 == 0 { "z" } else { "a" }))
+                    .expect("label");
+            }
+            assert!(builder.nulls.capacity() <= super::super::nulls::STAGING_ROWS);
+            if late_null {
+                builder.push(None).expect("late NULL");
+            }
+            let StagedColumn::TextDictionary {
+                codes,
+                nulls,
+                labels,
+                ..
+            } = builder.finish(pg_sys::TEXTOID).expect("sorted dictionary")
+            else {
+                panic!("text representation changed");
+            };
+            assert_eq!(labels, ["a", "z"]);
+            for (row, code) in codes[..16385].iter().enumerate() {
+                assert_eq!(*code, i32::from(row % 2 == 0));
+            }
+            if late_null {
+                assert_eq!(codes[16385], 0);
+                let mask = nulls.expect("late mask");
+                assert!(mask[..16385].iter().all(|null| *null == 0));
+                assert_eq!(mask[16385], 1);
+            } else {
+                assert!(nulls.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn raster_null_mask_backfills_without_changing_exact_payloads() {
+        let value = multiband_raster();
+        let mut builder = RasterColumnBuilder::new(raster_catalog_identity(), 1024);
+        builder.reserve_rows(8192).expect("reserve raster rows");
+        for _ in 0..16385 {
+            builder.push_value(Some(&value)).expect("raster prefix");
+        }
+        assert!(builder.nulls.capacity() <= super::super::nulls::STAGING_ROWS);
+        assert!(builder.push_value(Some(&[0])).is_err());
+        builder.push_value(None).expect("late NULL");
+        builder.push_value(Some(&value)).expect("raster suffix");
+        let StagedColumn::Raster { data, .. } = builder
+            .finish_after_catalog_proof()
+            .expect("pure raster staging fixture")
+        else {
+            panic!("raster representation changed");
+        };
+        let mask = data.nulls.as_ref().expect("late mask");
+        assert!(mask[..16385].iter().all(|null| *null == 0));
+        assert_eq!(&mask[16385..], &[1, 0]);
+        assert_eq!(data.exact.value(16384), Some(value.as_slice()));
+        assert_eq!(data.exact.value(16385), Some([].as_slice()));
+        assert_eq!(data.exact.value(16386), Some(value.as_slice()));
     }
 
     #[test]
@@ -2847,21 +3163,11 @@ mod unit_tests {
         assert_eq!(RawH3Datum::type_oid(), pg_sys::InvalidOid);
         assert!(RawH3Datum::is_compatible_with(pg_sys::Oid::from(99)));
 
-        let geometry = RawGeometryDatum(vec![1, 2, 3]);
-        assert_eq!(geometry.into_datum(), None);
-        assert_eq!(RawGeometryDatum::type_oid(), pg_sys::InvalidOid);
-        assert!(RawGeometryDatum::is_compatible_with(pg_sys::Oid::from(99)));
+        let mut geometry = ResidentGeometryBuilder::new(1024, 16);
         // SAFETY: a true null flag prevents any dereference of the sentinel Datum.
-        assert!(
-            unsafe {
-                RawGeometryDatum::from_polymorphic_datum(
-                    pg_sys::Datum::from(1_usize),
-                    true,
-                    pg_sys::Oid::from(99),
-                )
-            }
-            .is_none()
-        );
+        unsafe { stage_geometry_datum(&mut geometry, pg_sys::Datum::from(1_usize), true) }
+            .expect("NULL geometry does not inspect sentinel");
+        assert_eq!(geometry.finish().expect("NULL column").nulls, Some(vec![1]));
 
         let raster_datum = pg_sys::Datum::from(0x1234_usize);
         // SAFETY: RawRasterDatum only checks the by-value payload for this test.
@@ -3176,17 +3482,13 @@ mod unit_tests {
 
     #[test]
     fn text_dictionary_is_sorted_deduplicated_and_null_aware() {
-        let staged = ColumnBuilder::Text {
-            type_oid: pg_sys::TEXTOID,
-            values: vec![
-                Some("zeta".to_owned()),
-                None,
-                Some("alpha".to_owned()),
-                Some("zeta".to_owned()),
-            ],
+        let mut builder = TextColumnBuilder::default();
+        for value in [Some("zeta"), None, Some("alpha"), Some("zeta")] {
+            builder.push(value).expect("intern label");
         }
-        .finish()
-        .expect("text dictionary builds");
+        let staged = builder
+            .finish(pg_sys::TEXTOID)
+            .expect("text dictionary builds");
         let StagedColumn::TextDictionary {
             codes,
             nulls,
@@ -3199,6 +3501,86 @@ mod unit_tests {
         assert_eq!(labels, vec!["alpha", "zeta"]);
         assert_eq!(codes, vec![1, 0, 0, 1]);
         assert_eq!(nulls, Some(vec![0, 1, 0, 0]));
+    }
+
+    #[test]
+    fn incremental_text_dictionary_matches_sorted_reference_and_owns_labels() {
+        for type_oid in [pg_sys::TEXTOID, pg_sys::VARCHAROID, pg_sys::BPCHAROID] {
+            let mut builder = TextColumnBuilder::default();
+            builder.try_reserve(100_000).expect("reserve rows");
+            let labels = ["", "z", "a", "a ", "a  ", "é", "e\u{301}", "東京", "😀"];
+            let mut input = Vec::new();
+            for row in 0..100_000 {
+                let value = (row % 17 != 0).then(|| labels[(row * 13) % labels.len()].to_owned());
+                builder
+                    .push(value.as_deref())
+                    .expect("intern borrowed text");
+                // The builder cannot retain the temporary String's address.
+                input.push(value.clone());
+            }
+            assert_eq!(builder.by_label.len(), labels.len());
+            assert_eq!(builder.codes.len(), input.len());
+            let expected_labels = input
+                .iter()
+                .flatten()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let StagedColumn::TextDictionary {
+                codes,
+                nulls,
+                labels,
+                ..
+            } = builder.finish(type_oid).expect("finish dictionary")
+            else {
+                panic!("dictionary representation")
+            };
+            assert_eq!(labels, expected_labels);
+            let nulls = nulls.expect("NULL sidecar");
+            for (row, value) in input.iter().enumerate() {
+                assert_eq!(nulls[row], u8::from(value.is_none()));
+                assert_eq!(
+                    codes[row],
+                    value.as_ref().map_or(0, |value| i32::try_from(
+                        expected_labels.binary_search(value).expect("label")
+                    )
+                    .expect("code"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_text_dictionary_empty_null_and_capacity_boundaries() {
+        for values in [vec![], vec![None, None], vec![Some("same"), Some("same")]] {
+            let mut builder = TextColumnBuilder::default();
+            for value in &values {
+                builder.push(*value).expect("row");
+            }
+            let StagedColumn::TextDictionary {
+                codes,
+                nulls,
+                labels,
+                ..
+            } = builder.finish(pg_sys::TEXTOID).expect("finish")
+            else {
+                panic!("dictionary representation")
+            };
+            assert_eq!(codes, vec![0; values.len()]);
+            assert_eq!(nulls.is_some(), values.iter().any(Option::is_none));
+            assert_eq!(
+                labels.len(),
+                usize::from(values.iter().any(Option::is_some))
+            );
+        }
+        assert_eq!(next_text_dictionary_code(0), Ok(0));
+        assert_eq!(
+            next_text_dictionary_code(i32::MAX as usize - 1),
+            Ok(i32::MAX - 1)
+        );
+        assert!(next_text_dictionary_code(i32::MAX as usize).is_err());
+        assert!(next_text_dictionary_code(usize::MAX).is_err());
     }
 
     #[test]
@@ -3298,6 +3680,119 @@ mod tests {
             }
             CaughtError::RustPanic { ereport, .. } => ereport.sql_error_code(),
         }
+    }
+
+    #[pg_test]
+    fn direct_geometry_staging_borrows_flat_compressed_and_external_values() {
+        Spi::run(
+            "CREATE EXTENSION IF NOT EXISTS postgis; \
+             CREATE TABLE pgaccel_geometry_staging(p geometry, c geometry, e geometry); \
+             ALTER TABLE pgaccel_geometry_staging ALTER COLUMN p SET STORAGE PLAIN; \
+             ALTER TABLE pgaccel_geometry_staging ALTER COLUMN c SET STORAGE MAIN; \
+             ALTER TABLE pgaccel_geometry_staging ALTER COLUMN e SET STORAGE EXTERNAL; \
+             INSERT INTO pgaccel_geometry_staging \
+             SELECT ST_SetSRID(ST_MakePoint(-0.0,1.25),4326), \
+                    ST_MakeLine(ST_SetSRID(ST_MakePoint(1,2),4326) ORDER BY i), \
+                    ST_MakeLine(ST_SetSRID(ST_MakePoint(i,sin(i)),4326) ORDER BY i) \
+             FROM generate_series(1,2048) s(i); \
+             INSERT INTO pgaccel_geometry_staging VALUES \
+                (NULL,NULL,NULL), ('SRID=4326;POINT EMPTY', \
+                                  'SRID=4326;LINESTRING EMPTY', \
+                                  'SRID=4326;POLYGON EMPTY')",
+        )
+        .expect("create flat/compressed/external geometry fixture");
+        assert_eq!(
+            Spi::get_one::<bool>(
+                "SELECT pg_column_size(c)<2000 AND pg_column_size(e)>32000 \
+                 AND pg_relation_size((SELECT reltoastrelid FROM pg_class \
+                   WHERE oid='pgaccel_geometry_staging'::regclass))>0 \
+                 FROM pgaccel_geometry_staging WHERE p IS NOT NULL AND NOT ST_IsEmpty(p)"
+            )
+            .expect("verify compressed and out-of-line fixture"),
+            Some(true)
+        );
+        let relid = relation_oid("pgaccel_geometry_staging");
+        ensure_invalidation_trigger(relid).expect("install generation tracking");
+        let requests = resolve_attnos(relid, &[1, 2, 3]).expect("resolve geometry columns");
+        // The independent expected bytes use the old owned-copy boundary.
+        let expected = Spi::connect(|client| {
+            let mut rows = client
+                .select("SELECT p,c,e FROM pgaccel_geometry_staging", None, &[])
+                .expect("read exact source bytes");
+            let mut expected = Vec::new();
+            while rows.next().is_some() {
+                expected.push(
+                    (1..=3)
+                        .map(|column| {
+                            rows.get_datum_by_ordinal(column)
+                                .expect("geometry field")
+                                .map(|datum| {
+                                    let original = datum.cast_mut_ptr::<pg_sys::varlena>();
+                                    // SAFETY: live non-NULL geometry owned by this SPI row.
+                                    let flat = unsafe { pg_sys::pg_detoast_datum(original) };
+                                    assert!(!flat.is_null());
+                                    // SAFETY: flat contains its complete four-byte-header payload.
+                                    let bytes = unsafe {
+                                        std::slice::from_raw_parts(
+                                            flat.cast::<u8>(),
+                                            pgrx::varsize(flat.cast()),
+                                        )
+                                        .to_vec()
+                                    };
+                                    if flat != original {
+                                        // SAFETY: distinct detoast copy; bytes now own the payload.
+                                        unsafe { pg_sys::pfree(flat.cast()) };
+                                    }
+                                    bytes
+                                })
+                        })
+                        .collect::<Vec<_>>(),
+                );
+            }
+            expected
+        });
+        let staged = stage_for_test(relid, &requests).expect("borrowed geometry table scan");
+        assert_eq!(staged.row_count(), 3);
+        Spi::run("DROP TABLE pgaccel_geometry_staging").expect("release source table and toast");
+        for (column, request) in requests.iter().enumerate() {
+            let StagedColumn::Geometry { data, .. } =
+                staged.columns.get(&request.attno).expect("column")
+            else {
+                panic!("expected geometry column");
+            };
+            assert_eq!(data.nulls.as_deref(), Some([0, 1, 0].as_slice()));
+            for (row, values) in expected.iter().enumerate() {
+                assert_eq!(
+                    data.exact.value(row),
+                    Some(values[column].as_deref().unwrap_or(&[]))
+                );
+            }
+            assert_eq!(data.coordinates.len(), if column == 0 { 2 } else { 4096 });
+        }
+        // A non-NULL unsupported geometry is still rejected, including when
+        // rejection occurs after detoasting an out-of-line value.
+        Spi::run(
+            "CREATE TABLE pgaccel_geometry_invalid(g geometry); \
+             ALTER TABLE pgaccel_geometry_invalid ALTER COLUMN g SET STORAGE EXTERNAL; \
+             INSERT INTO pgaccel_geometry_invalid SELECT \
+               ST_MakeLine(ST_MakePoint(i,sin(i),i) ORDER BY i) \
+               FROM generate_series(1,2048) s(i)",
+        )
+        .expect("create toasted unsupported 3D geometry");
+        let invalid = relation_oid("pgaccel_geometry_invalid");
+        ensure_invalidation_trigger(invalid).expect("invalid fixture generation");
+        let requests = resolve_attnos(invalid, &[1]).expect("invalid fixture columns");
+        for _ in 0..16 {
+            let error = match stage_for_test(invalid, &requests) {
+                Ok(_) => panic!("3D geometry must not stage"),
+                Err(error) => error,
+            };
+            assert!(
+                error.contains("not a supported non-geodetic 2D layout"),
+                "{error}"
+            );
+        }
+        Spi::run("DROP TABLE pgaccel_geometry_invalid").expect("clean invalid fixture");
     }
 
     #[pg_test]

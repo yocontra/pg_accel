@@ -1,0 +1,40 @@
+[32m[1m       Using[0m[39m [37m[1mCliArgument("pg19")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.pgaccel/postgres/install/19beta1/bin/pg_config[39m
+CARGO_TARGET_DIR="/Users/contra/Projects/pg_accel/target" PGRX_ALL_FEATURES="false" PGRX_BUILD_PROFILE="dev" PGRX_FEATURES="pg19 pg_test" PGRX_MANIFEST_PATH="/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" PGRX_NO_DEFAULT_FEATURES="true" PGRX_NO_SCHEMA="false" "/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "test" "--manifest-path" "/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" "--features" "pg19 pg_test" "--no-default-features" "pg_scalar_"
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 35.51s
+     Running unittests src/lib.rs (target/debug/deps/pg_accel-ee631feaa28e3472)
+
+running 12 tests
+[32m[1m       Using[0m[39m [37m[1mPgConfig("pg19")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.pgaccel/postgres/install/19beta1/bin/pg_config[39m
+[32m[1m    Building[0m[39m extension with features [36mpg19 pg_test[39m
+[32m[1m     Running[0m[39m command [36m"/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "rustc" "--lib" "--manifest-path" "/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" "--features" "pg19 pg_test" "--no-default-features" "--message-format=json-render-diagnostics"[39m
+    Blocking waiting for file lock on build directory
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.18s
+[32m[1m  Installing[0m[39m extension
+[32m[1m     Copying[0m[39m control file to [36m.pgaccel/postgres/install/19beta1/share/extension/pg_accel.control[39m
+[32m[1m     Copying[0m[39m shared library to [36m.pgaccel/postgres/install/19beta1/lib/pg_accel.dylib[39m
+[32m[1m  Discovered[0m[39m [36m[1m320[0m[39m SQL entities: [36m[1m25[0m[39m schemas ([36m[1m3[0m[39m unique), [36m[1m293[0m[39m functions, [36m[1m0[0m[39m types, [36m[1m0[0m[39m enums, [36m[1m1[0m[39m sqls, [36m[1m0[0m[39m ords, [36m[1m0[0m[39m hashes, [36m[1m0[0m[39m aggregates, [36m[1m1[0m[39m triggers
+[32m[1m     Writing[0m[39m SQL entities to /Users/contra/Projects/pg_accel/.pgaccel/postgres/install/19beta1/share/extension/pg_accel--1.0.0-rc1.sql
+[32m[1m    Finished[0m[39m installing pg_accel
+test tests::scalar_lowering::tests::pg_pg_scalar_lowering_rejects_unqualified_catalog_and_relation_shapes ... ok
+test tests::scalar_lowering::tests::pg_pg_scalar_aggregate_extraction_uses_the_typed_lowerer ... ok
+test tests::scalar_lowering::tests::pg_pg_scalar_lowering_enforces_instruction_stack_and_input_bounds ... ok
+test tests::scalar_lowering::tests::pg_pg_scalar_null_safe_lowering_matches_native ... ok
+test tests::scalar_lowering::tests::pg_pg_scalar_lowering_preserves_lazy_error_branches ... ok
+test tests::scalar_lowering::tests::pg_pg_scalar_membership_validates_hashed_operator_and_array_contracts ... ok
+test tests::scalar_lowering::tests::pg_pg_scalar_lowering_matches_native_error_states ... ok
+test tests::scalar_lowering::tests::pg_pg_scalar_date_lowering_matches_native_boundaries_and_errors ... ok
+test tests::scalar_lowering::tests::pg_pg_scalar_lowering_matches_native_simplified_trees ... ok
+test tests::scalar_lowering::tests::pg_pg_scalar_resident_artifact_rejects_stale_inputs_and_reloads ... ok
+test tests::scalar_lowering::tests::pg_pg_scalar_descriptor_plan_materializes_all_integer_lanes ... ok
+test tests::scalar_lowering::tests::pg_pg_scalar_fused_owned_binding_matches_native_aggregates ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 1709 filtered out; finished in 15.25s
+
+     Running tests/correctness_tests.rs (target/debug/deps/correctness_tests-fa0924ee727060b3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+

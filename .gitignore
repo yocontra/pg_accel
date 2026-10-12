@@ -62,3 +62,6 @@ __pycache__/
 /benchmarks/README.md
 /benchmarks/runs/
 /.pgaccel/logs/
+
+# Original host-identifying crash report withheld from public evidence.
+/benchmarks/evidence/resident-join-binding-20261009/initial-metal-abort.ips

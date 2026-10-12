@@ -1,0 +1,66 @@
+=== 41_gpu_expr_projection ===
+BEGIN
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT 100000
+ANALYZE
+SET
+SELECT 1
+SET
+SELECT 1
+DO
+DROP TABLE
+COMMIT
+PGACCEL_ASSERT_OK:41_gpu_expr_projection.assert_002
+BEGIN
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT 100000
+ANALYZE
+SET
+SELECT 1
+SET
+SELECT 1
+DO
+DROP TABLE
+COMMIT
+PGACCEL_ASSERT_OK:41_gpu_expr_projection.assert_003
+BEGIN
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT 100000
+ANALYZE
+SET
+SELECT 1
+SET
+SELECT 1
+DO
+DROP TABLE
+COMMIT
+PGACCEL_ASSERT_OK:41_gpu_expr_projection.assert_004
+BEGIN
+ setseed 
+---------
+ 
+(1 row)
+
+SELECT 100000
+ANALYZE
+SET
+SELECT 1
+SET
+SELECT 1
+DO
+PGACCEL_ASSERT_OK:41_gpu_expr_projection.assert_001
+DROP TABLE
+COMMIT
+PGACCEL_FILE_OK:41_gpu_expr_projection

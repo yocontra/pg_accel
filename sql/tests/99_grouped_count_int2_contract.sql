@@ -1,6 +1,7 @@
 -- 99_grouped_count_int2_contract.sql: exact selected-path boundary for one
 -- nullable bool fact key grouped with COUNT over a distinct nullable int2
--- fact column. Global, filtered, and broader typed COUNT shapes stay native.
+-- fact column. Global COUNT(int2) and INT2/INT4 extrema are qualified;
+-- combinations with INT8 MIN remain native.
 
 \echo '=== 99_grouped_count_int2_contract ==='
 
@@ -193,20 +194,21 @@ BEGIN
 
     FOR plan_row IN
         EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-        SELECT count(observed) FROM _int2_count_contract
+        -- Integer-only extrema are qualified; INT8 MIN remains outside the lane.
+        SELECT count(observed), min(id) FROM _int2_count_contract
     LOOP
-        INSERT INTO _int2_count_plan VALUES ('global', plan_row."QUERY PLAN");
+        INSERT INTO _int2_count_plan VALUES ('global_count_min', plan_row."QUERY PLAN");
     END LOOP;
     FOR plan_row IN
         EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-        SELECT bool_key, count(observed_i4)
+        SELECT bool_key, count(observed_i4), min(id)
         FROM _int2_count_contract GROUP BY bool_key
     LOOP
-        INSERT INTO _int2_count_plan VALUES ('int4_measure', plan_row."QUERY PLAN");
+        INSERT INTO _int2_count_plan VALUES ('int4_count_min', plan_row."QUERY PLAN");
     END LOOP;
     FOR plan_row IN
         EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-        SELECT bool_key, count(observed)
+        SELECT bool_key, count(observed), min(id)
         FROM _int2_count_contract
         WHERE bool_key
         GROUP BY bool_key

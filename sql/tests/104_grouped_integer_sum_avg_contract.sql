@@ -408,12 +408,13 @@ BEGIN
 END $$;
 \echo 'PGACCEL_ASSERT_OK:104_grouped_integer_sum_avg_contract.assert_005'
 
-PREPARE _int2_avg_only_q AS
-SELECT bool_key, avg(observed_i2)
+-- INT2/INT4 extrema are now qualified; retain the adjacent INT8 boundary.
+PREPARE _int8_min_only_q AS
+SELECT bool_key, min(id)
 FROM _integer_sum_avg_contract
 GROUP BY bool_key;
-PREPARE _int4_without_count_q AS
-SELECT bool_key, sum(observed_i4), avg(observed_i4)
+PREPARE _int4_sum_int8_min_q AS
+SELECT bool_key, sum(observed_i4), min(id)
 FROM _integer_sum_avg_contract
 GROUP BY bool_key;
 
@@ -430,15 +431,15 @@ BEGIN
     SELECT pg_accel_kernel_executions() INTO STRICT kernels_before;
     FOR plan_row IN
         EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-        EXECUTE _int2_avg_only_q
+        EXECUTE _int8_min_only_q
     LOOP
-        INSERT INTO _integer_sum_avg_plan VALUES ('int2-avg-only', 'decline', plan_row."QUERY PLAN");
+        INSERT INTO _integer_sum_avg_plan VALUES ('int8-min-only', 'decline', plan_row."QUERY PLAN");
     END LOOP;
     FOR plan_row IN
         EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-        EXECUTE _int4_without_count_q
+        EXECUTE _int4_sum_int8_min_q
     LOOP
-        INSERT INTO _integer_sum_avg_plan VALUES ('int4-no-count', 'decline', plan_row."QUERY PLAN");
+        INSERT INTO _integer_sum_avg_plan VALUES ('int4-sum-int8-min', 'decline', plan_row."QUERY PLAN");
     END LOOP;
     SELECT pg_accel_kernel_executions() INTO STRICT kernels_after;
     SELECT stock_exec_count INTO STRICT stock_after FROM pg_accel_stats();
@@ -455,8 +456,8 @@ BEGIN
 END $$;
 \echo 'PGACCEL_ASSERT_OK:104_grouped_integer_sum_avg_contract.assert_006'
 
-DEALLOCATE _int4_without_count_q;
-DEALLOCATE _int2_avg_only_q;
+DEALLOCATE _int4_sum_int8_min_q;
+DEALLOCATE _int8_min_only_q;
 DEALLOCATE _int4_sum_avg_q;
 DEALLOCATE _int2_sum_avg_q;
 DROP TABLE _int4_sum_avg_lifecycle_enabled;

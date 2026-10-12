@@ -1,0 +1,11 @@
+[ 13%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/grouped_agg_workspace.cpp.o
+[ 13%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/grouped_agg.cpp.o
+[ 20%] Linking CXX shared library libpgaccel_kernels_shared.dylib
+[ 86%] Built target pgaccel_kernels_shared
+[ 93%] Building CXX object CMakeFiles/test_grouped_agg.dir/test/test_grouped_agg.cpp.o
+[100%] Linking CXX executable test_grouped_agg
+[100%] Built target test_grouped_agg
+[ 86%] Built target pgaccel_kernels_shared
+[ 93%] Building CXX object CMakeFiles/test_scalar.dir/test/test_scalar.cpp.o
+[100%] Linking CXX executable test_scalar
+[100%] Built target test_scalar

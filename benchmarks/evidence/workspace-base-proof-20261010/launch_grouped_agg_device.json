@@ -1,0 +1,22 @@
+{
+  "calls": [
+    {
+      "base_declaration": "0x91760c7b8",
+      "base_parameter": 3,
+      "callee_id": "0x917552f10",
+      "conditional": false,
+      "destination_id": "0x91760ee98",
+      "destination_name": "destination",
+      "destination_path": [],
+      "end": 5852166,
+      "local_reads": [
+        "0x91760d678"
+      ],
+      "nullable": true,
+      "start": 5852088
+    }
+  ],
+  "detail": "stable workspace parameter, typed call arguments and returned-alias facts; caller not approved",
+  "ok": true,
+  "source_sha256": "dc3fcc9d4e27a1131b8c8cbf643878442fc40992bdeae9c0d572f183b62d4d93"
+}

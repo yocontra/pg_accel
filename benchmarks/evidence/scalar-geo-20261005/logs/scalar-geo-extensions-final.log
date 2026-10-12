@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running unittests src/main.rs (target/debug/deps/pg_accel_bench-8dbe2368e0608457)
+
+running 2 tests
+test workloads::tests::test_extension_requirements_non_empty ... ok
+test workloads::tests::test_extension_requirements_reference_valid_workloads ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 576 filtered out; finished in 0.01s
+

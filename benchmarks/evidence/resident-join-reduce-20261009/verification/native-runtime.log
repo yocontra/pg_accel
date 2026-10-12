@@ -1,0 +1,18 @@
+Test project /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+    Start 26: test_join_rows
+1/1 Test #26: test_join_rows ...................***Failed    0.09 sec
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+No GPU for resident join-row tests
+gpu-noise[test_join_rows]: suppressed metal-no-devices=1; raw log: /Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs/test_join_rows-20261009-211610-38425.log
+gpu-test[test_join_rows]: failed with exit code 77
+--- failure summary from /Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs/test_join_rows-20261009-211610-38425.log ---
+PGACCEL_TEST_RESULT name=test_join_rows exit_code=77 result=FAIL raw_lines=3 body_sha256=d6d959fbfbac97c3101b871a28578c83c94aecd2680316e29870e5fd98bc26c4 binding_sha256=a0fd0700fd4bf59693d365a035e793e5f21b378579a3e3e3b80760b4ec67fcab
+
+
+0% tests passed, 1 tests failed out of 1
+
+Total Test time (real) =   0.09 sec
+
+The following tests FAILED:
+	 26 - test_join_rows (Failed)
+Errors while running CTest

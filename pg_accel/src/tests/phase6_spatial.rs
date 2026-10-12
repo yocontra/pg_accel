@@ -122,6 +122,115 @@ mod tests {
     }
 
     #[pg_test]
+    fn spatial_compaction_binds_checked_output_subspans() {
+        if !gpu_device_available() {
+            return;
+        }
+        serialize_gpu_tests();
+        use crate::gpu::{
+            ExprDeviceBuffer, PGACCEL_SPATIAL_CONTROL_BYTES, PgaccelSpatialRecheckCompactRequest,
+            PgaccelSpatialWorkspace, prepare_spatial_resident, spatial_recheck_compact_launch,
+            spatial_recheck_compact_launch_result, spatial_workspace_finish,
+        };
+        prepare_spatial_resident().expect("prepare spatial queue");
+        let tri = ExprDeviceBuffer::copy_from_slice(&[1_i8, -1, 0]).expect("tri-state");
+        let mask = ExprDeviceBuffer::copy_from_slice(&[99_i8; 11]).expect("shared mask");
+        let indices = ExprDeviceBuffer::<u64>::new(3).expect("indices");
+        let count = ExprDeviceBuffer::<u64>::new(1).expect("count");
+        let control = ExprDeviceBuffer::<u8>::new(PGACCEL_SPATIAL_CONTROL_BYTES).expect("control");
+        let failure = ExprDeviceBuffer::copy_from_slice(&[0_u32]).expect("failure flag");
+        let workspace =
+            PgaccelSpatialWorkspace::from_device_buffers(&control, &failure).expect("workspace");
+        for start in 0..=8 {
+            mask.write_prefix_from_slice(&[99_i8; 11])
+                .expect("reset guard bytes");
+            let request = PgaccelSpatialRecheckCompactRequest::from_device_buffers_at(
+                &tri, &mask, &indices, &count, 3, start,
+            )
+            .expect("checked output subspan");
+            assert_eq!(request.final_mask_bytes, 3);
+            assert_eq!(
+                request.final_mask as usize,
+                mask.as_mut_ptr() as usize + start
+            );
+            assert_eq!(request.row_count, 3);
+            // SAFETY: all disjoint device inputs, output subspan and workspace
+            // buffers remain owned here through synchronous completion.
+            let outcome = unsafe { spatial_recheck_compact_launch(&request, &workspace) };
+            spatial_recheck_compact_launch_result(outcome).expect("compact subspan");
+            // SAFETY: the chain's live workspace and failure word remain owned.
+            unsafe { spatial_workspace_finish(&workspace) }.expect("finish compaction");
+            let mut expected = [99_i8; 11];
+            expected[start..start + 3].copy_from_slice(&[1, -1, -1]);
+            assert_eq!(mask.copy_to_vec().expect("mask with guards"), expected);
+            assert_eq!(count.copy_to_vec().expect("uncertainty count"), [1]);
+        }
+        mask.write_prefix_from_slice(&[99_i8; 11])
+            .expect("reset final guards");
+        for start in [9, 11, usize::MAX] {
+            assert!(
+                PgaccelSpatialRecheckCompactRequest::from_device_buffers_at(
+                    &tri, &mask, &indices, &count, 3, start,
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            PgaccelSpatialRecheckCompactRequest::from_device_buffers(
+                &tri, &mask, &indices, &count, 3,
+            )
+            .is_err()
+        );
+        assert_eq!(mask.copy_to_vec().expect("unmodified mask"), [99_i8; 11]);
+    }
+
+    #[pg_test]
+    fn spatial_recheck_prefix_transfers_preserve_suffix_and_host_guards() {
+        if !gpu_device_available() {
+            return;
+        }
+        serialize_gpu_tests();
+        // Match the two recheck ABI element widths, including an unaligned
+        // byte-prefix end. Short transfers must not change the suffix.
+        let indices = crate::gpu::ExprDeviceBuffer::copy_from_slice(&[11_u64, 22, 33, 44])
+            .expect("index allocation");
+        indices
+            .write_prefix_from_slice(&[7, 9])
+            .expect("index prefix upload");
+        let mut readback = [u64::MAX; 4];
+        indices
+            .copy_prefix_to_slice(&mut readback[1..3])
+            .expect("index prefix download");
+        assert_eq!(readback, [u64::MAX, 7, 9, u64::MAX]);
+        assert_eq!(
+            indices.copy_to_vec().expect("complete readback"),
+            [7, 9, 33, 44]
+        );
+
+        let results =
+            crate::gpu::ExprDeviceBuffer::copy_from_slice(&[-1_i8; 5]).expect("result allocation");
+        results
+            .write_prefix_from_slice(&[1, 0, 1])
+            .expect("result prefix upload");
+        results.write_prefix_from_slice(&[]).expect("empty upload");
+        results
+            .copy_prefix_to_slice(&mut [])
+            .expect("empty download");
+        assert_eq!(
+            results.copy_to_vec().expect("result suffix"),
+            [1, 0, 1, -1, -1]
+        );
+        let mut guard = [99_i8; 6];
+        assert!(results.copy_prefix_to_slice(&mut guard).is_err());
+        assert_eq!(guard, [99; 6]);
+        assert!(results.write_prefix_from_slice(&[0; 6]).is_err());
+        assert_eq!(
+            results.copy_to_vec().expect("rejected write"),
+            [1, 0, 1, -1, -1]
+        );
+    }
+
+    #[pg_test]
     fn forced_spatial_groupagg_matches_postgis_for_argument_orders_and_edge_rows() {
         if !ensure_extension("postgis") || !gpu_device_available() {
             return;
@@ -143,17 +252,17 @@ mod tests {
              SET pg_accel.test_force_spatial_groupagg = off; \
              SELECT pg_accel_reset_stats()",
         )
-        .expect("normal dark admission settings should apply");
+        .expect("normal admission settings should apply");
         let dark_plan = explain_text(&column_first, false);
         assert!(
             !dark_plan.contains("Custom Scan (GpuAccelAgg)"),
-            "normal spatial aggregate admission must remain dark:\n{dark_plan}"
+            "tiny spatial aggregate must remain below the production work envelope:\n{dark_plan}"
         );
         assert_eq!(
             Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
                 .expect("planner rejection should be readable")
                 .as_deref(),
-            Some("generic_descriptor_capability")
+            Some("postgis_rows_below_device_minimum")
         );
 
         Spi::run("SET pg_accel.enabled = off").expect("native baseline should be selectable");
@@ -484,9 +593,106 @@ mod tests {
     }
 
     #[pg_test]
+    fn exact_recheck_selection_reuses_scratch_across_sparse_chunks() {
+        use crate::engine::ffi::syscache::{
+            TestInjectedPostgresError, with_test_injected_postgres_error_after,
+        };
+
+        assert!(
+            ensure_extension("postgis"),
+            "PostGIS qualification requires its real catalog"
+        );
+        assert!(
+            gpu_device_available(),
+            "spatial qualification requires a GPU"
+        );
+        serialize_gpu_tests();
+        Spi::run(
+            "CREATE TEMP TABLE _spatial_selected_exact(id integer, geom geometry(Point,4326)); \
+            INSERT INTO _spatial_selected_exact SELECT i, CASE \
+                WHEN i IN (65537,131073) THEN ST_GeomFromText('POINT(0 5)',4326) \
+                WHEN i%11=0 THEN NULL WHEN i%13=0 THEN ST_GeomFromText('POINT EMPTY',4326) \
+                WHEN i%2=0 THEN ST_GeomFromText('POINT(5 5)',4326) \
+                ELSE ST_GeomFromText('POINT(20 20)',4326) END \
+            FROM generate_series(1,131073) s(i); ANALYZE _spatial_selected_exact",
+        )
+        .expect("three chunks with sparse boundary rows and varying exact lengths");
+        let query = format!(
+            "SELECT count(*) FROM _spatial_selected_exact WHERE ST_Intersects(geom, {POLYGON})"
+        );
+        let native = || {
+            Spi::run("SET pg_accel.enabled=off").expect("native oracle");
+            let expected = count(&query);
+            configure_forced_spatial();
+            expected
+        };
+        let expected = native();
+        assert_forced_agg_plan(&query);
+        for (error, expected_code) in [
+            (
+                TestInjectedPostgresError::Ordinary,
+                pgrx::PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            ),
+            (
+                TestInjectedPostgresError::QueryCanceled,
+                pgrx::PgSqlErrorCode::ERRCODE_QUERY_CANCELED,
+            ),
+        ] {
+            Spi::run("SELECT pg_accel_evict('_spatial_selected_exact'::regclass)")
+                .expect("force a fresh multi-chunk mask");
+            let before = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
+            // No uncertain rows in chunk one; the first boundary is in chunk
+            // two. Fail at the next boundary in the one-row final chunk, after
+            // both no-recheck and patched workspace reuse have occurred.
+            let code = with_test_injected_postgres_error_after(error, 1, || {
+                PgTryBuilder::new(|| {
+                    let _ = count(&query);
+                    None
+                })
+                .catch_others(|caught| Some(caught_error_code(&caught)))
+                .execute()
+            });
+            assert_eq!(
+                code,
+                Some(expected_code),
+                "final-chunk error must abort publication"
+            );
+            let after = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
+            assert_eq!(after.installed, before.installed + 1);
+            assert_eq!(after.normal_end, before.normal_end);
+            assert_eq!(after.query_reset, before.query_reset + 1);
+            assert_eq!(Spi::get_one::<i64>(
+                "SELECT count(*) FROM pg_backend_memory_contexts WHERE name = 'pg_accel spatial exact recheck'"
+            ).expect("inspect recheck cache cleanup"), Some(0));
+            assert_eq!(
+                count(&query),
+                expected,
+                "retry must rebuild a complete mask"
+            );
+        }
+        assert_eq!(count(&query), expected);
+        assert_eq!(count(&query), expected, "warm mask reuse");
+        Spi::run(
+            "UPDATE _spatial_selected_exact SET geom=ST_GeomFromText('POINT(10 5)',4326) \
+            WHERE id BETWEEN 65537 AND 65600; \
+            UPDATE _spatial_selected_exact SET geom=NULL WHERE id<=65536",
+        )
+        .expect("change selected rows and source byte offsets");
+        let expected = native();
+        assert_artifact_refreshed(&query, "exact source generation and layout changed");
+        assert_eq!(count(&query), expected);
+        Spi::run("UPDATE _spatial_selected_exact SET geom=NULL").expect("all NULL geometry");
+        assert_eq!(count(&query), 0);
+        Spi::run("TRUNCATE _spatial_selected_exact").expect("empty geometry relation");
+        assert_eq!(count(&query), 0);
+        Spi::run("SELECT pg_accel_evict('_spatial_selected_exact'::regclass); DROP TABLE _spatial_selected_exact")
+            .expect("fixture cleanup");
+    }
+
+    #[pg_test]
     fn exact_recheck_preserves_cancellation_but_types_ordinary_errors() {
         use crate::engine::ffi::syscache::{
-            TestInjectedPostgresError, with_test_injected_postgres_error,
+            TestInjectedPostgresError, with_test_injected_postgres_error_after,
         };
 
         if !ensure_extension("postgis") || !gpu_device_available() {
@@ -494,6 +700,13 @@ mod tests {
         }
         serialize_gpu_tests();
         create_fixture("_spatial_exact_error");
+        Spi::run(
+            "INSERT INTO _spatial_exact_error VALUES \
+             (5, 'boundary2', ST_GeomFromText('POINT(10 5)',4326)), \
+             (6, 'boundary3', ST_GeomFromText('POINT(5 0)',4326)); \
+             ANALYZE _spatial_exact_error",
+        )
+        .expect("three uncertain rows exercise a populated PostGIS prepared cache");
         configure_forced_spatial();
         let query = format!(
             "SELECT count(*) FROM _spatial_exact_error \
@@ -502,7 +715,7 @@ mod tests {
         assert_forced_agg_plan(&query);
 
         let capture = |error| {
-            with_test_injected_postgres_error(error, || {
+            with_test_injected_postgres_error_after(error, 2, || {
                 PgTryBuilder::new(|| {
                     let _ = Spi::get_one::<i64>(&query)
                         .expect("forced spatial query must reach exact recheck");
@@ -513,6 +726,17 @@ mod tests {
                 })
                 .execute()
             })
+        };
+        let assert_recheck_cache_released = || {
+            assert_eq!(
+                Spi::get_one::<i64>(
+                    "SELECT count(*) FROM pg_backend_memory_contexts \
+                     WHERE name = 'pg_accel spatial exact recheck'"
+                )
+                .expect("exact-recheck memory contexts remain inspectable"),
+                Some(0),
+                "query-local PostGIS prepared caches must not survive finalization or errors"
+            );
         };
 
         let cleanup_before_ordinary =
@@ -545,6 +769,7 @@ mod tests {
             Spi::get_one::<i32>("SELECT 41").expect("backend usable after ordinary ERROR"),
             Some(41)
         );
+        assert_recheck_cache_released();
 
         let cleanup_before_cancel = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
         let (cancel_code, cancel_message) = capture(TestInjectedPostgresError::QueryCanceled)
@@ -572,6 +797,13 @@ mod tests {
             Spi::get_one::<i32>("SELECT 42").expect("backend usable after cancellation"),
             Some(42)
         );
+        assert_recheck_cache_released();
+        assert_eq!(
+            count(&query),
+            4,
+            "exact rechecks recover after cancellation"
+        );
+        assert_recheck_cache_released();
         assert_eq!(
             Spi::get_one::<i64>("SELECT stock_exec_count FROM pg_accel_stats()")
                 .expect("fallback counter remains readable"),

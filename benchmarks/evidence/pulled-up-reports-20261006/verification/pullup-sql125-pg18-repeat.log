@@ -1,0 +1,8 @@
+=== 125_null_accepting_predicates ===
+SET
+SET
+SELECT 1000017
+ANALYZE
+psql:sql/tests/125_null_accepting_predicates.sql:71: ERROR:  pg_accel: generic aggregate dispatch failed (grouped chunk kernel failed: GPU grouped_agg kernel(grouped_agg_execute) failed with execution_failed); refusing CPU fallback
+CONTEXT:  SQL statement "CREATE TEMP TABLE _null_actual AS SELECT g,h,sum(v) FILTER (WHERE g IS NULL) s,avg(v) FILTER (WHERE g IS NULL) a,count(*) FILTER (WHERE g IS NULL) missing,count(g) present,count(*) n FROM _null_predicate GROUP BY g,h"
+PL/pgSQL function inline_code_block line 34 at EXECUTE

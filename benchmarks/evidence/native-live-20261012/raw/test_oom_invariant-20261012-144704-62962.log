@@ -1,0 +1,43 @@
+PGACCEL_TEST_START name=test_oom_invariant
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+Device: Apple M2 Max backend=metal has_native_fp64=0 max_alloc_bytes=41747087360
+PGACCEL_DEVICE_PROOF device="Apple M2 Max" backend="metal" compute_units=38 max_alloc_bytes=41747087360 real_device=1
+
+Plan:
+  N (doubles) = 2 * max_alloc / sizeof(double) = 10436771840
+  N_capped    = 268435456 (2.15 GB per-family input)
+  RSS ceiling = 3 * max_alloc = 125.24 GB
+
+-- reduce_f64 @ N=268435456 (2.00 GB raw input) --
+   status=0 (OK=1) got=268435456 expected=268435456 correct=1  dispatches=1 rss_before=2.20GB peak=4.37GB delta=2.17GB ceiling=125.24GB under=1
+
+-- expr_vm_f64 @ values=268435456 (2.00 GB logical raw input, 8 cols x 33554432 rows) --
+   status=0 (OK=1) values_ok=1 processed_values=268435456 logical_bytes=2147483648 rss_before=4.40GB peak=4.40GB delta=0.00GB ceiling=125.24GB dispatches=64 under=1
+
+-- grouped_agg_i32_mul @ rows=67108864 (2.00 GB logical input, 32 B/row: 3 int32 keys + 3 int32 dimension keys + 2 int32 MUL inputs, 65536 groups) --
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.2979295799287986397.metalar.62963.12227815836366954768.tmp (kernels_added=1 skipped=0)
+   status=0 detail=0 status_ok=1 correct=1 processed_rows=67108864 lifecycle_calls=69 logical_bytes=2147483648 rss_before=4.40GB peak=4.43GB delta=0.03GB ceiling=125.24GB dispatches=69 under=1
+
+-- spatial_f64 (PIP) @ N=134217728 points (2.00 GB raw input) --
+   status=0 (OK=1) all_inside=1  rss_before=4.57GB peak=6.72GB delta=2.15GB ceiling=125.24GB dispatches=1 under=1
+
+-- h3_f64 @ N=134217728 (2.00 GB raw lat+lng input) --
+   status=0 (OK=1) all_same_valid=1  rss_before=9.94GB peak=9.94GB delta=0.00GB ceiling=125.24GB dispatches=129 under=1
+
+=== OOM-never invariant summary ===
+  reduce_f64     PASS  peak_rss=4.37GB ceiling=125.24GB status_ok=1 correct=1 under_ceiling=1 note=""
+PGACCEL_OOM_FAMILY family=reduce_f64 result=PASS dispatches=1 peak_rss_bytes=4365664256 rss_baseline_bytes=2196914176 rss_delta_bytes=2168750080 rss_limit_bytes=125241262080
+  expr_vm_f64    PASS  peak_rss=4.40GB ceiling=125.24GB status_ok=1 correct=1 under_ceiling=1 note=""
+PGACCEL_OOM_FAMILY family=expr_vm_f64 result=PASS dispatches=64 peak_rss_bytes=4399792128 rss_baseline_bytes=4399235072 rss_delta_bytes=557056 rss_limit_bytes=125241262080
+  grouped_agg_i32_mul PASS  peak_rss=4.43GB ceiling=125.24GB status_ok=1 correct=1 under_ceiling=1 note=""
+PGACCEL_OOM_FAMILY family=grouped_agg_i32_mul result=PASS dispatches=69 peak_rss_bytes=4433084416 rss_baseline_bytes=4399808512 rss_delta_bytes=33275904 rss_limit_bytes=125241262080
+  spatial_f64    PASS  peak_rss=6.72GB ceiling=125.24GB status_ok=1 correct=1 under_ceiling=1 note=""
+PGACCEL_OOM_FAMILY family=spatial_f64 result=PASS dispatches=1 peak_rss_bytes=6715260928 rss_baseline_bytes=4567318528 rss_delta_bytes=2147942400 rss_limit_bytes=125241262080
+  h3_f64         PASS  peak_rss=9.94GB ceiling=125.24GB status_ok=1 correct=1 under_ceiling=1 note=""
+PGACCEL_OOM_FAMILY family=h3_f64 result=PASS dispatches=129 peak_rss_bytes=9936994304 rss_baseline_bytes=9936535552 rss_delta_bytes=458752 rss_limit_bytes=125241262080
+PGACCEL_OOM_INVARIANT result=PASS families=5 max_alloc_bytes=41747087360 input_doubles=268435456 rss_limit_bytes=125241262080
+
+PASS — all live kernel families honor OOM-never invariant.
+PGACCEL_TEST_RESULT name=test_oom_invariant exit_code=0 result=PASS raw_lines=41 body_sha256=e5a08e129f209da7c906efa9ecaab32a4f929e7a621a18aa1bf99f469a56974f binding_sha256=26945c8a3da0e5301086b9a668bbca104bf1093aac989bcef0edd602dc487cdb

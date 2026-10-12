@@ -456,7 +456,13 @@ typedef enum {
   PGACCEL_RESIDENT_GEOMETRY_POINT = 1,
   PGACCEL_RESIDENT_GEOMETRY_LINESTRING = 2,
   PGACCEL_RESIDENT_GEOMETRY_POLYGON = 3,
+  PGACCEL_RESIDENT_GEOMETRY_MULTIPOLYGON = 6,
 } pgaccel_resident_geometry_type;
+
+/* Additive MULTIPOLYGON encoding: each component's first ring carries this
+ * tag; low 63 bits are absolute coordinate-pair offsets. Polygon offsets
+ * remain untagged. Old consumers reject the unknown geometry type. */
+#define PGACCEL_RESIDENT_GEOMETRY_RING_COMPONENT_START (UINT64_C(1) << 63)
 
 typedef enum {
   PGACCEL_RESIDENT_GEOMETRY_BBOX_VALID = 1u << 0,
@@ -470,13 +476,22 @@ typedef struct {
   uint32_t flags;
 } pgaccel_resident_geometry_row;
 
+/* Optional one-row polygonal view feature. Append ceil(coordinate_pair_count /
+ * EDGE_BLOCK_PAIRS) four-double boxes after the ordinary row bbox. Each box
+ * covers its block's vertices AND the next vertex (when present), so it
+ * encloses every edge starting in that block, including block-boundary edges.
+ * Old consumers reject the unknown flag; all existing struct layouts stay
+ * unchanged. Bounds are verified on-device before any result is published. */
+#define PGACCEL_RESIDENT_GEOMETRY_EDGE_INDEX 1u
+#define PGACCEL_RESIDENT_GEOMETRY_EDGE_BLOCK_PAIRS 32u
+
 typedef struct {
   uint32_t abi_version;
   uint32_t flags;
   const double* coordinates;                 /* [coordinate_pair_count * 2] */
-  const double* bboxes;                      /* [row_count * 4] */
+  const double* bboxes;                      /* [row_count * 4], optional edge boxes follow */
   const uint64_t* geometry_offsets;          /* [row_count + 1], coordinate-pair offsets */
-  const uint64_t* ring_offsets;              /* [ring_count], coordinate-pair offsets */
+  const uint64_t* ring_offsets;              /* [ring_count], offsets; MULTIPOLYGON shell tag above */
   const pgaccel_resident_geometry_row* rows; /* [row_count] */
   const uint8_t* nulls;                      /* optional [row_count], canonical 0/1 */
   size_t coordinates_bytes;                  /* readable bytes from coordinates */

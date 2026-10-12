@@ -1,0 +1,7 @@
+PGACCEL_TEST_START name=test_raster_resident
+=== pgaccel exact resident raster tests ===
+
+[;35m[AdaptiveCpp Warning] [0mmetal_hardware_manager: MTLCopyAllDevices returned no devices
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel_init failed
+PGACCEL_TEST_RESULT name=test_raster_resident exit_code=1 result=FAIL raw_lines=5 body_sha256=d1350ad81e7057c86fe4c796dbc271ecff1bfc473e0dfb2aeb635ecf242d636d binding_sha256=5e55784fe3fe16588eabffd3b117e6abdec5e320980ea451ec241d8693047e78

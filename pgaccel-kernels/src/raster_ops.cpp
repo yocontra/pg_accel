@@ -8,6 +8,7 @@
 
 #include "pgaccel_ffi.h"
 #include "pgaccel_queue.h"
+#include "pgaccel_raster_lookup.hpp"
 
 static sycl::queue& get_queue() {
   return pgaccel_require_queue();
@@ -249,6 +250,7 @@ class RasterResidentRowValidationKernel;
 class RasterResidentLowBitValidationKernel;
 class RasterResidentRowActionKernel;
 class RasterResidentReclassKernel;
+class RasterResidentReclassIndexedKernel;
 
 }  // namespace
 
@@ -571,47 +573,77 @@ pgaccel_raster_reclass_resident_ex(const pgaccel_raster_reclass_resident_request
 
   for (size_t launch_start = 0; launch_start < total_pixels;) {
     const size_t launch_count = std::min(max_chunk_pixels, total_pixels - launch_start);
-    queue.parallel_for<RasterResidentReclassKernel>(
-        sycl::range<1>(launch_count), [=](sycl::id<1> id) {
-          if (validation->failures != 0)
-            return;
-          const uint64_t pixel_index = launch_start + id[0];
-          const uint64_t output_byte = output_offsets[0] + (pixel_index << output_element_shift);
+    if (rule_count <= pgaccel_raster_detail::linear_rule_limit) {
+      queue.parallel_for<RasterResidentReclassKernel>(
+          sycl::range<1>(launch_count), [=](sycl::id<1> id) {
+            if (validation->failures != 0)
+              return;
+            const uint64_t pixel_index = launch_start + id[0];
+            const uint64_t output_byte = output_offsets[0] + (pixel_index << output_element_shift);
 
-          size_t low = 0;
-          size_t high = selected_count + 1;
-          while (low < high) {
-            const size_t middle = low + (high - low) / 2;
-            if (output_offsets[middle] <= output_byte)
-              low = middle + 1;
-            else
-              high = middle;
-          }
-          const size_t local_row = low - 1;
-          const pgaccel_resident_raster_row row = input.rows[selected_first_row + local_row];
-          const pgaccel_resident_raster_band band = input.bands[row.first_band];
-          const size_t input_element_bytes = raster_resident_pixel_width(band.pixel_type);
-          const uint32_t input_element_shift = raster_resident_width_shift(input_element_bytes);
-          const uint64_t row_pixel =
-              (output_byte - output_offsets[local_row]) / output_element_bytes;
-          const uint64_t input_byte =
-              input.band_offsets[row.first_band] + (row_pixel << input_element_shift);
-          const double value =
-              (band.flags & PGACCEL_RESIDENT_RASTER_BAND_IS_NODATA) != 0
-                  ? band.nodata
-                  : raster_resident_read_pixel(input.pixels + input_byte, band.pixel_type);
-
-          int64_t destination = 0;
-          constexpr double kPostgisFltEpsilon = 1.1920928955078125e-7;
-          for (size_t rule_index = 0; rule_index < rule_count; ++rule_index) {
-            const double source = static_cast<double>(rules[rule_index].source);
-            if (source == value || sycl::fabs(source - value) <= kPostgisFltEpsilon) {
-              destination = rules[rule_index].destination;
-              break;
+            size_t low = 0;
+            size_t high = selected_count + 1;
+            while (low < high) {
+              const size_t middle = low + (high - low) / 2;
+              if (output_offsets[middle] <= output_byte)
+                low = middle + 1;
+              else
+                high = middle;
             }
-          }
-          raster_resident_write_integer(output_pixels + output_byte, output_type, destination);
-        });
+            const size_t local_row = low - 1;
+            const pgaccel_resident_raster_row row = input.rows[selected_first_row + local_row];
+            const pgaccel_resident_raster_band band = input.bands[row.first_band];
+            const size_t input_element_bytes = raster_resident_pixel_width(band.pixel_type);
+            const uint32_t input_element_shift = raster_resident_width_shift(input_element_bytes);
+            const uint64_t row_pixel =
+                (output_byte - output_offsets[local_row]) / output_element_bytes;
+            const uint64_t input_byte =
+                input.band_offsets[row.first_band] + (row_pixel << input_element_shift);
+            const double value =
+                (band.flags & PGACCEL_RESIDENT_RASTER_BAND_IS_NODATA) != 0
+                    ? band.nodata
+                    : raster_resident_read_pixel(input.pixels + input_byte, band.pixel_type);
+
+            const int64_t destination =
+                pgaccel_raster_detail::reclass_lookup_linear(rules, rule_count, value);
+            raster_resident_write_integer(output_pixels + output_byte, output_type, destination);
+          });
+    } else {
+      queue.parallel_for<RasterResidentReclassIndexedKernel>(
+          sycl::range<1>(launch_count), [=](sycl::id<1> id) {
+            if (validation->failures != 0)
+              return;
+            const uint64_t pixel_index = launch_start + id[0];
+            const uint64_t output_byte = output_offsets[0] + (pixel_index << output_element_shift);
+
+            size_t low = 0;
+            size_t high = selected_count + 1;
+            while (low < high) {
+              const size_t middle = low + (high - low) / 2;
+              if (output_offsets[middle] <= output_byte)
+                low = middle + 1;
+              else
+                high = middle;
+            }
+            const size_t local_row = low - 1;
+            const pgaccel_resident_raster_row row = input.rows[selected_first_row + local_row];
+            const pgaccel_resident_raster_band band = input.bands[row.first_band];
+            const size_t input_element_bytes = raster_resident_pixel_width(band.pixel_type);
+            const uint32_t input_element_shift = raster_resident_width_shift(input_element_bytes);
+            const uint64_t row_pixel =
+                (output_byte - output_offsets[local_row]) / output_element_bytes;
+            const uint64_t input_byte =
+                input.band_offsets[row.first_band] + (row_pixel << input_element_shift);
+            const double value =
+                (band.flags & PGACCEL_RESIDENT_RASTER_BAND_IS_NODATA) != 0
+                    ? band.nodata
+                    : raster_resident_read_pixel(input.pixels + input_byte, band.pixel_type);
+
+            const int64_t destination =
+                pgaccel_raster_detail::reclass_lookup_indexed(rules, rule_count, value);
+            raster_resident_write_integer(output_pixels + output_byte, output_type, destination);
+          });
+    }
     launch_start += launch_count;
   }
   queue.wait_and_throw();

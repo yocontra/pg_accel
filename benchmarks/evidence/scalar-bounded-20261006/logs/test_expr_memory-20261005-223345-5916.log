@@ -1,0 +1,12 @@
+PGACCEL_TEST_START name=test_expr_memory
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+expr memory no-device: 10 checks, 0 failures
+expr memory: 37 checks, 0 failures
+PGACCEL_TEST_RESULT name=test_expr_memory exit_code=0 result=PASS raw_lines=10 body_sha256=fdff50d8b8fd68eee21cf0e8e4f17ff8d42f6997f6f8bebdf0181647323c91e8 binding_sha256=e27aeffd1bafc82602b14698ce16379f6f1b0ed790eebd9362c7674ab5e9f2ff

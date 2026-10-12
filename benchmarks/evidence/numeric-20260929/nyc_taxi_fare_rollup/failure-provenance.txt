@@ -1,0 +1,1 @@
+pg_accel provenance gate failed: live backend loaded pg_accel hash ab75fadc223831bf9a289e810a421f5bf1a4ae809190c374d22be8f7b975d6d7 from /Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4/lib/pg_accel.dylib, expected local build hash 65b269248c9fc6aafe8202455b67bc137bdafe2b6fae3f666970e0fa4d2e930b

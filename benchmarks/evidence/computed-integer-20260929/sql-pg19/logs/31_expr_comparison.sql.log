@@ -1,0 +1,11 @@
+=== 31_expr_comparison ===
+CREATE TABLE
+INSERT 0 10000
+SET
+SELECT 10000
+SET
+SELECT 10000
+DO
+PGACCEL_ASSERT_OK:31_expr_comparison.assert_001
+DROP TABLE
+PGACCEL_FILE_OK:31_expr_comparison

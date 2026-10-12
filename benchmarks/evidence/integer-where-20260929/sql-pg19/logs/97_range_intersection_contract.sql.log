@@ -1,0 +1,14 @@
+=== 97_range_intersection_contract ===
+SET
+SET
+CREATE TABLE
+INSERT 0 500000
+ANALYZE
+SET
+SELECT 257
+CREATE TABLE
+DO
+PGACCEL_ASSERT_OK:97_range_intersection_contract.assert_001
+TRUNCATE TABLE
+psql:/Users/contra/Projects/pg_accel/sql/tests/97_range_intersection_contract.sql:207: ERROR:  97 range adjacent contract FAILED: selected/dispatched (kernels 2 -> 3, stock 0)
+CONTEXT:  PL/pgSQL function inline_code_block line 52 at RAISE

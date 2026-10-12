@@ -1,8 +1,8 @@
 {
   "baseline_assertions": 306,
   "baseline_files": 58,
-  "declared_assertions": 361,
-  "declared_files": 67,
+  "declared_assertions": 462,
+  "declared_files": 100,
   "files": [
     {
       "assertions": [
@@ -199,7 +199,7 @@
       ],
       "completion_id": "100_grouped_count_int8_contract",
       "file": "100_grouped_count_int8_contract.sql",
-      "sha256": "8fe41094d7308ed95f532d74712285583368e6a1518d91a91eb3c218dacf4915"
+      "sha256": "be34ddb78386f36d93f4dcacd22af6c4e9bf90c6090169a4ec5b20eb6d0a51c4"
     },
     {
       "assertions": [
@@ -246,7 +246,7 @@
       ],
       "completion_id": "101_grouped_count_date_contract",
       "file": "101_grouped_count_date_contract.sql",
-      "sha256": "c2cea7df41331f3c0a5a987f7610c9656d10e5772897858a9af2ddcd2648c8ca"
+      "sha256": "2e73edfce997867642b54234c716ba26e442ea4233bf3e2811c9fef959a725f6"
     },
     {
       "assertions": [
@@ -406,12 +406,167 @@
           "guard_sha256": "af1b42e750ee2704fb1045c213d41c55ca8f493d642a312e0a6b33c1fe0f5a7f",
           "guard_token_count": 7,
           "id": "104_grouped_integer_sum_avg_contract.assert_006",
-          "source_line": 456
+          "source_line": 457
         }
       ],
       "completion_id": "104_grouped_integer_sum_avg_contract",
       "file": "104_grouped_integer_sum_avg_contract.sql",
-      "sha256": "4d9ab85f89bd2afcd316b9ee8460632f935be2cd96b26a756aee57d028f28ca9"
+      "sha256": "a285ff1400334359996d59847854c0798d8f8d190ac3a31ada47e96201ba51ef"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 4,
+          "guard_sha256": "863b22bf289570c050e783acb5251216a71594e16f15f57ccc4838b596bd438c",
+          "guard_token_count": 8,
+          "id": "105_native_having_contract.assert_001",
+          "source_line": 64
+        },
+        {
+          "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "21372223a22af9653faa414ec306368ac0b4f53b754d6a8cc02aec7732fb5b6a",
+          "guard_token_count": 2,
+          "id": "105_native_having_contract.assert_002",
+          "source_line": 87
+        },
+        {
+          "emission": "echo",
+          "guard_count": 4,
+          "guard_sha256": "c06fb5fe85276a15ff92d404776de42356c00d6d0aafa79815cd21ee4a0686ba",
+          "guard_token_count": 5,
+          "id": "105_native_having_contract.assert_003",
+          "source_line": 147
+        },
+        {
+          "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "c309d2b56325776c019031fba4aaa4ec1df4fa9fb5f0685b6d0438cf9c82c52d",
+          "guard_token_count": 4,
+          "id": "105_native_having_contract.assert_004",
+          "source_line": 185
+        },
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "972734b9d9c36044b97bf62f2355d6101d037ad9aaf3d12d30023f1c07731f37",
+          "guard_token_count": 8,
+          "id": "105_native_having_contract.assert_005",
+          "source_line": 228
+        }
+      ],
+      "completion_id": "105_native_having_contract",
+      "file": "105_native_having_contract.sql",
+      "sha256": "e5118c19c1a8cff8f6dd865bde19a2f058dd4a81440d3ad0eeeb20227baabab0"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 4,
+          "guard_sha256": "ea6f44011e7f92a542b7f2b212c1cee7987ecff63d9b048744bfd6cf5c6717f5",
+          "guard_token_count": 12,
+          "id": "106_h3_resolution_contract.assert_001",
+          "source_line": 60
+        },
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "8f5da8e62533b31538bf54e3752f481b6da37208205ba4099a61081afc5ed6e7",
+          "guard_token_count": 7,
+          "id": "106_h3_resolution_contract.assert_002",
+          "source_line": 97
+        },
+        {
+          "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "0c2de7edcc9f48375e0745ec940487d8942962419edf3f63686ce48cbbbfff4b",
+          "guard_token_count": 7,
+          "id": "106_h3_resolution_contract.assert_003",
+          "source_line": 132
+        }
+      ],
+      "completion_id": "106_h3_resolution_contract",
+      "file": "106_h3_resolution_contract.sql",
+      "sha256": "bf50b0c3021d9d4b90de99c1584d165f16dbffc8ab66d6b4acd28f880fcd5bfd"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 4,
+          "guard_sha256": "0b675e04bd188f66a3a4e6c71b85f6c914a8a51d34f55f861302b8a72de8c06b",
+          "guard_token_count": 9,
+          "id": "107_optional_integer_aggregates.assert_001",
+          "source_line": 67
+        },
+        {
+          "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "8e61c2314b65ab86f1f7fb77df22f1b48347e14559ba369b5afa1fa7e5c6e9cd",
+          "guard_token_count": 9,
+          "id": "107_optional_integer_aggregates.assert_002",
+          "source_line": 118
+        },
+        {
+          "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "5995f42db86493cca7d2653babfa931c15eb11ce5afb9742a81919ab9e184d14",
+          "guard_token_count": 6,
+          "id": "107_optional_integer_aggregates.assert_003",
+          "source_line": 128
+        }
+      ],
+      "completion_id": "107_optional_integer_aggregates",
+      "file": "107_optional_integer_aggregates.sql",
+      "sha256": "c6aab3fa88ffb772535a13a70e99e5a16ff649b71ff30374bbc7e5ae29390e52"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 4,
+          "guard_sha256": "71d59bf5c6f5e071691cc18d5379f887c58e119b366dae4232350448ce3ceda9",
+          "guard_token_count": 8,
+          "id": "108_multikey_integer_aggregates.assert_001",
+          "source_line": 90
+        },
+        {
+          "emission": "echo",
+          "guard_count": 4,
+          "guard_sha256": "5c1241d94929cf532c18b0e4506f6329d0ecde2c6e596427408caaf749e68935",
+          "guard_token_count": 9,
+          "id": "108_multikey_integer_aggregates.assert_002",
+          "source_line": 141
+        }
+      ],
+      "completion_id": "108_multikey_integer_aggregates",
+      "file": "108_multikey_integer_aggregates.sql",
+      "sha256": "ac5f264ea7b556c7d837b0f623e4634e4fc1ba3492be00153f23f14a97985b97"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "6155d51d4629432ab6ae3178d761c49dfe7121db8d54da0d8c6828b891614cad",
+          "guard_token_count": 10,
+          "id": "109_text_residency_interning.assert_001",
+          "source_line": 43
+        },
+        {
+          "emission": "echo",
+          "guard_count": 6,
+          "guard_sha256": "b79ba51f893bd8250d576876ac7c048996859fca90fff17a045511203a22704a",
+          "guard_token_count": 11,
+          "id": "109_text_residency_interning.assert_002",
+          "source_line": 101
+        }
+      ],
+      "completion_id": "109_text_residency_interning",
+      "file": "109_text_residency_interning.sql",
+      "sha256": "78c550186f033f11e3603a9d73b0c2e99171675de2bfd180aa4449976d23437d"
     },
     {
       "assertions": [
@@ -432,6 +587,260 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "f0ff64d52ee4dd1699492bbaaaa10f5109a453185f8b594bba03b9d10f807079",
+          "guard_token_count": 8,
+          "id": "110_multimeasure_integer_aggregates.assert_001",
+          "source_line": 70
+        },
+        {
+          "emission": "echo",
+          "guard_count": 4,
+          "guard_sha256": "f6aadaaff523952400cdeb8fcc07e5ab9a65d51e2e035286353f612c275d5458",
+          "guard_token_count": 9,
+          "id": "110_multimeasure_integer_aggregates.assert_002",
+          "source_line": 124
+        },
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "04c22fb67720c8a6dc41a0405b2ab2d0e5b78a84611535988f72a404f5fd6878",
+          "guard_token_count": 9,
+          "id": "110_multimeasure_integer_aggregates.assert_003",
+          "source_line": 168
+        }
+      ],
+      "completion_id": "110_multimeasure_integer_aggregates",
+      "file": "110_multimeasure_integer_aggregates.sql",
+      "sha256": "0fecc907dede1c5b5bc575ff1e3f970a02f5104b8f5ace74b475d28f61714804"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "358766fb79ed58eaa06a1a4acc1b398e0d68af2a1bfd8907ba4cc958f8c02f9a",
+          "guard_token_count": 8,
+          "id": "111_independent_aggregate_filters.assert_001",
+          "source_line": 72
+        },
+        {
+          "emission": "echo",
+          "guard_count": 5,
+          "guard_sha256": "f1fb3f84e9e44bbfc673302c8fef5b427d64f272a5c65701c5240a4a44d5107f",
+          "guard_token_count": 9,
+          "id": "111_independent_aggregate_filters.assert_003",
+          "source_line": 193
+        },
+        {
+          "emission": "echo",
+          "guard_count": 4,
+          "guard_sha256": "d73d03704d78e49e2e4bbb49df68a67b204ec8da1670906ad80148e3a4a43bde",
+          "guard_token_count": 9,
+          "id": "111_independent_aggregate_filters.assert_002",
+          "source_line": 250
+        }
+      ],
+      "completion_id": "111_independent_aggregate_filters",
+      "file": "111_independent_aggregate_filters.sql",
+      "sha256": "0506e58970f9d485544485da3c50ecb8bdeee66ddd5af72f216a6846ad303441"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 4,
+          "guard_sha256": "9182d1a3b1295f26f6117a5a50d2b9eff9b7b4bfb643098d1d8c76213d0c277a",
+          "guard_token_count": 14,
+          "id": "112_spatial_polygon_topology.assert_001",
+          "source_line": 89
+        },
+        {
+          "emission": "echo",
+          "guard_count": 6,
+          "guard_sha256": "5820f06ebfc9e5f489298156de68c6c6b8ce87643a951c119b7806019a58a10f",
+          "guard_token_count": 10,
+          "id": "112_spatial_polygon_topology.assert_002",
+          "source_line": 155
+        }
+      ],
+      "completion_id": "112_spatial_polygon_topology",
+      "file": "112_spatial_polygon_topology.sql",
+      "sha256": "a6942dfa5613e951bf0ff7afc4338ba28a83274ffbe42e31abe8aa3372728c2a"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 4,
+          "guard_sha256": "61e0d3da867111dccdaf544510ab36bbc3ae2d6c1c5d71e71a1b64d945514d25",
+          "guard_token_count": 18,
+          "id": "113_h3_large_hash_contract.assert_001",
+          "source_line": 74
+        },
+        {
+          "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "6672ed89349fa5919db01fc5836d4870bf71fbbce61706aad3e67e9eabb3a656",
+          "guard_token_count": 4,
+          "id": "113_h3_large_hash_contract.assert_002",
+          "source_line": 94
+        }
+      ],
+      "completion_id": "113_h3_large_hash_contract",
+      "file": "113_h3_large_hash_contract.sql",
+      "sha256": "83c77daaf9ec184a3a8890b99c3f909ac618e98f6e56ac150f9977d66c60ec6a"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 8,
+          "guard_sha256": "44d97c6d1e809ff13c0fdf78262b183980626d7dd0324d5c87cb59179ddd7994",
+          "guard_token_count": 16,
+          "id": "114_spatial_multipolygon_contract.assert_001",
+          "source_line": 121
+        },
+        {
+          "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "c99cb565ca03ab3db3c3d51c74e55c40549f553268dcc931002bda3730049f59",
+          "guard_token_count": 2,
+          "id": "114_spatial_multipolygon_contract.assert_002",
+          "source_line": 138
+        },
+        {
+          "emission": "echo",
+          "guard_count": 4,
+          "guard_sha256": "115d04aad8fdbdb7c73e725dcea48e868a1d332ba72bc990cc3d979d5c438e94",
+          "guard_token_count": 13,
+          "id": "114_spatial_multipolygon_contract.assert_003",
+          "source_line": 197
+        }
+      ],
+      "completion_id": "114_spatial_multipolygon_contract",
+      "file": "114_spatial_multipolygon_contract.sql",
+      "sha256": "53915aca35c8d1385e9cf1434a9e064abf7cc4ccc02f89b415fe1acd7b5cab4b"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "d6d7a0af02a0133856a1fa7784df6c21c31ab1691e6d4a5569a56069cda0224b",
+          "guard_token_count": 8,
+          "id": "115_filtered_integer_counts.assert_001",
+          "source_line": 64
+        },
+        {
+          "emission": "echo",
+          "guard_count": 4,
+          "guard_sha256": "24e4916f94f15a247d3b7cd6deb0a9b64aaebb82ff68276d68ba204f37689bb7",
+          "guard_token_count": 9,
+          "id": "115_filtered_integer_counts.assert_002",
+          "source_line": 120
+        },
+        {
+          "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "32962a2124c2e732bf85b38f837259632210120bc56e8406541e04b0abb710d8",
+          "guard_token_count": 8,
+          "id": "115_filtered_integer_counts.assert_003",
+          "source_line": 160
+        }
+      ],
+      "completion_id": "115_filtered_integer_counts",
+      "file": "115_filtered_integer_counts.sql",
+      "sha256": "42124847f670c6f775d2132b6a925c09709b1f46841ea2a170d9488d6879f287"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 5,
+          "guard_sha256": "9018e6b9f2ee235cf076b8a2dde3e93221d84977c653f74db6ca17ea9042b747",
+          "guard_token_count": 9,
+          "id": "116_numeric_residency.assert_001",
+          "source_line": 57
+        }
+      ],
+      "completion_id": "116_numeric_residency",
+      "file": "116_numeric_residency.sql",
+      "sha256": "21ce06d9178a0dfc734428371810d96c7e15ba9494a9c2f6690851fba21caf09"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "a0f25bdaed3a94258b904b119b77cd86e4cd53ec7feb9e9ba495cb5c7795cdad",
+          "guard_token_count": 11,
+          "id": "117_numeric_aggregates.assert_001",
+          "source_line": 89
+        },
+        {
+          "emission": "echo",
+          "guard_count": 4,
+          "guard_sha256": "62fddd27024a3f91ebc15ce097c0054f2b782a283d7764bd4f374a1e2252d1af",
+          "guard_token_count": 10,
+          "id": "117_numeric_aggregates.assert_002",
+          "source_line": 140
+        }
+      ],
+      "completion_id": "117_numeric_aggregates",
+      "file": "117_numeric_aggregates.sql",
+      "sha256": "0cbfeb4cb65296964bbc18325c2429b68c4aaa7ccb71196bc99b9ce9b766823d"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "8bc1b8a315a90749450ad1e896dc63d87acea1c4cfaf6ea120f18815c35e551b",
+          "guard_token_count": 12,
+          "id": "118_spatial_numeric_rollups.assert_001",
+          "source_line": 90
+        },
+        {
+          "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "9f15d4a6f4e9cd6b06fa9fce41345f490d18ccef272a813db3223dd6a518c8e2",
+          "guard_token_count": 10,
+          "id": "118_spatial_numeric_rollups.assert_002",
+          "source_line": 140
+        }
+      ],
+      "completion_id": "118_spatial_numeric_rollups",
+      "file": "118_spatial_numeric_rollups.sql",
+      "sha256": "1de59a0f71d9cb3990b9c77e9a3f9dad60888387c7e2378e5dca87ad7d7c1062"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "215dbc4a5f955f0d3dc614d10653155654f9e6e0bf26fc358fb8c6cb762f6907",
+          "guard_token_count": 12,
+          "id": "119_global_integer_aggregates.assert_001",
+          "source_line": 62
+        },
+        {
+          "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "6a275a9e5c9c7a30ddfcb553bdd36f74d4e544da458943deca84e6be44d727de",
+          "guard_token_count": 10,
+          "id": "119_global_integer_aggregates.assert_002",
+          "source_line": 106
+        }
+      ],
+      "completion_id": "119_global_integer_aggregates",
+      "file": "119_global_integer_aggregates.sql",
+      "sha256": "99c6beb74c92e9d1fdf487464ce59d74af21013334300a86f5b1b566eda9f031"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
           "guard_count": 1,
           "guard_sha256": "5207ac6384c3cc23543b544f6575a9e839ff5f40bc53cb3088f923743e4a2cc9",
           "guard_token_count": 2,
@@ -447,6 +856,300 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "474b0f540bed3fff8e1731aef03cd062369d2bc7cabf5148c4bb3bb59a49fafd",
+          "guard_token_count": 13,
+          "id": "120_spatial_integer_rollups.assert_001",
+          "source_line": 92
+        },
+        {
+          "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "9f15d4a6f4e9cd6b06fa9fce41345f490d18ccef272a813db3223dd6a518c8e2",
+          "guard_token_count": 10,
+          "id": "120_spatial_integer_rollups.assert_002",
+          "source_line": 142
+        }
+      ],
+      "completion_id": "120_spatial_integer_rollups",
+      "file": "120_spatial_integer_rollups.sql",
+      "sha256": "a17b6d714f2b9d0e50af6fe92abe074fe54b5f3886a7b63ba4d824a540f73103"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "19e9012704a708350bb24d761ffa11b0dfef64cec6e331a4e57e742a9fd559df",
+          "guard_token_count": 13,
+          "id": "121_integer_where_aggregates.assert_001",
+          "source_line": 72
+        },
+        {
+          "emission": "echo",
+          "guard_count": 4,
+          "guard_sha256": "72179d2e1539f0de7d20c7ea83bc64b4b58c590e10451dee835de7caa1b23e07",
+          "guard_token_count": 10,
+          "id": "121_integer_where_aggregates.assert_002",
+          "source_line": 123
+        }
+      ],
+      "completion_id": "121_integer_where_aggregates",
+      "file": "121_integer_where_aggregates.sql",
+      "sha256": "d9732308961e22a96aaf9a26262cb11e69db584a4ad605ba01d2b53b9be701d0"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "972998b75dc0c9c4f29c88403d4bca7653746931050f3cc18d55af44aea2e3dd",
+          "guard_token_count": 13,
+          "id": "122_spatial_scalar_conjunction.assert_001",
+          "source_line": 75
+        },
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "266e3f184af20278443481945bc67eb5cccf160892dc920fdd294ec1e9cc2e28",
+          "guard_token_count": 12,
+          "id": "122_spatial_scalar_conjunction.assert_002",
+          "source_line": 108
+        },
+        {
+          "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "cde4a01c0e1f51e9418579bd55dc52089db85a2893a21a4a0590d1a88f331648",
+          "guard_token_count": 10,
+          "id": "122_spatial_scalar_conjunction.assert_003",
+          "source_line": 156
+        }
+      ],
+      "completion_id": "122_spatial_scalar_conjunction",
+      "file": "122_spatial_scalar_conjunction.sql",
+      "sha256": "652480b3c8642007fe7e625e2cdc21a47c913f081816ebb1eb7dc59ab8ad1097"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "575f0197792087b179303e7e36e6b7a5ab69923723372272a90204edef5b9347",
+          "guard_token_count": 12,
+          "id": "123_integer_extrema.assert_001",
+          "source_line": 80
+        },
+        {
+          "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "e8d65c4a022935e30a80ddec55050da3daec799e71e4101a0835f95ec943992d",
+          "guard_token_count": 10,
+          "id": "123_integer_extrema.assert_002",
+          "source_line": 132
+        }
+      ],
+      "completion_id": "123_integer_extrema",
+      "file": "123_integer_extrema.sql",
+      "sha256": "a9923f6d0408129bc206ea21753f43d0fde1a865757a570252ab20bf5d7ccdda"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "9972215e4485c85a1765f5b3b2227bc35207dc6ba804ae76b3b41ea2165e0ebb",
+          "guard_token_count": 11,
+          "id": "124_bigint_numeric_aggregates.assert_001",
+          "source_line": 74
+        },
+        {
+          "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "f48359261be36221d548cea3640512711b50d3d2b8b6ecefb56c3d1be34cff2e",
+          "guard_token_count": 10,
+          "id": "124_bigint_numeric_aggregates.assert_002",
+          "source_line": 126
+        }
+      ],
+      "completion_id": "124_bigint_numeric_aggregates",
+      "file": "124_bigint_numeric_aggregates.sql",
+      "sha256": "fbbdf68f9763c4b1f99e022b12fde208cd42fbe93c1dd4165a3acfba9882bbb3"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "99ba949cfb72cc52113fd165389658815af1fc6d72d9af7aa3a32c67abb8a20c",
+          "guard_token_count": 12,
+          "id": "125_null_accepting_predicates.assert_001",
+          "source_line": 72
+        },
+        {
+          "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "b48af1dc203105b7a4dc3ade04f9bb327645e3e214f2389f147a8868e5afa836",
+          "guard_token_count": 10,
+          "id": "125_null_accepting_predicates.assert_002",
+          "source_line": 120
+        }
+      ],
+      "completion_id": "125_null_accepting_predicates",
+      "file": "125_null_accepting_predicates.sql",
+      "sha256": "cdcfac3d3ce4da8c43996921aad6e26d252d324807aa7699f036024c9e300e15"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "b74970414539932835d5c5c52cf8a7ffa19c5759fc19b19e853fbe79b65e2586",
+          "guard_token_count": 9,
+          "id": "126_computed_integer_aggregates.assert_001",
+          "source_line": 65
+        },
+        {
+          "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "0404494834f8e1536608e6127acc1f0e7281fdf9c5c08ad6386d5b6b0cc32054",
+          "guard_token_count": 7,
+          "id": "126_computed_integer_aggregates.assert_002",
+          "source_line": 107
+        },
+        {
+          "emission": "echo",
+          "guard_count": 5,
+          "guard_sha256": "8d26b6403ad75b8c0791d253e83d3597530a701dafdb0d99a62a82754a722f5f",
+          "guard_token_count": 7,
+          "id": "126_computed_integer_aggregates.assert_003",
+          "source_line": 155
+        },
+        {
+          "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "cd50e5036047d23f7cc37b0c69b0066a5beec7f859dc6a4031fd3efd3d53e167",
+          "guard_token_count": 2,
+          "id": "126_computed_integer_aggregates.assert_004",
+          "source_line": 173
+        }
+      ],
+      "completion_id": "126_computed_integer_aggregates",
+      "file": "126_computed_integer_aggregates.sql",
+      "sha256": "d1eec3eaa32c7077d39b14f1a52bcdf603f143800c2bbee38e96cbe944a6571c"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "c4b8e2945f1420106f6692b346b9964ffc2ed8cb7fb9848850d508e042c68892",
+          "guard_token_count": 8,
+          "id": "127_fused_integer_rows.assert_001",
+          "source_line": 56
+        },
+        {
+          "emission": "echo",
+          "guard_count": 4,
+          "guard_sha256": "ab5c4ebbc6f37e7c1ae7c60d1c59e8896cd04be1c67b6ad28d8a1e93f6e650da",
+          "guard_token_count": 9,
+          "id": "127_fused_integer_rows.assert_002",
+          "source_line": 113
+        }
+      ],
+      "completion_id": "127_fused_integer_rows",
+      "file": "127_fused_integer_rows.sql",
+      "sha256": "46a10e74e4a0b267c88523760a5268bdfeff78942eebf76422b25551d1532ee2"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 7,
+          "guard_sha256": "395b22035a4c24ca3d660c7740e2ce1426eee6639b4764686675293379289df4",
+          "guard_token_count": 14,
+          "id": "128_scalar_program_aggregates.assert_001",
+          "source_line": 82
+        },
+        {
+          "emission": "echo",
+          "guard_count": 6,
+          "guard_sha256": "1e22c9605cad55f6fb8560a6c16e6fd5cfdeac1b6e5043f7a3ade741a65f6441",
+          "guard_token_count": 9,
+          "id": "128_scalar_program_aggregates.assert_002",
+          "source_line": 142
+        },
+        {
+          "emission": "echo",
+          "guard_count": 6,
+          "guard_sha256": "c60a3bb40e8107d2ac4cbc09c43c84e7ab593022fd6c398bdcac7c001ac87623",
+          "guard_token_count": 7,
+          "id": "128_scalar_program_aggregates.assert_003",
+          "source_line": 203
+        },
+        {
+          "emission": "echo",
+          "guard_count": 6,
+          "guard_sha256": "5cc61582e96d4666dbf6d14598b8e33672001170d85b84152284a51744e69362",
+          "guard_token_count": 17,
+          "id": "128_scalar_program_aggregates.assert_004",
+          "source_line": 277
+        },
+        {
+          "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "bb12b542ea588b3530ede6428216109fd07d9645a54427be40d3444f0c699def",
+          "guard_token_count": 2,
+          "id": "128_scalar_program_aggregates.assert_005",
+          "source_line": 316
+        }
+      ],
+      "completion_id": "128_scalar_program_aggregates",
+      "file": "128_scalar_program_aggregates.sql",
+      "sha256": "d39d8757d475067cbbf97454ae3a971addec71c8af6253d5624923725f3f2037"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "79ce57d68e5206c86d833e6f0039f50016a8fee5f69dee80aa10cbc6e344f84c",
+          "guard_token_count": 9,
+          "id": "129_spatial_scalar_programs.assert_001",
+          "source_line": 80
+        },
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "1c203da9b555c1b871e82c605ad2c5b23b04fa8cb138a4b84b63e5b70038230f",
+          "guard_token_count": 8,
+          "id": "129_spatial_scalar_programs.assert_002",
+          "source_line": 114
+        },
+        {
+          "emission": "echo",
+          "guard_count": 4,
+          "guard_sha256": "b05bbb037cf01317045d25108bfa3c28b0d751990b9b25301da7232f278fb78c",
+          "guard_token_count": 7,
+          "id": "129_spatial_scalar_programs.assert_003",
+          "source_line": 164
+        },
+        {
+          "emission": "echo",
+          "guard_count": 7,
+          "guard_sha256": "bc04c63c4443bba9140f67a9717d5fb1654faf3dfaa3bef129320fe419723938",
+          "guard_token_count": 12,
+          "id": "129_spatial_scalar_programs.assert_004",
+          "source_line": 233
+        }
+      ],
+      "completion_id": "129_spatial_scalar_programs",
+      "file": "129_spatial_scalar_programs.sql",
+      "sha256": "5d34e68df959f6d3a6574b93bfdf9e3c3f45247763b01c0f11da3c5f90c0f83d"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
           "guard_count": 1,
           "guard_sha256": "f26b4c0c86dce378f7eabf2c4725e1105ad57fc5526f26a1344977675005e7d3",
           "guard_token_count": 1,
@@ -457,6 +1160,342 @@
       "completion_id": "12_h3_operations",
       "file": "12_h3_operations.sql",
       "sha256": "21f2a2b9627b4ef5eb212b4592da5237a4a582e0b987007a646bf7cbe7d8791c"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 5,
+          "guard_sha256": "8a6ae6392872ea56d2517595f746415f22256d117a20747758510eb91d026393",
+          "guard_token_count": 11,
+          "id": "130_scalar_aggregate_filters.assert_001",
+          "source_line": 102
+        },
+        {
+          "emission": "echo",
+          "guard_count": 4,
+          "guard_sha256": "ef919a392c6065e10c5a3d4a98cbaa39c01cc7b617afb1af19fe1a18d17941b4",
+          "guard_token_count": 7,
+          "id": "130_scalar_aggregate_filters.assert_002",
+          "source_line": 146
+        },
+        {
+          "emission": "echo",
+          "guard_count": 5,
+          "guard_sha256": "f24255db48d758516c603c52bf8934d1a60d65acd4b6360de07391f3d2df94b3",
+          "guard_token_count": 11,
+          "id": "130_scalar_aggregate_filters.assert_003",
+          "source_line": 200
+        },
+        {
+          "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "cd50e5036047d23f7cc37b0c69b0066a5beec7f859dc6a4031fd3efd3d53e167",
+          "guard_token_count": 2,
+          "id": "130_scalar_aggregate_filters.assert_004",
+          "source_line": 221
+        }
+      ],
+      "completion_id": "130_scalar_aggregate_filters",
+      "file": "130_scalar_aggregate_filters.sql",
+      "sha256": "29abf4f0c5918ccd1927d1fbb80b12c7ae99b0d83554abad7fc617a66d4f6c0a"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "d729470d9d4026ef99045879431ae88eff50b3a448bc4936e8548607e7e98968",
+          "guard_token_count": 9,
+          "id": "131_scalar_date_expressions.assert_001",
+          "source_line": 65
+        },
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "03cf53652be5d3470f4971971523b32777230d015e40a0112160b0677cab9449",
+          "guard_token_count": 8,
+          "id": "131_scalar_date_expressions.assert_002",
+          "source_line": 98
+        },
+        {
+          "emission": "echo",
+          "guard_count": 4,
+          "guard_sha256": "69055e728ab9c0beaa4cc9bf7ca76ffa99e19db4a9fb0450675da5a431197664",
+          "guard_token_count": 7,
+          "id": "131_scalar_date_expressions.assert_003",
+          "source_line": 133
+        },
+        {
+          "emission": "echo",
+          "guard_count": 4,
+          "guard_sha256": "370d4667c1ba7d78ac62087ef6984b8f97d3d3e790e6fc1632c10730edd428a0",
+          "guard_token_count": 14,
+          "id": "131_scalar_date_expressions.assert_004",
+          "source_line": 184
+        }
+      ],
+      "completion_id": "131_scalar_date_expressions",
+      "file": "131_scalar_date_expressions.sql",
+      "sha256": "a30a59c2092b0bfab8b472b7849ddecc3b1a7cf92f34294dc32a442148fd7b74"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 4,
+          "guard_sha256": "1ca2bc6b0144b22ca6d8ac7aaefa1f9c0bb562c1fcf1cc08d6c64d90e0845a7c",
+          "guard_token_count": 14,
+          "id": "132_scalar_where.assert_001",
+          "source_line": 73
+        },
+        {
+          "emission": "echo",
+          "guard_count": 4,
+          "guard_sha256": "0921044e3254c477c9272a65f887497c5a86990a39c1efcf1691d492af749828",
+          "guard_token_count": 7,
+          "id": "132_scalar_where.assert_002",
+          "source_line": 108
+        },
+        {
+          "emission": "echo",
+          "guard_count": 4,
+          "guard_sha256": "5681fc04c5c28c4d0a7b11ffdebf65d9f65a3414c87ed00a6841bc7682228ef7",
+          "guard_token_count": 10,
+          "id": "132_scalar_where.assert_003",
+          "source_line": 150
+        },
+        {
+          "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "cd50e5036047d23f7cc37b0c69b0066a5beec7f859dc6a4031fd3efd3d53e167",
+          "guard_token_count": 2,
+          "id": "132_scalar_where.assert_004",
+          "source_line": 166
+        },
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "d191d1866212785118748d18d17212210ad633c046aad5b772e99ba9fa5bc296",
+          "guard_token_count": 11,
+          "id": "132_scalar_where.assert_005",
+          "source_line": 207
+        }
+      ],
+      "completion_id": "132_scalar_where",
+      "file": "132_scalar_where.sql",
+      "sha256": "12b4ff579c9e7178c9ac4ae5df3817191c17544bf56ddf4f3e724dc3efca6b74"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "a7d12f104c65b2fd9aad9d8b7e40db25113c3ec0bf19b06b0e8d0ee494fb47b6",
+          "guard_token_count": 12,
+          "id": "133_where_qualifier_order.assert_001",
+          "source_line": 56
+        },
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "b54fa652ba42713f4d1dae9949e4c31743291e20d1efb9a12372ab04fad64fdc",
+          "guard_token_count": 10,
+          "id": "133_where_qualifier_order.assert_002",
+          "source_line": 93
+        }
+      ],
+      "completion_id": "133_where_qualifier_order",
+      "file": "133_where_qualifier_order.sql",
+      "sha256": "ece7f5d23b2fbb4093c346d7993c95b01abd18e95c06d2c4e0361b0f0f24912a"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "a9145a0107a618adff4001486dba85d581d361e1b8a57a440ea9ff3a9da59245",
+          "guard_token_count": 12,
+          "id": "134_spatial_scalar_where.assert_001",
+          "source_line": 76
+        },
+        {
+          "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "3354200672e1e789f7522a3b3238a18a754522991008541d5d8e17e31ef9ddc9",
+          "guard_token_count": 10,
+          "id": "134_spatial_scalar_where.assert_002",
+          "source_line": 120
+        },
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "b54fa652ba42713f4d1dae9949e4c31743291e20d1efb9a12372ab04fad64fdc",
+          "guard_token_count": 10,
+          "id": "134_spatial_scalar_where.assert_003",
+          "source_line": 166
+        },
+        {
+          "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "cd50e5036047d23f7cc37b0c69b0066a5beec7f859dc6a4031fd3efd3d53e167",
+          "guard_token_count": 2,
+          "id": "134_spatial_scalar_where.assert_004",
+          "source_line": 185
+        }
+      ],
+      "completion_id": "134_spatial_scalar_where",
+      "file": "134_spatial_scalar_where.sql",
+      "sha256": "99b2a148cb3e3951cbcb1ab452122161a19842a92d52caf2b04a4f388e7ce3f9"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "4b0dab9523c2a443fc5aaad2974bd868335f052006b7c79ad16427663e985b20",
+          "guard_token_count": 12,
+          "id": "135_null_safe_scalar.assert_001",
+          "source_line": 74
+        },
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "4255194cb5b7a86dd83a9e25524c02beae9e66a0bf45ace3cac54c74f3da32d9",
+          "guard_token_count": 10,
+          "id": "135_null_safe_scalar.assert_002",
+          "source_line": 111
+        },
+        {
+          "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "3a87ef2a2dc1ccc7800fed39d26612a60690bae33a0980bcff96d0b838b51d38",
+          "guard_token_count": 10,
+          "id": "135_null_safe_scalar.assert_003",
+          "source_line": 146
+        },
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "1156e39f49728ddf1065f68d8d3650b6ed1eeed1e2cf5d6e9e3361df9984a46f",
+          "guard_token_count": 10,
+          "id": "135_null_safe_scalar.assert_004",
+          "source_line": 194
+        },
+        {
+          "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "cd50e5036047d23f7cc37b0c69b0066a5beec7f859dc6a4031fd3efd3d53e167",
+          "guard_token_count": 2,
+          "id": "135_null_safe_scalar.assert_005",
+          "source_line": 212
+        }
+      ],
+      "completion_id": "135_null_safe_scalar",
+      "file": "135_null_safe_scalar.sql",
+      "sha256": "3a30f193c4e7981f7d81e05539ecdbaaeb7b033bac18b2dcc78ca04d078906f6"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "5d1ec5735abd02115e2eeba32abea49af48d6c917dd4eacb33534ae0d26b03a8",
+          "guard_token_count": 12,
+          "id": "136_scalar_nullif_extrema.assert_001",
+          "source_line": 85
+        },
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "066068c5898612381e48c0f91288140eae051595472e4474b5603dbd3a868dca",
+          "guard_token_count": 11,
+          "id": "136_scalar_nullif_extrema.assert_002",
+          "source_line": 121
+        },
+        {
+          "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "a7bef8e89b1fe99804c080ea730e4315b23462f911ac8ddf6c20ecc5ae9d6709",
+          "guard_token_count": 10,
+          "id": "136_scalar_nullif_extrema.assert_003",
+          "source_line": 156
+        },
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "1156e39f49728ddf1065f68d8d3650b6ed1eeed1e2cf5d6e9e3361df9984a46f",
+          "guard_token_count": 10,
+          "id": "136_scalar_nullif_extrema.assert_004",
+          "source_line": 196
+        },
+        {
+          "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "cd50e5036047d23f7cc37b0c69b0066a5beec7f859dc6a4031fd3efd3d53e167",
+          "guard_token_count": 2,
+          "id": "136_scalar_nullif_extrema.assert_005",
+          "source_line": 214
+        }
+      ],
+      "completion_id": "136_scalar_nullif_extrema",
+      "file": "136_scalar_nullif_extrema.sql",
+      "sha256": "041b894b4535aa4bb41bf18c2a2c95cdc603c005b3281352d6facb1a316d785e"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "c1cde5282f2fa890c7a1e201b087a430094744500bcf1109cb0d76361bd7572c",
+          "guard_token_count": 4,
+          "id": "137_pulled_up_reports.assert_001",
+          "source_line": 86
+        },
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "a1422f7087a4f6cfde4209c39703b3c80286e2ad1bebed69c9e86966d4b4e5b0",
+          "guard_token_count": 4,
+          "id": "137_pulled_up_reports.assert_002",
+          "source_line": 111
+        },
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "8d791a0ac14ffb0bec8202cfb601ca9fcc43b72bf2f2463f8a0bd134f0b8ed09",
+          "guard_token_count": 5,
+          "id": "137_pulled_up_reports.assert_003",
+          "source_line": 135
+        },
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "40c7e2988175481a16b7aada85cd58efc67d2195fa814b5e100133b31402de41",
+          "guard_token_count": 9,
+          "id": "137_pulled_up_reports.assert_004",
+          "source_line": 164
+        },
+        {
+          "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "cd50e5036047d23f7cc37b0c69b0066a5beec7f859dc6a4031fd3efd3d53e167",
+          "guard_token_count": 2,
+          "id": "137_pulled_up_reports.assert_005",
+          "source_line": 183
+        },
+        {
+          "emission": "echo",
+          "guard_count": 13,
+          "guard_sha256": "10d039902561e229aeca71d11ba4e77100d1bc5f6b861393c631c430b32b6d49",
+          "guard_token_count": 9,
+          "id": "137_pulled_up_reports.assert_006",
+          "source_line": 275
+        }
+      ],
+      "completion_id": "137_pulled_up_reports",
+      "file": "137_pulled_up_reports.sql",
+      "sha256": "f8a85ff1063fc8a913b1b7894eb77f9ad15c48e54f37d5d0d3cd3d7766a68f7f"
     },
     {
       "assertions": [
@@ -3133,7 +4172,7 @@
           "guard_sha256": "d8a7a5e4140c69769688dc5cac4ccefff9c8f6ab5bf40bd6d559936958796001",
           "guard_token_count": 19,
           "id": "96_declined_lifecycle_contract.assert_001",
-          "source_line": 244
+          "source_line": 246
         },
         {
           "emission": "echo",
@@ -3141,7 +4180,7 @@
           "guard_sha256": "8bc32cc87db44dfe50c13178f506220d872f485f4f72f9b01e7d1976f68f9cc8",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_002",
-          "source_line": 264
+          "source_line": 266
         },
         {
           "emission": "echo",
@@ -3149,7 +4188,7 @@
           "guard_sha256": "7a9a66e895ef0c5be7a996e887f7ae9b1e28d3db36ee7eaef7f9ba38ec2bd64b",
           "guard_token_count": 6,
           "id": "96_declined_lifecycle_contract.assert_003",
-          "source_line": 322
+          "source_line": 324
         },
         {
           "emission": "echo",
@@ -3157,7 +4196,7 @@
           "guard_sha256": "712f24f712d7adfe24d55d2b14cb4f2a917594f5deef05a5b4a77e3ad06ccf1e",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_004",
-          "source_line": 343
+          "source_line": 345
         },
         {
           "emission": "echo",
@@ -3165,7 +4204,7 @@
           "guard_sha256": "f6b7c8217bbc9f5c3c2f3679af5450ddaee17d1145a920fafb55587800c5b631",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_005",
-          "source_line": 363
+          "source_line": 365
         },
         {
           "emission": "echo",
@@ -3173,7 +4212,7 @@
           "guard_sha256": "0c856a600d2ffa4d200ccdfe420072878bdac167455cc75ecbc69bfbc5d1800c",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_006",
-          "source_line": 383
+          "source_line": 385
         },
         {
           "emission": "echo",
@@ -3181,7 +4220,7 @@
           "guard_sha256": "a32e96309654dd869e8b0cbd9388e21b8faba7c3b5962bff74c85254fe5fa0db",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_007",
-          "source_line": 408
+          "source_line": 410
         },
         {
           "emission": "echo",
@@ -3189,7 +4228,7 @@
           "guard_sha256": "36e4b231acab18031855b87865be82d8b21392e584756fdfd898f3ab6cec148a",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_008",
-          "source_line": 428
+          "source_line": 430
         },
         {
           "emission": "echo",
@@ -3197,7 +4236,7 @@
           "guard_sha256": "5ae92fc80ec9c64bd4d0a178c2cd1fff97a66b79ec4eb9d0dde362306f813bc4",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_009",
-          "source_line": 492
+          "source_line": 494
         },
         {
           "emission": "echo",
@@ -3205,7 +4244,7 @@
           "guard_sha256": "ebc8ca88b8cba6282195a35210b75d4006f8a9e5cc5e952693fdff5dfefd95b2",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_010",
-          "source_line": 567
+          "source_line": 569
         },
         {
           "emission": "echo",
@@ -3213,7 +4252,7 @@
           "guard_sha256": "0f00921a94a84c924c33cf3db1c5a04c607a36a2bb7aee0a289803ef1f79c006",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_011",
-          "source_line": 594
+          "source_line": 596
         },
         {
           "emission": "echo",
@@ -3221,7 +4260,7 @@
           "guard_sha256": "4f482fbef132aa269de8cb0609f457acef1610c343c1d40fb10242086ef46ac0",
           "guard_token_count": 5,
           "id": "96_declined_lifecycle_contract.assert_012",
-          "source_line": 680
+          "source_line": 682
         },
         {
           "emission": "echo",
@@ -3229,7 +4268,7 @@
           "guard_sha256": "e9684fae74045c5c8dc449b2d600cce70ef662c2894ef8439316412e04024d92",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_013",
-          "source_line": 703
+          "source_line": 705
         },
         {
           "emission": "echo",
@@ -3237,7 +4276,7 @@
           "guard_sha256": "03bfe28688306acf6bfda6713f2a64943bf18ac905d1820594a5da05ebab5586",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_014",
-          "source_line": 758
+          "source_line": 760
         },
         {
           "emission": "echo",
@@ -3245,7 +4284,7 @@
           "guard_sha256": "4161308dcf955a4c2b36d6e107c0f0d83bcd4fbb7a62b2469a70fb493562f894",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_015",
-          "source_line": 780
+          "source_line": 782
         },
         {
           "emission": "echo",
@@ -3253,7 +4292,7 @@
           "guard_sha256": "13a2e7207ae86ae19764324131c5bb84e63379fadb0d726cfe966d4ff1bb6bc5",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_016",
-          "source_line": 802
+          "source_line": 804
         },
         {
           "emission": "echo",
@@ -3261,35 +4300,35 @@
           "guard_sha256": "3b706ed9fed2e8ae906b343037642e4f57f6b1d76f483858724a544fe372b469",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_017",
-          "source_line": 824
+          "source_line": 826
         }
       ],
       "completion_id": "96_declined_lifecycle_contract",
       "file": "96_declined_lifecycle_contract.sql",
-      "sha256": "1b5fd1835eb2efa4b5d68681caf317e386f6e44263ce8eba321592a40551b9a7"
+      "sha256": "cb2e916ae03624516d6525d82e08468215217f46eb13046b0a6df345035c6a26"
     },
     {
       "assertions": [
         {
           "emission": "echo",
           "guard_count": 8,
-          "guard_sha256": "d98801c85acaf88b9d0eecebfdde7d60c7a915b336c9ce49b1815497a2ef787a",
+          "guard_sha256": "93b826f4bfc3f2de8412fd5636832f6992229b12b01eb9e068eb430f32d3c82c",
           "guard_token_count": 19,
           "id": "97_range_intersection_contract.assert_001",
-          "source_line": 144
+          "source_line": 145
         },
         {
           "emission": "echo",
-          "guard_count": 2,
-          "guard_sha256": "6a64e839aa402ac35c6bed278b37e0a1956d9afc09189c4b2a1a32dd196683ff",
-          "guard_token_count": 8,
+          "guard_count": 3,
+          "guard_sha256": "e8fc8963c2571ccfae424a5f544f0b52b988e13cced2553e1127d23cc36b7057",
+          "guard_token_count": 10,
           "id": "97_range_intersection_contract.assert_002",
-          "source_line": 208
+          "source_line": 212
         }
       ],
       "completion_id": "97_range_intersection_contract",
       "file": "97_range_intersection_contract.sql",
-      "sha256": "eb6420c2009a0968c4af49058b97e430c8d1cefe90e3313dec4cfcef137d9fc7"
+      "sha256": "88d2e54cd09f0e5b984ea882361f378d4800cc8f1ffe27aeca63efc3fe501ed3"
     },
     {
       "assertions": [
@@ -3312,7 +4351,7 @@
       ],
       "completion_id": "98_aggregate_filter_contract",
       "file": "98_aggregate_filter_contract.sql",
-      "sha256": "17d83c0623711d7b3f6f50f517beecee599ce3b695e3dbc6db1454044dfd3c1c"
+      "sha256": "84542e73227ea130b66af3a5078d1df2f8f6dae360ae487fe302a2e0b96c5b4e"
     },
     {
       "assertions": [
@@ -3322,7 +4361,7 @@
           "guard_sha256": "18d78cc7c9366ee1fca5fe2fae865a5c2e9061b733b8990a559c261ac3b29256",
           "guard_token_count": 2,
           "id": "99_grouped_count_int2_contract.assert_001",
-          "source_line": 41
+          "source_line": 42
         },
         {
           "emission": "echo",
@@ -3330,7 +4369,7 @@
           "guard_sha256": "2dd301562d8f1f4d951deb4b6ac950db16cf752f9694092451a7ff486af4a67c",
           "guard_token_count": 6,
           "id": "99_grouped_count_int2_contract.assert_002",
-          "source_line": 76
+          "source_line": 77
         },
         {
           "emission": "echo",
@@ -3338,7 +4377,7 @@
           "guard_sha256": "d15e6ea32e44507e8bb50a05bea546de73f365bda578259aa24ba1ac0039f20a",
           "guard_token_count": 6,
           "id": "99_grouped_count_int2_contract.assert_003",
-          "source_line": 88
+          "source_line": 89
         },
         {
           "emission": "echo",
@@ -3346,7 +4385,7 @@
           "guard_sha256": "de886de4452d9e026acd906b09057c9148972a0c56a0ca5b6c5b1536273f3397",
           "guard_token_count": 11,
           "id": "99_grouped_count_int2_contract.assert_004",
-          "source_line": 178
+          "source_line": 179
         },
         {
           "emission": "echo",
@@ -3354,12 +4393,12 @@
           "guard_sha256": "07cca55e77d4dbf2bc05bc190278a05369c19074ca71fe0248a10ab58e4d508a",
           "guard_token_count": 7,
           "id": "99_grouped_count_int2_contract.assert_005",
-          "source_line": 234
+          "source_line": 236
         }
       ],
       "completion_id": "99_grouped_count_int2_contract",
       "file": "99_grouped_count_int2_contract.sql",
-      "sha256": "0d3bab983df31b19b4401f635bc6177771868ad4d9f4b8da620cce9bd499c51e"
+      "sha256": "f16bf7a9b1d636dea558c94d1f52fe88fe696d7fdcc726ce6a565041ee3062a5"
     }
   ],
   "kind": "sql-semantic-assertion-manifest",

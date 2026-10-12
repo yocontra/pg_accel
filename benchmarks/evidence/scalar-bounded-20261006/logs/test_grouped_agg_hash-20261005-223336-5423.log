@@ -1,0 +1,27 @@
+PGACCEL_TEST_START name=test_grouped_agg_hash
+--- hash duplicates/nulls/high-bits/collisions/warm workspace ---
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.3461708859651564584.metalar.5476.12512024855466970521.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/16555657627412307434.17486796370747534526.metalar.5476.5610498082784323471.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.8229294135756067812.metalar.5476.3397669534714525974.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/4939212832255122260.15043875205389249912.metalar.5476.928720978182175181.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/13810581291822887598.17486796370747534526.metalar.5476.3438447696464722440.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.17697595560191736513.metalar.5476.8574452264771280837.tmp (kernels_added=1 skipped=0)
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/14690400167917884164.11533957788924602645.metalar.5476.4260799171335498038.tmp (kernels_added=1 skipped=0)
+--- hash empty/all-null/capacity boundaries ---
+--- hash fixed-seed differential ---
+--- hash million-row hot groups ---
+--- parallel hash compaction/sort, non-power-of-two cardinalities ---
+parallel case: groups=16383 nullable=0
+parallel case: groups=16383 nullable=1
+parallel case: groups=16385 nullable=0
+parallel case: groups=16385 nullable=1
+parallel case: groups=32771 nullable=0
+parallel case: groups=32771 nullable=1
+parallel case: groups=1048583 nullable=0
+parallel case: groups=1048583 nullable=1
+--- hash qualification ceiling: 16Mi distinct groups including NULL ---
+--- fused H3 parent hash exactness/validation ---
+--- hash hard failure and unsupported shapes ---
+test_grouped_agg_hash: 314 passed, 0 failed
+PGACCEL_TEST_RESULT name=test_grouped_agg_hash exit_code=0 result=PASS raw_lines=25 body_sha256=7102e4dace14fbe94bb4319ce828f617fa53ec1cf1de7f731499e43dfae6b3f0 binding_sha256=59f228157c816569c0e65aba58717b3c99e8459a458394ca1e32aec52d2724d6

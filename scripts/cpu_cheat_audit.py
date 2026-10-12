@@ -99,9 +99,9 @@ OUTPUT_ASSIGNMENTS = frozenset(
 )
 
 DEFAULT_ABI_MANIFEST = pathlib.Path(__file__).with_name("cpu_cheat_abi_manifest.txt")
-EXPECTED_ABI_MANIFEST_COUNT = 123
+EXPECTED_ABI_MANIFEST_COUNT = 131
 EXPECTED_ABI_MANIFEST_SHA256 = (
-    "6a6871c0f01391606ca77714f03324da4de893766a99d1bf036091b41308b667"
+    "d4dc7e0e01e18f9e642a5ac69ae4e4c0f361df6ef88d570dce361ea240b5402c"
 )
 INTERNAL_NON_ABI_HEADERS = frozenset(
     {"alloc_helper.h", "pgaccel_error.h", "pgaccel_queue.h"}
@@ -3195,7 +3195,19 @@ def _lambda_capture_before_body(
             cursor = candidate - 1
     if cursor >= lower and tokens[cursor].value == ")" and cursor in reverse:
         cursor = reverse[cursor] - 1
-    return cursor if cursor >= lower and tokens[cursor].value == "]" else None
+    if cursor < lower or tokens[cursor].value != "]" or cursor not in reverse:
+        return None
+    capture_open = reverse[cursor]
+    if capture_open > lower:
+        previous = tokens[capture_open - 1]
+        # A declarator such as `int* slots[1]{out}` has an array bound, not a
+        # lambda capture. Misclassifying it hides its initializer's host effects.
+        if previous.value in {")", "]"} or (
+            previous.kind == "identifier"
+            and previous.value not in {"return", "co_return", "throw", "co_await"}
+        ):
+            return None
+    return cursor
 
 
 def _lambda_ranges(
@@ -3703,6 +3715,33 @@ def _scope_for(index: int, brace_ranges: Sequence[tuple[int, int]]) -> tuple[int
 def _declaration_kind(
     tokens: Sequence[Token], name_index: int, function: Function
 ) -> str | None:
+    # A qualified using-declaration really does introduce a local binding,
+    # including each name in C++17's comma-separated form. Its imported type
+    # is not proven here: never inherit an outer queue/handler's device proof.
+    # A type alias (using X = ...) is not an imported variable binding.
+    if name_index > 0 and tokens[name_index - 1].value == "::":
+        start = name_index - 1
+        while start > function.body_open and tokens[start - 1].value not in {
+            ";", "{", "}",
+        }:
+            start -= 1
+        prefix = [token.value for token in tokens[start:name_index]]
+        if (
+            prefix
+            and prefix[0] == "using"
+            and "=" not in prefix
+            and "namespace" not in prefix
+            and name_index + 1 < function.body_close
+            and tokens[name_index + 1].value in {",", ";"}
+        ):
+            return "other"
+    # A field or qualified lookup is not a declaration of the same-spelled
+    # local/parameter. In particular, ``*bytes = layout.bytes`` must not shadow
+    # the ABI output, nor may ``q = holder.q`` erase a real queue's type. Keep
+    # the dereference/assignment in host-write analysis; this only distinguishes
+    # name binding from member access, never approves an output write.
+    if not _unqualified_output_identifier(tokens, name_index):
+        return None
     if name_index + 1 >= function.body_close or tokens[name_index + 1].value not in {
         "=",
         ";",
@@ -8337,6 +8376,67 @@ def _proven_opaque_resource_handoffs(
     )
 
 
+def _indexed_output_escapes(
+    tokens: Sequence[Token],
+    function: Function,
+    roots: set[str],
+    device_lambdas: set[tuple[int, int]],
+    forward: dict[int, int],
+) -> list[int]:
+    """Reject unmodeled host containers holding ABI-output-derived state.
+
+    A store such as `slots[0] = out` can let a later argument-free helper
+    overwrite a device result. Scalar and aggregate copies are conservative
+    failures too: this verifier does not track indexed host container contents.
+    Device-lambda stores remain subject to the normal device provenance proof.
+    """
+    lines: set[int] = set()
+    reverse = {end: start for start, end in forward.items()}
+    for index in range(function.body_open + 1, function.body_close):
+        if _is_inside(index, device_lambdas):
+            continue
+        value = tokens[index].value
+        if value == "=":
+            left = index - 1
+            while left > function.body_open and tokens[left].value not in {
+                ";",
+                "{",
+                "}",
+            }:
+                left -= 1
+            if not any(
+                tokens[item].value == "[" and forward.get(item, index) < index
+                for item in range(left + 1, index)
+            ):
+                continue
+            _, end, _ = _statement_range(
+                tokens, index + 1, function.body_close, forward
+            )
+            if _range_references_output(tokens, index + 1, end, roots):
+                lines.add(tokens[index].line)
+        elif value == "{" and tokens[index - 1].value == "]" and index in forward:
+            # Braced array initialization is not a callable lambda. Actual
+            # capture lists begin after an expression delimiter, not a name.
+            if (
+                _lambda_capture_before_body(
+                    tokens, index, function.body_open + 1, reverse
+                )
+                is not None
+            ):
+                continue
+            bound = reverse.get(index - 1)
+            if bound is None or bound <= function.body_open + 1:
+                continue
+            if (
+                tokens[bound - 1].kind != "identifier"
+                and tokens[bound - 1].value != "]"
+            ):
+                continue
+            if _range_references_output(tokens, index + 1, forward[index], roots):
+                lines.add(tokens[index].line)
+    return sorted(lines)
+
+
 def _deferred_output_writes(
     tokens: Sequence[Token],
     function: Function,
@@ -10329,8 +10429,17 @@ class _PathAuditor:
             lambda_ranges,
             device_lambdas,
         )
+        indexed_escape_lines = _indexed_output_escapes(
+            self.tokens, function, output_roots, device_lambdas, self.forward
+        )
         classifications: set[str] = set()
         details: list[str] = []
+        if indexed_escape_lines:
+            classifications.update({"output_container_escape", "review_required"})
+            details.append(
+                "ABI output state escapes through unmodeled host indexed storage at line(s) "
+                + ", ".join(map(str, indexed_escape_lines))
+            )
         if direct:
             classifications.update({"device_dispatch", "large_input_gpu_chain"})
             details.extend(item.detail for item in direct)
@@ -10898,6 +11007,7 @@ class _PathAuditor:
 
         failure_only_hazards = bool(
             host_loop_lines
+            or indexed_escape_lines
             or unsafe_write_records
             or transfer_lines
             or counter_lines
@@ -10996,6 +11106,7 @@ class _PathAuditor:
 
         hard_failure = bool(
             unsafe_success
+            or indexed_escape_lines
             or untrusted_counter_lines
             or raii_output_capture_lines
             or host_loop_lines
@@ -11494,6 +11605,10 @@ def _external_device_proofs(
         if (
             entry is None
             or not entry.ok
+            or bool(
+                set(entry.classifications)
+                & {"bounded_metadata", "build_bound_metadata"}
+            )
             or not (set(entry.classifications) & device_evidence)
             or _canonical_signature_tokens(entry.return_type)
             != _canonical_signature_tokens(function.return_spelling)
@@ -12699,6 +12814,11 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="marker created before the clean rebuild that produced --objects",
     )
     parser.add_argument(
+        "--metadata-binding",
+        type=pathlib.Path,
+        help="independently replay join metadata proof and linked-object ownership",
+    )
+    parser.add_argument(
         "--regenerate-abi-manifest",
         type=pathlib.Path,
         help="explicit maintainer operation that writes a compiler-derived manifest",
@@ -12825,6 +12945,109 @@ def _write_json_report(
     )
 
 
+def _metadata_overlay(audit: FileAudit, names: frozenset[str]) -> FileAudit:
+    """Final report classification only; never seed the device proof cache."""
+    allowed = {
+        "host_computation",
+        "host_output_write",
+        "missing_device_terminal",
+        "review_required",
+        "undominated_success",
+        "unresolved_helper",
+        "unresolved_output_helper",
+        # Informational source-view tag, not an expansion error. The independent
+        # typed proof checks the actual frozen, compiler-expanded translation unit.
+        "macro_expanded_body",
+    }
+    if {entry.entrypoint for entry in audit.entrypoint_audits} != names:
+        raise ParseError("metadata source export inventory differs from proved roots")
+    if any(
+        finding.entrypoint not in names or not set(finding.classifications) <= allowed
+        for finding in audit.findings
+    ) or any(
+        not set(entry.classifications) <= allowed for entry in audit.entrypoint_audits
+    ):
+        raise ParseError(
+            "metadata proof cannot override parser/preprocessor/other findings"
+        )
+    return dataclasses.replace(
+        audit,
+        entrypoint_audits=tuple(
+            dataclasses.replace(
+                entry,
+                ok=True,
+                classifications=("bounded_metadata", "build_bound_metadata"),
+                detail="independently rebuilt typed metadata proof; linked symbol ownership verified",
+                guaranteed_output_parameter_positions=(),
+                output_parameter_position_variants=(),
+            )
+            for entry in audit.entrypoint_audits
+        ),
+        findings=(),
+    )
+
+
+def _integrate_metadata_binding(
+    audits: Sequence[FileAudit],
+    abi: AbiInventory | None,
+    binding: pathlib.Path,
+    object_paths: Sequence[pathlib.Path],
+    marker: pathlib.Path | None,
+) -> tuple[list[FileAudit], AbiInventory | None]:
+    from metadata_link import ROOTS, verify_binding
+
+    try:
+        if abi is None or abi.findings or len(object_paths) != 1 or marker is None:
+            raise ParseError(
+                "metadata approval requires a clean release ABI/object inventory"
+            )
+        source = (
+            pathlib.Path(__file__).resolve().parents[1]
+            / "pgaccel-kernels/src/join_rows_layout.cpp"
+        )
+        matches = [item for item in audits if item.path.resolve() == source]
+        if len(matches) != 1:
+            raise ParseError(
+                "the exact metadata source must be included once in the audit"
+            )
+        if abi.compiler is None or abi.compiler.get("status") != "verified":
+            raise ParseError(
+                "metadata replay requires the independently selected ABI compiler"
+            )
+        evidence = verify_binding(
+            binding,
+            object_paths[0],
+            source,
+            marker,
+            compiler=pathlib.Path(str(abi.compiler["compiler_path"])),
+            build_root=object_paths[0].resolve().parent,
+        )
+        replacement = _metadata_overlay(matches[0], frozenset(ROOTS))
+        return (
+            [replacement if item is matches[0] else item for item in audits],
+            dataclasses.replace(abi, objects=(*abi.objects, evidence)),
+        )
+    except (
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+        subprocess.TimeoutExpired,
+    ) as error:
+        finding = Finding(
+            binding,
+            1,
+            "<metadata-build-binding>",
+            str(error),
+            ("metadata_binding_error", "review_required"),
+        )
+        if abi is not None:
+            return list(audits), dataclasses.replace(
+                abi, findings=(*abi.findings, finding)
+            )
+        return [*audits, FileAudit(binding, 0, 0, 0, (), (finding,))], abi
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
     if args.regenerate_abi_manifest is not None:
@@ -12867,7 +13090,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     unique_paths = list(dict.fromkeys(args.sources))
     audits = audit_paths(unique_paths)
-    findings = [finding for audit in audits for finding in audit.findings]
     object_paths = list(args.objects)
     abi = (
         audit_abi(
@@ -12882,6 +13104,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.headers
         else None
     )
+    if args.metadata_binding is not None:
+        audits, abi = _integrate_metadata_binding(
+            audits, abi, args.metadata_binding, object_paths, args.build_marker
+        )
+    findings = [finding for audit in audits for finding in audit.findings]
     if abi is not None:
         findings.extend(abi.findings)
     if args.json_report is not None:

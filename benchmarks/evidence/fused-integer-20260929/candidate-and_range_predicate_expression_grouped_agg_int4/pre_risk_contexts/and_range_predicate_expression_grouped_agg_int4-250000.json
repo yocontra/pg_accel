@@ -1,0 +1,28 @@
+{
+  "workload": "and_range_predicate_expression_grouped_agg_int4",
+  "rows": 250000,
+  "seed": 42,
+  "iterations": 10,
+  "warmup": 5,
+  "timing_mode": "raw",
+  "cache_mode": "warm",
+  "realistic_gucs": false,
+  "skip_guc_verify": false,
+  "capture_plans": true,
+  "capture_planner_stages": false,
+  "native_parity_pairing": false,
+  "backend_pid": 66519,
+  "backend_pid_error": null,
+  "setup_sql": [
+    "DROP TABLE IF EXISTS bench_and_range_predicate_expression_sales_int4",
+    "CREATE TABLE bench_and_range_predicate_expression_sales_int4 (id serial PRIMARY KEY, product_id int4 NOT NULL, price int4, quantity int4 NOT NULL)",
+    "INSERT INTO bench_and_range_predicate_expression_sales_int4 (product_id, price, quantity) SELECT (g % 256)::int4, CASE WHEN g % 97 = 0 THEN NULL ELSE (1 + (g % 1000))::int4 END, (1 + ((g / 256) % 10))::int4 FROM generate_series(1, 250000) AS g",
+    "ANALYZE bench_and_range_predicate_expression_sales_int4"
+  ],
+  "pre_query_sql": [],
+  "accel_query_sql": "SELECT product_id, SUM(price * quantity) AS sum, COUNT(*) AS count FROM bench_and_range_predicate_expression_sales_int4 WHERE price >= 200 AND price <= 800 GROUP BY product_id",
+  "baseline_query_sql": "SELECT product_id, SUM(price * quantity) AS sum, COUNT(*) AS count FROM bench_and_range_predicate_expression_sales_int4 WHERE price >= 200 AND price <= 800 GROUP BY product_id",
+  "explain_sql": "EXPLAIN (VERBOSE, COSTS OFF) SELECT product_id, SUM(price * quantity) AS sum, COUNT(*) AS count FROM bench_and_range_predicate_expression_sales_int4 WHERE price >= 200 AND price <= 800 GROUP BY product_id",
+  "explain": "Custom Scan (GpuAccelAgg)\n  Output: product_id, (sum((price * quantity))), (count(*))\n  Strategy: GpuAgg\n  Plan Selected: true\n  Batch Size: 65536\n  Expected Threads: 1\n  GPU Resident Pipeline: true\n  GPU Resident Proof Version: 2\n  GPU Resident Operator Class: resident_groupagg\n  GPU Physical Kernel Mode: parallel_dense_integer\n  GPU Descriptor Strategy: descriptor_grouped_aggregate\n  GPU Descriptor Specialization: dense_integer_expressions_plain\n  GPU Descriptor Specialization Cache: miss\n  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)\n  GPU Descriptor Group Keys: k0:fact(2352781.2:type=23) type=23 collation=0 encoding=hash\n  GPU Descriptor Aggregates: m0:mul(2352781.3:type=23, 2352781.4:type=23) -> value.sum; m1:count_star -> value.count\n  GPU Descriptor Filter: fact=ranges(input=2352781.3:type=23, count=1); measures=[m0=none; m1=none]; dimensions=[none]\n  GPU Descriptor Star Dimensions: none\n  GPU Descriptor Output: slot0:group[k0] source_type=23 result_type=23 typmod=-1 collation=0 nullable=false; slot1:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot2:aggregate[m1].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false\n  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)\n  GPU Descriptor Artifact: not initialized\n  GPU Descriptor Generations: not inspected\n  GPU Descriptor Bytes: not inspected\n  GPU Resident Stage Mask: 16395\n  GPU Resident Device Columns: 3\n  GPU Resident Boundary: none: no CPU boundary\n",
+  "explain_error": null
+}

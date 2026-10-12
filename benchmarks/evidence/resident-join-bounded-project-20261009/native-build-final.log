@@ -1,0 +1,54 @@
+-- pgaccel_kernels: SYCL (AdaptiveCpp) is the only supported backend; build fails without AdaptiveCpp
+-- Configuring done (0.2s)
+-- Generating done (0.1s)
+-- Build files have been written to: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+[ 26%] Built target pgaccel_kernels_shared
+[ 26%] Built target pgaccel_kernels
+[ 28%] Built target test_device
+[ 29%] Built target test_raster_resident
+[ 31%] Built target test_hash_agg_keys
+[ 32%] Built target test_reduce_matrix
+[ 34%] Built target test_reduce_minimal
+[ 36%] Built target test_expr_vm_matrix
+[ 38%] Built target test_grouped_agg_workspace
+[ 38%] Built target test_expr_memory
+[ 40%] Built target test_bbox
+[ 42%] Built target test_spatial_dispatch
+[ 44%] Built target test_spatial
+[ 44%] Building CXX object CMakeFiles/test_join_rows.dir/test/test_join_rows.cpp.o
+[ 46%] Built target test_host_api_contract
+[ 47%] Built target test_spatial_pairwise_boundary
+[ 51%] Built target test_h3
+[ 51%] Built target test_reduce_bool_bit
+[ 53%] Built target test_fork_warmed
+[ 55%] Built target test_kernel_failure_status
+[ 57%] Built target test_spatial_resident
+[ 59%] Built target test_grouped_agg_hash
+[ 61%] Built target test_fork_archive_stress
+[ 63%] Built target test_hashagg_spatial_matrix
+[ 65%] Built target test_hash_domain_matrix
+[ 66%] Built target test_fork_cold
+[ 68%] Built target test_exec_gpu
+[ 69%] Built target test_fp64_probe_asin
+[ 70%] Built target test_fp64_mul_probe
+[ 72%] Built target test_fp64_probe_mul
+[ 74%] Built target test_scalar
+[ 75%] Built target test_spatial_bench
+[ 76%] Built target test_oom_invariant
+[ 77%] Built target test_grouped_agg
+[ 79%] Built target test_fork_cold_barrier
+[ 81%] Built target test_fp64_probe_add
+[ 82%] Built target test_correctness
+[ 83%] Built target test_reduce_stats
+[ 84%] Built target test_fp64_probe_sin
+[ 86%] Built target test_sycl_basic
+[ 87%] Built target test_fp64_probe_cos
+[ 93%] Built target test_fork
+[ 93%] Built target test_fp64_probe_haversine
+[ 93%] Built target test_ooo_overlap
+[ 95%] Built target test_fp64_probe_sqrt
+[ 96%] Built target test_hash_agg_partial
+[ 98%] Built target test_fp64_probe_atan2
+[ 99%] Built target test_hash_join
+[100%] Linking CXX executable test_join_rows
+[100%] Built target test_join_rows

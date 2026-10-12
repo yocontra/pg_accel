@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "workload": "numeric_grouped_wide_scale",
+  "rows": 250000,
+  "status": "pass",
+  "order_sensitive": false,
+  "accel_rows": 6,
+  "baseline_rows": 6,
+  "accel_minus_baseline_count": 0,
+  "baseline_minus_accel_count": 0,
+  "sample_limit": 20,
+  "accel_minus_baseline_samples": [],
+  "baseline_minus_accel_samples": [],
+  "accel_query_sql": "SELECT g,sum(v) s,avg(v) a,count(v) c FROM bench_numeric_rollup GROUP BY g",
+  "baseline_query_sql": "SELECT g,sum(v) s,avg(v) a,count(v) c FROM bench_numeric_rollup GROUP BY g",
+  "error": null
+}

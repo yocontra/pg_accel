@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "workload": "grouped_computed_integer",
+  "rows": 250000,
+  "status": "pass",
+  "order_sensitive": false,
+  "accel_rows": 33,
+  "baseline_rows": 33,
+  "accel_minus_baseline_count": 0,
+  "baseline_minus_accel_count": 0,
+  "sample_limit": 20,
+  "accel_minus_baseline_samples": [],
+  "baseline_minus_accel_samples": [],
+  "accel_query_sql": "SELECT region,sum(price*adjustment) revenue,avg(price-adjustment) net, min(price+adjustment) lo,max(price+adjustment) hi,count(*) n FROM bench_computed_sales GROUP BY region",
+  "baseline_query_sql": "SELECT region,sum(price*adjustment) revenue,avg(price-adjustment) net, min(price+adjustment) lo,max(price+adjustment) hi,count(*) n FROM bench_computed_sales GROUP BY region",
+  "error": null
+}

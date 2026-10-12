@@ -1,0 +1,13 @@
+source: /Users/contra/.pgrx/18.log
+run_start_offset_bytes: 2004875
+delta_start_offset_bytes: 2004875
+capture_end_offset_bytes: 2006199
+delta_max_bytes: 262144
+truncated_to_last_delta_bytes: false
+---
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/.acpp/apps/global/jit-cache/15176369980434037186.9425128177434775847.metalar.29737.2191819999844187901.tmp (kernels_added=1 skipped=0)
+2026-09-29 19:52:50.939 PDT [15329] LOG:  checkpoint starting: immediate force wait
+2026-09-29 19:52:50.966 PDT [15329] LOG:  checkpoint complete: wrote 2100 buffers (0.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 2 removed, 0 recycled; write=0.016 s, sync=0.004 s, total=0.028 s; sync files=42, longest=0.001 s, average=0.001 s; distance=33902 kB, estimate=128494 kB; lsn=546/45E0AD08, redo lsn=546/45E0ACB0
+2026-09-29 19:52:53.814 PDT [15329] LOG:  checkpoint starting: immediate force wait
+2026-09-29 19:52:53.879 PDT [15329] LOG:  checkpoint complete: wrote 8163 buffers (0.4%), wrote 1 SLRU buffers; 0 WAL file(s) added, 8 removed, 1 recycled; write=0.036 s, sync=0.003 s, total=0.066 s; sync files=39, longest=0.001 s, average=0.001 s; distance=134762 kB, estimate=134762 kB; lsn=546/4E1A55C0, redo lsn=546/4E1A5568

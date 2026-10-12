@@ -1,0 +1,20 @@
+=== 128_scalar_program_aggregates ===
+SET
+SET
+SELECT 250017
+ANALYZE
+psql:sql/tests/128_scalar_program_aggregates.sql:58: NOTICE:  128 scalar matrix selected 24 query shapes
+DO
+PGACCEL_ASSERT_OK:128_scalar_program_aggregates.assert_001
+DO
+PGACCEL_ASSERT_OK:128_scalar_program_aggregates.assert_002
+SET
+PREPARE
+DO
+PGACCEL_ASSERT_OK:128_scalar_program_aggregates.assert_003
+DEALLOCATE
+RESET
+INSERT 0 250017
+ANALYZE
+psql:sql/tests/128_scalar_program_aggregates.sql:165: ERROR:  128 error-producing scalar not selected: SELECT sum(a/b),avg(a/b),count(a/b),min(a/b),max(a/b) FROM _scalar_program / Aggregate  ->  Seq Scan on _scalar_program
+CONTEXT:  PL/pgSQL function inline_code_block line 20 at RAISE

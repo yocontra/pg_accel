@@ -9,7 +9,9 @@ use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
+use crate::engine::residency::ExecutionMemoryCharge;
 use crate::engine::spec::abi;
+use crate::engine::spec::scalar::{ScalarProgram, ScalarType};
 
 use super::{
     GpuError, GpuErrorDomain, GpuOperation, GpuResult, GpuStatusDetail, PgaccelMemSpace,
@@ -34,6 +36,7 @@ pub enum GroupedAggKernelMode {
     ParallelDenseCount = abi::PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_COUNT,
     ParallelDenseInteger = abi::PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_INTEGER,
     SerialGeneric = abi::PGACCEL_GROUPED_AGG_KERNEL_MODE_SERIAL_GENERIC,
+    ParallelDenseNumeric = abi::PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_NUMERIC,
 }
 
 impl GroupedAggKernelMode {
@@ -44,6 +47,7 @@ impl GroupedAggKernelMode {
             Self::ParallelDenseCount => "parallel_dense_count",
             Self::ParallelDenseInteger => "parallel_dense_integer",
             Self::SerialGeneric => "serial_generic",
+            Self::ParallelDenseNumeric => "parallel_dense_numeric",
         }
     }
 
@@ -57,6 +61,9 @@ impl GroupedAggKernelMode {
                 Ok(Self::ParallelDenseInteger)
             }
             abi::PGACCEL_GROUPED_AGG_KERNEL_MODE_SERIAL_GENERIC => Ok(Self::SerialGeneric),
+            abi::PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_NUMERIC => {
+                Ok(Self::ParallelDenseNumeric)
+            }
             _ => Err(descriptor_error(
                 "kernel returned an unknown grouped physical mode",
             )),
@@ -65,12 +72,14 @@ impl GroupedAggKernelMode {
 }
 
 fn native_kernel_mode(desc: &abi::PgaccelGroupedAggDesc) -> GpuResult<GroupedAggKernelMode> {
+    let mut desc = *desc;
+    let _numeric_views = pin_numeric_views(&mut desc, 0)?;
     let mut raw = 0;
     // SAFETY: both pointers refer to live, correctly aligned values for this
     // synchronous metadata-only native validation call.
     let status = unsafe {
         bridge::pgaccel_grouped_agg_kernel_mode(
-            std::ptr::from_ref(desc),
+            std::ptr::from_ref(&desc),
             std::ptr::from_mut(&mut raw),
         )
     };
@@ -159,6 +168,23 @@ fn validate_descriptor_shell(desc: &abi::PgaccelGroupedAggDesc) -> GpuResult<()>
     {
         return Err(descriptor_error("HASH grouping requires COMPACT output"));
     }
+    if desc.measures[..measure_count].iter().any(|measure| {
+        (measure.op == abi::PGACCEL_GROUPED_AGG_MEASURE_SCALAR) != scalar_column(&measure.value)
+            || measure.rhs.flags == abi::PGACCEL_GROUPED_AGG_SCALAR_VIEW_V1
+    }) {
+        return Err(descriptor_error(
+            "scalar view requires SCALAR VALUE and cannot be an RHS",
+        ));
+    }
+    if desc.measures[measure_count..].iter().any(|measure| {
+        measure.op == abi::PGACCEL_GROUPED_AGG_MEASURE_SCALAR
+            || scalar_column(&measure.value)
+            || scalar_column(&measure.rhs)
+    }) {
+        return Err(descriptor_error(
+            "inactive scalar metadata is not canonical",
+        ));
+    }
     Ok(())
 }
 
@@ -169,6 +195,8 @@ fn validate_descriptor_shell(desc: &abi::PgaccelGroupedAggDesc) -> GpuResult<()>
 /// lifecycle transition is safe and preserves the descriptor's borrow.
 pub struct ResolvedGroupedAggPlan<'input> {
     desc: abi::PgaccelGroupedAggDesc,
+    _numeric_views: NumericViewOwners,
+    _scalar_views: ScalarViewOwners,
     identity: Rc<()>,
     _input_lifetime: PhantomData<&'input [u8]>,
 }
@@ -179,10 +207,32 @@ impl<'input> ResolvedGroupedAggPlan<'input> {
     /// # Safety
     /// Every active descriptor pointer must address the frozen logical length
     /// in the declared AdaptiveCpp context and remain live for `'input`.
-    pub unsafe fn from_abi(desc: abi::PgaccelGroupedAggDesc) -> GpuResult<Self> {
+    /// Packed NUMERIC view metadata is host-readable during this call and is
+    /// copied; its nested row/digit buffers retain the `'input` requirement.
+    /// SPG1 view, words and input descriptors must be host-readable during
+    /// construction and are copied. Nested resident lanes retain `'input`.
+    pub unsafe fn from_abi(mut desc: abi::PgaccelGroupedAggDesc) -> GpuResult<Self> {
         validate_descriptor_shell(&desc)?;
+        for measure in &desc.measures[..desc.measure_count as usize] {
+            if packed_numeric(&measure.rhs) {
+                return Err(descriptor_error(
+                    "packed NUMERIC RHS expressions are unsupported",
+                ));
+            }
+            if let Some(view) = numeric_metadata(&measure.value)?
+                && view.row_count != desc.row_count as u64
+            {
+                return Err(descriptor_error(
+                    "numeric metadata row count differs from plan",
+                ));
+            }
+        }
+        let numeric_views = pin_numeric_views(&mut desc, 0)?;
+        let scalar_views = pin_scalar_views(&mut desc, 0)?;
         Ok(Self {
             desc,
+            _numeric_views: numeric_views,
+            _scalar_views: scalar_views,
             identity: Rc::new(()),
             _input_lifetime: PhantomData,
         })
@@ -210,11 +260,59 @@ impl<'input> ResolvedGroupedAggPlan<'input> {
         native_kernel_mode(&desc)
     }
 
+    /// Exact native workspace and host output footprint, without allocations,
+    /// pool checkout, reservations or device work. Borrowed metadata stays pinned.
+    pub fn hash_memory_requirements(&self) -> GpuResult<GroupedAggMemoryRequirements> {
+        if self.desc.grouping_mode != abi::PGACCEL_GROUPED_AGG_GROUPING_HASH
+            || self.one_shot_kernel_mode()? != GroupedAggKernelMode::ParallelHash
+        {
+            return Err(descriptor_error(
+                "hash memory forecast requires native parallel hash",
+            ));
+        }
+        self.one_shot_memory_requirements()
+    }
+
+    /// Exact one-shot scratch and result footprint for any supported grouping
+    /// family. This is metadata-only; it does not reserve execution memory.
+    pub fn one_shot_memory_requirements(&self) -> GpuResult<GroupedAggMemoryRequirements> {
+        let workspace = GroupedAggWorkspace::requirements_for_descriptor(&self.desc)?;
+        let output_bytes = grouped_output_required_bytes(&self.desc)?;
+        let total_bytes = workspace
+            .bytes
+            .checked_add(output_bytes)
+            .ok_or_else(|| capacity_error("grouped memory forecast overflows usize"))?;
+        Ok(GroupedAggMemoryRequirements {
+            workspace_bytes: workspace.bytes,
+            output_bytes,
+            total_bytes,
+        })
+    }
+
+    /// Reject a working set that cannot fit even after reclaiming this backend's
+    /// idle grouped pools. This read-only forecast is not a reservation: each
+    /// allocation still atomically charges the cluster ledger under concurrency.
+    pub fn preflight_hash_memory(&self) -> GpuResult<GroupedAggMemoryRequirements> {
+        let requirement = self.hash_memory_requirements()?;
+        requirement.preflight()?;
+        Ok(requirement)
+    }
+
+    /// Read-only combined-budget check before allocating one-shot buffers.
+    /// Per-allocation reservations remain authoritative under concurrency.
+    pub fn preflight_one_shot_memory(&self) -> GpuResult<GroupedAggMemoryRequirements> {
+        let requirement = self.one_shot_memory_requirements()?;
+        requirement.preflight()?;
+        Ok(requirement)
+    }
+
     /// Use the plan's current row pointers as one lifecycle chunk.
     #[must_use]
     pub fn chunk(&self) -> GroupedAggChunk<'_, 'input> {
         GroupedAggChunk {
             desc: self.desc,
+            _numeric_views: std::array::from_fn(|_| None),
+            _scalar_views: std::array::from_fn(|_| None),
             _plan: PhantomData,
             _input_lifetime: PhantomData,
             _not_send_sync: PhantomData,
@@ -242,11 +340,19 @@ impl<'input> ResolvedGroupedAggPlan<'input> {
 
         let mut desc = self.desc;
         desc.row_count = row_count;
+        let numeric_views = pin_numeric_views(&mut desc, first_row)?;
+        let scalar_views = pin_scalar_views(&mut desc, first_row)?;
         advance_descriptor_rows(&mut desc, first_row)?;
-        // SAFETY: `from_abi` established that every active pointer spans the
-        // plan's full logical row count. The checked subrange above advances
-        // only row-shaped pointers and retains the frozen session shape.
-        unsafe { GroupedAggChunk::from_abi(self, desc) }
+        // The checked subrange and metadata owners preserve the constructor's
+        // input contract. Do not copy the nested metadata a second time.
+        Ok(GroupedAggChunk {
+            desc,
+            _numeric_views: numeric_views,
+            _scalar_views: scalar_views,
+            _plan: PhantomData,
+            _input_lifetime: PhantomData,
+            _not_send_sync: PhantomData,
+        })
     }
 }
 
@@ -298,7 +404,7 @@ fn advance_measure_column(
     column: &mut abi::PgaccelGroupedAggMeasureCol,
     rows: usize,
 ) -> GpuResult<()> {
-    if !column.values.is_null() {
+    if !column.values.is_null() && !packed_numeric(column) && !scalar_column(column) {
         let element_bytes = usize::try_from(column.element_bytes)
             .map_err(|_| descriptor_error("grouped measure width does not fit usize"))?;
         if element_bytes == 0 {
@@ -368,6 +474,8 @@ fn advance_descriptor_rows(
 /// One row-pointer/count slice for a multi-call grouped aggregation.
 pub struct GroupedAggChunk<'plan, 'input> {
     desc: abi::PgaccelGroupedAggDesc,
+    _numeric_views: NumericViewOwners,
+    _scalar_views: ScalarViewOwners,
     _plan: PhantomData<&'plan ResolvedGroupedAggPlan<'input>>,
     _input_lifetime: PhantomData<&'input [u8]>,
     _not_send_sync: PhantomData<Rc<()>>,
@@ -379,21 +487,36 @@ impl<'plan, 'input> GroupedAggChunk<'plan, 'input> {
     /// # Safety
     /// Active row pointers must be advanced consistently, remain valid for
     /// `desc.row_count`, and share the plan's AdaptiveCpp context.
+    /// SPG1 host view/words/bindings must be readable during this call; they
+    /// are copied before the chunk can outlive the caller's metadata.
     pub unsafe fn from_abi(
         plan: &'plan ResolvedGroupedAggPlan<'input>,
-        desc: abi::PgaccelGroupedAggDesc,
+        mut desc: abi::PgaccelGroupedAggDesc,
     ) -> GpuResult<Self> {
         validate_descriptor_shell(&desc)?;
+        for measure in &desc.measures[..desc.measure_count as usize] {
+            if let Some(view) = numeric_metadata(&measure.value)?
+                && view.row_count != desc.row_count as u64
+            {
+                return Err(descriptor_error(
+                    "numeric metadata row count differs from chunk",
+                ));
+            }
+        }
         if desc.row_count > plan.desc.row_count {
             return Err(descriptor_error(
                 "chunk exceeds the row count used to size its workspace",
             ));
         }
+        let scalar_views = pin_scalar_views(&mut desc, 0)?;
         if !stable_shape_matches(&plan.desc, &desc) {
             return Err(descriptor_error("chunk changes a frozen plan shape"));
         }
+        let numeric_views = pin_numeric_views(&mut desc, 0)?;
         Ok(Self {
             desc,
+            _numeric_views: numeric_views,
+            _scalar_views: scalar_views,
             _plan: PhantomData,
             _input_lifetime: PhantomData,
             _not_send_sync: PhantomData,
@@ -440,6 +563,249 @@ fn measure_col_shape_eq(
         && left.element_bytes == right.element_bytes
         && left.scale == right.scale
         && left.flags == right.flags
+        && numeric_metadata_shape(left) == numeric_metadata_shape(right)
+        && scalar_program_words(left) == scalar_program_words(right)
+}
+
+struct ScalarViewOwner {
+    _view: Box<abi::PgaccelScalarView>,
+    _words: Box<[i32]>,
+    _inputs: Box<[abi::PgaccelScalarInput]>,
+    // Drop after the allocations this reservation covers.
+    _charge: ExecutionMemoryCharge,
+}
+
+/// Exact requested heap payload for a scalar snapshot (allocator bookkeeping
+/// and the inline owner are not heap payload). Bound, plan, session and sliced
+/// chunk snapshots each reserve independently before allocating.
+pub fn scalar_metadata_bytes(words: usize, inputs: usize) -> GpuResult<usize> {
+    if !(3..=abi::PGACCEL_SCALAR_MAX_WORDS).contains(&words)
+        || inputs > abi::PGACCEL_SCALAR_MAX_INPUTS
+    {
+        return Err(descriptor_error("scalar metadata size exceeds contract"));
+    }
+    Ok(size_of::<abi::PgaccelScalarView>()
+        + words * size_of::<i32>()
+        + inputs * size_of::<abi::PgaccelScalarInput>())
+}
+
+pub fn reserve_scalar_metadata(words: usize, inputs: usize) -> GpuResult<ExecutionMemoryCharge> {
+    reserve_execution_bytes(
+        scalar_metadata_bytes(words, inputs)?,
+        crate::engine::gucs::resident_memory_budget_bytes(),
+    )
+}
+
+type ScalarViewOwners = [Option<ScalarViewOwner>; abi::PGACCEL_GROUPED_AGG_MAX_MEASURES];
+
+fn scalar_column(column: &abi::PgaccelGroupedAggMeasureCol) -> bool {
+    column.flags == abi::PGACCEL_GROUPED_AGG_SCALAR_VIEW_V1
+}
+
+// Only used after constructors have validated and snapshotted scalar metadata.
+// Words include input/result types, so equality proves the full program shape.
+fn scalar_program_words(column: &abi::PgaccelGroupedAggMeasureCol) -> Option<&[i32]> {
+    if !scalar_column(column) {
+        return None;
+    }
+    // SAFETY: every caller's active scalar view is owned by a plan/chunk/session.
+    let view = unsafe { &*column.values.cast::<abi::PgaccelScalarView>() };
+    // SAFETY: construction validated and copied this bounded word slice.
+    Some(unsafe { std::slice::from_raw_parts(view.words, view.word_count as usize) })
+}
+
+fn pin_scalar_views(
+    desc: &mut abi::PgaccelGroupedAggDesc,
+    first_row: usize,
+) -> GpuResult<ScalarViewOwners> {
+    let mut owners: ScalarViewOwners = std::array::from_fn(|_| None);
+    let end = first_row
+        .checked_add(desc.row_count)
+        .ok_or_else(|| descriptor_error("scalar input row bound overflow"))?;
+    for (slot, measure) in desc
+        .measures
+        .iter_mut()
+        .take(desc.measure_count as usize)
+        .enumerate()
+    {
+        if measure.op != abi::PGACCEL_GROUPED_AGG_MEASURE_SCALAR {
+            continue;
+        }
+        let col = &mut measure.value;
+        if !scalar_column(col)
+            || col.values.is_null()
+            || !col
+                .values
+                .addr()
+                .is_multiple_of(align_of::<abi::PgaccelScalarView>())
+            || col.element_bytes as usize != size_of::<abi::PgaccelScalarView>()
+            || !col.nulls.is_null()
+            || col.scale != 0
+            || measure.accumulator_kind != abi::PGACCEL_GROUPED_AGG_ACCUM_I64
+            || measure.state_bytes != 8
+            || measure.agg_mask == 0
+            || measure.agg_mask
+                & !(abi::PGACCEL_GROUPED_AGG_LANE_SUM
+                    | abi::PGACCEL_GROUPED_AGG_LANE_MIN
+                    | abi::PGACCEL_GROUPED_AGG_LANE_MAX
+                    | abi::PGACCEL_GROUPED_AGG_LANE_COUNT)
+                != 0
+        {
+            return Err(descriptor_error("invalid scalar measure view"));
+        }
+        // SAFETY: unsafe adoption requires readable host metadata; subsequent
+        // calls only inspect owned views. No resident payload is read here.
+        let mut view = unsafe { *col.values.cast::<abi::PgaccelScalarView>() };
+        if view.version != abi::PGACCEL_SCALAR_VIEW_VERSION
+            || view.reserved != 0
+            || view.row_count < end as u64
+            || view.word_count < 3
+            || view.word_count as usize > abi::PGACCEL_SCALAR_MAX_WORDS
+            || view.input_count as usize > abi::PGACCEL_SCALAR_MAX_INPUTS
+            || view.words.is_null()
+            || !view.words.addr().is_multiple_of(align_of::<i32>())
+            || (view.input_count == 0) != view.inputs.is_null()
+            || !view
+                .inputs
+                .addr()
+                .is_multiple_of(align_of::<abi::PgaccelScalarInput>())
+        {
+            return Err(descriptor_error("invalid scalar program metadata"));
+        }
+        // SAFETY: adoption requires the declared host slice, bounded above.
+        let words = unsafe { std::slice::from_raw_parts(view.words, view.word_count as usize) };
+        let program = ScalarProgram::validate_wire(words)
+            .map_err(|_| descriptor_error("invalid scalar program control flow or types"))?;
+        let physical_type = |ty| match ty {
+            ScalarType::Bool => abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL,
+            ScalarType::Int4 => abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32,
+            ScalarType::Date => abi::PGACCEL_GROUPED_AGG_PHYSICAL_DATE,
+        };
+        if program.inputs().len() != view.input_count as usize
+            || physical_type(program.result_type()) != col.physical_type
+            || (program.result_type() == ScalarType::Bool
+                && measure.agg_mask != abi::PGACCEL_GROUPED_AGG_LANE_COUNT)
+            || (program.result_type() == ScalarType::Date
+                && measure.agg_mask & abi::PGACCEL_GROUPED_AGG_LANE_SUM != 0)
+        {
+            return Err(descriptor_error("scalar program binding type mismatch"));
+        }
+        let charge = reserve_scalar_metadata(words.len(), view.input_count as usize)?;
+        let words = words.to_vec().into_boxed_slice();
+        let mut inputs = if view.input_count == 0 {
+            Vec::new().into_boxed_slice()
+        } else {
+            // SAFETY: declared host bindings are readable and bounded above.
+            unsafe { std::slice::from_raw_parts(view.inputs, view.input_count as usize) }
+                .to_vec()
+                .into_boxed_slice()
+        };
+        for (input, ty) in inputs.iter_mut().zip(program.inputs()) {
+            let width = if *ty == ScalarType::Bool { 1 } else { 4 };
+            if input.reserved != 0
+                || input.physical_type != physical_type(*ty)
+                || (end != 0 && input.values.is_null())
+                || !input.values.addr().is_multiple_of(width)
+            {
+                return Err(descriptor_error("invalid scalar resident input binding"));
+            }
+            checked_byte_offset(end, width)?;
+            if !input.values.is_null() {
+                let offset = checked_byte_offset(first_row, width)?;
+                // SAFETY: constructor pins the full declared resident span,
+                // and the checked end is within the view's accessible bound.
+                input.values = unsafe { input.values.cast::<u8>().add(offset).cast() };
+            }
+            input.nulls = advance_byte_pointer(input.nulls, first_row)?;
+        }
+        view.row_count = desc.row_count as u64;
+        view.words = words.as_ptr();
+        view.inputs = if inputs.is_empty() {
+            std::ptr::null()
+        } else {
+            inputs.as_ptr()
+        };
+        let pinned = Box::new(view);
+        col.values = std::ptr::from_ref(pinned.as_ref()).cast();
+        owners[slot] = Some(ScalarViewOwner {
+            _view: pinned,
+            _words: words,
+            _inputs: inputs,
+            _charge: charge,
+        });
+    }
+    Ok(owners)
+}
+
+type NumericViewOwners =
+    [Option<Box<abi::PgaccelNumericView>>; abi::PGACCEL_GROUPED_AGG_MAX_MEASURES];
+
+fn packed_numeric(column: &abi::PgaccelGroupedAggMeasureCol) -> bool {
+    column.physical_type == abi::PGACCEL_GROUPED_AGG_PHYSICAL_NUMERIC
+        && column.flags == abi::PGACCEL_GROUPED_AGG_NUMERIC_PACKED_VIEW
+}
+
+fn numeric_metadata(
+    column: &abi::PgaccelGroupedAggMeasureCol,
+) -> GpuResult<Option<abi::PgaccelNumericView>> {
+    if !packed_numeric(column) {
+        return Ok(None);
+    }
+    if column.values.is_null()
+        || !column
+            .values
+            .addr()
+            .is_multiple_of(align_of::<abi::PgaccelNumericView>())
+        || column.element_bytes as usize != size_of::<abi::PgaccelNumericView>()
+        || column.scale != 0
+    {
+        return Err(descriptor_error("invalid numeric metadata view"));
+    }
+    // SAFETY: the unsafe resolved-plan/chunk constructors require packed
+    // NUMERIC metadata to be host-readable during construction. Subsequent
+    // callers use owned, pinned snapshots. This reads metadata, never USM rows
+    // or digits. Payload pointers retain the constructor's input lifetime.
+    let view = unsafe { *column.values.cast::<abi::PgaccelNumericView>() };
+    if view.reserved != 0
+        || view.min_weight < -4096
+        || view.max_weight > 32767
+        || view.min_weight > view.max_weight
+        || view.max_ndigits > u32::from(u16::MAX)
+        || (view.row_count != 0 && view.rows.is_null())
+        || (view.digit_count != 0 && view.digits.is_null())
+    {
+        return Err(descriptor_error("invalid numeric digit bounds or pointers"));
+    }
+    Ok(Some(view))
+}
+
+fn numeric_metadata_shape(column: &abi::PgaccelGroupedAggMeasureCol) -> Option<(i32, i32, u32)> {
+    numeric_metadata(column)
+        .ok()
+        .flatten()
+        .map(|view| (view.min_weight, view.max_weight, view.max_ndigits))
+}
+
+fn pin_numeric_views(
+    desc: &mut abi::PgaccelGroupedAggDesc,
+    first_row: usize,
+) -> GpuResult<NumericViewOwners> {
+    let mut owners: NumericViewOwners = std::array::from_fn(|_| None);
+    for (index, measure) in desc
+        .measures
+        .iter_mut()
+        .take(desc.measure_count as usize)
+        .enumerate()
+    {
+        if let Some(mut view) = numeric_metadata(&measure.value)? {
+            view.rows = advance_byte_pointer(view.rows, first_row)?;
+            view.row_count = desc.row_count as u64;
+            let pinned = Box::new(view);
+            measure.value.values = std::ptr::from_ref(pinned.as_ref()).cast();
+            owners[index] = Some(pinned);
+        }
+    }
+    Ok(owners)
 }
 
 fn stable_shape_matches(
@@ -525,6 +891,13 @@ fn push_column_shape(words: &mut Vec<u64>, column: &abi::PgaccelGroupedAggMeasur
         column.scale as u64,
         u64::from(column.flags),
     ]);
+    if let Some((min_weight, max_weight, max_ndigits)) = numeric_metadata_shape(column) {
+        words.extend([min_weight as u64, max_weight as u64, u64::from(max_ndigits)]);
+    }
+    if let Some(program) = scalar_program_words(column) {
+        words.push(program.len() as u64);
+        words.extend(program.iter().map(|word| u64::from(*word as u32)));
+    }
 }
 
 fn push_filter_shape(words: &mut Vec<u64>, filter: &abi::PgaccelGroupedAggFilter) {
@@ -624,6 +997,7 @@ struct PooledGroupedWorkspace {
     ptr: NonNull<c_void>,
     requirement: abi::PgaccelGroupedAggWorkspaceReq,
     owner_pid: u32,
+    charge: Option<ExecutionMemoryCharge>,
 }
 
 impl PooledGroupedWorkspace {
@@ -634,12 +1008,16 @@ impl PooledGroupedWorkspace {
         NonNull<c_void>,
         abi::PgaccelGroupedAggWorkspaceReq,
         u32,
+        Option<ExecutionMemoryCharge>,
     ) {
         let this = ManuallyDrop::new(self);
         // SAFETY: `this` will not run Drop, so moving the non-Copy key out is
         // exclusive and each remaining field is Copy.
         let key = unsafe { std::ptr::read(&raw const this.key) };
-        (key, this.ptr, this.requirement, this.owner_pid)
+        // SAFETY: ManuallyDrop suppresses the source destructor; ownership of
+        // the non-Copy ledger charge moves together with its device allocation.
+        let charge = unsafe { std::ptr::read(&raw const this.charge) };
+        (key, this.ptr, this.requirement, this.owner_pid, charge)
     }
 }
 
@@ -796,6 +1174,67 @@ pub struct GroupedAggWorkspace {
     owner_pid: u32,
     poisoned: bool,
     _not_send_sync: PhantomData<Rc<()>>,
+    charge: Option<ExecutionMemoryCharge>,
+}
+
+fn idle_grouped_execution_bytes() -> GpuResult<u64> {
+    let sum = |total: u64, charge: &ExecutionMemoryCharge| {
+        total
+            .checked_add(charge.bytes())
+            .ok_or_else(|| capacity_error("idle grouped charges overflow u64"))
+    };
+    let workspace = GROUPED_WORKSPACE_POOL.with(|pool| {
+        pool.borrow()
+            .iter()
+            .filter_map(|entry| entry.charge.as_ref())
+            .try_fold(0, sum)
+    })?;
+    GROUPED_OUTPUT_POOL.with(|pool| {
+        pool.borrow()
+            .iter()
+            .filter_map(|entry| entry.charge.as_ref())
+            .try_fold(workspace, sum)
+    })
+}
+
+fn validate_grouped_memory_budget(
+    live: u64,
+    idle: u64,
+    required: u64,
+    budget: u64,
+) -> GpuResult<()> {
+    let minimum = live
+        .checked_sub(idle)
+        .and_then(|active| active.checked_add(required))
+        .ok_or_else(|| {
+            capacity_error("grouped memory accounting overflow or inconsistent idle charges")
+        })?;
+    if minimum > budget {
+        return Err(allocation_error(
+            "combined grouped workspace/output exceeds execution budget",
+        ));
+    }
+    Ok(())
+}
+
+fn reserve_execution_memory(bytes: usize) -> GpuResult<ExecutionMemoryCharge> {
+    // Every grouped family owns real workspace/output bytes, including plain
+    // integer dense aggregation. Selection cannot exempt an allocation from
+    // the shared budget. Option fields exist only for ownership transfer.
+    reserve_execution_bytes(bytes, crate::engine::gucs::resident_memory_budget_bytes())
+}
+
+fn reserve_execution_bytes(bytes: usize, budget: u64) -> GpuResult<ExecutionMemoryCharge> {
+    let bytes = u64::try_from(bytes).map_err(|_| capacity_error("execution bytes exceed u64"))?;
+    if let Ok(charge) = ExecutionMemoryCharge::reserve(bytes, budget) {
+        Ok(charge)
+    } else {
+        // Only idle buffers are reclaimed. Active sessions/results and
+        // resident input borrows remain untouched; retry the atomic reserve.
+        cleanup_grouped_allocation_pools();
+        ExecutionMemoryCharge::reserve(bytes, budget)
+            .map_err(|_| allocation_error("grouped execution memory budget exceeded"))
+    }
 }
 
 fn workspace_query_descriptor(desc: &abi::PgaccelGroupedAggDesc) -> abi::PgaccelGroupedAggDesc {
@@ -811,9 +1250,11 @@ impl GroupedAggWorkspace {
         Self::allocate_for_descriptor(&plan.desc)
     }
 
-    fn allocate_for_descriptor(desc: &abi::PgaccelGroupedAggDesc) -> GpuResult<Self> {
-        crate::ensure_backend_exit_callback();
-        let query_desc = workspace_query_descriptor(desc);
+    fn requirements_for_descriptor(
+        desc: &abi::PgaccelGroupedAggDesc,
+    ) -> GpuResult<abi::PgaccelGroupedAggWorkspaceReq> {
+        let mut query_desc = workspace_query_descriptor(desc);
+        let _numeric_views = pin_numeric_views(&mut query_desc, 0)?;
         let mut requirement = abi::PgaccelGroupedAggWorkspaceReq {
             abi_version: abi::PGACCEL_OLAP_ABI_VERSION,
             size_bytes: WORKSPACE_REQ_SIZE,
@@ -853,10 +1294,16 @@ impl GroupedAggWorkspace {
         }
         let _ = u32::try_from(requirement.alignment)
             .map_err(|_| descriptor_error("workspace alignment exceeds ABI width"))?;
+        Ok(requirement)
+    }
 
+    fn allocate_for_descriptor(desc: &abi::PgaccelGroupedAggDesc) -> GpuResult<Self> {
+        crate::ensure_backend_exit_callback();
+        let query_desc = workspace_query_descriptor(desc);
+        let requirement = Self::requirements_for_descriptor(&query_desc)?;
         let pool_key = grouped_workspace_pool_key(&query_desc, &requirement);
         if let Some(entry) = checkout_grouped_workspace(&pool_key) {
-            let (pool_key, ptr, requirement, owner_pid) = entry.into_parts();
+            let (pool_key, ptr, requirement, owner_pid, charge) = entry.into_parts();
             return Ok(Self {
                 ptr: Some(ptr),
                 requirement,
@@ -864,9 +1311,11 @@ impl GroupedAggWorkspace {
                 owner_pid,
                 poisoned: false,
                 _not_send_sync: PhantomData,
+                charge,
             });
         }
 
+        let charge = Some(reserve_execution_memory(requirement.bytes)?);
         let mut raw = std::ptr::null_mut();
         // SAFETY: raw is a valid out pointer and requirements were checked.
         let status = unsafe {
@@ -906,6 +1355,7 @@ impl GroupedAggWorkspace {
             owner_pid: std::process::id(),
             poisoned: false,
             _not_send_sync: PhantomData,
+            charge,
         })
     }
 
@@ -965,6 +1415,7 @@ impl Drop for GroupedAggWorkspace {
                 ptr,
                 requirement: self.requirement,
                 owner_pid: self.owner_pid,
+                charge: self.charge.take(),
             });
         } else {
             // SAFETY: pointer came from the matching grouped allocator and is
@@ -1272,6 +1723,22 @@ struct GroupedOutputPoolKey {
     compatible_shape: Box<[u64]>,
 }
 
+fn materialized_key_tag(
+    desc: &abi::PgaccelGroupedAggDesc,
+    key: &abi::PgaccelGroupedAggKey,
+) -> PgaccelValTag {
+    if desc.grouping_mode == abi::PGACCEL_GROUPED_AGG_GROUPING_HASH
+        && key.source == abi::PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT
+    {
+        match key.values.tag {
+            PgaccelValTag::Int32 => PgaccelValTag::Int64,
+            tag => tag,
+        }
+    } else {
+        PgaccelValTag::Int32
+    }
+}
+
 fn grouped_output_pool_key(desc: &abi::PgaccelGroupedAggDesc) -> GroupedOutputPoolKey {
     let key_count = desc.key_count as usize;
     let measure_count = desc.measure_count as usize;
@@ -1285,13 +1752,7 @@ fn grouped_output_pool_key(desc: &abi::PgaccelGroupedAggDesc) -> GroupedOutputPo
         u64::from(desc.measure_count),
     ]);
     for key in desc.keys.iter().take(key_count) {
-        let output_tag = if desc.grouping_mode == abi::PGACCEL_GROUPED_AGG_GROUPING_HASH
-            && key.source == abi::PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT
-        {
-            key.values.tag
-        } else {
-            PgaccelValTag::Int32
-        };
+        let output_tag = materialized_key_tag(desc, key);
         words.extend([
             output_tag as u64,
             u64::from(!dense_output && key_output_nullable(desc, key)),
@@ -1321,6 +1782,59 @@ struct PooledGroupedOutput {
     key_types: [i32; abi::PGACCEL_GROUPED_AGG_MAX_KEYS],
     measures: [MeasureOutputStorage; abi::PGACCEL_GROUPED_AGG_MAX_MEASURES],
     owner_pid: u32,
+    charge: Option<ExecutionMemoryCharge>,
+}
+
+/// Logical allocation footprint before reserving or allocating result buffers.
+/// Includes every enabled state and sidecar, not just the SUM digit payload.
+fn grouped_output_required_bytes(desc: &abi::PgaccelGroupedAggDesc) -> GpuResult<usize> {
+    let dense = desc.output_mode == abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE;
+    let mut per_group = usize::from(dense);
+    let overflow = || capacity_error("grouped output byte footprint overflows usize");
+    if !dense {
+        if desc.grouping_mode == abi::PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX {
+            per_group = size_of::<usize>();
+        }
+        for key in desc.keys.iter().take(desc.key_count as usize) {
+            let tag = materialized_key_tag(desc, key);
+            let width = key_width(tag)
+                .ok_or_else(|| descriptor_error("compact output key has invalid type"))?;
+            per_group = per_group
+                .checked_add(width)
+                .and_then(|n| n.checked_add(usize::from(key_output_nullable(desc, key))))
+                .ok_or_else(overflow)?;
+        }
+    }
+    for measure in desc.measures.iter().take(desc.measure_count as usize) {
+        let mask = measure.agg_mask;
+        if mask & !abi::PGACCEL_GROUPED_AGG_LANE_ALL_KNOWN != 0 {
+            return Err(descriptor_error(
+                "measure contains unknown aggregate lane bits",
+            ));
+        }
+        let values = mask
+            & (abi::PGACCEL_GROUPED_AGG_LANE_SUM
+                | abi::PGACCEL_GROUPED_AGG_LANE_MIN
+                | abi::PGACCEL_GROUPED_AGG_LANE_MAX
+                | abi::PGACCEL_GROUPED_AGG_LANE_SUMSQ);
+        let rhs_sum = mask & abi::PGACCEL_GROUPED_AGG_LANE_RHS_SUM != 0;
+        let states = values.count_ones() as usize + usize::from(rhs_sum);
+        let count = mask & abi::PGACCEL_GROUPED_AGG_LANE_COUNT != 0;
+        let nonnull =
+            values != 0 || (count && measure.op != abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR);
+        let counters = usize::from(count)
+            + usize::from(nonnull)
+            + usize::from(rhs_sum)
+            + usize::from(mask & abi::PGACCEL_GROUPED_AGG_LANE_RHS_COUNT != 0);
+        per_group = states
+            .checked_mul(measure.state_bytes as usize)
+            .and_then(|n| n.checked_add(counters * size_of::<u64>()))
+            .and_then(|n| n.checked_add(per_group))
+            .ok_or_else(overflow)?;
+    }
+    per_group
+        .checked_mul(desc.group_capacity)
+        .ok_or_else(overflow)
 }
 
 fn grouped_output_retained_bytes(
@@ -1563,6 +2077,7 @@ pub struct GroupedAggOutputStorage {
     plan_identity: Rc<()>,
     pool_key: Option<GroupedOutputPoolKey>,
     owner_pid: u32,
+    charge: Option<ExecutionMemoryCharge>,
 }
 
 impl GroupedAggOutputStorage {
@@ -1590,6 +2105,7 @@ impl GroupedAggOutputStorage {
                 key_types,
                 measures,
                 owner_pid,
+                charge,
             } = pooled;
             return Ok(Self {
                 capacity,
@@ -1603,8 +2119,12 @@ impl GroupedAggOutputStorage {
                 plan_identity: Rc::clone(&plan.identity),
                 pool_key: Some(key),
                 owner_pid,
+                charge,
             });
         }
+        let charge = Some(reserve_execution_memory(grouped_output_required_bytes(
+            desc,
+        )?)?);
         let mut active_groups = dense_output.then(|| zero_vec(capacity)).transpose()?;
         let group_codes = (!dense_output
             && desc.grouping_mode == abi::PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX)
@@ -1618,13 +2138,7 @@ impl GroupedAggOutputStorage {
         if !dense_output {
             for index in 0..key_count {
                 let key = &desc.keys[index];
-                let tag = if desc.grouping_mode == abi::PGACCEL_GROUPED_AGG_GROUPING_HASH
-                    && key.source == abi::PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT
-                {
-                    key.values.tag
-                } else {
-                    PgaccelValTag::Int32
-                };
+                let tag = materialized_key_tag(desc, key);
                 let width = key_width(tag)
                     .ok_or_else(|| descriptor_error("compact output key has invalid type"))?;
                 key_values[index] = Some(RawHostBuffer::zeroed(capacity, width)?);
@@ -1655,6 +2169,7 @@ impl GroupedAggOutputStorage {
             plan_identity: Rc::clone(&plan.identity),
             pool_key: Some(pool_key),
             owner_pid: std::process::id(),
+            charge,
         };
         update_grouped_output_pool_metrics(|metrics| {
             metrics.fresh_allocations = metrics.fresh_allocations.saturating_add(1);
@@ -1826,6 +2341,31 @@ impl GroupedAggOutputStorage {
         Ok(f64::from_ne_bytes(measure.state_at(lane, group)?))
     }
 
+    /// Materialize one completed decimal state, never resident input rows.
+    /// SQL NULL is represented separately by the non-NULL count lane.
+    pub fn measure_numeric_wire_at(&self, index: usize, group: usize) -> GpuResult<Vec<u8>> {
+        let measure = self
+            .measures
+            .get(index)
+            .ok_or_else(|| capacity_error("aggregate measure index is out of bounds"))?;
+        if measure.accumulator_kind != abi::PGACCEL_GROUPED_AGG_ACCUM_NUMERIC {
+            return Err(descriptor_error(
+                "aggregate state is not a NUMERIC accumulator",
+            ));
+        }
+        let start = group
+            .checked_mul(measure.state_bytes)
+            .ok_or_else(|| capacity_error("numeric state offset overflow"))?;
+        let end = start
+            .checked_add(measure.state_bytes)
+            .ok_or_else(|| capacity_error("numeric state end overflow"))?;
+        let state = measure
+            .state(GroupedAggStateLane::Sum)
+            .and_then(|bytes| bytes.get(start..end))
+            .ok_or_else(|| capacity_error("numeric state index is out of bounds"))?;
+        numeric_sum_wire(state)
+    }
+
     #[must_use]
     pub fn measure_count(&self, index: usize) -> Option<&[u64]> {
         self.measures.get(index)?.count.as_deref()
@@ -1845,6 +2385,68 @@ impl GroupedAggOutputStorage {
     pub fn measure_rhs_nonnull_count(&self, index: usize) -> Option<&[u64]> {
         self.measures.get(index)?.rhs_nonnull_count.as_deref()
     }
+}
+
+/// Decode a finalized native decimal state to PostgreSQL's public binary
+/// format. This only validates/transports an already reduced result.
+fn numeric_sum_wire(state: &[u8]) -> GpuResult<Vec<u8>> {
+    if state.len() < 16 || !state.len().is_multiple_of(8) {
+        return Err(descriptor_error("invalid NUMERIC result state width"));
+    }
+    let field = |offset: usize| {
+        u32::from_ne_bytes(
+            state[offset..offset + 4]
+                .try_into()
+                .expect("checked numeric header width"),
+        )
+    };
+    let weight = field(0) as i32;
+    let ndigits = field(4);
+    let sign = field(8);
+    let dscale = field(12);
+    if !(-4096..=32767).contains(&weight)
+        || ndigits > u32::from(u16::MAX)
+        || dscale > 16383
+        || !matches!(sign, 0 | 0x4000 | 0xc000 | 0xd000 | 0xf000)
+    {
+        return Err(descriptor_error("invalid NUMERIC result header"));
+    }
+    let end = 16 + ndigits as usize * 2;
+    if end > state.len() || state[end..].iter().any(|byte| *byte != 0) {
+        return Err(descriptor_error(
+            "invalid NUMERIC result digit length or padding",
+        ));
+    }
+    let digits = &state[16..end];
+    if digits
+        .chunks_exact(2)
+        .any(|digit| u16::from_ne_bytes([digit[0], digit[1]]) >= 10000)
+    {
+        return Err(descriptor_error("invalid NUMERIC result digit"));
+    }
+    if ndigits == 0 {
+        if weight != 0 || sign == 0x4000 {
+            return Err(descriptor_error("noncanonical NUMERIC zero/special result"));
+        }
+    } else if sign > 0x4000
+        || weight - ndigits as i32 + 1 < -4096
+        || digits[..2] == [0, 0]
+        || digits[digits.len() - 2..] == [0, 0]
+    {
+        return Err(descriptor_error("noncanonical NUMERIC digit extent"));
+    }
+    if (sign == 0xc000 && dscale != 0) || (matches!(sign, 0xd000 | 0xf000) && dscale != 32) {
+        return Err(descriptor_error("invalid NUMERIC special display scale"));
+    }
+    let mut wire = Vec::with_capacity(8 + digits.len());
+    wire.extend((ndigits as u16).to_be_bytes());
+    wire.extend((weight as i16).to_be_bytes());
+    wire.extend((sign as u16).to_be_bytes());
+    wire.extend((dscale as u16).to_be_bytes());
+    for digit in digits.chunks_exact(2) {
+        wire.extend(u16::from_ne_bytes([digit[0], digit[1]]).to_be_bytes());
+    }
+    Ok(wire)
 }
 
 impl Drop for GroupedAggOutputStorage {
@@ -1873,6 +2475,7 @@ impl Drop for GroupedAggOutputStorage {
             key_types: self.key_types,
             measures,
             owner_pid: self.owner_pid,
+            charge: self.charge.take(),
         });
     }
 }
@@ -1945,6 +2548,24 @@ const fn status_poisons_workspace(status: PgaccelStatus) -> bool {
 
 fn grouped_agg_kernel_error(status: PgaccelStatus, detail: i32) -> GpuError {
     if status == PgaccelStatus::Error
+        && detail == abi::PGACCEL_GROUPED_AGG_DEVICE_ERROR_DATE_OUT_OF_RANGE
+    {
+        return GpuError::new(
+            GpuErrorDomain::GroupedAgg,
+            GpuOperation::Kernel("grouped_agg_execute"),
+            GpuStatusDetail::DateOutOfRange,
+        );
+    }
+    if status == PgaccelStatus::Error
+        && detail == abi::PGACCEL_GROUPED_AGG_DEVICE_ERROR_DIVISION_BY_ZERO
+    {
+        return GpuError::new(
+            GpuErrorDomain::GroupedAgg,
+            GpuOperation::Kernel("grouped_agg_execute"),
+            GpuStatusDetail::DivisionByZero,
+        );
+    }
+    if status == PgaccelStatus::Error
         && detail == abi::PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW
     {
         GpuError::new(
@@ -1981,6 +2602,7 @@ fn execute_call(
     expected_data_mode: Option<GroupedAggKernelMode>,
 ) -> GpuResult<Option<GroupedAggOutcome>> {
     let mut desc = lifecycle_call_descriptor(desc, flags);
+    let _numeric_views = pin_numeric_views(&mut desc, 0)?;
     workspace.apply_to(&mut desc)?;
     let actual_mode = native_kernel_mode(&desc)?;
     if expected_data_mode.is_some_and(|expected| actual_mode != expected) {
@@ -2083,12 +2705,16 @@ pub fn execute_grouped_agg_one_shot_with_workspace_and_mode(
 
 /// Stateful multi-call facade reserved by the frozen chunk lifecycle.
 ///
-/// The session owns no input pointer. `plan_shape` retains raw pointer values
-/// only as equality tokens and is never submitted to native code. Every
+/// The session owns no resident payload. `plan_shape` retains raw payload
+/// pointers only as equality tokens and is never submitted to native code;
+/// packed NUMERIC and SPG1 metadata is independently snapshotted and may be inspected.
+/// Every
 /// accumulate/finalize/reset call must supply a freshly pinned plan or chunk,
 /// which lets residency release its store borrow between synchronous calls.
 pub struct GroupedAggSession {
     plan_shape: abi::PgaccelGroupedAggDesc,
+    _numeric_views: NumericViewOwners,
+    _scalar_views: ScalarViewOwners,
     workspace_row_capacity: usize,
     workspace: GroupedAggWorkspace,
     kernel_mode: GroupedAggKernelMode,
@@ -2097,6 +2723,32 @@ pub struct GroupedAggSession {
 }
 
 impl GroupedAggSession {
+    /// Query exactly the same native scratch layout and host output footprint
+    /// as start/finalize, without reserving, allocating, checking out a pool
+    /// entry or submitting device work. Input metadata stays pinned by `plan`.
+    pub fn memory_requirements(
+        plan: &ResolvedGroupedAggPlan<'_>,
+        max_chunk_rows: usize,
+    ) -> GpuResult<GroupedAggMemoryRequirements> {
+        if plan.desc.grouping_mode != abi::PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX {
+            return Err(descriptor_error(
+                "bounded memory query requires dense grouping",
+            ));
+        }
+        let desc = bounded_workspace_descriptor(plan, max_chunk_rows)?;
+        let workspace = GroupedAggWorkspace::requirements_for_descriptor(&desc)?;
+        let output_bytes = grouped_output_required_bytes(&plan.desc)?;
+        let total_bytes = workspace
+            .bytes
+            .checked_add(output_bytes)
+            .ok_or_else(|| capacity_error("grouped execution memory footprint overflows usize"))?;
+        Ok(GroupedAggMemoryRequirements {
+            workspace_bytes: workspace.bytes,
+            output_bytes,
+            total_bytes,
+        })
+    }
+
     pub fn start(plan: &ResolvedGroupedAggPlan<'_>, max_chunk_rows: usize) -> GpuResult<Self> {
         if plan.desc.grouping_mode != abi::PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX {
             return Err(descriptor_error(
@@ -2105,8 +2757,16 @@ impl GroupedAggSession {
         }
         let workspace_desc = bounded_workspace_descriptor(plan, max_chunk_rows)?;
         let kernel_mode = native_kernel_mode(&workspace_desc)?;
+        let mut plan_shape = plan.desc;
+        let numeric_views = pin_numeric_views(&mut plan_shape, 0)?;
+        let scalar_views = pin_scalar_views(&mut plan_shape, 0)?;
+        // Snapshot charges above are already live. Include the eventual output
+        // now, before allocating scratch or submitting any accumulation work.
+        Self::memory_requirements(plan, max_chunk_rows)?.preflight()?;
         Ok(Self {
-            plan_shape: plan.desc,
+            plan_shape,
+            _numeric_views: numeric_views,
+            _scalar_views: scalar_views,
             workspace_row_capacity: workspace_desc.row_count,
             workspace: GroupedAggWorkspace::allocate_for_descriptor(&workspace_desc)?,
             kernel_mode,
@@ -2219,6 +2879,72 @@ impl GroupedAggSession {
     }
 }
 
+/// Prospective workspace and output allocations only. Excludes resident inputs,
+/// dictionary artifacts and independently charged scalar metadata snapshots.
+/// Scalar planner admission must budget the simultaneous snapshot lifetimes too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroupedAggMemoryRequirements {
+    pub workspace_bytes: usize,
+    pub output_bytes: usize,
+    pub total_bytes: usize,
+}
+
+impl GroupedAggMemoryRequirements {
+    fn preflight(self) -> GpuResult<()> {
+        validate_grouped_memory_budget(
+            crate::engine::residency::resident_live_bytes(),
+            idle_grouped_execution_bytes()?,
+            u64::try_from(self.total_bytes)
+                .map_err(|_| capacity_error("grouped bytes exceed u64"))?,
+            crate::engine::gucs::resident_memory_budget_bytes(),
+        )
+    }
+}
+
+/// Query a borrowed dense layout without constructing execution owners or
+/// reserving/checking out buffers. This function never dispatches a kernel.
+///
+/// # Safety
+/// Every active host metadata view and its nested metadata slices must remain
+/// readable for this call. Payload pointers are presence/alignment markers
+/// only: the native requirements/mode queries never dereference resident rows.
+/// The caller must not use a query-only descriptor for execution.
+pub unsafe fn query_dense_grouped_memory_layout(
+    desc: &abi::PgaccelGroupedAggDesc,
+) -> GpuResult<GroupedAggMemoryRequirements> {
+    // The shell checks execution-owner canonicality (flags must be zero).
+    // A layout query may describe a bounded RESET/ACCUMULATE call; native
+    // validation below validates those actual flags against the row count.
+    let mut shell = *desc;
+    shell.execution_flags = 0;
+    validate_descriptor_shell(&shell)?;
+    if desc.grouping_mode != abi::PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX
+        || desc.output_mode != abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE
+        || desc.dim_count != 0
+    {
+        return Err(descriptor_error(
+            "layout forecast requires dimension-free dense output",
+        ));
+    }
+    let query = workspace_query_descriptor(desc);
+    if native_kernel_mode(&query)? != GroupedAggKernelMode::ParallelDenseInteger {
+        return Err(descriptor_error(
+            "layout forecast requires parallel dense integer execution",
+        ));
+    }
+    let workspace = GroupedAggWorkspace::requirements_for_descriptor(&query)?;
+    let output_bytes = grouped_output_required_bytes(&query)?;
+    let total_bytes = workspace
+        .bytes
+        .checked_add(output_bytes)
+        .ok_or_else(|| capacity_error("grouped layout forecast overflows usize"))?;
+    Ok(GroupedAggMemoryRequirements {
+        workspace_bytes: workspace.bytes,
+        output_bytes,
+        total_bytes,
+    })
+}
+
 fn bounded_workspace_descriptor(
     plan: &ResolvedGroupedAggPlan<'_>,
     max_chunk_rows: usize,
@@ -2264,6 +2990,185 @@ fn validate_session_finalize_inputs(
 mod tests {
     use super::*;
 
+    fn numeric_descriptor_fixture(view: &abi::PgaccelNumericView) -> abi::PgaccelGroupedAggDesc {
+        let mut desc = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        desc.key_count = 0;
+        // SAFETY: unused ABI key records require the all-zero representation.
+        desc.keys = unsafe { std::mem::zeroed() };
+        desc.group_capacity = 1;
+        desc.row_count = view.row_count as usize;
+        desc.where_filter.value_cmp_opcode = crate::engine::expr_compiler::opcode::ALWAYS_TRUE;
+        for filter in &mut desc.measure_filters {
+            filter.value_cmp_opcode = crate::engine::expr_compiler::opcode::ALWAYS_TRUE;
+        }
+        let measure = &mut desc.measures[0];
+        measure.accumulator_kind = abi::PGACCEL_GROUPED_AGG_ACCUM_NUMERIC;
+        measure.state_bytes =
+            16 + (2 * (view.max_weight - view.min_weight + 5) as u32).next_multiple_of(8);
+        measure.value.values = std::ptr::from_ref(view).cast();
+        measure.value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_NUMERIC;
+        measure.value.element_bytes = size_of::<abi::PgaccelNumericView>() as u32;
+        measure.value.flags = abi::PGACCEL_GROUPED_AGG_NUMERIC_PACKED_VIEW;
+        desc
+    }
+
+    #[test]
+    fn numeric_metadata_is_owned_and_chunks_preserve_arena_and_bounds() {
+        let rows = [abi::PgaccelNumericRow::default(); 8];
+        let digits = [12_u16, 34];
+        let mut view = abi::PgaccelNumericView {
+            rows: rows.as_ptr(),
+            digits: digits.as_ptr(),
+            row_count: 8,
+            digit_count: 2,
+            min_weight: -2,
+            max_weight: 2,
+            max_ndigits: 2,
+            reserved: 0,
+        };
+        // SAFETY: live host buffers support metadata-only testing. No GPU
+        // execution or USM payload reads are performed by this unit test.
+        let plan = unsafe { ResolvedGroupedAggPlan::from_abi(numeric_descriptor_fixture(&view)) }
+            .expect("numeric plan");
+        view.min_weight = -1;
+        view.max_weight = 3;
+        assert_eq!(
+            numeric_metadata_shape(&plan.desc.measures[0].value),
+            Some((-2, 2, 2))
+        );
+        assert_ne!(
+            plan.desc.measures[0].value.values,
+            std::ptr::from_ref(&view).cast()
+        );
+        let chunk = plan.row_chunk(3, 2).expect("bounded chunk");
+        let metadata = numeric_metadata(&chunk.desc.measures[0].value)
+            .expect("metadata")
+            .expect("numeric");
+        assert_eq!(metadata.rows, rows[3..].as_ptr());
+        assert_eq!(metadata.digits, digits.as_ptr());
+        assert_eq!(metadata.row_count, 2);
+        assert_eq!(metadata.digit_count, 2);
+        assert!(stable_shape_matches(&plan.desc, &chunk.desc));
+        assert!(plan.row_chunk(7, 2).is_err());
+        assert_eq!(
+            numeric_metadata(&plan.row_chunk(8, 0).expect("empty boundary").desc.measures[0].value)
+                .expect("metadata")
+                .expect("numeric")
+                .row_count,
+            0
+        );
+        let mut control =
+            lifecycle_call_descriptor(&plan.desc, abi::PGACCEL_GROUPED_AGG_EXEC_FINALIZE);
+        let _owners = pin_numeric_views(&mut control, 0).expect("control metadata");
+        assert_eq!(
+            numeric_metadata(&control.measures[0].value)
+                .expect("metadata")
+                .expect("numeric")
+                .row_count,
+            0
+        );
+        let mut snapshot = plan.desc;
+        let _owners = pin_numeric_views(&mut snapshot, 0).expect("owned session shape");
+        drop(plan);
+        assert_eq!(
+            numeric_metadata_shape(&snapshot.measures[0].value),
+            Some((-2, 2, 2))
+        );
+        let other = numeric_descriptor_fixture(&view);
+        assert_eq!(
+            snapshot.measures[0].state_bytes,
+            other.measures[0].state_bytes
+        );
+        assert!(!stable_shape_matches(&snapshot, &other));
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        push_column_shape(&mut left, &snapshot.measures[0].value);
+        push_column_shape(&mut right, &other.measures[0].value);
+        assert_ne!(left, right);
+    }
+
+    fn numeric_state(weight: i32, sign: u32, scale: u32, digits: &[u16]) -> Vec<u8> {
+        let mut state = Vec::new();
+        state.extend(weight.to_ne_bytes());
+        state.extend((digits.len() as u32).to_ne_bytes());
+        state.extend(sign.to_ne_bytes());
+        state.extend(scale.to_ne_bytes());
+        for digit in digits {
+            state.extend(digit.to_ne_bytes());
+        }
+        state.resize(state.len().next_multiple_of(8) + 8, 0);
+        state
+    }
+
+    #[test]
+    fn numeric_result_transport_is_exact_and_rejects_corruption() {
+        let wire =
+            numeric_sum_wire(&numeric_state(-1, 0x4000, 8, &[12, 3456])).expect("negative decimal");
+        assert_eq!(wire, vec![0, 2, 255, 255, 64, 0, 0, 8, 0, 12, 13, 128]);
+        for (sign, scale) in [(0, 16383), (0xc000, 0), (0xd000, 32), (0xf000, 32)] {
+            assert!(numeric_sum_wire(&numeric_state(0, sign, scale, &[])).is_ok());
+        }
+        for state in [
+            numeric_state(32768, 0, 0, &[1]),
+            numeric_state(-4097, 0, 0, &[1]),
+            numeric_state(0, 0x8000, 0, &[1]),
+            numeric_state(0, 0, 16384, &[1]),
+            numeric_state(0, 0, 0, &[10000]),
+            numeric_state(0, 0, 0, &[0, 1]),
+            numeric_state(0, 0, 0, &[1, 0]),
+            numeric_state(0, 0xc000, 0, &[1]),
+            numeric_state(0, 0xd000, 0, &[]),
+            numeric_state(0, 0x4000, 0, &[]),
+            vec![0; 15],
+        ] {
+            assert!(numeric_sum_wire(&state).is_err());
+        }
+        let mut state = numeric_state(0, 0, 4, &[123]);
+        state[4..8].copy_from_slice(&u32::MAX.to_ne_bytes());
+        assert!(numeric_sum_wire(&state).is_err());
+        state[4..8].copy_from_slice(&1_u32.to_ne_bytes());
+        *state.last_mut().expect("padding") = 1;
+        assert!(numeric_sum_wire(&state).is_err());
+        let mut digits = vec![9999; 36864];
+        digits[36863] = 9990;
+        assert_eq!(
+            numeric_sum_wire(&numeric_state(32767, 0, 16383, &digits))
+                .expect("full precision")
+                .len(),
+            8 + 2 * 36864
+        );
+    }
+
+    #[test]
+    fn numeric_metadata_rejects_mismatched_lengths_and_ignores_inactive_pointers() {
+        let view = abi::PgaccelNumericView {
+            rows: std::ptr::null(),
+            digits: std::ptr::null(),
+            row_count: 0,
+            digit_count: 0,
+            min_weight: 0,
+            max_weight: 0,
+            max_ndigits: 0,
+            reserved: 0,
+        };
+        let mut desc = numeric_descriptor_fixture(&view);
+        desc.row_count = 1;
+        // SAFETY: the zero-row metadata is readable; construction must reject
+        // the inconsistent descriptor before any payload pointer is used.
+        assert!(unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.is_err());
+        desc.row_count = 0;
+        desc.measures[1] = desc.measures[0];
+        desc.measures[1].value.values = std::ptr::without_provenance(1);
+        // SAFETY: the sole active view is live and empty. Slot one is inactive
+        // and may only be inspected as descriptor bytes, never dereferenced.
+        let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.expect("active metadata only");
+        assert!(plan.one_shot_kernel_mode().is_err());
+        desc.measures[1] = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE).measures[1];
+        desc.measures[0].rhs = desc.measures[0].value;
+        // SAFETY: both metadata pointers are readable; packed RHS is rejected.
+        assert!(unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.is_err());
+    }
+
     fn descriptor_fixture(output_mode: i32) -> abi::PgaccelGroupedAggDesc {
         // SAFETY: every enum-bearing field has zero as a valid discriminant;
         // the fixture then fills all active frozen descriptor fields.
@@ -2297,6 +3202,10 @@ mod tests {
     fn output_storage_allocates_exact_requested_lanes() {
         let plan = plan(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
         let mut storage = GroupedAggOutputStorage::new(&plan).expect("output allocates");
+        assert_eq!(
+            grouped_output_required_bytes(plan.descriptor()).expect("output footprint"),
+            storage.retained_bytes()
+        );
         assert_eq!(storage.active_groups().expect("dense active lane").len(), 4);
         assert!(storage.group_codes().is_none());
         assert_eq!(
@@ -2326,6 +3235,405 @@ mod tests {
         assert!(raw.measures[1..].iter().all(|measure| measure.sum.is_null()
             && measure.count.is_null()
             && measure.nonnull_count.is_null()));
+    }
+
+    #[test]
+    fn output_footprint_matches_every_state_lane_and_rejects_overflow() {
+        for mode in [
+            abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE,
+            abi::PGACCEL_GROUPED_AGG_OUTPUT_COMPACT,
+        ] {
+            for mask in 1..=abi::PGACCEL_GROUPED_AGG_LANE_ALL_KNOWN {
+                let mut desc = descriptor_fixture(mode);
+                desc.measures[0].agg_mask = mask;
+                // SAFETY: this zero-row fixture has no input pointers and is
+                // only used for host result allocation, never native execution.
+                let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.expect("fixture plan");
+                let storage = GroupedAggOutputStorage::new(&plan).expect("host result allocation");
+                assert_eq!(
+                    grouped_output_required_bytes(&desc).expect("footprint"),
+                    storage.retained_bytes()
+                );
+            }
+        }
+        let mut desc = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        desc.group_capacity = usize::MAX;
+        assert!(grouped_output_required_bytes(&desc).is_err());
+        desc.group_capacity = 0;
+        assert_eq!(
+            grouped_output_required_bytes(&desc).expect("empty footprint"),
+            0
+        );
+    }
+
+    #[test]
+    fn hash_memory_forecast_is_exact_and_has_no_pool_or_ledger_effects() {
+        static NULLS: [u8; 1] = [0];
+        static WHERE_MASK: [i8; 1] = [1];
+        cleanup_grouped_allocation_pools();
+        let baseline = crate::engine::residency::resident_live_bytes();
+        let workspace_pool = grouped_workspace_pool_snapshot();
+        let output_pool = grouped_output_pool_snapshot();
+        for capacity in [1, 17, 16_385, 100_000] {
+            for kind in 0..3 {
+                let mut desc = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_COMPACT);
+                desc.grouping_mode = abi::PGACCEL_GROUPED_AGG_GROUPING_HASH;
+                desc.group_capacity = capacity;
+                desc.keys[0].values.tag = PgaccelValTag::Int64;
+                desc.keys[0].values.nulls = NULLS.as_ptr();
+                desc.keys[0].cardinality = 0;
+                desc.measures[0].value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32;
+                desc.measures[0].value.element_bytes = 4;
+                for filter in
+                    std::iter::once(&mut desc.where_filter).chain(&mut desc.measure_filters)
+                {
+                    filter.value_cmp_opcode = crate::engine::expr_compiler::opcode::ALWAYS_TRUE;
+                }
+                if kind != 2 {
+                    desc.measures[0].agg_mask = abi::PGACCEL_GROUPED_AGG_LANE_COUNT;
+                }
+                if kind == 0 {
+                    desc.measures[0].op = abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR;
+                    // SAFETY: COUNT(*) has no input view; all-zero is canonical.
+                    desc.measures[0].value = unsafe { std::mem::zeroed() };
+                }
+                // SAFETY: zero-row shape with a static NULL-sidecar marker.
+                let plan =
+                    unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.expect("hash metadata");
+                let required = plan.hash_memory_requirements().expect("native hash layout");
+                assert_eq!(required.output_bytes, capacity * [17, 25, 33][kind]);
+                assert_eq!(
+                    required.total_bytes,
+                    required.workspace_bytes + required.output_bytes
+                );
+                assert!(required.workspace_bytes > 0);
+                desc.where_filter.kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
+                desc.where_filter.mask = WHERE_MASK.as_ptr();
+                // SAFETY: same zero-row metadata fixture, with a static mask;
+                // forecasting does not execute or access either input lane.
+                let where_plan =
+                    unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.expect("hash WHERE metadata");
+                let where_required = where_plan
+                    .hash_memory_requirements()
+                    .expect("native WHERE shard layout");
+                assert_eq!(
+                    where_required.workspace_bytes,
+                    required.workspace_bytes + 1_024
+                );
+                assert_eq!(where_required.output_bytes, required.output_bytes);
+                assert_eq!(where_required.total_bytes, required.total_bytes + 1_024);
+            }
+        }
+        assert_eq!(crate::engine::residency::resident_live_bytes(), baseline);
+        assert_eq!(grouped_workspace_pool_snapshot(), workspace_pool);
+        assert_eq!(grouped_output_pool_snapshot(), output_pool);
+        let dense = plan(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        assert!(dense.hash_memory_requirements().is_err());
+    }
+
+    #[test]
+    fn hash_outputs_and_workspace_charge_once_across_pool_reuse() {
+        use crate::engine::residency::resident_live_bytes;
+        cleanup_grouped_allocation_pools();
+        let baseline = resident_live_bytes();
+        let budget = crate::engine::gucs::resident_memory_budget_bytes();
+        let mut desc = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_COMPACT);
+        desc.grouping_mode = abi::PGACCEL_GROUPED_AGG_GROUPING_HASH;
+        desc.keys[0].values.tag = PgaccelValTag::Int64;
+        desc.keys[0].cardinality = 0;
+        desc.measures[0].value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32;
+        desc.measures[0].value.element_bytes = 4;
+        for filter in std::iter::once(&mut desc.where_filter).chain(&mut desc.measure_filters) {
+            filter.value_cmp_opcode = crate::engine::expr_compiler::opcode::ALWAYS_TRUE;
+        }
+        // SAFETY: pointer-free zero-row fixture; only metadata/output allocation.
+        let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.expect("hash plan");
+        let required = plan.preflight_hash_memory().expect("fits budget");
+        let output = GroupedAggOutputStorage::new(&plan).expect("charged output");
+        assert_eq!(
+            resident_live_bytes(),
+            baseline + required.output_bytes as u64
+        );
+        drop(output);
+        assert_eq!(
+            idle_grouped_execution_bytes().expect("idle charge"),
+            required.output_bytes as u64
+        );
+        let held = ExecutionMemoryCharge::reserve(
+            budget - baseline - required.total_bytes as u64 + 1,
+            budget,
+        )
+        .expect("leave one byte too little for the combined working set");
+        assert!(plan.preflight_hash_memory().is_err());
+        assert_eq!(
+            grouped_output_pool_snapshot().retained_outputs,
+            1,
+            "forecast does not evict"
+        );
+        drop(held);
+        let held =
+            ExecutionMemoryCharge::reserve(budget - baseline - required.total_bytes as u64, budget)
+                .expect("exact working-set budget");
+        plan.preflight_hash_memory()
+            .expect("idle charge is credited, not double-counted");
+        let before = resident_live_bytes();
+        let output = GroupedAggOutputStorage::new(&plan).expect("pooled output checkout");
+        assert_eq!(resident_live_bytes(), before);
+        let workspace_charge = reserve_execution_memory(required.workspace_bytes)
+            .expect("actual workspace reservation path");
+        assert_eq!(workspace_charge.bytes(), required.workspace_bytes as u64);
+        assert_eq!(resident_live_bytes(), budget);
+        drop(workspace_charge);
+        drop(output);
+        drop(held);
+        cleanup_grouped_allocation_pools();
+        assert_eq!(resident_live_bytes(), baseline);
+        let held = ExecutionMemoryCharge::reserve(
+            budget - baseline - required.output_bytes as u64 + 1,
+            budget,
+        )
+        .expect("leave one byte too little for fresh output");
+        assert!(GroupedAggOutputStorage::new(&plan).is_err());
+        assert_eq!(grouped_output_pool_snapshot().retained_outputs, 0);
+        drop(held);
+        assert_eq!(resident_live_bytes(), baseline);
+    }
+
+    #[test]
+    fn grouped_combined_budget_checks_overflow_and_idle_credit() {
+        assert!(validate_grouped_memory_budget(100, 20, 30, 110).is_ok());
+        assert!(validate_grouped_memory_budget(100, 20, 30, 109).is_err());
+        assert!(validate_grouped_memory_budget(20, 21, 0, 100).is_err());
+        assert!(validate_grouped_memory_budget(u64::MAX, 0, 1, u64::MAX).is_err());
+        assert!(validate_grouped_memory_budget(u64::MAX, 1, 1, u64::MAX).is_ok());
+    }
+
+    fn dense_integer_budget_plan(
+        output_mode: i32,
+        capacity: usize,
+        kind: usize,
+        measure_count: usize,
+    ) -> ResolvedGroupedAggPlan<'static> {
+        let mut desc = descriptor_fixture(output_mode);
+        desc.group_capacity = capacity;
+        desc.keys[0].cardinality = capacity as u32;
+        desc.measures[0].value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32;
+        desc.measures[0].value.element_bytes = 4;
+        if kind != 2 {
+            desc.measures[0].agg_mask = abi::PGACCEL_GROUPED_AGG_LANE_COUNT;
+        }
+        if kind == 0 {
+            desc.measures[0].op = abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR;
+            // SAFETY: COUNT(*) requires an absent, all-zero value view.
+            desc.measures[0].value = unsafe { std::mem::zeroed() };
+        }
+        desc.measure_count = measure_count as u32;
+        for index in 1..measure_count {
+            desc.measures[index] = desc.measures[0];
+        }
+        for filter in std::iter::once(&mut desc.where_filter).chain(&mut desc.measure_filters) {
+            filter.value_cmp_opcode = crate::engine::expr_compiler::opcode::ALWAYS_TRUE;
+        }
+        // SAFETY: pointer-free, zero-row fixture; only metadata/host allocation.
+        unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.expect("integer budget plan")
+    }
+
+    #[test]
+    fn all_dense_integer_output_lanes_are_charged_and_reused_exactly_once() {
+        use crate::engine::residency::resident_live_bytes;
+        cleanup_grouped_allocation_pools();
+        let baseline = resident_live_bytes();
+        for mode in [
+            abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE,
+            abi::PGACCEL_GROUPED_AGG_OUTPUT_COMPACT,
+        ] {
+            for capacity in [1, 17, 65_537] {
+                for kind in 0..3 {
+                    for count in [1, abi::PGACCEL_GROUPED_AGG_MAX_MEASURES] {
+                        let plan = dense_integer_budget_plan(mode, capacity, kind, count);
+                        let key_bytes = if mode == abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE {
+                            1
+                        } else {
+                            size_of::<usize>() + size_of::<i32>()
+                        };
+                        let bytes = capacity * (key_bytes + count * [8, 16, 24][kind]);
+                        assert_eq!(
+                            grouped_output_required_bytes(plan.descriptor())
+                                .expect("output footprint"),
+                            bytes
+                        );
+                        let output =
+                            GroupedAggOutputStorage::new(&plan).expect("charged dense output");
+                        assert_eq!(output.retained_bytes(), bytes);
+                        assert_eq!(
+                            output
+                                .charge
+                                .as_ref()
+                                .expect("every output charged")
+                                .bytes(),
+                            bytes as u64
+                        );
+                        assert_eq!(resident_live_bytes(), baseline + bytes as u64);
+                        drop(output);
+                        assert_eq!(
+                            idle_grouped_execution_bytes().expect("idle bytes"),
+                            bytes as u64
+                        );
+                        let hits = grouped_output_pool_snapshot().hits;
+                        let output =
+                            GroupedAggOutputStorage::new(&plan).expect("reuse dense output");
+                        assert_eq!(grouped_output_pool_snapshot().hits, hits + 1);
+                        assert_eq!(resident_live_bytes(), baseline + bytes as u64);
+                        assert_eq!(idle_grouped_execution_bytes().expect("no idle bytes"), 0);
+                        cleanup_grouped_allocation_pools();
+                        assert_eq!(
+                            resident_live_bytes(),
+                            baseline + bytes as u64,
+                            "active output stays charged"
+                        );
+                        drop(output);
+                        cleanup_grouped_allocation_pools();
+                        assert_eq!(resident_live_bytes(), baseline);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dense_working_set_preflight_and_budget_denial_precede_device_allocation() {
+        use crate::engine::residency::resident_live_bytes;
+        cleanup_grouped_allocation_pools();
+        let baseline = resident_live_bytes();
+        let budget = crate::engine::gucs::resident_memory_budget_bytes();
+        let plan = dense_integer_budget_plan(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE, 17, 2, 1);
+        let pools = (
+            grouped_output_pool_snapshot(),
+            grouped_workspace_pool_snapshot(),
+        );
+        let required = plan
+            .one_shot_memory_requirements()
+            .expect("native dense layout");
+        let bounded = GroupedAggSession::memory_requirements(&plan, 4093).expect("bounded layout");
+        assert_eq!(required, bounded, "empty input needs the same layout");
+        assert_eq!(required.output_bytes, 17 * 25);
+        assert_eq!(resident_live_bytes(), baseline);
+        assert_eq!(
+            pools,
+            (
+                grouped_output_pool_snapshot(),
+                grouped_workspace_pool_snapshot()
+            )
+        );
+        let held = ExecutionMemoryCharge::reserve(
+            budget - baseline - required.total_bytes as u64 + 1,
+            budget,
+        )
+        .expect("scratch alone fits but the full query does not");
+        let before = resident_live_bytes();
+        assert_eq!(
+            plan.preflight_one_shot_memory()
+                .expect_err("combined budget rejected")
+                .status,
+            GpuStatusDetail::OutOfMemory
+        );
+        let failed = GroupedAggSession::start(&plan, 4093)
+            .err()
+            .expect("reject before workspace allocation");
+        assert_eq!(failed.status, GpuStatusDetail::OutOfMemory);
+        assert_eq!(resident_live_bytes(), before);
+        assert_eq!(
+            pools,
+            (
+                grouped_output_pool_snapshot(),
+                grouped_workspace_pool_snapshot()
+            )
+        );
+        drop(held);
+        let held =
+            ExecutionMemoryCharge::reserve(budget - baseline - required.total_bytes as u64, budget)
+                .expect("exact combined budget");
+        plan.preflight_one_shot_memory().expect("exact fit");
+        let output = GroupedAggOutputStorage::new(&plan).expect("output fits");
+        let workspace_charge =
+            reserve_execution_memory(required.workspace_bytes).expect("scratch reservation fits");
+        assert_eq!(resident_live_bytes(), budget);
+        assert!(
+            reserve_execution_memory(1).is_err(),
+            "active owners cannot be reclaimed"
+        );
+        assert_eq!(resident_live_bytes(), budget);
+        drop(workspace_charge);
+        drop(output);
+        drop(held);
+        cleanup_grouped_allocation_pools();
+        assert_eq!(resident_live_bytes(), baseline);
+
+        let held =
+            ExecutionMemoryCharge::reserve(budget - baseline, budget).expect("exhaust budget");
+        let failed = GroupedAggWorkspace::allocate(&plan)
+            .err()
+            .expect("scratch denied without a GPU");
+        assert_eq!(failed.status, GpuStatusDetail::OutOfMemory);
+        let allocations = grouped_output_pool_snapshot().fresh_allocations;
+        let failed = GroupedAggOutputStorage::new(&plan)
+            .err()
+            .expect("output denied");
+        assert_eq!(failed.status, GpuStatusDetail::OutOfMemory);
+        assert_eq!(
+            grouped_output_pool_snapshot().fresh_allocations,
+            allocations
+        );
+        assert_eq!(
+            grouped_workspace_pool_snapshot().fresh_allocations,
+            pools.1.fresh_allocations
+        );
+        assert_eq!(resident_live_bytes(), budget);
+        // Metadata-only forecasts still work at zero available budget.
+        assert_eq!(
+            plan.one_shot_memory_requirements()
+                .expect("unfunded forecast"),
+            required
+        );
+        assert_eq!(
+            GroupedAggSession::memory_requirements(&plan, 4093).expect("unfunded bounded forecast"),
+            bounded
+        );
+        drop(held);
+        assert_eq!(resident_live_bytes(), baseline);
+    }
+
+    #[test]
+    fn dense_budget_pressure_reclaims_only_idle_output_charges() {
+        use crate::engine::residency::resident_live_bytes;
+        cleanup_grouped_allocation_pools();
+        let baseline = resident_live_bytes();
+        let budget = crate::engine::gucs::resident_memory_budget_bytes();
+        let plan = dense_integer_budget_plan(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE, 17, 2, 1);
+        let bytes =
+            grouped_output_required_bytes(plan.descriptor()).expect("output footprint") as u64;
+        let active = GroupedAggOutputStorage::new(&plan).expect("active output");
+        let idle = GroupedAggOutputStorage::new(&plan).expect("second output");
+        drop(idle);
+        let held = ExecutionMemoryCharge::reserve(budget - baseline - bytes * 2, budget)
+            .expect("fill remaining budget");
+        let replacement = reserve_execution_memory(bytes as usize).expect("reclaim idle buffer");
+        assert_eq!(grouped_output_pool_snapshot().retained_outputs, 0);
+        assert_eq!(resident_live_bytes(), budget);
+        assert_eq!(
+            active.charge.as_ref().expect("active charge").bytes(),
+            bytes
+        );
+        assert!(
+            GroupedAggOutputStorage::new(&plan).is_err(),
+            "active charge cannot be reclaimed"
+        );
+        assert_eq!(resident_live_bytes(), budget);
+        drop(replacement);
+        drop(held);
+        drop(active);
+        cleanup_grouped_allocation_pools();
+        assert_eq!(resident_live_bytes(), baseline);
     }
 
     #[test]
@@ -2635,17 +3943,27 @@ mod tests {
     }
 
     #[test]
-    fn hash_fact_key_output_preserves_scalar_width() {
-        let mut descriptor = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_COMPACT);
-        descriptor.grouping_mode = abi::PGACCEL_GROUPED_AGG_GROUPING_HASH;
-        descriptor.keys[0].values.tag = PgaccelValTag::Int64;
-        // SAFETY: zero-row fixture is not dispatched.
-        let plan = unsafe { ResolvedGroupedAggPlan::from_abi(descriptor) }
-            .expect("int64 hash fact fixture is structurally valid");
-        let mut output = GroupedAggOutputStorage::new(&plan).expect("output allocates");
-        assert_eq!(output.key_values(0).expect("key bytes").len(), 32);
-        assert_eq!(output.key_type(0), Some(PgaccelValTag::Int64 as i32));
-        assert_eq!(output.raw().keys[0].value_type, PgaccelValTag::Int64 as i32);
+    fn hash_integer_key_output_uses_canonical_i64_width() {
+        for tag in [PgaccelValTag::Int32, PgaccelValTag::Int64] {
+            let mut descriptor = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_COMPACT);
+            descriptor.grouping_mode = abi::PGACCEL_GROUPED_AGG_GROUPING_HASH;
+            descriptor.keys[0].values.tag = tag;
+            // SAFETY: zero-row fixture is not dispatched.
+            let plan = unsafe { ResolvedGroupedAggPlan::from_abi(descriptor) }
+                .expect("int64 hash fact fixture is structurally valid");
+            let mut output = GroupedAggOutputStorage::new(&plan).expect("output allocates");
+            assert_eq!(output.key_values(0).expect("key bytes").len(), 32);
+            assert_eq!(output.key_type(0), Some(PgaccelValTag::Int64 as i32));
+            assert_eq!(output.raw().keys[0].value_type, PgaccelValTag::Int64 as i32);
+            let narrow_bytes = grouped_output_required_bytes(&descriptor).expect("output budget");
+            let narrow_pool = grouped_output_pool_key(&descriptor);
+            descriptor.keys[0].values.tag = PgaccelValTag::Int64;
+            assert_eq!(
+                narrow_bytes,
+                grouped_output_required_bytes(&descriptor).expect("wide budget")
+            );
+            assert_eq!(narrow_pool, grouped_output_pool_key(&descriptor));
+        }
     }
 
     #[test]
@@ -2741,6 +4059,26 @@ mod tests {
 
     #[test]
     fn numeric_overflow_detail_refines_only_generic_execution_errors() {
+        let date = grouped_agg_kernel_error(
+            PgaccelStatus::Error,
+            abi::PGACCEL_GROUPED_AGG_DEVICE_ERROR_DATE_OUT_OF_RANGE,
+        );
+        assert_eq!(date.status, GpuStatusDetail::DateOutOfRange);
+        let oom_date = grouped_agg_kernel_error(
+            PgaccelStatus::ErrorOom,
+            abi::PGACCEL_GROUPED_AGG_DEVICE_ERROR_DATE_OUT_OF_RANGE,
+        );
+        assert_eq!(oom_date.status, GpuStatusDetail::OutOfMemory);
+        let division = grouped_agg_kernel_error(
+            PgaccelStatus::Error,
+            abi::PGACCEL_GROUPED_AGG_DEVICE_ERROR_DIVISION_BY_ZERO,
+        );
+        assert_eq!(division.status, GpuStatusDetail::DivisionByZero);
+        let oom_division = grouped_agg_kernel_error(
+            PgaccelStatus::ErrorOom,
+            abi::PGACCEL_GROUPED_AGG_DEVICE_ERROR_DIVISION_BY_ZERO,
+        );
+        assert_eq!(oom_division.status, GpuStatusDetail::OutOfMemory);
         let overflow = grouped_agg_kernel_error(
             PgaccelStatus::Error,
             abi::PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW,
@@ -2768,6 +4106,350 @@ mod tests {
         // SAFETY: fixture has no live pointers; rejection happens on metadata.
         let result = unsafe { GroupedAggChunk::from_abi(&plan, changed) };
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn scalar_metadata_requires_matching_tags_before_pointer_access() {
+        let plan = plan(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        for kind in 0..3 {
+            let mut desc = plan.desc;
+            match kind {
+                0 => desc.measures[0].op = abi::PGACCEL_GROUPED_AGG_MEASURE_SCALAR,
+                1 => desc.measures[0].value.flags = abi::PGACCEL_GROUPED_AGG_SCALAR_VIEW_V1,
+                _ => desc.measures[0].rhs.flags = abi::PGACCEL_GROUPED_AGG_SCALAR_VIEW_V1,
+            }
+            // SAFETY: rejection inspects tags only, before reading any pointers.
+            assert!(unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.is_err());
+            // SAFETY: the same shell validation must protect chunk adoption.
+            assert!(unsafe { GroupedAggChunk::from_abi(&plan, desc) }.is_err());
+        }
+    }
+
+    fn scalar_descriptor_fixture(view: &abi::PgaccelScalarView) -> abi::PgaccelGroupedAggDesc {
+        let mut desc = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        desc.key_count = 0;
+        // SAFETY: inactive ABI keys require canonical zero records.
+        desc.keys = unsafe { std::mem::zeroed() };
+        desc.group_capacity = 1;
+        desc.row_count = view.row_count as usize;
+        desc.where_filter.value_cmp_opcode = crate::engine::expr_compiler::opcode::ALWAYS_TRUE;
+        for filter in &mut desc.measure_filters {
+            filter.value_cmp_opcode = crate::engine::expr_compiler::opcode::ALWAYS_TRUE;
+        }
+        let measure = &mut desc.measures[0];
+        measure.op = abi::PGACCEL_GROUPED_AGG_MEASURE_SCALAR;
+        measure.value.values = std::ptr::from_ref(view).cast();
+        measure.value.element_bytes = size_of::<abi::PgaccelScalarView>() as u32;
+        measure.value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32;
+        measure.value.flags = abi::PGACCEL_GROUPED_AGG_SCALAR_VIEW_V1;
+        desc
+    }
+
+    #[test]
+    fn scalar_owners_copy_all_metadata_and_slice_only_nested_lanes() {
+        use crate::engine::residency::resident_live_bytes;
+        use crate::engine::spec::scalar::SCALAR_PROGRAM_MAGIC;
+        let baseline = resident_live_bytes();
+        let values = [1_i32; 8];
+        let bools = [1_u8; 8];
+        let nulls = [0_u8; 8];
+        let original = [SCALAR_PROGRAM_MAGIC, 2, 2, 2, 1, 0, 0];
+        let snapshot_bytes = scalar_metadata_bytes(original.len(), 2).expect("bounded size") as u64;
+        let plan = {
+            let mut words = original;
+            let mut inputs = [
+                abi::PgaccelScalarInput {
+                    values: values.as_ptr().cast(),
+                    nulls: nulls.as_ptr(),
+                    physical_type: 2,
+                    reserved: 0,
+                },
+                abi::PgaccelScalarInput {
+                    values: bools.as_ptr().cast(),
+                    nulls: std::ptr::null(),
+                    physical_type: 1,
+                    reserved: 0,
+                },
+            ];
+            let mut view = abi::PgaccelScalarView {
+                version: 1,
+                word_count: words.len() as u32,
+                input_count: 2,
+                reserved: 0,
+                row_count: 8,
+                words: words.as_ptr(),
+                inputs: inputs.as_ptr(),
+            };
+            // SAFETY: live host buffers are used only for metadata tests, never dispatch.
+            let plan =
+                unsafe { ResolvedGroupedAggPlan::from_abi(scalar_descriptor_fixture(&view)) }
+                    .expect("scalar plan");
+            assert_ne!(
+                plan.desc.measures[0].value.values,
+                std::ptr::from_ref(&view).cast()
+            );
+            words[0] = 0;
+            inputs[0].values = std::ptr::null();
+            view.version = 99;
+            assert_eq!(words[0] + view.version as i32, 99);
+            assert!(inputs[0].values.is_null());
+            plan
+        };
+        assert_eq!(resident_live_bytes(), baseline + snapshot_bytes);
+        assert_eq!(
+            scalar_program_words(&plan.desc.measures[0].value),
+            Some(original.as_slice())
+        );
+        let chunk = plan.row_chunk(3, 2).expect("typed row slice");
+        assert_eq!(resident_live_bytes(), baseline + 2 * snapshot_bytes);
+        let owned = chunk._scalar_views[0]
+            .as_ref()
+            .expect("chunk owns metadata");
+        assert_eq!(owned._view.row_count, 2);
+        assert_eq!(owned._inputs[0].values, values[3..].as_ptr().cast());
+        assert_eq!(owned._inputs[0].nulls, nulls[3..].as_ptr());
+        assert_eq!(owned._inputs[1].values, bools[3..].as_ptr().cast());
+        assert!(owned._inputs[1].nulls.is_null());
+        assert_eq!(owned._words.as_ref(), &original);
+        assert!(stable_shape_matches(&plan.desc, &chunk.desc));
+        assert!(plan.row_chunk(8, 1).is_err());
+        assert!(plan.row_chunk(usize::MAX, 1).is_err());
+        assert_eq!(
+            plan.row_chunk(8, 0).expect("empty end")._scalar_views[0]
+                .as_ref()
+                .expect("owned")
+                ._inputs[0]
+                .values,
+            values[8..].as_ptr().cast()
+        );
+        let borrowed = plan.chunk();
+        assert_eq!(resident_live_bytes(), baseline + 2 * snapshot_bytes);
+        assert!(borrowed._scalar_views[0].is_none());
+        assert_eq!(
+            borrowed.desc.measures[0].value.values,
+            plan.desc.measures[0].value.values
+        );
+        drop(borrowed);
+        drop(chunk);
+        assert_eq!(resident_live_bytes(), baseline + snapshot_bytes);
+        let mut session_shape = plan.desc;
+        let session_owners = pin_scalar_views(&mut session_shape, 0).expect("session snapshot");
+        assert_eq!(resident_live_bytes(), baseline + 2 * snapshot_bytes);
+        drop(plan);
+        assert_eq!(resident_live_bytes(), baseline + snapshot_bytes);
+        assert_eq!(
+            scalar_program_words(&session_shape.measures[0].value),
+            Some(original.as_slice())
+        );
+        assert_eq!(
+            session_owners[0]
+                .as_ref()
+                .expect("session owner")
+                ._view
+                .row_count,
+            8
+        );
+        drop(session_owners);
+        assert_eq!(resident_live_bytes(), baseline);
+    }
+
+    #[test]
+    fn scalar_metadata_budget_boundary_and_partial_failure_release_charges() {
+        use crate::engine::residency::{
+            begin_test_allocation_count, finish_test_allocation_count, resident_live_bytes,
+        };
+        use crate::engine::spec::scalar::SCALAR_PROGRAM_MAGIC;
+        cleanup_grouped_allocation_pools();
+        let baseline = resident_live_bytes();
+        let words = [SCALAR_PROGRAM_MAGIC, 2, 0, 1, 42];
+        let bytes = scalar_metadata_bytes(words.len(), 0).expect("literal metadata size") as u64;
+        assert_eq!(bytes, 60);
+        assert!(scalar_metadata_bytes(usize::MAX, 0).is_err());
+        assert!(scalar_metadata_bytes(5, usize::MAX).is_err());
+        assert!(reserve_execution_bytes(bytes as usize, baseline + bytes - 1).is_err());
+        assert_eq!(resident_live_bytes(), baseline);
+        let charge =
+            reserve_execution_bytes(bytes as usize, baseline + bytes).expect("exact budget");
+        assert_eq!(resident_live_bytes(), baseline + bytes);
+        drop(charge);
+        assert_eq!(resident_live_bytes(), baseline);
+        let view = abi::PgaccelScalarView {
+            version: 1,
+            word_count: 5,
+            input_count: 0,
+            reserved: 0,
+            row_count: 8,
+            words: words.as_ptr(),
+            inputs: std::ptr::null(),
+        };
+        let desc = scalar_descriptor_fixture(&view);
+        let budget = crate::engine::gucs::resident_memory_budget_bytes();
+        let held = ExecutionMemoryCharge::reserve(budget - baseline - bytes, budget)
+            .expect("leave exactly one snapshot");
+        // SAFETY: valid literal host metadata; no resident input payload.
+        let plan =
+            unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.expect("exact metadata budget");
+        assert_eq!(resident_live_bytes(), budget);
+        begin_test_allocation_count();
+        let rejected = plan.row_chunk(0, 1);
+        let allocations = finish_test_allocation_count();
+        assert!(rejected.is_err());
+        assert_eq!(
+            allocations, 0,
+            "budget rejection must precede metadata allocation"
+        );
+        drop(rejected);
+        assert_eq!(resident_live_bytes(), budget);
+        drop(plan);
+        let mut two = desc;
+        two.measure_count = 2;
+        two.measures[1] = two.measures[0];
+        // SAFETY: both literal slots reference the live view. The second
+        // reservation fails and must unwind the first snapshot's charge.
+        assert!(unsafe { ResolvedGroupedAggPlan::from_abi(two) }.is_err());
+        assert_eq!(resident_live_bytes(), budget - bytes);
+        drop(held);
+        assert_eq!(resident_live_bytes(), baseline);
+    }
+
+    #[test]
+    fn scalar_program_identity_rejects_drift_and_distinguishes_pool_entries() {
+        use crate::engine::spec::scalar::SCALAR_PROGRAM_MAGIC;
+        let mut words = [SCALAR_PROGRAM_MAGIC, 2, 0, 1, 42];
+        let view = abi::PgaccelScalarView {
+            version: 1,
+            word_count: 5,
+            input_count: 0,
+            reserved: 0,
+            row_count: 8,
+            words: words.as_ptr(),
+            inputs: std::ptr::null(),
+        };
+        // SAFETY: all nested metadata is readable; this literal has no resident payload.
+        let plan = unsafe { ResolvedGroupedAggPlan::from_abi(scalar_descriptor_fixture(&view)) }
+            .expect("literal plan");
+        words[4] = 43;
+        // SAFETY: metadata remains readable; program identity must reject adoption.
+        assert!(
+            unsafe { GroupedAggChunk::from_abi(&plan, scalar_descriptor_fixture(&view)) }.is_err()
+        );
+        // SAFETY: same valid literal metadata, adopted independently.
+        let other = unsafe { ResolvedGroupedAggPlan::from_abi(scalar_descriptor_fixture(&view)) }
+            .expect("second literal plan");
+        assert!(!stable_shape_matches(&plan.desc, &other.desc));
+        // SAFETY: all-zero requirement is an inert pool-key test fixture.
+        let req = unsafe { std::mem::zeroed() };
+        assert_ne!(
+            grouped_workspace_pool_key(&plan.desc, &req),
+            grouped_workspace_pool_key(&other.desc, &req)
+        );
+        assert_eq!(words[4], 43);
+        let final_desc =
+            lifecycle_call_descriptor(&plan.desc, abi::PGACCEL_GROUPED_AGG_EXEC_FINALIZE);
+        assert_eq!(final_desc.row_count, 0);
+        assert_eq!(
+            scalar_program_words(&final_desc.measures[0].value),
+            scalar_program_words(&plan.desc.measures[0].value)
+        );
+    }
+
+    #[test]
+    fn scalar_metadata_rejects_bad_headers_programs_types_and_lengths() {
+        use crate::engine::spec::scalar::SCALAR_PROGRAM_MAGIC;
+        let values = [1_i32; 8];
+        let words = [SCALAR_PROGRAM_MAGIC, 2, 1, 2, 0, 0];
+        let input = abi::PgaccelScalarInput {
+            values: values.as_ptr().cast(),
+            nulls: std::ptr::null(),
+            physical_type: 2,
+            reserved: 0,
+        };
+        let base = abi::PgaccelScalarView {
+            version: 1,
+            word_count: 6,
+            input_count: 1,
+            reserved: 0,
+            row_count: 8,
+            words: words.as_ptr(),
+            inputs: &raw const input,
+        };
+        for kind in 0..14 {
+            let mut view = base;
+            let mut bound = input;
+            let mut program = words;
+            match kind {
+                0 => view.version = 2,
+                1 => view.reserved = 1,
+                2 => view.word_count = 580,
+                3 => view.input_count = 65,
+                4 => view.words = std::ptr::null(),
+                5 => view.inputs = std::ptr::null(),
+                6 => view.row_count = 7,
+                7 => bound.reserved = 1,
+                8 => bound.physical_type = 1,
+                9 => bound.values = std::ptr::null(),
+                10 => program[0] = 0,
+                11 => program[4] = 99,
+                12 => program[5] = 1,
+                _ => view.row_count = u64::MAX,
+            }
+            if (7..=9).contains(&kind) {
+                view.inputs = &raw const bound;
+            }
+            if (10..=12).contains(&kind) {
+                view.words = program.as_ptr();
+            }
+            let mut desc = scalar_descriptor_fixture(&view);
+            if kind == 6 {
+                desc.row_count = 8;
+            }
+            // SAFETY: malformed metadata is rejected before any payload use;
+            // over-limit lengths/null host pointers are rejected before reading.
+            assert!(
+                unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.is_err(),
+                "case {kind}"
+            );
+        }
+        let mut desc = scalar_descriptor_fixture(&base);
+        desc.measures[1] = desc.measures[0];
+        desc.measures[1].value.values = std::ptr::without_provenance(1);
+        // SAFETY: inactive metadata must be rejected without dereferencing it.
+        assert!(unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.is_err());
+    }
+
+    #[test]
+    fn scalar_boolean_count_and_empty_bindings_keep_their_types() {
+        use crate::engine::spec::scalar::SCALAR_PROGRAM_MAGIC;
+        let words = [SCALAR_PROGRAM_MAGIC, 1, 0, 3, 1]; // typed NULL BOOL
+        let view = abi::PgaccelScalarView {
+            version: 1,
+            word_count: 5,
+            input_count: 0,
+            reserved: 0,
+            row_count: 0,
+            words: words.as_ptr(),
+            inputs: std::ptr::null(),
+        };
+        let mut desc = scalar_descriptor_fixture(&view);
+        desc.measures[0].value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL;
+        // SAFETY: only live, zero-input metadata is read during validation.
+        assert!(unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.is_err());
+        desc.measures[0].agg_mask = abi::PGACCEL_GROUPED_AGG_LANE_COUNT;
+        // SAFETY: typed literal has no resident payload.
+        let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.expect("Boolean COUNT");
+        let chunk = plan.row_chunk(0, 0).expect("empty scalar slice");
+        assert!(stable_shape_matches(&plan.desc, &chunk.desc));
+        assert!(
+            chunk._scalar_views[0]
+                .as_ref()
+                .expect("owner")
+                ._view
+                .inputs
+                .is_null()
+        );
+        desc.measures[0].value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32;
+        // SAFETY: result type mismatch is rejected without resident access.
+        assert!(unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.is_err());
     }
 
     #[test]
@@ -2997,6 +4679,7 @@ mod tests {
             owner_pid: std::process::id(),
             poisoned: false,
             _not_send_sync: PhantomData,
+            charge: None,
         };
         assert!(finish_successful_call(&mut workspace, Some(&storage), Some(&raw)).is_err());
         assert!(workspace.is_poisoned());

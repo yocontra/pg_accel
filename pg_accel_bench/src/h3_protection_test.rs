@@ -597,11 +597,21 @@ fn h3_protection_parity_lane_names_resolve() {
     }
 }
 
-/// The fused parent grouped-count query is the only current H3 winning lane.
+/// Fused parent grouped-count variants have explicit protected winner names.
 #[test]
 fn h3_protection_canonical_winning_names_registered() {
-    assert_eq!(h3_winning_lane_names(), vec!["h3_cell_to_parent"]);
-    assert!(find_workload("h3_cell_to_parent").is_some());
+    assert_eq!(
+        h3_winning_lane_names(),
+        vec![
+            "h3_cell_to_parent",
+            "h3_parent_res4",
+            "h3_parent_res9",
+            "h3_parent_res15"
+        ]
+    );
+    for name in h3_winning_lane_names() {
+        assert!(find_workload(name).is_some());
+    }
 }
 
 /// Grouped point-to-cell shapes and standalone scalar variants remain

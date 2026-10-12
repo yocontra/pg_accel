@@ -1,0 +1,15 @@
+=== 121_integer_where_aggregates ===
+SET
+SET
+SELECT 1000017
+ANALYZE
+psql:sql/tests/121_integer_where_aggregates.sql:71: ERROR:  121 missing normal integer dispatch: SELECT sum(v) FILTER (WHERE w>0) s,avg(qty) FILTER (WHERE id BETWEEN 250000 AND 750003) a,count(*) n FROM _integer_where_agg / shape_aggregate_modifier / Aggregate (actual rows=1.00 loops=1)
+  Buffers: local read=7232 written=1
+  ->  Seq Scan on _integer_where_agg (actual rows=1000017.00 loops=1)
+        Buffers: local read=7232 written=1
+Planning:
+  Buffers: shared hit=133
+Planning Time: 0.142 ms
+Execution Time: 148.775 ms
+
+CONTEXT:  PL/pgSQL function inline_code_block line 51 at RAISE

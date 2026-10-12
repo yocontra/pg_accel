@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "timing_skew_threshold_fraction": 0.1,
+  "evaluated_no_dispatch_rows": 3,
+  "clean_rows": 3,
+  "warning_rows": 0,
+  "timing_skew_rows": 0,
+  "plan_mismatch_rows": 0,
+  "selected_custom_scan_not_dispatched_rows": 0,
+  "missing_plan_evidence_rows": 0,
+  "ignored_dispatching_rows": 0,
+  "rows": [
+    {
+      "workload": "grouped_derived_ratio",
+      "rows": 250000,
+      "speedup_median_vs_parallel": 1.0040324420611084,
+      "timing_skew_fraction": 0.004032442061108421,
+      "timing_skew": false,
+      "plan_mismatch": false,
+      "missing_plan_evidence": false,
+      "accel_plan_signature": "finalize groupaggregate",
+      "baseline_plan_signature": "finalize groupaggregate",
+      "status": "comparable_native",
+      "action": "no GPU credit; use only as native-decline/stability evidence"
+    },
+    {
+      "workload": "grouped_derived_ratio",
+      "rows": 1000000,
+      "speedup_median_vs_parallel": 0.994978616077044,
+      "timing_skew_fraction": 0.005046725469090019,
+      "timing_skew": false,
+      "plan_mismatch": false,
+      "missing_plan_evidence": false,
+      "accel_plan_signature": "finalize groupaggregate",
+      "baseline_plan_signature": "finalize groupaggregate",
+      "status": "comparable_native",
+      "action": "no GPU credit; use only as native-decline/stability evidence"
+    },
+    {
+      "workload": "grouped_derived_ratio",
+      "rows": 2000000,
+      "speedup_median_vs_parallel": 0.9993948560899373,
+      "timing_skew_fraction": 0.0006055103309519083,
+      "timing_skew": false,
+      "plan_mismatch": false,
+      "missing_plan_evidence": false,
+      "accel_plan_signature": "finalize groupaggregate",
+      "baseline_plan_signature": "finalize groupaggregate",
+      "status": "comparable_native",
+      "action": "no GPU credit; use only as native-decline/stability evidence"
+    }
+  ]
+}

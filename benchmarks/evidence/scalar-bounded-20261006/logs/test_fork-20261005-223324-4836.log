@@ -1,0 +1,26 @@
+PGACCEL_TEST_START name=test_fork
+=== Fork GPU Test (PG pattern: parent loads lib, child inits GPU) ===
+Parent PID: 4837
+
+Parent: library loaded (static constructors ran), NOT calling pgaccel_init()
+
+Parent: forking...
+
+Child PID: 4838 (parent was 4837)
+Child: pgaccel_init OK — device=Apple M2 Max backend=metal CUs=38
+[child] reduce_sum_f32: 25000.000000 OK
+[child] reduce_min_f32: 25.000000 OK
+[child] reduce_max_f32: 25.000000 OK
+[child] metalar files before fp64 matrix: 7099
+[child] fp64 matrix: reduce_sum_f64 OK
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+=== Fork GPU Test (PG pattern: parent loads lib, child inits GPU) ===
+Parent PID: 4837
+
+Parent: library loaded (static constructors ran), NOT calling pgaccel_init()
+
+Parent: forking...
+
+=== Results ===
+PASS: GPU works in forked child (PG backend pattern).
+PGACCEL_TEST_RESULT name=test_fork exit_code=0 result=PASS raw_lines=24 body_sha256=4aa35cc225b7b2420fbf9a509d839df78cfc0ca50507cd63656fe9ebfc085746 binding_sha256=9b41b4bf9350eb770bcdaf75b2830740fcb059fc0859a23a36f86992a4760983

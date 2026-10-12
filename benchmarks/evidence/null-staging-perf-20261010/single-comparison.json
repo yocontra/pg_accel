@@ -1,0 +1,32 @@
+[
+  {
+    "pattern": "none",
+    "candidate_previous_ratio": 0.5543187480071898,
+    "repeat_ratio": 0.5301373567031561
+  },
+  {
+    "pattern": "first",
+    "candidate_previous_ratio": 0.5190248691805578,
+    "repeat_ratio": 0.5278772395306217
+  },
+  {
+    "pattern": "last",
+    "candidate_previous_ratio": 0.5443748408499126,
+    "repeat_ratio": 0.5405604962894895
+  },
+  {
+    "pattern": "sparse",
+    "candidate_previous_ratio": 0.5297882395626629,
+    "repeat_ratio": 0.5411586188985353
+  },
+  {
+    "pattern": "alternating",
+    "candidate_previous_ratio": 0.5353297427329969,
+    "repeat_ratio": 0.5349833274016481
+  },
+  {
+    "pattern": "all",
+    "candidate_previous_ratio": 0.5275573431894771,
+    "repeat_ratio": 0.5292267880150223
+  }
+]

@@ -1,0 +1,68 @@
+{
+  "schema_version": 2,
+  "created_unix_seconds": 1790711413,
+  "artifact_index_path": "artifact_index.json",
+  "artifact_checklist_path": "artifact_checklist.md",
+  "log_tail_bytes": 65536,
+  "log_delta_bytes": 262144,
+  "telemetry_tail_bytes": 65536,
+  "max_log_candidates": 32,
+  "log_candidates": [
+    "/Users/contra/.pgrx/19.log",
+    "/Users/contra/.pgrx/data-19/pg_accel_panic.log",
+    "/Users/contra/.pgrx/data-19/pg_accel_traces.jsonl",
+    "/Users/contra/.pgrx/data-19/pg_accel_otel.jsonl",
+    "/tmp/pg_accel_panic.log",
+    "/Users/contra/.pgrx/data-18/pg_accel_panic.log",
+    "/Users/contra/.pgrx/data-18/pg_accel_traces.jsonl",
+    "/Users/contra/.pgrx/data-18/pg_accel_otel.jsonl"
+  ],
+  "log_start_offsets": [
+    {
+      "path": "/Users/contra/.pgrx/19.log",
+      "existed": true,
+      "len_bytes": 257187
+    },
+    {
+      "path": "/Users/contra/.pgrx/data-19/pg_accel_panic.log",
+      "existed": true,
+      "len_bytes": 13625
+    },
+    {
+      "path": "/Users/contra/.pgrx/data-19/pg_accel_traces.jsonl",
+      "existed": true,
+      "len_bytes": 4813
+    },
+    {
+      "path": "/Users/contra/.pgrx/data-19/pg_accel_otel.jsonl",
+      "existed": true,
+      "len_bytes": 14806
+    },
+    {
+      "path": "/tmp/pg_accel_panic.log",
+      "existed": false,
+      "len_bytes": 0
+    },
+    {
+      "path": "/Users/contra/.pgrx/data-18/pg_accel_panic.log",
+      "existed": true,
+      "len_bytes": 0
+    },
+    {
+      "path": "/Users/contra/.pgrx/data-18/pg_accel_traces.jsonl",
+      "existed": true,
+      "len_bytes": 212
+    },
+    {
+      "path": "/Users/contra/.pgrx/data-18/pg_accel_otel.jsonl",
+      "existed": true,
+      "len_bytes": 0
+    }
+  ],
+  "telemetry_candidates": [
+    "/Users/contra/.pgrx/data-19/pg_accel_traces.jsonl",
+    "/Users/contra/.pgrx/data-19/pg_accel_otel.jsonl",
+    "/Users/contra/.pgrx/data-18/pg_accel_traces.jsonl",
+    "/Users/contra/.pgrx/data-18/pg_accel_otel.jsonl"
+  ]
+}

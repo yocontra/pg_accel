@@ -1,0 +1,1 @@
+coverage error: SQL semantic matrix family inventory differs: missing=[], extra=['selected.null_safe_scalar']

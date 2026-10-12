@@ -19,13 +19,17 @@ mod gpu_hashagg_med_card;
 mod grouped_agg;
 mod grouped_agg_high_card;
 mod grouped_agg_int4;
+mod grouped_computed_integer;
 mod grouped_count_bool_candidate;
 mod grouped_count_date_candidate;
 mod grouped_count_float_candidate;
 mod grouped_count_int2_candidate;
 mod grouped_count_int8_candidate;
 mod grouped_count_timestamp_candidate;
+mod grouped_filtered_integer;
 mod grouped_integer_sum_avg_candidate;
+mod grouped_multikey_integer;
+mod grouped_multimeasure_integer;
 mod hashagg_sweep;
 mod predicate_expression_grouped_agg_int4;
 mod predicate_filter_expression_grouped_agg;
@@ -43,7 +47,10 @@ mod hash_join;
 mod hashjoin_sweep;
 mod weighted_global_count_int4;
 // --- GPU Spatial ---
+mod grouped_bigint;
+mod grouped_numeric;
 mod index_recheck;
+mod nyc_taxi;
 mod proximity;
 mod spatial_complex_poly;
 mod spatial_contains;
@@ -141,6 +148,7 @@ pub use gpu_sort_topk_wide::GpuSortTopkWide;
 pub use grouped_agg::GroupedAgg;
 pub use grouped_agg_high_card::GroupedAggHighCard;
 pub use grouped_agg_int4::GroupedAggInt4;
+pub use grouped_computed_integer::{GroupedComputedInteger, ScalarProgramAggregate};
 pub use grouped_count_bool_candidate::GroupedCountBoolCandidate;
 pub use grouped_count_date_candidate::GroupedCountDateCandidate;
 pub use grouped_count_float_candidate::{GroupedCountFloat4Candidate, GroupedCountFloat8Candidate};
@@ -149,11 +157,15 @@ pub use grouped_count_int8_candidate::GroupedCountInt8Candidate;
 pub use grouped_count_timestamp_candidate::{
     GroupedCountTimestampCandidate, GroupedCountTimestamptzCandidate,
 };
+pub use grouped_filtered_integer::{FilteredIntegerMode, GroupedFilteredInteger};
 pub use grouped_integer_sum_avg_candidate::{
-    GroupedInt2SumAvgCandidate, GroupedInt4SumAvgCandidate,
+    GroupedInt2SumAvgCandidate, GroupedInt4AvgOnly, GroupedInt4HiddenHaving,
+    GroupedInt4NativeHaving, GroupedInt4SumAvgCandidate,
 };
+pub use grouped_multikey_integer::GroupedMultikeyInteger;
+pub use grouped_multimeasure_integer::GroupedMultimeasureInteger;
 pub use h3_bulk::H3Bulk;
-pub use h3_cell_to_parent::H3CellToParent;
+pub use h3_cell_to_parent::{H3CellToParent, H3ParentResolution};
 pub use h3_grid_distance::H3GridDistance;
 pub use h3_resolution_sweep::H3ResolutionSweep;
 pub use h3_srf_grid_disk::H3SrfGridDisk;
@@ -190,7 +202,7 @@ pub use spatial_contains::SpatialContains;
 pub use spatial_filter::SpatialFilter;
 pub use spatial_join::SpatialJoin;
 pub use spatial_multi_pred::SpatialMultiPred;
-pub use spatial_resident_agg_candidate::SpatialResidentAggCandidate;
+pub use spatial_resident_agg_candidate::{SpatialPolygonHoles, SpatialResidentAggCandidate};
 pub use spatial_selectivity::SpatialSelectivity;
 pub use spatial_sort::SpatialSort;
 pub use ssbm::{
@@ -199,7 +211,11 @@ pub use ssbm::{
 };
 pub use timeseries_sensor_rollup::TimeseriesSensorRollup;
 pub use topk_wide::TopkWide;
-pub use tpch::{TpchQ1, TpchQ6, TpchQ12};
+pub use tpch::{
+    TpchQ1, TpchQ2, TpchQ3, TpchQ4, TpchQ5, TpchQ6, TpchQ7, TpchQ8, TpchQ9, TpchQ10, TpchQ11,
+    TpchQ12, TpchQ13, TpchQ14, TpchQ15, TpchQ16, TpchQ17, TpchQ18, TpchQ19, TpchQ20, TpchQ21,
+    TpchQ22,
+};
 pub use weighted_global_count_int4::WeightedGlobalCountInt4;
 pub use window_analytics::WindowAnalytics;
 pub use window_full_output_decline::WindowFullOutputDecline;
@@ -248,6 +264,11 @@ impl ResultOracle {
 
 /// A benchmark workload that can set up tables, run a query, and clean up.
 pub trait Workload: Send + Sync {
+    /// Opt-in externally prepared fixture. Captured verbatim with run artifacts.
+    /// Default synthetic suites never require downloads or corpus imports.
+    fn external_fixture_manifest(&self) -> Option<&'static str> {
+        None
+    }
     /// Short identifier for this workload (e.g. `"gpu_reduce_sum"`).
     fn name(&self) -> &'static str;
 
@@ -326,6 +347,42 @@ pub trait Workload: Send + Sync {
 /// Return all registered workloads.
 pub fn all_workloads() -> Vec<Box<dyn Workload>> {
     vec![
+        Box::new(nyc_taxi::NycTaxi("nyc_taxi_h3_res9")),
+        Box::new(nyc_taxi::NycTaxi("nyc_taxi_airport_indexed")),
+        Box::new(nyc_taxi::NycTaxi("nyc_taxi_airport_scan")),
+        Box::new(nyc_taxi::NycTaxi("nyc_taxi_fare_rollup")),
+        Box::new(nyc_taxi::NycTaxi("nyc_taxi_mixed_rollup")),
+        Box::new(nyc_taxi::NycTaxi("nyc_taxi_filtered_rollup")),
+        Box::new(nyc_taxi::NycTaxi("nyc_taxi_airport_rollup")),
+        Box::new(nyc_taxi::NycTaxi("nyc_taxi_airport_passengers")),
+        Box::new(nyc_taxi::NycTaxi("nyc_taxi_passenger_where")),
+        Box::new(nyc_taxi::NycTaxi("nyc_taxi_nullable_passengers")),
+        Box::new(nyc_taxi::NycTaxi("nyc_taxi_airport_nullable_passengers")),
+        Box::new(nyc_taxi::NycTaxi("nyc_taxi_passenger_filters")),
+        Box::new(nyc_taxi::NycTaxi("nyc_taxi_airport_passenger_filters")),
+        Box::new(nyc_taxi::NycTaxi("nyc_taxi_airport_vendor_passengers")),
+        Box::new(nyc_taxi::NycTaxi("nyc_taxi_airport_vendor_rollup")),
+        Box::new(nyc_taxi::NycTaxi("nyc_taxi_passenger_extrema")),
+        Box::new(nyc_taxi::NycTaxi("nyc_taxi_airport_passenger_extrema")),
+        Box::new(grouped_numeric::GroupedNumeric("numeric_global_sum_avg")),
+        Box::new(grouped_bigint::GroupedBigint("bigint_global_sum_avg")),
+        Box::new(grouped_bigint::GroupedBigint("bigint_grouped_sum_avg")),
+        Box::new(grouped_bigint::GroupedBigint("bigint_filtered_mixed")),
+        Box::new(grouped_bigint::GroupedBigint("bigint_nullable_filters")),
+        Box::new(grouped_numeric::GroupedNumeric("numeric_global_count")),
+        Box::new(grouped_numeric::GroupedNumeric("numeric_mixed_global")),
+        Box::new(grouped_numeric::GroupedNumeric("numeric_where_ranges")),
+        Box::new(grouped_numeric::GroupedNumeric("numeric_where_mask")),
+        Box::new(grouped_numeric::GroupedNumeric("numeric_mixed_grouped")),
+        Box::new(grouped_numeric::GroupedNumeric("numeric_grouped_counts")),
+        Box::new(grouped_numeric::GroupedNumeric("numeric_grouped_sum_count")),
+        Box::new(grouped_numeric::GroupedNumeric(
+            "numeric_grouped_three_keys",
+        )),
+        Box::new(grouped_numeric::GroupedNumeric(
+            "numeric_grouped_wide_scale",
+        )),
+        Box::new(grouped_numeric::GroupedNumeric("numeric_grouped_filtered")),
         // --- GPU Reduce (original) ---
         Box::new(GpuReduceSum),
         Box::new(GpuReduceScaling),
@@ -349,6 +406,41 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(GroupedCountTimestamptzCandidate),
         Box::new(GroupedInt2SumAvgCandidate),
         Box::new(GroupedInt4SumAvgCandidate),
+        Box::new(GroupedInt4NativeHaving),
+        Box::new(GroupedInt4HiddenHaving),
+        Box::new(GroupedInt4AvgOnly),
+        Box::new(GroupedMultikeyInteger),
+        Box::new(GroupedMultimeasureInteger),
+        Box::new(GroupedComputedInteger(false)),
+        Box::new(GroupedComputedInteger(true)),
+        Box::new(ScalarProgramAggregate::GroupedRollup),
+        Box::new(ScalarProgramAggregate::GlobalRollup),
+        Box::new(ScalarProgramAggregate::GroupedCoalesce),
+        Box::new(ScalarProgramAggregate::GroupedSimpleCase),
+        Box::new(ScalarProgramAggregate::GroupedSimpleCaseLinear),
+        Box::new(ScalarProgramAggregate::GroupedMembership),
+        Box::new(ScalarProgramAggregate::SpatialGroupedMembership),
+        Box::new(ScalarProgramAggregate::GroupedScalarFilter),
+        Box::new(ScalarProgramAggregate::GroupedScalarWhere),
+        Box::new(ScalarProgramAggregate::SpatialGroupedScalarWhere),
+        Box::new(ScalarProgramAggregate::GroupedNullSafeWhere),
+        Box::new(ScalarProgramAggregate::SpatialGroupedNullSafeWhere),
+        Box::new(ScalarProgramAggregate::GroupedBoundedRatio),
+        Box::new(ScalarProgramAggregate::SpatialGroupedBoundedRatio),
+        Box::new(ScalarProgramAggregate::GroupedDerivedRatio),
+        Box::new(ScalarProgramAggregate::SpatialGroupedDerivedRatio),
+        Box::new(ScalarProgramAggregate::SpatialGroupedScalarFilter),
+        Box::new(ScalarProgramAggregate::GroupedDateSpan),
+        Box::new(ScalarProgramAggregate::SpatialGroupedDateSpan),
+        Box::new(ScalarProgramAggregate::SpatialGlobalRollup),
+        Box::new(ScalarProgramAggregate::SpatialGroupedRollup),
+        Box::new(GroupedFilteredInteger(FilteredIntegerMode::Intervals)),
+        Box::new(GroupedFilteredInteger(FilteredIntegerMode::Boolean)),
+        Box::new(GroupedFilteredInteger(FilteredIntegerMode::Counts)),
+        Box::new(GroupedFilteredInteger(FilteredIntegerMode::GlobalBoolean)),
+        Box::new(GroupedFilteredInteger(FilteredIntegerMode::GlobalCounts)),
+        Box::new(GroupedFilteredInteger(FilteredIntegerMode::WhereRanges)),
+        Box::new(GroupedFilteredInteger(FilteredIntegerMode::WhereMask)),
         Box::new(GroupedAggHighCard),
         Box::new(GpuHashaggMedCard),
         Box::new(TimeseriesSensorRollup),
@@ -432,6 +524,11 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(SpatialComplexPoly),
         Box::new(SpatialSelectivity),
         Box::new(SpatialResidentAggCandidate),
+        Box::new(SpatialPolygonHoles("spatial_holes_intersects")),
+        Box::new(SpatialPolygonHoles("spatial_holes_contains")),
+        Box::new(SpatialPolygonHoles("spatial_holes_within")),
+        Box::new(SpatialPolygonHoles("spatial_holes_covers")),
+        Box::new(SpatialPolygonHoles("spatial_holes_coveredby")),
         // --- GPU Spatial Megapoly (action_items W7) ---
         // Collapsed from `spatial_mega_{100,250,500,1k,2k,5k}v` to one
         // representative. All six wrapped the same `point_in_ring` kernel;
@@ -518,6 +615,9 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         // --- GPU H3 (original) ---
         Box::new(H3Bulk),
         Box::new(H3CellToParent),
+        Box::new(H3ParentResolution::<4>),
+        Box::new(H3ParentResolution::<9>),
+        Box::new(H3ParentResolution::<15>),
         Box::new(H3GridDistance),
         Box::new(H3ResolutionSweep),
         Box::new(H3SrfGridDisk),
@@ -574,8 +674,27 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(SsbmQ4_3),
         // --- TPC-H-shaped end-to-end system suite ---
         Box::new(TpchQ1),
+        Box::new(TpchQ2),
+        Box::new(TpchQ3),
+        Box::new(TpchQ4),
+        Box::new(TpchQ5),
         Box::new(TpchQ6),
+        Box::new(TpchQ7),
+        Box::new(TpchQ8),
+        Box::new(TpchQ9),
+        Box::new(TpchQ10),
+        Box::new(TpchQ11),
         Box::new(TpchQ12),
+        Box::new(TpchQ13),
+        Box::new(TpchQ14),
+        Box::new(TpchQ15),
+        Box::new(TpchQ16),
+        Box::new(TpchQ17),
+        Box::new(TpchQ18),
+        Box::new(TpchQ19),
+        Box::new(TpchQ20),
+        Box::new(TpchQ21),
+        Box::new(TpchQ22),
         // --- ClickBench-style end-to-end event suite ---
         Box::new(ClickbenchGroupedEvents),
         Box::new(ClickbenchDistinctUsers),
@@ -1036,6 +1155,60 @@ const RELEASED_ENVELOPE_CONTRACTS: &[ReleasedEnvelopeContract] = &[
         family: ReleasedPathFamily::GroupedAggregate,
     },
     ReleasedEnvelopeContract {
+        workload: "grouped_int4_native_having",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "grouped_int4_avg_only",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "grouped_multikey_integer",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "grouped_multimeasure_integer",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "global_computed_integer",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "grouped_filtered_integer",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "grouped_boolean_filtered_integer",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "grouped_conditional_integer_counts",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "grouped_int4_hidden_having",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
         workload: "predicate_expression_grouped_agg_int4",
         min_rows: GROUPAGG_WINNER_MIN_ROWS,
         max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
@@ -1114,6 +1287,24 @@ const RELEASED_ENVELOPE_CONTRACTS: &[ReleasedEnvelopeContract] = &[
         family: ReleasedPathFamily::H3Parent,
     },
     ReleasedEnvelopeContract {
+        workload: "h3_parent_res4",
+        min_rows: H3_GROUPED_WINNER_MIN_ROWS,
+        max_rows: usize::MAX,
+        family: ReleasedPathFamily::H3Parent,
+    },
+    ReleasedEnvelopeContract {
+        workload: "h3_parent_res9",
+        min_rows: H3_GROUPED_WINNER_MIN_ROWS,
+        max_rows: 1_000_000,
+        family: ReleasedPathFamily::H3Parent,
+    },
+    ReleasedEnvelopeContract {
+        workload: "h3_parent_res15",
+        min_rows: H3_GROUPED_WINNER_MIN_ROWS,
+        max_rows: 1_000_000,
+        family: ReleasedPathFamily::H3Parent,
+    },
+    ReleasedEnvelopeContract {
         workload: "spatial_resident_agg_candidate",
         min_rows: 1_000_000,
         max_rows: 1_000_000,
@@ -1124,6 +1315,36 @@ const RELEASED_ENVELOPE_CONTRACTS: &[ReleasedEnvelopeContract] = &[
         min_rows: 10_000,
         max_rows: 1_000_000,
         family: ReleasedPathFamily::RasterTransform,
+    },
+    ReleasedEnvelopeContract {
+        workload: "spatial_holes_intersects",
+        min_rows: 1_000_000,
+        max_rows: 2_000_000,
+        family: ReleasedPathFamily::SpatialAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "spatial_holes_contains",
+        min_rows: 1_000_000,
+        max_rows: 2_000_000,
+        family: ReleasedPathFamily::SpatialAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "spatial_holes_within",
+        min_rows: 1_000_000,
+        max_rows: 2_000_000,
+        family: ReleasedPathFamily::SpatialAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "spatial_holes_covers",
+        min_rows: 1_000_000,
+        max_rows: 2_000_000,
+        family: ReleasedPathFamily::SpatialAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "spatial_holes_coveredby",
+        min_rows: 1_000_000,
+        max_rows: 2_000_000,
+        family: ReleasedPathFamily::SpatialAggregate,
     },
 ];
 
@@ -1572,6 +1793,90 @@ fn groupagg_threshold_matrix_entry(
             "nullable bool key + nullable int4 measure",
             "bool key, exact SUM(int4), NUMERIC AVG(int4), COUNT(*)",
             "exact nullable INT4 resident grouped SUM/AVG/COUNT warm winner matrix",
+        ),
+        "grouped_int4_avg_only" => (
+            "resident_integer_aggregate_avg_only",
+            "nullable bool key + nullable int4 AVG input",
+            "three boolean SQL groups: false, true, and NULL",
+            "all rows grouped; NULL measures ignored and NULL-key group is all-NULL",
+            "three grouped rows".to_owned(),
+            "nullable bool key + nullable int4 measure",
+            "bool key, exact NUMERIC AVG(int4); no SUM or COUNT(*) outputs",
+            "single shared SUM/non-NULL state without a COUNT(*) output lane",
+        ),
+        "grouped_conditional_integer_counts" => (
+            "resident_conditional_integer_counts",
+            "nullable text/date/bool keys, int4 amount and int2 units",
+            "224 populated dimension combinations plus one nullable-key group",
+            "overlapping compound filters with independent predicate/value NULLs",
+            "225 grouped rows".to_owned(),
+            "three keys, one shared SUM/AVG/COUNT state and two count-only states",
+            "exact filtered COUNT(*), COUNT(value), SUM and NUMERIC AVG",
+            "conditional integer counts warm gate",
+        ),
+        "grouped_boolean_filtered_integer" => (
+            "resident_boolean_filtered_integer_aggregate",
+            "nullable text/date/bool keys, int4 amount and int2 units",
+            "224 populated dimension combinations plus one nullable-key group",
+            "overlapping Boolean and NULL-bearing IN filters; independent units NULLs",
+            "225 grouped rows".to_owned(),
+            "three keys and three conditional states sharing two input columns",
+            "exact SUM/NUMERIC AVG with AND/OR/NOT/IN plus unfiltered COUNT(*)",
+            "Boolean aggregate FILTER warm gate",
+        ),
+        "grouped_filtered_integer" => (
+            "resident_filtered_integer_aggregate",
+            "nullable text/date/bool keys, int4 amount and int2 units",
+            "224 populated dimension combinations plus one nullable-key group",
+            "positive/negative amount intervals; independent units NULLs",
+            "225 grouped rows".to_owned(),
+            "three keys and three filtered states sharing two input columns",
+            "exact filtered SUM/NUMERIC AVG plus unfiltered COUNT(*)",
+            "independent aggregate FILTER warm gate",
+        ),
+        "grouped_multimeasure_integer" => (
+            "resident_multimeasure_integer_aggregate",
+            "nullable text region, date, bool flag, int4 amount/discount and int2 units",
+            "224 populated dimension combinations plus one nullable-key group",
+            "all rows grouped; each measure has an independent NULL pattern",
+            "225 grouped rows".to_owned(),
+            "text + date + bool keys with three independent integer states",
+            "exact SUM and NUMERIC AVG for three fields plus COUNT(*)",
+            "multi-measure resident integer aggregation warm gate",
+        ),
+        "global_computed_integer" => (
+            "resident_computed_integer_aggregate",
+            "independently nullable int4 price and adjustment",
+            "one global output row",
+            "all rows counted; either NULL operand excludes the expression",
+            "one aggregate row".to_owned(),
+            "three checked arithmetic states plus COUNT(*)",
+            "exact product SUM, difference NUMERIC AVG and sum MIN/MAX",
+            "global computed-measure aggregation warm gate",
+        ),
+        "grouped_multikey_integer" => (
+            "resident_multikey_integer_aggregate",
+            "nullable text region, date, bool flag and int4 amount",
+            "224 populated dimension combinations plus one all-NULL group",
+            "all input rows grouped; NULL measures excluded from SUM/AVG",
+            "225 grouped rows".to_owned(),
+            "text + date + bool keys and nullable int4 measure",
+            "three keys, exact SUM, NUMERIC AVG and COUNT(*)",
+            "multi-dimensional resident integer aggregation warm gate",
+        ),
+        "grouped_int4_native_having" | "grouped_int4_hidden_having" => (
+            "resident_integer_aggregate_native_having",
+            "nullable bool key + nullable int4 SUM/AVG input",
+            "three input groups reduced to two by native HAVING",
+            "all input rows aggregated; all-NULL group removed by PostgreSQL",
+            "two ordered grouped rows".to_owned(),
+            "nullable bool key + nullable int4 measure",
+            if name == "grouped_int4_hidden_having" {
+                "bool key, exact SUM(int4), NUMERIC AVG(int4); COUNT(*) is internal only"
+            } else {
+                "bool key, exact SUM(int4), NUMERIC AVG(int4), COUNT(*)"
+            },
+            "GPU aggregate plus native HAVING and ORDER BY end-to-end warm gate",
         ),
         "grouped_count_date_candidate" => (
             "resident_dictionary_groupagg_nullable_date_count",
@@ -2163,6 +2468,13 @@ fn h3_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThresho
     };
     let expectation = current_phase6_decline.map_or_else(
         || match class {
+            H3LaneClass::Winning { .. }
+                if matches!(name, "h3_parent_res9" | "h3_parent_res15") && rows > 1_000_000 =>
+            {
+                BenchmarkLaneExpectation::NativeDecline {
+                    reason: "generic_groups_exceed_device_maximum",
+                }
+            }
             H3LaneClass::Winning { min_warm_speedup } if rows >= H3_GROUPED_WINNER_MIN_ROWS => {
                 BenchmarkLaneExpectation::GpuWinner { min_warm_speedup }
             }
@@ -2319,6 +2631,18 @@ fn h3_matrix_profile(name: &str) -> Option<H3MatrixProfile> {
             row_width: "8-byte h3index input and output",
             output_size: "parent h3index group key plus count rows",
             threshold_basis: "Phase 7 fused parent/count warm winner ratchet backed by cache-mode-both evidence",
+            decline_reason: "h3_parent_grouped_count_unexpected_native_decline",
+        },
+        "h3_parent_res4" | "h3_parent_res9" | "h3_parent_res15" => H3MatrixProfile {
+            lane: "h3_parent_bounded_resolution_rollup",
+            data_type: "nullable h3index -> h3index",
+            cardinality: "256 synthetic NYC-coordinate sites at resolution 15 plus NULL",
+            selectivity: "all rows grouped at the target resolution named by the workload",
+            result_count: grouped_result,
+            batch_count: "resident H3 transformation and compact hash COUNT",
+            row_width: "8-byte h3index plus nullable sidecar",
+            output_size: "parent h3index and exact COUNT",
+            threshold_basis: "bounded H3 high-resolution warm gate; first-use accounted separately",
             decline_reason: "h3_parent_grouped_count_unexpected_native_decline",
         },
         "h3_grid_distance" | "h3_dist_near" | "h3_dist_far" => H3MatrixProfile {
@@ -2602,7 +2926,9 @@ fn typed_reduce_structural_decline_reason(name: &str) -> Option<&'static str> {
             Some("shape_floating_accumulator_semantics")
         }
         "reduce_sum_f32" => Some("shape_unsupported_aggregate_input"),
-        "reduce_sum_i64" => Some("shape_numeric_accumulator_unavailable"),
+        // This legacy fixture does not pin vi8. Bigint arithmetic is now
+        // supported, but admission still requires the exact loaded snapshot.
+        "reduce_sum_i64" => Some("generic_numeric_estimate_unavailable"),
         "reduce_min_f64" | "reduce_max_f64" => Some("generic_serial_kernel_mode_unqualified"),
         _ => None,
     }
@@ -3062,8 +3388,15 @@ fn spatial_threshold_matrix_entry(
 ) -> Option<BenchmarkThresholdMatrixEntry> {
     let profile = spatial_matrix_profile(name)?;
     let work_product = (profile.vertices as u64).saturating_mul(rows as u64);
-    let descriptor_capability_decline =
-        name != "spatial_resident_agg_candidate" || rows != 1_000_000;
+    let descriptor_capability_decline = !match name {
+        "spatial_resident_agg_candidate" => rows == 1_000_000,
+        "spatial_holes_intersects"
+        | "spatial_holes_contains"
+        | "spatial_holes_within"
+        | "spatial_holes_covers"
+        | "spatial_holes_coveredby" => (1_000_000..=2_000_000).contains(&rows),
+        _ => false,
+    };
     let current_planner_decline =
         descriptor_capability_decline.then_some("generic_descriptor_capability");
     let expectation = current_planner_decline.map_or_else(
@@ -3089,7 +3422,11 @@ fn spatial_threshold_matrix_entry(
         prepared_geometry: profile.prepared_geometry,
         batch_count: spatial_batch_count(rows, profile.min_batch_size),
         row_width: "point geometry + tuple id",
-        output_size: "count aggregate emits one row; Custom Scan yields matching heap rows",
+        output_size: if profile.registered_gpu_predicate {
+            "resident predicate mask feeds COUNT; Custom Scan emits one aggregate row"
+        } else {
+            "count aggregate emits one row; native scan evaluates matching heap rows"
+        },
         dispatch_evidence: match expectation {
             BenchmarkLaneExpectation::GpuWinner { .. } => GENERIC_GPU_DISPATCH_EVIDENCE,
             BenchmarkLaneExpectation::NativeDecline { .. } => {
@@ -3144,6 +3481,20 @@ fn spatial_matrix_profile(name: &str) -> Option<SpatialMatrixProfile> {
         };
 
     Some(match name {
+        "spatial_holes_intersects"
+        | "spatial_holes_contains"
+        | "spatial_holes_within"
+        | "spatial_holes_covers"
+        | "spatial_holes_coveredby" => {
+            let mut profile = base(
+                1_027,
+                Some(23),
+                "synthetic ~23% selectivity with two holes, NULLs and boundary rows",
+                "resident_point_polygon_topology_count",
+            );
+            profile.registered_gpu_predicate = true;
+            profile
+        }
         "spatial_resident_agg_candidate" => {
             let mut profile = base(
                 1_025,
@@ -3497,6 +3848,9 @@ fn static_workload_name(name: &str) -> &'static str {
         "h3_latlng_res15" => "h3_latlng_res15",
         "h3_fp64_ops" => "h3_fp64_ops",
         "h3_cell_to_parent" => "h3_cell_to_parent",
+        "h3_parent_res4" => "h3_parent_res4",
+        "h3_parent_res9" => "h3_parent_res9",
+        "h3_parent_res15" => "h3_parent_res15",
         "h3_grid_distance" => "h3_grid_distance",
         "h3_dist_near" => "h3_dist_near",
         "h3_dist_far" => "h3_dist_far",
@@ -3529,6 +3883,37 @@ fn static_workload_name(name: &str) -> &'static str {
         "grouped_count_timestamptz_candidate" => "grouped_count_timestamptz_candidate",
         "grouped_int2_sum_avg_candidate" => "grouped_int2_sum_avg_candidate",
         "grouped_int4_sum_avg_candidate" => "grouped_int4_sum_avg_candidate",
+        "grouped_int4_native_having" => "grouped_int4_native_having",
+        "grouped_int4_hidden_having" => "grouped_int4_hidden_having",
+        "grouped_int4_avg_only" => "grouped_int4_avg_only",
+        "grouped_multikey_integer" => "grouped_multikey_integer",
+        "grouped_multimeasure_integer" => "grouped_multimeasure_integer",
+        "grouped_computed_integer" => "grouped_computed_integer",
+        "global_computed_integer" => "global_computed_integer",
+        "grouped_scalar_program" => "grouped_scalar_program",
+        "global_scalar_program" => "global_scalar_program",
+        "spatial_global_scalar_program" => "spatial_global_scalar_program",
+        "spatial_grouped_scalar_program" => "spatial_grouped_scalar_program",
+        "grouped_coalesced_integer" => "grouped_coalesced_integer",
+        "grouped_simple_case" => "grouped_simple_case",
+        "grouped_simple_case_linear" => "grouped_simple_case_linear",
+        "grouped_membership_integer" => "grouped_membership_integer",
+        "spatial_grouped_membership_integer" => "spatial_grouped_membership_integer",
+        "grouped_scalar_filter" => "grouped_scalar_filter",
+        "grouped_scalar_where" => "grouped_scalar_where",
+        "spatial_grouped_scalar_where" => "spatial_grouped_scalar_where",
+        "grouped_null_safe_where" => "grouped_null_safe_where",
+        "spatial_grouped_null_safe_where" => "spatial_grouped_null_safe_where",
+        "grouped_bounded_ratio" => "grouped_bounded_ratio",
+        "spatial_grouped_bounded_ratio" => "spatial_grouped_bounded_ratio",
+        "grouped_derived_ratio" => "grouped_derived_ratio",
+        "spatial_grouped_derived_ratio" => "spatial_grouped_derived_ratio",
+        "spatial_grouped_scalar_filter" => "spatial_grouped_scalar_filter",
+        "grouped_date_span" => "grouped_date_span",
+        "spatial_grouped_date_span" => "spatial_grouped_date_span",
+        "grouped_filtered_integer" => "grouped_filtered_integer",
+        "grouped_boolean_filtered_integer" => "grouped_boolean_filtered_integer",
+        "grouped_conditional_integer_counts" => "grouped_conditional_integer_counts",
         "grouped_agg_high_card" => "grouped_agg_high_card",
         "gpu_hashagg_med_card" => "gpu_hashagg_med_card",
         "timeseries_sensor_rollup" => "timeseries_sensor_rollup",
@@ -3587,6 +3972,11 @@ fn static_workload_name(name: &str) -> &'static str {
         "sort_float4" => "sort_float4",
         "sort_float8" => "sort_float8",
         "spatial_resident_agg_candidate" => "spatial_resident_agg_candidate",
+        "spatial_holes_intersects" => "spatial_holes_intersects",
+        "spatial_holes_covers" => "spatial_holes_covers",
+        "spatial_holes_coveredby" => "spatial_holes_coveredby",
+        "spatial_holes_contains" => "spatial_holes_contains",
+        "spatial_holes_within" => "spatial_holes_within",
         "spatial_filter" => "spatial_filter",
         "spatial_selectivity" => "spatial_selectivity",
         "spatial_mega_1kv" => "spatial_mega_1kv",
@@ -3660,6 +4050,25 @@ fn static_workload_name(name: &str) -> &'static str {
 mod tests {
     use super::*;
 
+    #[test]
+    fn computed_integer_winner_contract_requires_selected_evidence() {
+        // Grouped arithmetic is registered for characterization, but normal
+        // parallel PostgreSQL still wins admission on the measured fixtures.
+        // Keep the independently verified global winner contract intact.
+        let winners = benchmark_expected_winner_names();
+        assert!(!winners.contains(&"grouped_computed_integer"));
+        assert!(winners.contains(&"global_computed_integer"));
+        for rows in [GROUPAGG_WINNER_MIN_ROWS, DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS] {
+            assert!(benchmark_threshold_matrix_entry("grouped_computed_integer", rows).is_none());
+            assert!(matches!(
+                benchmark_threshold_matrix_entry("global_computed_integer", rows)
+                    .expect("verified global arithmetic envelope")
+                    .expectation,
+                BenchmarkLaneExpectation::GpuWinner { .. }
+            ));
+        }
+    }
+
     fn supported_default_suite_probe(name: &str, rows: usize) -> bool {
         matches!(
             (name, rows),
@@ -3674,12 +4083,98 @@ mod tests {
                     | "grouped_count_timestamptz_candidate"
                     | "grouped_int2_sum_avg_candidate"
                     | "grouped_int4_sum_avg_candidate"
+                    | "grouped_int4_native_having"
+                    | "grouped_int4_hidden_having"
+                    | "grouped_int4_avg_only"
+                    | "grouped_multikey_integer"
+                    | "numeric_global_sum_avg"
+                    | "bigint_global_sum_avg"
+                    | "bigint_grouped_sum_avg"
+                    | "bigint_filtered_mixed"
+                    | "bigint_nullable_filters"
+                    | "numeric_global_count"
+                    | "numeric_mixed_global"
+                    | "numeric_where_ranges"
+                    | "numeric_where_mask"
+                    | "numeric_mixed_grouped"
+                    | "numeric_grouped_counts"
+                    | "numeric_grouped_sum_count"
+                    | "numeric_grouped_three_keys"
+                    | "numeric_grouped_wide_scale"
+                    | "numeric_grouped_filtered"
+                    | "grouped_multimeasure_integer"
+                    | "grouped_computed_integer"
+                    | "global_computed_integer"
+                    | "grouped_scalar_program"
+                    | "global_scalar_program"
+                    | "grouped_coalesced_integer"
+                    | "grouped_simple_case"
+                    | "grouped_simple_case_linear"
+                    | "grouped_membership_integer"
+                    | "grouped_scalar_filter"
+                    | "grouped_scalar_where"
+                    | "grouped_date_span"
+                    | "grouped_filtered_integer"
+                    | "grouped_null_safe_where"
+                    | "grouped_boolean_filtered_integer"
+                    | "grouped_bounded_ratio"
+                    | "grouped_derived_ratio"
+                    | "grouped_conditional_integer_counts"
+                    | "global_boolean_filtered_integer"
+                    | "integer_where_ranges"
+                    | "integer_where_mask"
+                    | "global_conditional_integer_counts"
                     | "aggregate_filter_grouped_agg_int4"
                     | "and_range_predicate_expression_grouped_agg_int4",
                 GROUPAGG_WINNER_MIN_ROWS
             ) | (
                 "raster_ndvi" | "raster_slope" | "raster_reclass" | "raster_algebra_deep",
                 100
+            ) | (
+                "spatial_holes_intersects"
+                    | "spatial_global_scalar_program"
+                    | "spatial_grouped_scalar_program"
+                    | "spatial_grouped_membership_integer"
+                    | "spatial_grouped_scalar_filter"
+                    | "spatial_grouped_scalar_where"
+                    | "grouped_null_safe_where"
+                    | "spatial_grouped_null_safe_where"
+                    | "grouped_bounded_ratio"
+                    | "spatial_grouped_bounded_ratio"
+                    | "grouped_derived_ratio"
+                    | "spatial_grouped_derived_ratio"
+                    | "spatial_grouped_date_span"
+                    | "grouped_coalesced_integer"
+                    | "grouped_simple_case"
+                    | "grouped_simple_case_linear"
+                    | "grouped_membership_integer"
+                    | "grouped_scalar_filter"
+                    | "grouped_scalar_where"
+                    | "grouped_date_span"
+                    | "spatial_holes_contains"
+                    | "spatial_holes_within"
+                    | "spatial_holes_covers"
+                    | "spatial_holes_coveredby",
+                2_000_000
+            ) | (
+                "nyc_taxi_h3_res9"
+                    | "nyc_taxi_airport_indexed"
+                    | "nyc_taxi_airport_scan"
+                    | "nyc_taxi_fare_rollup"
+                    | "nyc_taxi_mixed_rollup"
+                    | "nyc_taxi_filtered_rollup"
+                    | "nyc_taxi_airport_rollup"
+                    | "nyc_taxi_airport_passengers"
+                    | "nyc_taxi_passenger_where"
+                    | "nyc_taxi_nullable_passengers"
+                    | "nyc_taxi_airport_nullable_passengers"
+                    | "nyc_taxi_passenger_filters"
+                    | "nyc_taxi_airport_passenger_filters"
+                    | "nyc_taxi_airport_vendor_passengers"
+                    | "nyc_taxi_airport_vendor_rollup"
+                    | "nyc_taxi_passenger_extrema"
+                    | "nyc_taxi_airport_passenger_extrema",
+                nyc_taxi::FULL_ROWS
             )
         )
     }
@@ -4538,7 +5033,7 @@ mod tests {
             ("gpu_reduce_sum", "shape_floating_accumulator_semantics"),
             ("reduce_sum_f32", "shape_unsupported_aggregate_input"),
             ("reduce_sum_f64", "shape_floating_accumulator_semantics"),
-            ("reduce_sum_i64", "shape_numeric_accumulator_unavailable"),
+            ("reduce_sum_i64", "generic_numeric_estimate_unavailable"),
             ("reduce_min_f64", "generic_serial_kernel_mode_unqualified"),
             ("reduce_max_f64", "generic_serial_kernel_mode_unqualified"),
             ("reduce_multi", "shape_floating_accumulator_semantics"),
@@ -4582,7 +5077,7 @@ mod tests {
             .expect("reduce_sum_i64 threshold entry");
         assert_eq!(
             entry.expectation.decline_reason(),
-            Some("shape_numeric_accumulator_unavailable")
+            Some("generic_numeric_estimate_unavailable")
         );
 
         for name in ["reduce_min_f64", "reduce_max_f64"] {
@@ -5428,11 +5923,19 @@ mod tests {
         }
     }
 
-    /// The current release contract has one exact, planner-reachable H3 winner.
+    /// The H3 rollups retain explicit, planner-reachable performance contracts.
     #[test]
     fn test_h3_canonical_winning_lanes_present() {
         let winners = h3_winning_lane_names();
-        assert_eq!(winners, vec!["h3_cell_to_parent"]);
+        assert_eq!(
+            winners,
+            vec![
+                "h3_cell_to_parent",
+                "h3_parent_res4",
+                "h3_parent_res9",
+                "h3_parent_res15"
+            ]
+        );
     }
 
     /// Structurally unsupported H3 query shapes remain fail-closed parity lanes.
@@ -5684,13 +6187,13 @@ mod tests {
     }
 
     #[test]
-    fn test_every_workload_query_starts_with_select() {
+    fn test_every_workload_query_starts_with_select_or_with() {
         for w in &all_workloads() {
             let query = w.query_sql();
             let trimmed = query.trim().to_lowercase();
             assert!(
-                trimmed.starts_with("select"),
-                "workload '{}' query does not start with SELECT: {}",
+                trimmed.starts_with("select") || trimmed.starts_with("with"),
+                "workload '{}' query does not start with SELECT or WITH: {}",
                 w.name(),
                 query.chars().take(60).collect::<String>()
             );

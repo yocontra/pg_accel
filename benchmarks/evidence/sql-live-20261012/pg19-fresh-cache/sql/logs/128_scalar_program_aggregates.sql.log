@@ -1,0 +1,255 @@
+=== 128_scalar_program_aggregates ===
+SET
+SET
+SELECT 250017
+ANALYZE
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=(a+1)*(b-2) keys= restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=(a+1)*(b-2) keys= restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=(a+1)*(b-2) keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=(a+1)*(b-2) keys=g restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=(a+1)*(b-2) keys=g restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=(a+1)*(b-2) keys=g restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=(a+1)*(b-2) keys=g,flag restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=(a+1)*(b-2) keys=g,flag restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=(a+1)*(b-2) keys=g,flag restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=(a+1)*(b-2) keys=g,flag,p restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=(a+1)*(b-2) keys=g,flag,p restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=(a+1)*(b-2) keys=g,flag,p restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=COALESCE(a,b,0) keys= restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=COALESCE(a,b,0) keys= restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=COALESCE(a,b,0) keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=COALESCE(a,b,0) keys=g restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=COALESCE(a,b,0) keys=g restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=COALESCE(a,b,0) keys=g restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=COALESCE(a,b,0) keys=g,flag restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=COALESCE(a,b,0) keys=g,flag restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=COALESCE(a,b,0) keys=g,flag restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=COALESCE(a,b,0) keys=g,flag,p restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=COALESCE(a,b,0) keys=g,flag,p restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=COALESCE(a,b,0) keys=g,flag,p restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=-COALESCE(a,0) keys= restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=-COALESCE(a,0) keys= restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=-COALESCE(a,0) keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=-COALESCE(a,0) keys=g restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=-COALESCE(a,0) keys=g restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=-COALESCE(a,0) keys=g restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=-COALESCE(a,0) keys=g,flag restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=-COALESCE(a,0) keys=g,flag restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=-COALESCE(a,0) keys=g,flag restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=-COALESCE(a,0) keys=g,flag,p restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=-COALESCE(a,0) keys=g,flag,p restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=-COALESCE(a,0) keys=g,flag,p restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b IS NULL THEN a WHEN a>0 THEN (a+b)*(a-b) ELSE COALESCE(a,0)-b END keys= restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b IS NULL THEN a WHEN a>0 THEN (a+b)*(a-b) ELSE COALESCE(a,0)-b END keys= restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b IS NULL THEN a WHEN a>0 THEN (a+b)*(a-b) ELSE COALESCE(a,0)-b END keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b IS NULL THEN a WHEN a>0 THEN (a+b)*(a-b) ELSE COALESCE(a,0)-b END keys=g restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b IS NULL THEN a WHEN a>0 THEN (a+b)*(a-b) ELSE COALESCE(a,0)-b END keys=g restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b IS NULL THEN a WHEN a>0 THEN (a+b)*(a-b) ELSE COALESCE(a,0)-b END keys=g restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b IS NULL THEN a WHEN a>0 THEN (a+b)*(a-b) ELSE COALESCE(a,0)-b END keys=g,flag restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b IS NULL THEN a WHEN a>0 THEN (a+b)*(a-b) ELSE COALESCE(a,0)-b END keys=g,flag restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b IS NULL THEN a WHEN a>0 THEN (a+b)*(a-b) ELSE COALESCE(a,0)-b END keys=g,flag restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b IS NULL THEN a WHEN a>0 THEN (a+b)*(a-b) ELSE COALESCE(a,0)-b END keys=g,flag,p restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b IS NULL THEN a WHEN a>0 THEN (a+b)*(a-b) ELSE COALESCE(a,0)-b END keys=g,flag,p restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b IS NULL THEN a WHEN a>0 THEN (a+b)*(a-b) ELSE COALESCE(a,0)-b END keys=g,flag,p restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a/b END keys= restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a/b END keys= restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a/b END keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a/b END keys=g restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a/b END keys=g restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a/b END keys=g restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a/b END keys=g,flag restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a/b END keys=g,flag restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a/b END keys=g,flag restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a/b END keys=g,flag,p restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a/b END keys=g,flag,p restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a/b END keys=g,flag,p restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a%b END keys= restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a%b END keys= restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a%b END keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a%b END keys=g restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a%b END keys=g restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a%b END keys=g restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a%b END keys=g,flag restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a%b END keys=g,flag restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a%b END keys=g,flag restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a%b END keys=g,flag,p restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a%b END keys=g,flag,p restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b=0 THEN NULL ELSE a%b END keys=g,flag,p restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=1 keys= restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=1 keys= restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=1 keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=1 keys=g restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=1 keys=g restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=1 keys=g restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=1 keys=g,flag restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=1 keys=g,flag restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=1 keys=g,flag restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=1 keys=g,flag,p restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=1 keys=g,flag,p restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=1 keys=g,flag,p restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=NULL::int4 keys= restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=NULL::int4 keys= restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=NULL::int4 keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=NULL::int4 keys=g restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=NULL::int4 keys=g restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=NULL::int4 keys=g restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=NULL::int4 keys=g,flag restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=NULL::int4 keys=g,flag restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=NULL::int4 keys=g,flag restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=NULL::int4 keys=g,flag,p restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=NULL::int4 keys=g,flag,p restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=NULL::int4 keys=g,flag,p restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a WHEN 7 THEN b WHEN -7 THEN a+b ELSE a-b END keys= restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a WHEN 7 THEN b WHEN -7 THEN a+b ELSE a-b END keys= restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a WHEN 7 THEN b WHEN -7 THEN a+b ELSE a-b END keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a WHEN 7 THEN b WHEN -7 THEN a+b ELSE a-b END keys=g restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a WHEN 7 THEN b WHEN -7 THEN a+b ELSE a-b END keys=g restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a WHEN 7 THEN b WHEN -7 THEN a+b ELSE a-b END keys=g restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a WHEN 7 THEN b WHEN -7 THEN a+b ELSE a-b END keys=g,flag restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a WHEN 7 THEN b WHEN -7 THEN a+b ELSE a-b END keys=g,flag restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a WHEN 7 THEN b WHEN -7 THEN a+b ELSE a-b END keys=g,flag restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a WHEN 7 THEN b WHEN -7 THEN a+b ELSE a-b END keys=g,flag,p restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a WHEN 7 THEN b WHEN -7 THEN a+b ELSE a-b END keys=g,flag,p restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a WHEN 7 THEN b WHEN -7 THEN a+b ELSE a-b END keys=g,flag,p restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE p WHEN true THEN a WHEN false THEN b ELSE 0 END keys= restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE p WHEN true THEN a WHEN false THEN b ELSE 0 END keys= restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE p WHEN true THEN a WHEN false THEN b ELSE 0 END keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE p WHEN true THEN a WHEN false THEN b ELSE 0 END keys=g restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE p WHEN true THEN a WHEN false THEN b ELSE 0 END keys=g restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE p WHEN true THEN a WHEN false THEN b ELSE 0 END keys=g restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE p WHEN true THEN a WHEN false THEN b ELSE 0 END keys=g,flag restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE p WHEN true THEN a WHEN false THEN b ELSE 0 END keys=g,flag restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE p WHEN true THEN a WHEN false THEN b ELSE 0 END keys=g,flag restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE p WHEN true THEN a WHEN false THEN b ELSE 0 END keys=g,flag,p restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE p WHEN true THEN a WHEN false THEN b ELSE 0 END keys=g,flag,p restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE p WHEN true THEN a WHEN false THEN b ELSE 0 END keys=g,flag,p restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a WHEN NULL THEN 99 WHEN b THEN 42 ELSE a END keys= restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a WHEN NULL THEN 99 WHEN b THEN 42 ELSE a END keys= restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a WHEN NULL THEN 99 WHEN b THEN 42 ELSE a END keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a WHEN NULL THEN 99 WHEN b THEN 42 ELSE a END keys=g restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a WHEN NULL THEN 99 WHEN b THEN 42 ELSE a END keys=g restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a WHEN NULL THEN 99 WHEN b THEN 42 ELSE a END keys=g restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a WHEN NULL THEN 99 WHEN b THEN 42 ELSE a END keys=g,flag restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a WHEN NULL THEN 99 WHEN b THEN 42 ELSE a END keys=g,flag restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a WHEN NULL THEN 99 WHEN b THEN 42 ELSE a END keys=g,flag restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a WHEN NULL THEN 99 WHEN b THEN 42 ELSE a END keys=g,flag,p restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a WHEN NULL THEN 99 WHEN b THEN 42 ELSE a END keys=g,flag,p restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a WHEN NULL THEN 99 WHEN b THEN 42 ELSE a END keys=g,flag,p restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a+b WHEN 10 THEN CASE b WHEN 3 THEN 42 ELSE a END ELSE b END keys= restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a+b WHEN 10 THEN CASE b WHEN 3 THEN 42 ELSE a END ELSE b END keys= restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a+b WHEN 10 THEN CASE b WHEN 3 THEN 42 ELSE a END ELSE b END keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a+b WHEN 10 THEN CASE b WHEN 3 THEN 42 ELSE a END ELSE b END keys=g restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a+b WHEN 10 THEN CASE b WHEN 3 THEN 42 ELSE a END ELSE b END keys=g restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a+b WHEN 10 THEN CASE b WHEN 3 THEN 42 ELSE a END ELSE b END keys=g restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a+b WHEN 10 THEN CASE b WHEN 3 THEN 42 ELSE a END ELSE b END keys=g,flag restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a+b WHEN 10 THEN CASE b WHEN 3 THEN 42 ELSE a END ELSE b END keys=g,flag restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a+b WHEN 10 THEN CASE b WHEN 3 THEN 42 ELSE a END ELSE b END keys=g,flag restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a+b WHEN 10 THEN CASE b WHEN 3 THEN 42 ELSE a END ELSE b END keys=g,flag,p restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a+b WHEN 10 THEN CASE b WHEN 3 THEN 42 ELSE a END ELSE b END keys=g,flag,p restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE a+b WHEN 10 THEN CASE b WHEN 3 THEN 42 ELSE a END ELSE b END keys=g,flag,p restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (7,-7,NULL) THEN b ELSE a-b END keys= restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (7,-7,NULL) THEN b ELSE a-b END keys= restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (7,-7,NULL) THEN b ELSE a-b END keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (7,-7,NULL) THEN b ELSE a-b END keys=g restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (7,-7,NULL) THEN b ELSE a-b END keys=g restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 CASE/membership native cost decline: SELECT g,sum(CASE WHEN a IN (7,-7,NULL) THEN b ELSE a-b END) s,avg(CASE WHEN a IN (7,-7,NULL) THEN b ELSE a-b END) a,count(CASE WHEN a IN (7,-7,NULL) THEN b ELSE a-b END) c,min(CASE WHEN a IN (7,-7,NULL) THEN b ELSE a-b END) lo,max(CASE WHEN a IN (7,-7,NULL) THEN b ELSE a-b END) hi,count(*) n FROM _scalar_program WHERE flag=2 OR flag IS NULL GROUP BY g
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (7,-7,NULL) THEN b ELSE a-b END keys=g,flag restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (7,-7,NULL) THEN b ELSE a-b END keys=g,flag restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 CASE/membership native cost decline: SELECT g,flag,sum(CASE WHEN a IN (7,-7,NULL) THEN b ELSE a-b END) s,avg(CASE WHEN a IN (7,-7,NULL) THEN b ELSE a-b END) a,count(CASE WHEN a IN (7,-7,NULL) THEN b ELSE a-b END) c,min(CASE WHEN a IN (7,-7,NULL) THEN b ELSE a-b END) lo,max(CASE WHEN a IN (7,-7,NULL) THEN b ELSE a-b END) hi,count(*) n FROM _scalar_program WHERE flag=2 OR flag IS NULL GROUP BY g,flag
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (7,-7,NULL) THEN b ELSE a-b END keys=g,flag,p restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (7,-7,NULL) THEN b ELSE a-b END keys=g,flag,p restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (7,-7,NULL) THEN b ELSE a-b END keys=g,flag,p restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b NOT IN (-2,-1,0,1,2) THEN a ELSE b END keys= restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b NOT IN (-2,-1,0,1,2) THEN a ELSE b END keys= restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b NOT IN (-2,-1,0,1,2) THEN a ELSE b END keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b NOT IN (-2,-1,0,1,2) THEN a ELSE b END keys=g restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b NOT IN (-2,-1,0,1,2) THEN a ELSE b END keys=g restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b NOT IN (-2,-1,0,1,2) THEN a ELSE b END keys=g restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b NOT IN (-2,-1,0,1,2) THEN a ELSE b END keys=g,flag restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b NOT IN (-2,-1,0,1,2) THEN a ELSE b END keys=g,flag restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b NOT IN (-2,-1,0,1,2) THEN a ELSE b END keys=g,flag restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b NOT IN (-2,-1,0,1,2) THEN a ELSE b END keys=g,flag,p restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b NOT IN (-2,-1,0,1,2) THEN a ELSE b END keys=g,flag,p restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN b NOT IN (-2,-1,0,1,2) THEN a ELSE b END keys=g,flag,p restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN (a+b) IN (7,10,42,NULL) THEN a*b ELSE a+b END keys= restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN (a+b) IN (7,10,42,NULL) THEN a*b ELSE a+b END keys= restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN (a+b) IN (7,10,42,NULL) THEN a*b ELSE a+b END keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN (a+b) IN (7,10,42,NULL) THEN a*b ELSE a+b END keys=g restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN (a+b) IN (7,10,42,NULL) THEN a*b ELSE a+b END keys=g restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 CASE/membership native cost decline: SELECT g,sum(CASE WHEN (a+b) IN (7,10,42,NULL) THEN a*b ELSE a+b END) s,avg(CASE WHEN (a+b) IN (7,10,42,NULL) THEN a*b ELSE a+b END) a,count(CASE WHEN (a+b) IN (7,10,42,NULL) THEN a*b ELSE a+b END) c,min(CASE WHEN (a+b) IN (7,10,42,NULL) THEN a*b ELSE a+b END) lo,max(CASE WHEN (a+b) IN (7,10,42,NULL) THEN a*b ELSE a+b END) hi,count(*) n FROM _scalar_program WHERE flag=2 OR flag IS NULL GROUP BY g
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN (a+b) IN (7,10,42,NULL) THEN a*b ELSE a+b END keys=g,flag restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN (a+b) IN (7,10,42,NULL) THEN a*b ELSE a+b END keys=g,flag restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 CASE/membership native cost decline: SELECT g,flag,sum(CASE WHEN (a+b) IN (7,10,42,NULL) THEN a*b ELSE a+b END) s,avg(CASE WHEN (a+b) IN (7,10,42,NULL) THEN a*b ELSE a+b END) a,count(CASE WHEN (a+b) IN (7,10,42,NULL) THEN a*b ELSE a+b END) c,min(CASE WHEN (a+b) IN (7,10,42,NULL) THEN a*b ELSE a+b END) lo,max(CASE WHEN (a+b) IN (7,10,42,NULL) THEN a*b ELSE a+b END) hi,count(*) n FROM _scalar_program WHERE flag=2 OR flag IS NULL GROUP BY g,flag
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN (a+b) IN (7,10,42,NULL) THEN a*b ELSE a+b END keys=g,flag,p restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN (a+b) IN (7,10,42,NULL) THEN a*b ELSE a+b END keys=g,flag,p restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 CASE/membership native cost decline: SELECT g,flag,p,sum(CASE WHEN (a+b) IN (7,10,42,NULL) THEN a*b ELSE a+b END) s,avg(CASE WHEN (a+b) IN (7,10,42,NULL) THEN a*b ELSE a+b END) a,count(CASE WHEN (a+b) IN (7,10,42,NULL) THEN a*b ELSE a+b END) c,min(CASE WHEN (a+b) IN (7,10,42,NULL) THEN a*b ELSE a+b END) lo,max(CASE WHEN (a+b) IN (7,10,42,NULL) THEN a*b ELSE a+b END) hi,count(*) n FROM _scalar_program WHERE flag=2 OR flag IS NULL GROUP BY g,flag,p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN p IN (true,NULL) THEN a ELSE b END keys= restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN p IN (true,NULL) THEN a ELSE b END keys= restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN p IN (true,NULL) THEN a ELSE b END keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN p IN (true,NULL) THEN a ELSE b END keys=g restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN p IN (true,NULL) THEN a ELSE b END keys=g restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN p IN (true,NULL) THEN a ELSE b END keys=g restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN p IN (true,NULL) THEN a ELSE b END keys=g,flag restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN p IN (true,NULL) THEN a ELSE b END keys=g,flag restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN p IN (true,NULL) THEN a ELSE b END keys=g,flag restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN p IN (true,NULL) THEN a ELSE b END keys=g,flag,p restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN p IN (true,NULL) THEN a ELSE b END keys=g,flag,p restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN p IN (true,NULL) THEN a ELSE b END keys=g,flag,p restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (7,7,7) THEN b ELSE a END keys= restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (7,7,7) THEN b ELSE a END keys= restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (7,7,7) THEN b ELSE a END keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (7,7,7) THEN b ELSE a END keys=g restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (7,7,7) THEN b ELSE a END keys=g restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (7,7,7) THEN b ELSE a END keys=g restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (7,7,7) THEN b ELSE a END keys=g,flag restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (7,7,7) THEN b ELSE a END keys=g,flag restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (7,7,7) THEN b ELSE a END keys=g,flag restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (7,7,7) THEN b ELSE a END keys=g,flag,p restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (7,7,7) THEN b ELSE a END keys=g,flag,p restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (7,7,7) THEN b ELSE a END keys=g,flag,p restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (-2147483648,2147483647,NULL) THEN b ELSE a END keys= restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (-2147483648,2147483647,NULL) THEN b ELSE a END keys= restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (-2147483648,2147483647,NULL) THEN b ELSE a END keys= restriction= WHERE flag=2 OR flag IS NULL
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (-2147483648,2147483647,NULL) THEN b ELSE a END keys=g restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (-2147483648,2147483647,NULL) THEN b ELSE a END keys=g restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 CASE/membership native cost decline: SELECT g,sum(CASE WHEN a IN (-2147483648,2147483647,NULL) THEN b ELSE a END) s,avg(CASE WHEN a IN (-2147483648,2147483647,NULL) THEN b ELSE a END) a,count(CASE WHEN a IN (-2147483648,2147483647,NULL) THEN b ELSE a END) c,min(CASE WHEN a IN (-2147483648,2147483647,NULL) THEN b ELSE a END) lo,max(CASE WHEN a IN (-2147483648,2147483647,NULL) THEN b ELSE a END) hi,count(*) n FROM _scalar_program WHERE flag=2 OR flag IS NULL GROUP BY g
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (-2147483648,2147483647,NULL) THEN b ELSE a END keys=g,flag restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (-2147483648,2147483647,NULL) THEN b ELSE a END keys=g,flag restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 CASE/membership native cost decline: SELECT g,flag,sum(CASE WHEN a IN (-2147483648,2147483647,NULL) THEN b ELSE a END) s,avg(CASE WHEN a IN (-2147483648,2147483647,NULL) THEN b ELSE a END) a,count(CASE WHEN a IN (-2147483648,2147483647,NULL) THEN b ELSE a END) c,min(CASE WHEN a IN (-2147483648,2147483647,NULL) THEN b ELSE a END) lo,max(CASE WHEN a IN (-2147483648,2147483647,NULL) THEN b ELSE a END) hi,count(*) n FROM _scalar_program WHERE flag=2 OR flag IS NULL GROUP BY g,flag
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (-2147483648,2147483647,NULL) THEN b ELSE a END keys=g,flag,p restriction=
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 selected expression=CASE WHEN a IN (-2147483648,2147483647,NULL) THEN b ELSE a END keys=g,flag,p restriction= WHERE p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 CASE/membership native cost decline: SELECT g,flag,p,sum(CASE WHEN a IN (-2147483648,2147483647,NULL) THEN b ELSE a END) s,avg(CASE WHEN a IN (-2147483648,2147483647,NULL) THEN b ELSE a END) a,count(CASE WHEN a IN (-2147483648,2147483647,NULL) THEN b ELSE a END) c,min(CASE WHEN a IN (-2147483648,2147483647,NULL) THEN b ELSE a END) lo,max(CASE WHEN a IN (-2147483648,2147483647,NULL) THEN b ELSE a END) hi,count(*) n FROM _scalar_program WHERE flag=2 OR flag IS NULL GROUP BY g,flag,p
+psql:/Users/contra/Projects/pg_accel/sql/tests/128_scalar_program_aggregates.sql:81: NOTICE:  128 scalar matrix selected 208 query shapes (154 grouped)
+DO
+PGACCEL_ASSERT_OK:128_scalar_program_aggregates.assert_001
+DO
+PGACCEL_ASSERT_OK:128_scalar_program_aggregates.assert_002
+SET
+PREPARE
+PREPARE
+DO
+PGACCEL_ASSERT_OK:128_scalar_program_aggregates.assert_003
+DEALLOCATE
+DEALLOCATE
+RESET
+INSERT 0 250017
+ANALYZE
+DO
+PGACCEL_ASSERT_OK:128_scalar_program_aggregates.assert_004
+DO
+PGACCEL_ASSERT_OK:128_scalar_program_aggregates.assert_005
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ f
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:128_scalar_program_aggregates

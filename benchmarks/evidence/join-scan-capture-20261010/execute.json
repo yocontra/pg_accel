@@ -1,0 +1,168 @@
+{
+  "calls": [
+    {
+      "base_declaration": "0x73f913528",
+      "base_parameter": 3,
+      "callee_id": "0x73f914a50",
+      "conditional": false,
+      "destination_id": "0x73f914510",
+      "destination_name": "heads",
+      "destination_path": [],
+      "end": 5567666,
+      "local_reads": [],
+      "nullable": false,
+      "start": 5567630
+    },
+    {
+      "base_declaration": "0x73f913528",
+      "base_parameter": 3,
+      "callee_id": "0x73f914a50",
+      "conditional": false,
+      "destination_id": "0x73f914e18",
+      "destination_name": "next",
+      "destination_path": [],
+      "end": 5567718,
+      "local_reads": [],
+      "nullable": false,
+      "start": 5567683
+    },
+    {
+      "base_declaration": "0x73f913528",
+      "base_parameter": 3,
+      "callee_id": "0x73f915810",
+      "conditional": false,
+      "destination_id": "0x73f9152e8",
+      "destination_name": "counts",
+      "destination_path": [],
+      "end": 5567775,
+      "local_reads": [],
+      "nullable": false,
+      "start": 5567737
+    },
+    {
+      "base_declaration": "0x73f913528",
+      "base_parameter": 3,
+      "callee_id": "0x73f916240",
+      "conditional": false,
+      "destination_id": "0x73f915d20",
+      "destination_name": "device_request",
+      "destination_path": [],
+      "end": 5567907,
+      "local_reads": [],
+      "nullable": false,
+      "start": 5567850
+    },
+    {
+      "base_declaration": "0x73f913528",
+      "base_parameter": 3,
+      "callee_id": "0x73f915810",
+      "conditional": true,
+      "destination_id": "0x73f926690",
+      "destination_name": "input",
+      "destination_path": [],
+      "end": 5569829,
+      "local_reads": [
+        "0x73f925a50"
+      ],
+      "nullable": false,
+      "start": 5569769
+    },
+    {
+      "base_declaration": "0x73f913528",
+      "base_parameter": 3,
+      "callee_id": "0x73f915810",
+      "conditional": false,
+      "destination_id": "0x73f926d90",
+      "destination_name": "offsets",
+      "destination_path": [],
+      "end": 5569889,
+      "local_reads": [
+        "0x73f925a50",
+        "0x73f925c18"
+      ],
+      "nullable": false,
+      "start": 5569851
+    },
+    {
+      "base_declaration": "0x73f913528",
+      "base_parameter": 3,
+      "callee_id": "0x73f915810",
+      "conditional": false,
+      "destination_id": "0x73f927258",
+      "destination_name": "sums",
+      "destination_path": [],
+      "end": 5569943,
+      "local_reads": [
+        "0x73f925c18"
+      ],
+      "nullable": false,
+      "start": 5569908
+    },
+    {
+      "base_declaration": "0x73f913528",
+      "base_parameter": 3,
+      "callee_id": "0x73f915810",
+      "conditional": false,
+      "destination_id": "0x73f932678",
+      "destination_name": "child",
+      "destination_path": [],
+      "end": 5570568,
+      "local_reads": [
+        "0x73f9321b8",
+        "0x73f9323d8"
+      ],
+      "nullable": false,
+      "start": 5570530
+    },
+    {
+      "base_declaration": "0x73f913528",
+      "base_parameter": 3,
+      "callee_id": "0x73f915810",
+      "conditional": false,
+      "destination_id": "0x73f932b48",
+      "destination_name": "parent",
+      "destination_path": [],
+      "end": 5570654,
+      "local_reads": [
+        "0x73f9321b8"
+      ],
+      "nullable": false,
+      "start": 5570595
+    },
+    {
+      "base_declaration": "0x73f913528",
+      "base_parameter": 3,
+      "callee_id": "0x73f915810",
+      "conditional": false,
+      "destination_id": "0x73f936030",
+      "destination_name": "total",
+      "destination_path": [],
+      "end": 5570915,
+      "local_reads": [],
+      "nullable": false,
+      "start": 5570848
+    },
+    {
+      "base_declaration": "0x73f913528",
+      "base_parameter": 3,
+      "callee_id": "0x73f915810",
+      "conditional": false,
+      "destination_id": "0x73f936c90",
+      "destination_name": "offsets",
+      "destination_path": [],
+      "end": 5571221,
+      "local_reads": [],
+      "nullable": false,
+      "start": 5571172
+    }
+  ],
+  "detail": "stable workspace parameter, checked offset initializer/update expressions, typed call arguments and returned-alias facts; caller not approved",
+  "offset_inputs": [
+    "0x73f925a50",
+    "0x73f925c18",
+    "0x73f9321b8",
+    "0x73f9323d8"
+  ],
+  "ok": true,
+  "source_sha256": "86b60452b6c99098ddb8088eda7087119a5f7a109ea37064b32707320403fe10"
+}

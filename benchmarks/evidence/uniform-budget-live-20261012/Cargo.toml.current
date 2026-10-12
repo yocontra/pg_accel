@@ -1,0 +1,51 @@
+[workspace]
+members = ["pg_accel", "pg_accel_bench"]
+resolver = "2"
+
+[profile.release]
+# Rust 1.96 post-link stripping can misalign Mach-O dylibs: rust-lang/rust#157750.
+strip = "none"
+
+[workspace.package]
+version = "1.0.0-rc1"
+edition = "2024"
+license = "PostgreSQL"
+authors = ["Eric Schoffstall"]
+description = "GPU-resident aggregate Custom Scan extension for PostgreSQL."
+repository = "https://github.com/yocontra/pg_accel"
+homepage = "https://github.com/yocontra/pg_accel"
+keywords = ["postgres", "postgresql", "gpu", "postgis", "h3"]
+categories = ["database"]
+readme = "README.md"
+
+[workspace.lints.rust]
+# Keep manifest-driven linting equivalent across editors, `cargo check`, and
+# CI instead of relying on individual commands to remember `-D warnings`.
+warnings = { level = "deny", priority = -2 }
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+
+# Multiple versions are sometimes forced by pgrx's dependency graph. cargo-deny
+# owns dependency convergence and advisory policy for the workspace.
+multiple_crate_versions = "allow"
+
+# High-signal restriction lints. Enabling the entire restriction group would
+# impose mutually incompatible style policies, so keep this list intentional.
+dbg_macro = "deny"
+error_impl_error = "deny"
+infinite_loop = "deny"
+lossy_float_literal = "deny"
+string_slice = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+unwrap_used = "deny"
+# expect() is allowed — it carries context. unwrap_used catches the dangerous case.
+expect_used = "allow"
+doc_markdown = "allow"
+missing_const_for_fn = "allow"

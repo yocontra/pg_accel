@@ -1,0 +1,25 @@
+Test project /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+    Start  3: test_raster_lookup
+1/2 Test  #3: test_raster_lookup ...............   Passed    0.29 sec
+    Start 11: test_raster_resident
+2/2 Test #11: test_raster_resident .............***Failed    0.50 sec
+=== pgaccel exact resident raster tests ===
+
+pgaccel: no SYCL GPU device found; GPU acceleration unavailable
+pgaccel_init failed
+gpu-noise[test_raster_resident]: suppressed metal-no-devices=1; raw log: /Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs/test_raster_resident-20261010-020424-45894.log
+gpu-test[test_raster_resident]: failed with exit code 1
+--- failure summary from /Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs/test_raster_resident-20261010-020424-45894.log ---
+PGACCEL_TEST_RESULT name=test_raster_resident exit_code=1 result=FAIL raw_lines=5 body_sha256=d1350ad81e7057c86fe4c796dbc271ecff1bfc473e0dfb2aeb635ecf242d636d binding_sha256=5e55784fe3fe16588eabffd3b117e6abdec5e320980ea451ec241d8693047e78
+
+
+50% tests passed, 1 tests failed out of 2
+
+Label Time Summary:
+host    =   0.29 sec*proc (1 test)
+
+Total Test time (real) =   0.79 sec
+
+The following tests FAILED:
+	 11 - test_raster_resident (Failed)
+Errors while running CTest

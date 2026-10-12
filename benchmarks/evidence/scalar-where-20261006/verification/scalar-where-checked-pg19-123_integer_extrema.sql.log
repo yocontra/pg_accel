@@ -1,0 +1,30 @@
+=== 123_integer_extrema ===
+SET
+SET
+SELECT 1000017
+ANALYZE
+DO
+PGACCEL_ASSERT_OK:123_integer_extrema.assert_001
+SET
+PREPARE
+PREPARE
+DO
+PGACCEL_ASSERT_OK:123_integer_extrema.assert_002
+DEALLOCATE
+DEALLOCATE
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ f
+(1 row)
+
+DROP TABLE
+RESET
+RESET
+RESET
+RESET
+PGACCEL_FILE_OK:123_integer_extrema
