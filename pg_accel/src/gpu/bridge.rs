@@ -143,7 +143,7 @@ pub fn convert_status(func: &'static str, raw: i32) -> PgaccelStatus {
 /// Backend/thread-local observations, deliberately absent from production builds.
 #[cfg(any(test, feature = "pg_test"))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct TestJoinStatusCounts {
+pub struct TestJoinStatusCounts {
     pub count_attempts: u64,
     pub oom: u64,
     pub timeouts: u64,
@@ -159,7 +159,7 @@ thread_local! {
 }
 
 #[cfg(any(test, feature = "pg_test"))]
-pub(crate) fn test_join_status_counts() -> TestJoinStatusCounts {
+pub fn test_join_status_counts() -> TestJoinStatusCounts {
     TEST_JOIN_STATUS_COUNTS.get()
 }
 
