@@ -1,0 +1,3 @@
+62ab0c63521b6aea3d8dc19b8114d55384a6c7af46c7d894f713ac69414d4871  patches/adaptivecpp/sscp-replay-controls.patch
+b2180daed5a73e5535d5a94e88a11933d449688235e51e376aa8acc1ad44b791  scripts/tests/fixtures/acpp_hcf_replay.cpp
+2d19748e79dd048a29cd8b79f714e10e92acfae6ecfff5d06cc2fbb88334d731  scripts/tests/test_acpp_hcf_replay.py

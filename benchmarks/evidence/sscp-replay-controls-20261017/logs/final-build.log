@@ -1,0 +1,129 @@
+[  0%] Building CXX object src/compiler/CMakeFiles/acpp-clang-cbs.dir/cbs/LoopSplitterInlining.cpp.o
+[  5%] Building CXX object src/compiler/CMakeFiles/acpp-clang-cbs.dir/cbs/SplitterAnnotationAnalysis.cpp.o
+[  5%] Building CXX object src/compiler/CMakeFiles/acpp-clang-cbs.dir/cbs/IRUtils.cpp.o
+[ 10%] Building CXX object src/compiler/CMakeFiles/acpp-clang-cbs.dir/cbs/KernelFlattening.cpp.o
+[ 10%] Building CXX object src/compiler/CMakeFiles/acpp-clang-cbs.dir/cbs/LoopsParallelMarker.cpp.o
+[ 15%] Building CXX object src/compiler/CMakeFiles/acpp-clang-cbs.dir/cbs/PHIsToAllocas.cpp.o
+/Users/contra/Projects/pg_accel/.codex/scratch/projection-replay-20261017/source/src/compiler/cbs/IRUtils.cpp:74:24: warning: 'getFirstNonPHI' is deprecated: Use iterators as instruction positions [-Wdeprecated-declarations]
+   74 |   return isBarrier(BB->getFirstNonPHI(), SAA);
+      |                        ^~~~~~~~~~~~~~
+      |                        getFirstNonPHIIt
+/opt/homebrew/opt/llvm@20/include/llvm/IR/BasicBlock.h:286:3: note: 'getFirstNonPHI' has been explicitly marked deprecated here
+  286 |   LLVM_DEPRECATED("Use iterators as instruction positions", "getFirstNonPHIIt")
+      |   ^
+/opt/homebrew/opt/llvm@20/include/llvm/Support/Compiler.h:234:50: note: expanded from macro 'LLVM_DEPRECATED'
+  234 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+/Users/contra/Projects/pg_accel/.codex/scratch/projection-replay-20261017/source/src/compiler/cbs/IRUtils.cpp:457:47: warning: 'getFirstNonPHI' is deprecated: Use iterators as instruction positions instead [-Wdeprecated-declarations]
+  457 |     InsertionPoint = ToArrayify->getParent()->getFirstNonPHI();
+      |                                               ^~~~~~~~~~~~~~
+      |                                               getFirstNonPHIIt
+/opt/homebrew/opt/llvm@20/include/llvm/IR/BasicBlock.h:288:3: note: 'getFirstNonPHI' has been explicitly marked deprecated here
+  288 |   LLVM_DEPRECATED("Use iterators as instruction positions instead",
+      |   ^
+/opt/homebrew/opt/llvm@20/include/llvm/Support/Compiler.h:234:50: note: expanded from macro 'LLVM_DEPRECATED'
+  234 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+[ 15%] Building CXX object src/compiler/CMakeFiles/acpp-clang-cbs.dir/cbs/RemoveBarrierCalls.cpp.o
+2 warnings generated.
+[ 21%] Building CXX object src/compiler/CMakeFiles/acpp-clang-cbs.dir/cbs/CanonicalizeBarriers.cpp.o
+/Users/contra/Projects/pg_accel/.codex/scratch/projection-replay-20261017/source/src/compiler/cbs/PHIsToAllocas.cpp:64:44: warning: 'getFirstNonPHI' is deprecated: Use iterators as instruction positions instead [-Wdeprecated-declarations]
+   64 |   Builder.SetInsertPoint(Phi->getParent()->getFirstNonPHI());
+      |                                            ^~~~~~~~~~~~~~
+      |                                            getFirstNonPHIIt
+/opt/homebrew/opt/llvm@20/include/llvm/IR/BasicBlock.h:288:3: note: 'getFirstNonPHI' has been explicitly marked deprecated here
+  288 |   LLVM_DEPRECATED("Use iterators as instruction positions instead",
+      |   ^
+/opt/homebrew/opt/llvm@20/include/llvm/Support/Compiler.h:234:50: note: expanded from macro 'LLVM_DEPRECATED'
+  234 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+[ 21%] Building CXX object src/compiler/CMakeFiles/acpp-clang-cbs.dir/cbs/SimplifyKernel.cpp.o
+1 warning generated.
+[ 26%] Building CXX object src/compiler/CMakeFiles/acpp-clang-cbs.dir/cbs/LoopSimplify.cpp.o
+[ 26%] Building CXX object src/compiler/CMakeFiles/acpp-clang-cbs.dir/cbs/PipelineBuilder.cpp.o
+[ 31%] Building CXX object src/compiler/CMakeFiles/acpp-clang-cbs.dir/cbs/SubCfgFormation.cpp.o
+[ 31%] Building CXX object src/compiler/CMakeFiles/acpp-clang-cbs.dir/cbs/UniformityAnalysis.cpp.o
+[ 36%] Building CXX object src/compiler/CMakeFiles/acpp-clang-cbs.dir/cbs/VectorShape.cpp.o
+[ 36%] Building CXX object src/compiler/CMakeFiles/acpp-clang-cbs.dir/cbs/VectorizationInfo.cpp.o
+/Users/contra/Projects/pg_accel/.codex/scratch/projection-replay-20261017/source/src/compiler/cbs/SubCfgFormation.cpp:98:16: warning: 'moveBefore' is deprecated: Use iterators as instruction positions [-Wdeprecated-declarations]
+   98 |     FirstLoad->moveBefore(&F.getEntryBlock().front());
+      |                ^
+/opt/homebrew/opt/llvm@20/include/llvm/IR/Instruction.h:243:3: note: 'moveBefore' has been explicitly marked deprecated here
+  243 |   LLVM_DEPRECATED("Use iterators as instruction positions", "")
+      |   ^
+/opt/homebrew/opt/llvm@20/include/llvm/Support/Compiler.h:234:50: note: expanded from macro 'LLVM_DEPRECATED'
+  234 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+/Users/contra/Projects/pg_accel/.codex/scratch/projection-replay-20261017/source/src/compiler/cbs/SubCfgFormation.cpp:262:13: warning: 'moveBefore' is deprecated: Use iterators as instruction positions [-Wdeprecated-declarations]
+  262 |       Load->moveBefore(F.getEntryBlock().getTerminator());
+      |             ^
+/opt/homebrew/opt/llvm@20/include/llvm/IR/Instruction.h:243:3: note: 'moveBefore' has been explicitly marked deprecated here
+  243 |   LLVM_DEPRECATED("Use iterators as instruction positions", "")
+      |   ^
+/opt/homebrew/opt/llvm@20/include/llvm/Support/Compiler.h:234:50: note: expanded from macro 'LLVM_DEPRECATED'
+  234 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+[ 42%] Building CXX object src/compiler/CMakeFiles/acpp-clang-cbs.dir/cbs/AllocaSSA.cpp.o
+/Users/contra/Projects/pg_accel/.codex/scratch/projection-replay-20261017/source/src/compiler/cbs/SubCfgFormation.cpp:883:13: warning: 'insertBefore' is deprecated: Use iterators as instruction positions [-Wdeprecated-declarations]
+  883 |     IClone->insertBefore(LoadTerm);
+      |             ^
+/opt/homebrew/opt/llvm@20/include/llvm/IR/Instruction.h:214:3: note: 'insertBefore' has been explicitly marked deprecated here
+  214 |   LLVM_DEPRECATED("Use iterators as instruction positions", "")
+      |   ^
+/opt/homebrew/opt/llvm@20/include/llvm/Support/Compiler.h:234:50: note: expanded from macro 'LLVM_DEPRECATED'
+  234 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+/Users/contra/Projects/pg_accel/.codex/scratch/projection-replay-20261017/source/src/compiler/cbs/SubCfgFormation.cpp:1401:8: warning: 'moveBefore' is deprecated: Use iterators as instruction positions [-Wdeprecated-declarations]
+ 1401 |     I->moveBefore(F.getEntryBlock().getTerminator());
+      |        ^
+/opt/homebrew/opt/llvm@20/include/llvm/IR/Instruction.h:243:3: note: 'moveBefore' has been explicitly marked deprecated here
+  243 |   LLVM_DEPRECATED("Use iterators as instruction positions", "")
+      |   ^
+/opt/homebrew/opt/llvm@20/include/llvm/Support/Compiler.h:234:50: note: expanded from macro 'LLVM_DEPRECATED'
+  234 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+/Users/contra/Projects/pg_accel/.codex/scratch/projection-replay-20261017/source/src/compiler/cbs/SubCfgFormation.cpp:1433:10: warning: 'moveBefore' is deprecated: Use iterators as instruction positions [-Wdeprecated-declarations]
+ 1433 |       I->moveBefore(Entry->getTerminator());
+      |          ^
+/opt/homebrew/opt/llvm@20/include/llvm/IR/Instruction.h:243:3: note: 'moveBefore' has been explicitly marked deprecated here
+  243 |   LLVM_DEPRECATED("Use iterators as instruction positions", "")
+      |   ^
+/opt/homebrew/opt/llvm@20/include/llvm/Support/Compiler.h:234:50: note: expanded from macro 'LLVM_DEPRECATED'
+  234 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+[ 42%] Building CXX object src/compiler/CMakeFiles/acpp-clang-cbs.dir/cbs/VectorShapeTransformer.cpp.o
+[ 47%] Building CXX object src/compiler/CMakeFiles/acpp-clang-cbs.dir/cbs/Region.cpp.o
+[ 47%] Building CXX object src/compiler/CMakeFiles/acpp-clang-cbs.dir/cbs/SyncDependenceAnalysis.cpp.o
+5 warnings generated.
+[ 47%] Built target acpp-clang-cbs
+[ 52%] Building CXX object src/compiler/CMakeFiles/acpp-clang.dir/AdaptiveCppLlvmPasses.cpp.o
+[ 52%] Building CXX object src/compiler/CMakeFiles/acpp-clang.dir/GlobalsPruningPass.cpp.o
+[ 57%] Building CXX object src/compiler/CMakeFiles/acpp-clang.dir/sscp/KernelOutliningPass.cpp.o
+[ 57%] Building CXX object src/compiler/CMakeFiles/acpp-clang.dir/SMCPCompatPass.cpp.o
+[ 63%] Building CXX object src/compiler/CMakeFiles/acpp-clang.dir/sscp/IRConstantReplacer.cpp.o
+[ 63%] Building CXX object src/compiler/CMakeFiles/acpp-clang.dir/sscp/DynamicFunctionSupport.cpp.o
+[ 68%] Building CXX object src/compiler/CMakeFiles/acpp-clang.dir/sscp/TargetSeparationPass.cpp.o
+[ 68%] Building CXX object src/compiler/CMakeFiles/acpp-clang.dir/sscp/HostKernelNameExtractionPass.cpp.o
+[ 73%] Building CXX object src/compiler/CMakeFiles/acpp-clang.dir/sscp/AggregateArgumentExpansionPass.cpp.o
+[ 73%] Building CXX object src/compiler/CMakeFiles/acpp-clang.dir/sscp/StdBuiltinRemapperPass.cpp.o
+[ 78%] Building CXX object src/compiler/CMakeFiles/acpp-clang.dir/sscp/StdAtomicRemapperPass.cpp.o
+[ 78%] Building CXX object src/compiler/CMakeFiles/acpp-clang.dir/sscp/DeviceAssertPass.cpp.o
+/Users/contra/Projects/pg_accel/.codex/scratch/projection-replay-20261017/source/src/compiler/sscp/TargetSeparationPass.cpp:577:24: warning: 'getDeclaration' is deprecated: Use getOrInsertDeclaration instead [-Wdeprecated-declarations]
+  577 |       llvm::Intrinsic::getDeclaration(&M, llvm::Intrinsic::donothing);
+      |                        ^~~~~~~~~~~~~~
+      |                        getOrInsertDeclaration
+/opt/homebrew/opt/llvm@20/include/llvm/IR/Intrinsics.h:100:3: note: 'getDeclaration' has been explicitly marked deprecated here
+  100 |   LLVM_DEPRECATED("Use getOrInsertDeclaration instead",
+      |   ^
+/opt/homebrew/opt/llvm@20/include/llvm/Support/Compiler.h:234:50: note: expanded from macro 'LLVM_DEPRECATED'
+  234 | #define LLVM_DEPRECATED(MSG, FIX) __attribute__((deprecated(MSG, FIX)))
+      |                                                  ^
+[ 84%] Building CXX object src/compiler/CMakeFiles/acpp-clang.dir/sscp/pcuda/FreeKernelCall.cpp.o
+[ 84%] Building CXX object src/compiler/CMakeFiles/acpp-clang.dir/sscp/pcuda/StaticLocalMemoryPass.cpp.o
+[ 89%] Building CXX object src/compiler/CMakeFiles/acpp-clang.dir/sscp/pcuda/ExternDynamicLocalMemoryPass.cpp.o
+[ 89%] Building CXX object src/compiler/CMakeFiles/acpp-clang.dir/reflection/IntrospectStructPass.cpp.o
+[ 94%] Building CXX object src/compiler/CMakeFiles/acpp-clang.dir/reflection/FunctionNameExtractionPass.cpp.o
+[ 94%] Building CXX object src/compiler/CMakeFiles/acpp-clang.dir/frontend/AdaptiveCppClangPlugin.cpp.o
+1 warning generated.
+[100%] Linking CXX shared module libacpp-clang.so
+[100%] Built target acpp-clang

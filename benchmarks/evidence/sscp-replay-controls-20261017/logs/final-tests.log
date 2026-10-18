@@ -1,0 +1,13 @@
+test_01_option_rejections_and_unpatched_fail_closed (scripts.tests.test_acpp_hcf_replay.AdaptiveCppHcfReplayTests.test_01_option_rejections_and_unpatched_fail_closed) ... ok
+test_02_fixture_replay_names_and_id_payload_coherence (scripts.tests.test_acpp_hcf_replay.AdaptiveCppHcfReplayTests.test_02_fixture_replay_names_and_id_payload_coherence) ... ok
+test_03_actual_join_four_cell_exact_replay (scripts.tests.test_acpp_hcf_replay.AdaptiveCppHcfReplayTests.test_03_actual_join_four_cell_exact_replay) ... ok
+test_04_32bit_target_default_compiles_explicit_id_rejects (scripts.tests.test_acpp_hcf_replay.AdaptiveCppHcfReplayTests.test_04_32bit_target_default_compiles_explicit_id_rejects) ... ok
+test_hcf_accepts_bounded_wrapper_without_removing_bytes (scripts.tests.test_acpp_hcf_replay.ReplayInspectionTests.test_hcf_accepts_bounded_wrapper_without_removing_bytes) ... ok
+test_hcf_rejects_missing_duplicate_and_truncated_payload (scripts.tests.test_acpp_hcf_replay.ReplayInspectionTests.test_hcf_rejects_missing_duplicate_and_truncated_payload) ... ok
+test_immediate_preserves_high_bits_and_unsigned_max (scripts.tests.test_acpp_hcf_replay.ReplayInspectionTests.test_immediate_preserves_high_bits_and_unsigned_max) ... ok
+test_immediate_rejects_unmodeled_writes_and_control_flow (scripts.tests.test_acpp_hcf_replay.ReplayInspectionTests.test_immediate_rejects_unmodeled_writes_and_control_flow) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 60.622s
+
+OK

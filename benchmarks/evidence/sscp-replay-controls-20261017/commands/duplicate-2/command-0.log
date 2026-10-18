@@ -1,0 +1,1 @@
+clang (LLVM option parsing): for the --acpp-sscp-hcf-object-id option: explicit HCF ID may only occur once

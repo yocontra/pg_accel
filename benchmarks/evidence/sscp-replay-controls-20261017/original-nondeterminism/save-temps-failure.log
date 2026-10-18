@@ -1,0 +1,4 @@
+clang (LLVM option parsing): Unknown command line argument '-acpp-sscp'.  Try: 'clang (LLVM option parsing) --help'
+clang (LLVM option parsing): Did you mean '--icp-csskip'?
+clang (LLVM option parsing): Unknown command line argument '-acpp-sscp-kernel-opts=fast-math'.  Try: 'clang (LLVM option parsing) --help'
+clang (LLVM option parsing): Did you mean '--ppc-gep-opt=fast-math'?

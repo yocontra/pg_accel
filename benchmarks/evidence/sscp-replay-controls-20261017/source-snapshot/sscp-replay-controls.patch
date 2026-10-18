@@ -1,0 +1,95 @@
+--- a/src/compiler/sscp/TargetSeparationPass.cpp
++++ b/src/compiler/sscp/TargetSeparationPass.cpp
+@@ -27,6 +27,7 @@
+ 
+ #include <cctype>
+ #include <cstddef>
++#include <limits>
+ #include <map>
+ #include <tuple>
+ #include <unordered_map>
+@@ -108,6 +109,36 @@
+   ScopedPrintingTimer(llvm::StringRef Name, llvm::StringRef Description = "")
+   : Timer{Name, true, Description} {}
+ };
++
++// Explicit IDs are an opt-in replay input, not a cross-object uniqueness policy.
++// LLVM 20 tracks occurrences but does not enforce Optional during parsing.
++class HcfObjectIdParser : public llvm::cl::parser<unsigned long long> {
++public:
++  explicit HcfObjectIdParser(llvm::cl::Option &O) : parser(O) {}
++
++  bool parse(llvm::cl::Option &O, llvm::StringRef, llvm::StringRef Arg,
++             unsigned long long &Value) {
++    if(O.getNumOccurrences() > 1)
++      return O.error("explicit HCF ID may only occur once");
++    if(std::numeric_limits<std::size_t>::digits != 64)
++      return O.error("explicit HCF IDs require a 64-bit compiler host");
++    constexpr unsigned long long Max = 18446744073709551615ULL;
++    if(Arg.empty() || Arg.front() < '1' || Arg.front() > '9')
++      return O.error("expected canonical decimal ID in 1..18446744073709551615");
++    unsigned long long Parsed = 0;
++    for(char C : Arg) {
++      if(C < '0' || C > '9' || Parsed > (Max - (C - '0')) / 10)
++        return O.error("expected canonical decimal ID in 1..18446744073709551615");
++      Parsed = Parsed * 10 + (C - '0');
++    }
++    Value = Parsed;
++    return false;
++  }
++};
++
++static llvm::cl::opt<unsigned long long, false, HcfObjectIdParser> SSCPHcfObjectId{
++    "acpp-sscp-hcf-object-id", llvm::cl::Optional, llvm::cl::ValueRequired,
++    llvm::cl::desc{"Explicit unique per-object HCF ID for exact compilation replay"}};
+ 
+ static llvm::cl::opt<bool> SSCPEmitHcf{
+     "acpp-sscp-emit-hcf", llvm::cl::init(false),
+@@ -910,6 +941,15 @@
+ llvm::PreservedAnalyses TargetSeparationPass::run(llvm::Module &M,
+                                                   llvm::ModuleAnalysisManager &MAM) {
+ 
++  // The runtime registration key is size_t. Refuse explicit IDs when the
++  // host-target ABI cannot preserve all 64 bits; do not alter ordinary builds.
++  if(SSCPHcfObjectId.getNumOccurrences() &&
++     (M.getDataLayout().isDefault() ||
++      M.getDataLayout().getPointerSizeInBits(0) != 64)) {
++    M.getContext().emitError("explicit HCF IDs require a known 64-bit host-target registration ABI");
++    return llvm::PreservedAnalyses::all();
++  }
++
+   DynamicFunctionIdentifactionPass DFI;
+   DFI.run(M, MAM);
+ 
+@@ -919,7 +959,9 @@
+     // TODO If we know that the SSCP compilation flow is the only one using HCF,
+     // we could just enumerate the objects instead of generating (hopefully)
+     // unique random numbers.
+-    std::size_t HcfObjectId = generateRandomNumber<std::size_t>();
++    std::size_t HcfObjectId = SSCPHcfObjectId.getNumOccurrences()
++                                ? SSCPHcfObjectId.getValue()
++                                : generateRandomNumber<std::size_t>();
+     std::string HcfString;
+ 
+ 
+--- a/src/compiler/sscp/HostKernelNameExtractionPass.cpp
++++ b/src/compiler/sscp/HostKernelNameExtractionPass.cpp
+@@ -15,6 +15,7 @@
+ #include "hipSYCL/common/debug.hpp"
+ 
+ #include <llvm/IR/Constants.h>
++#include <llvm/ADT/SetVector.h>
+ #include <llvm/IR/DerivedTypes.h>
+ #include <llvm/IR/Function.h>
+ #include <llvm/IR/GlobalVariable.h>
+@@ -35,7 +36,9 @@
+                                                           llvm::ModuleAnalysisManager &MAM) {
+ 
+ 
+-  llvm::SmallPtrSet<llvm::Function*, 16> SSCPKernelNameExtractionFunctions;
++  // Preserve discovery order while deduplicating annotation/name discovery.
++  // Pointer-set iteration becomes nondeterministic when its inline capacity spills.
++  llvm::SmallSetVector<llvm::Function*, 16> SSCPKernelNameExtractionFunctions;
+   utils::findFunctionsWithStringAnnotations(M, [&](llvm::Function* F, llvm::StringRef Annotation){
+     if(F) {
+       if(Annotation.compare(SSCPExtractKernelNameIdentifierAnnotation) == 0){

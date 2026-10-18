@@ -1,0 +1,6 @@
+f822f5717dacd119f92ef6dfc981697abefd0a20f8db308d45bde38d935087bd  .pgaccel/acpp/current/lib/cmake/AdaptiveCpp/syclcc-launcher
+6a409354f39d2f462d13d1d2bae59ed891f6a1a641f44f6d8c11a2bd45beb63b  .pgaccel/acpp/current/bin/acpp
+26684c43250e342b7c436ee3433a53dc3b20c3ba1fcc872b68ef30a648f65ca3  .pgaccel/acpp/current/etc/AdaptiveCpp/acpp-core.json
+d5f586aeb399ca0f8dae28260ef6ca999bf0d341369018e57b2dc92d26c79fe7  .pgaccel/acpp/current/lib/libacpp-clang.so
+04b5e38c66d491a17ceace7dfaab283417e6676ab2e3d3048fe01dfb1e44d3c7  /opt/homebrew/opt/llvm@20/bin/clang++
+bb950e6358acb2eefc9abeb9ab9f737f9c74546c79bddc9642974a875e21a046  pgaccel-kernels/src/join_rows.cpp

@@ -1,0 +1,4 @@
+b0b2e21b6457ef509a856214eec048439a558d1b317874694f69bac84cce6227  .codex/scratch/projection-replay-20261017/prefix/lib/libacpp-clang.so
+d5f586aeb399ca0f8dae28260ef6ca999bf0d341369018e57b2dc92d26c79fe7  .pgaccel/acpp/metal/lib/libacpp-clang.so
+493d72a1051acf5caf7d822a57b0392a2c29c7a6b82e2afc8ae2d3fa9ca8e147  .codex/scratch/projection-replay-20261017/source/src/compiler/sscp/TargetSeparationPass.cpp
+0dc2ffb6553b2db0109678843a9578436c83dc8ff670a5c08fdd86a7e5eb04f6  .codex/scratch/projection-replay-20261017/source/src/compiler/sscp/HostKernelNameExtractionPass.cpp

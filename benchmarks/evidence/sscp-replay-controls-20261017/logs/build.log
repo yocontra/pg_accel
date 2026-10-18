@@ -1,0 +1,22 @@
+patching file 'src/libkernel/sscp/metal/CMakeLists.txt'
+patching file 'include/hipSYCL/runtime/metal/metal_code_object.hpp'
+patching file 'src/compiler/llvm-to-backend/metal/Emitter.cpp'
+patching file 'src/compiler/llvm-to-backend/metal/Emitter.hpp'
+patching file 'src/compiler/sscp/TargetSeparationPass.cpp'
+patching file 'src/runtime/metal/metal_code_object.cpp'
+patching file 'src/runtime/metal/metal_queue.cpp'
+patching file 'src/compiler/sscp/TargetSeparationPass.cpp'
+patching file 'src/compiler/sscp/HostKernelNameExtractionPass.cpp'
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	../../../../benchmarks/evidence/resident-join-rows-20261006/
+	../../../../patches/adaptivecpp/sscp-replay-controls.patch
+	../../../../scripts/tests/fixtures/acpp_hcf_replay.cpp
+	../../../../scripts/tests/test_acpp_hcf_replay.py
+
+nothing added to commit but untracked files present (use "git add" to track)
+CMake Error: CMake was unable to find a build program corresponding to "Ninja".  CMAKE_MAKE_PROGRAM is not set.  You probably need to select a different build tool.
+-- Configuring incomplete, errors occurred!

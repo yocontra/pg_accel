@@ -25,10 +25,24 @@ published release artifact.
   object-origin and extent checks. Full redeclaration validation rejects later
   attributes and implementations, including function-try bodies. Integrated
   local suites pass 26 effects, 15 build-binding and 11 link-binding tests;
-  old failures and compiler-valid regressions are preserved. Actual Linux CI
-  validation remains pending. The seven device/address proof gaps remain open;
-  no full production-audit rerun or release approval is claimed. Evidence:
+  old failures and compiler-valid regressions are preserved. At `e5de264f`,
+  [Linux PG18](https://github.com/yocontra/pg_accel/actions/runs/38323607556/job/115057309352)
+  passed analyzer fixtures, 1,311 standalone Rust tests and 588 harness tests;
+  [Linux PG19](https://github.com/yocontra/pg_accel/actions/runs/38323607556/job/115057309344)
+  passed 1,311 standalone Rust tests, with analyzer fixtures skipped. Full CI
+  still failed twelve macOS live assertions, and release audit retained seven
+  device/address proof findings; no release approval is claimed. Evidence:
   `benchmarks/evidence/metadata-memcmp-nonnull-20261012/README.md`.
+
+- [x] Establish an isolated pinned-compiler exact-replay prerequisite: opt-in
+  canonical 64-bit HCF IDs and deterministic deduplicated kernel-name ordering.
+  A fresh 37-object plugin build passes eight tests without skips; seven whole
+  object comparisons are byte-identical, including real join shared/static
+  variants at O0 and O3/DNDEBUG. Native registration inspection covers O3;
+  malformed/repeated IDs and actual 32-bit target explicit mode reject.
+  Default mode and all twenty fixture names are retained. No production wiring,
+  projection proof or closure of the seven findings is introduced. Evidence:
+  `benchmarks/evidence/sscp-replay-controls-20261017/README.md`.
 
 ## Active OLAP And Geo Expansion
 

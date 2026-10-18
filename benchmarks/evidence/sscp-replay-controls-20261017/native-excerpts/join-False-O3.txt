@@ -1,0 +1,19 @@
+EXCERPTS ONLY: original file line numbers; omitted lines remain in scratch
+1: /Users/contra/Projects/pg_accel/.codex/scratch/projection-replay-20261017/final-tests/join-False-O3/object.o:
+2: __ZN7hipsycl4glue4sscp23static_hcf_registrationD1Ev:
+3:        0:	stp	x20, x19, [sp, #-0x20]!
+4:        4:	stp	x29, x30, [sp, #0x10]
+5:        8:	add	x29, sp, #0x10
+6:        c:	mov	x19, x0
+7:       10:	mov	x0, #0x1
+8:       14:	movk	x0, #0x98aa, lsl #16
+9:       18:	movk	x0, #0xfb15, lsl #32
+10:       1c:	movk	x0, #0x7068, lsl #48
+11:       20:	bl	___acpp_unregister_hcf
+[omitted]
+45911:    2f1a4:	adrp	x0, ___acpp_local_sscp_hcf_content.initialized@PAGE
+45912:    2f1a8:	add	x0, x0, ___acpp_local_sscp_hcf_content.initialized@PAGEOFF
+45913:    2f1ac:	mov	w1, #0x1e6
+45914:    2f1b0:	movk	w1, #0x2, lsl #16
+45915:    2f1b4:	bl	___acpp_register_hcf
+[omitted]

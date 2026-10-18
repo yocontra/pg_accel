@@ -1,0 +1,2 @@
+Retained 31 compiler cases and 38 invocations
+Exact complete object replays: 7

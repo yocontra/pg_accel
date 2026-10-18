@@ -1,0 +1,2 @@
+clang (LLVM option parsing): Unknown command line argument '-acpp-sscp-hcf-object-id=1'.  Try: 'clang (LLVM option parsing) --help'
+clang (LLVM option parsing): Did you mean '--acpp-sscp-export-all=1'?

@@ -1,0 +1,2 @@
+error: explicit HCF IDs require a known 64-bit host-target registration ABI
+1 error generated.
