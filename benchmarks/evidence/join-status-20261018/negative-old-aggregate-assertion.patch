@@ -1,0 +1,14 @@
+--- pg_accel/src/tests/join_rows.rs	2026-10-18 09:25:48
++++ .codex/scratch/join-status-20261018/negative-old-aggregate-assertion.rs	2026-10-18 09:25:16
+@@ -1113,6 +1113,11 @@
+         assert_eq!(after.oom, statuses.oom);
+         assert_eq!(after.other, statuses.other);
+         assert_eq!(
++            failures,
++            crate::gpu::kernel_failure_count(crate::gpu::GpuFailureDomain::HashJoin),
++            "successful COUNT is not a fake OOM"
++        );
++        assert_eq!(
+             crate::gpu::kernel_failure_count(crate::gpu::GpuFailureDomain::HashJoin) - failures,
+             1,
+             "successful retry still records its interrupted native attempt"

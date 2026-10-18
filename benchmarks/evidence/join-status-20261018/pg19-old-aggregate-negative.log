@@ -1,0 +1,73 @@
+[32m[1m       Using[0m[39m [37m[1mCliArgument("pg19")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/19beta1/bin/pg_config[39m
+CARGO_PGRX_TEST_PGDATA="/Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/pgdata19-old-aggregate-negative" CARGO_TARGET_DIR="/Users/contra/Projects/pg_accel/target" PGRX_ALL_FEATURES="false" PGRX_BUILD_PROFILE="dev" PGRX_FEATURES="pg19 pg_test" PGRX_MANIFEST_PATH="/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" PGRX_NO_DEFAULT_FEATURES="true" PGRX_NO_SCHEMA="false" "/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "test" "--manifest-path" "/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" "--features" "pg19 pg_test" "--no-default-features" "pg_resident_join_occurrence_binding_and_invalidation"
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.63s
+     Running unittests src/lib.rs (target/debug/deps/pg_accel-ee631feaa28e3472)
+
+running 1 test
+test tests::join_rows::tests::pg_pg_resident_join_occurrence_binding_and_invalidation ... [32m[1m       Using[0m[39m [37m[1mPgConfig("pg19")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/19beta1/bin/pg_config[39m
+[32m[1m    Building[0m[39m extension with features [36mpg_test pg19[39m
+[32m[1m     Running[0m[39m command [36m"/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "rustc" "--lib" "--manifest-path" "/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" "--features" "pg_test pg19" "--no-default-features" "--message-format=json-render-diagnostics"[39m
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.23s
+[32m[1m  Installing[0m[39m extension
+[32m[1m     Copying[0m[39m control file to [36m.codex/scratch/uniform-budget-live-20261012/postgres/19beta1/share/extension/pg_accel.control[39m
+[32m[1m     Copying[0m[39m shared library to [36m.codex/scratch/uniform-budget-live-20261012/postgres/19beta1/lib/pg_accel.dylib[39m
+[32m[1m  Discovered[0m[39m [36m[1m337[0m[39m SQL entities: [36m[1m27[0m[39m schemas ([36m[1m3[0m[39m unique), [36m[1m308[0m[39m functions, [36m[1m0[0m[39m types, [36m[1m0[0m[39m enums, [36m[1m1[0m[39m sqls, [36m[1m0[0m[39m ords, [36m[1m0[0m[39m hashes, [36m[1m0[0m[39m aggregates, [36m[1m1[0m[39m triggers
+[32m[1m     Writing[0m[39m SQL entities to /Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/19beta1/share/extension/pg_accel--1.0.0-rc1.sql
+[32m[1m    Finished[0m[39m installing pg_accel
+FAILED
+
+failures:
+
+---- tests::join_rows::tests::pg_pg_resident_join_occurrence_binding_and_invalidation stdout ----
+[32m[1m     Running[0m[39m cd "/Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/pgdata19-old-aggregate-negative" && "/Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/19beta1/bin/initdb" "--locale=C" "--lc-ctype=UTF-8" "-D" "/Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/pgdata19-old-aggregate-negative/19-88199"
+[32m[1m    Finished[0m[39m initializing database
+[32m[1m    Starting[0m[39m test Postgres on port [36m[1m56236[0m[39m
+[36m[2026-10-18 09:25:29.448 MST] [88292] [6ad4f2f9.158e4]: LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)[39m
+[36m[2026-10-18 09:25:29.448 MST] [88292] [6ad4f2f9.158e4]: LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query[39m
+[36m[2026-10-18 09:25:29.450 MST] [88292] [6ad4f2f9.158e4]: LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit[39m
+[36m[2026-10-18 09:25:29.452 MST] [88292] [6ad4f2f9.158e4]: LOG:  listening on IPv6 address "::1", port 56236[39m
+[36m[2026-10-18 09:25:29.452 MST] [88292] [6ad4f2f9.158e4]: LOG:  listening on IPv4 address "127.0.0.1", port 56236[39m
+[36m[2026-10-18 09:25:29.452 MST] [88292] [6ad4f2f9.158e4]: LOG:  listening on Unix socket "/tmp/pgrx-test-sockets-19-88199/.s.PGSQL.56236"[39m
+[36m[2026-10-18 09:25:29.457 MST] [88307] [6ad4f2f9.158f3]: LOG:  database system was shut down at 2026-10-18 09:25:28 MST[39m
+[32m[1m    Creating[0m[39m database [36m[1mpgrx_tests[0m[39m
+
+thread 'tests::join_rows::tests::pg_pg_resident_join_occurrence_binding_and_invalidation' (19178767) panicked at /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-tests-0.19.1/src/framework.rs:195:9:
+
+
+Postgres Messages:
+[37m[2m[2026-10-18 09:25:29.448 MST] [88292] [6ad4f2f9.158e4]: LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+[2026-10-18 09:25:29.448 MST] [88292] [6ad4f2f9.158e4]: LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+[2026-10-18 09:25:29.450 MST] [88292] [6ad4f2f9.158e4]: LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+[2026-10-18 09:25:29.452 MST] [88292] [6ad4f2f9.158e4]: LOG:  listening on IPv6 address "::1", port 56236
+[2026-10-18 09:25:29.452 MST] [88292] [6ad4f2f9.158e4]: LOG:  listening on IPv4 address "127.0.0.1", port 56236
+[2026-10-18 09:25:29.452 MST] [88292] [6ad4f2f9.158e4]: LOG:  listening on Unix socket "/tmp/pgrx-test-sockets-19-88199/.s.PGSQL.56236"
+[2026-10-18 09:25:29.459 MST] [88292] [6ad4f2f9.158e4]: LOG:  database system is ready to accept connections
+[0m[39m
+
+Test Function Messages:
+[36m[2026-10-18 09:25:29.638 MST] [88322] [6ad4f2f9.15902]: LOG:  statement: START TRANSACTION
+[2026-10-18 09:25:29.638 MST] [88322] [6ad4f2f9.15902]: LOG:  statement: SELECT "tests"."pg_resident_join_occurrence_binding_and_invalidation"();
+[2026-10-18 09:25:36.298 MST] [88322] [6ad4f2f9.15902]: ERROR:  assertion `left == right` failed: successful COUNT is not a fake OOM
+[2026-10-18 09:25:36.298 MST] [88322] [6ad4f2f9.15902]: STATEMENT:  SELECT "tests"."pg_resident_join_occurrence_binding_and_invalidation"();
+[2026-10-18 09:25:36.299 MST] [88322] [6ad4f2f9.15902]: LOG:  statement: ROLLBACK
+[39m
+
+Client Error:
+[31m[1massertion `left == right` failed: successful COUNT is not a fake OOM
+  left: 1
+ right: 2[0m[39m
+postgres location: [37m[2mjoin_rows.rs:1115[0m[39m
+rust location: [33m<unknown>[39m
+
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::join_rows::tests::pg_pg_resident_join_occurrence_binding_and_invalidation
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1839 filtered out; finished in 13.40s
+
+error: test failed, to rerun pass `--lib`

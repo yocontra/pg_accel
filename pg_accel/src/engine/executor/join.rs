@@ -78,7 +78,8 @@ impl ResidentJoinInputs {
         super::join_reduce::validate_chunk_rows(reduction_chunk_rows)
             .map_err(JoinExecutionError::Device)?;
         if spec.is_cardinality_only() {
-            let (rows, kernel_launches) = self.execute_cardinality(join_limits)?;
+            let (rows, kernel_launches) =
+                self.execute_cardinality(join_limits, postgres_interrupt_pending)?;
             return super::join_reduce::cardinality_output(spec, rows, kernel_launches)
                 .map(super::join_reduce::JoinReducedOutcome::Complete)
                 .map_err(JoinExecutionError::Device);
@@ -134,6 +135,7 @@ impl ResidentJoinInputs {
     fn execute_cardinality(
         &self,
         limits: JoinDispatchLimits,
+        pending: impl FnMut() -> bool,
     ) -> Result<(u64, u64), JoinExecutionError> {
         let mut previous_launches = 0;
         let result = run_interruptible_dispatch(
@@ -160,7 +162,7 @@ impl ResidentJoinInputs {
                     }
                 }
             },
-            postgres_interrupt_pending,
+            pending,
             || capture_postgres_interrupt().map_or(Ok(()), |error| Err(Box::new(error))),
         );
         match result {
@@ -168,6 +170,20 @@ impl ResidentJoinInputs {
             Err(InterruptibleDispatchError::Dispatch(error)) => Err(error),
             Err(InterruptibleDispatchError::Interrupt(error)) => (*error).rethrow(),
         }
+    }
+
+    #[cfg(feature = "pg_test")]
+    pub(crate) fn execute_cardinality_test_hook(
+        &self,
+        limits: JoinDispatchLimits,
+        mut on_poll: impl FnMut(),
+    ) -> Result<(u64, u64), JoinExecutionError> {
+        // Only signal flags may be changed in this native callback. PostgreSQL
+        // services them after native return and release of the residency borrow.
+        self.execute_cardinality(limits, || {
+            on_poll();
+            postgres_interrupt_pending()
+        })
     }
 
     /// PostgreSQL-aware bounded entry point. SQL permissions, shape and limit

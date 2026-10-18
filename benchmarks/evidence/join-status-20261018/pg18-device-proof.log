@@ -1,0 +1,40 @@
+BEGIN
+                                                      version                                                       
+--------------------------------------------------------------------------------------------------------------------
+ PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+(1 row)
+
+ cpu_cores | configured_workers | gpu_available | gpu_device_name |  memory_model   | pg_version | pg_accel_version 
+-----------+--------------------+---------------+-----------------+-----------------+------------+------------------
+        12 |                  0 | t             | Apple M2 Max    | explicit_device |     180004 | 1.0.0-rc1
+(1 row)
+
+      source      
+------------------
+ hardware_derived
+(1 row)
+
+                       proname                        |                            prosrc                            
+------------------------------------------------------+--------------------------------------------------------------
+ pg_resident_join_occurrence_binding_and_invalidation | pg_resident_join_occurrence_binding_and_invalidation_wrapper
+ pg_resident_join_rows_native_parity_and_ownership    | pg_resident_join_rows_native_parity_and_ownership_wrapper
+(2 rows)
+
+DO
+ pg_resident_join_occurrence_binding_and_invalidation 
+------------------------------------------------------
+ 
+(1 row)
+
+ pg_resident_join_rows_native_parity_and_ownership 
+---------------------------------------------------
+ 
+(1 row)
+
+ kernels_before | kernels_after | dispatched_kernel_calls 
+----------------+---------------+-------------------------
+              0 |         20704 |                   20704
+(1 row)
+
+JOIN_STATUS_REAL_GPU_PASS
+ROLLBACK

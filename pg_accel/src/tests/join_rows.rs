@@ -1059,6 +1059,7 @@ mod tests {
             };
             let before = crate::gpu::gpu_exec_count();
             let failures = crate::gpu::kernel_failure_count(crate::gpu::GpuFailureDomain::HashJoin);
+            let statuses = crate::gpu::bridge::test_join_status_counts();
             let JoinReducedOutcome::Complete(output) = inputs
                 .execute_reduced(&constant, capacity, limits, 2)
                 .expect("device cardinality without pair production")
@@ -1072,10 +1073,15 @@ mod tests {
                 output.join_kernel_launches,
                 crate::gpu::gpu_exec_count() - before
             );
+            let after = crate::gpu::bridge::test_join_status_counts();
+            assert_eq!(after.oom, statuses.oom, "COUNT has no pair-capacity OOM");
+            assert_eq!(after.other, statuses.other, "COUNT has no other failure");
+            let retries = after.timeouts - statuses.timeouts;
+            assert_eq!(after.count_attempts - statuses.count_attempts, 1 + retries);
             assert_eq!(
-                failures,
-                crate::gpu::kernel_failure_count(crate::gpu::GpuFailureDomain::HashJoin),
-                "successful COUNT is not a fake OOM"
+                crate::gpu::kernel_failure_count(crate::gpu::GpuFailureDomain::HashJoin) - failures,
+                retries,
+                "benign interruptions remain counted as non-OK native statuses"
             );
             assert_eq!(output.selected_rows, joined_rows as u64);
             assert_eq!(output.states[..measures], vec![expected[1]; measures]);
@@ -1083,6 +1089,38 @@ mod tests {
             crate::gpu::cleanup_grouped_allocation_pools();
             assert_eq!(resident_live_bytes(), baseline);
         }
+        // The initial native poll precedes all kernels. Interrupt it once, then
+        // require exactly one complete retry, including empty-input counts.
+        let statuses = crate::gpu::bridge::test_join_status_counts();
+        let failures = crate::gpu::kernel_failure_count(crate::gpu::GpuFailureDomain::HashJoin);
+        let kernels = crate::gpu::gpu_exec_count();
+        let mut polls = 0;
+        let (rows, launches) = inputs
+            .execute_cardinality_test_hook(limits, || {
+                polls += 1;
+                if polls == 1 {
+                    // Native callback: no PostgreSQL calls or longjmp here.
+                    unsafe {
+                        std::ptr::write_volatile(&raw mut pgrx::pg_sys::InterruptPending, 1);
+                    }
+                }
+            })
+            .expect("benign interrupt retries exact device cardinality");
+        let after = crate::gpu::bridge::test_join_status_counts();
+        assert_eq!(rows, joined_rows as u64);
+        assert_eq!(after.count_attempts - statuses.count_attempts, 2);
+        assert_eq!(after.timeouts - statuses.timeouts, 1);
+        assert_eq!(after.oom, statuses.oom);
+        assert_eq!(after.other, statuses.other);
+        assert_eq!(
+            crate::gpu::kernel_failure_count(crate::gpu::GpuFailureDomain::HashJoin) - failures,
+            1,
+            "successful retry still records its interrupted native attempt"
+        );
+        assert_eq!(launches, crate::gpu::gpu_exec_count() - kernels);
+        assert_eq!(polls, launches + 2, "one initial poll per native attempt");
+        crate::gpu::cleanup_grouped_allocation_pools();
+        assert_eq!(resident_live_bytes(), baseline);
         if joined_rows != 0 {
             faulting.measures = vec![spec.measures[1].clone()];
             faulting.row_filter.as_mut().expect("filter").program = ScalarProgram::new(
@@ -1895,11 +1933,27 @@ mod tests {
         assert_eq!(resident_live_bytes(), baseline);
         let held = ExecutionMemoryCharge::reserve(budget - baseline, budget)
             .expect("no count scratch budget");
+        let held_bytes = resident_live_bytes();
+        let kernels = crate::gpu::gpu_exec_count();
+        let statuses = crate::gpu::bridge::test_join_status_counts();
+        let failures = crate::gpu::kernel_failure_count(crate::gpu::GpuFailureDomain::HashJoin);
         assert_eq!(
             plan.count_controlled(limits, &mut || false)
                 .expect_err("real workspace OOM must not publish a count")
                 .status,
             crate::gpu::GpuStatusDetail::OutOfMemory
+        );
+        assert_eq!(crate::gpu::gpu_exec_count(), kernels, "no native dispatch");
+        assert_eq!(crate::gpu::bridge::test_join_status_counts(), statuses);
+        assert_eq!(
+            crate::gpu::kernel_failure_count(crate::gpu::GpuFailureDomain::HashJoin),
+            failures,
+            "Rust reservation OOM is not a native status failure"
+        );
+        assert_eq!(
+            resident_live_bytes(),
+            held_bytes,
+            "failed count releases scratch"
         );
         drop(held);
         assert_eq!(resident_live_bytes(), baseline);

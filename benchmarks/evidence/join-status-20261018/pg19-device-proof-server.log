@@ -1,0 +1,262 @@
+2026-10-18 09:27:25.204 MST [93061] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-18 09:27:25.204 MST [93061] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-18 09:27:25.206 MST [93061] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-18 09:27:25.206 MST [93061] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/socket-proof19/.s.PGSQL.30019"
+2026-10-18 09:27:25.211 MST [93066] LOG:  database system was shut down at 2026-10-18 09:27:25 MST
+2026-10-18 09:27:25.213 MST [93061] LOG:  database system is ready to accept connections
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/2546917753447678802.855411189406164468.metalar.93075.150450771211477342.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/3577875019036991826.855411189406164468.metalar.93075.11974863269181184829.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/7932518743031556896.5249622179836049645.metalar.93075.8734154146173310379.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/15645957498266366212.13184395842116062883.metalar.93075.3480941024322797407.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/7984154748588617724.12096655462425133969.metalar.93075.9727474643941356639.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/14884838055984028072.2175431729838046554.metalar.93075.12015469844889916613.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/9464793717740158540.3807672429966864536.metalar.93075.3952354990679651826.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/14690400167917884164.13184395842116062883.metalar.93075.9498136837505563158.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/2375739736618576978.8973886291722602454.metalar.93075.18364389459138160327.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/12742463291825261128.547070947207152210.metalar.93075.16649462244884094299.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/4939212832255122260.10714619014531049738.metalar.93075.11197781111755256151.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/3523093248116128384.15291313301800751018.metalar.93075.15673866594033993824.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/10244442864516165838.2484733349679544874.metalar.93075.1985311488500168483.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/14690400167917884164.8744226197215643185.metalar.93075.2785409021863194207.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/16881181002366429274.14882947525344919645.metalar.93075.15755936738166969740.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/6229825781897181524.1364684166377355568.metalar.93075.18017917850299656907.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/2457796378833377408.15291313301800751018.metalar.93075.11381984367832377838.tmp (kernels_added=1 skipped=0)
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1267:29: <non-string panic payload>
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/8557114654404209906.4994160988632260091.metalar.93075.4662185883518509425.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/9792251698342819226.4994160988632260091.metalar.93075.8041712053723398102.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/15645957498266366212.12244893483038329809.metalar.93075.16663682059236446437.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/4294855281998029116.12896661660900280164.metalar.93075.9914104434731754492.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/14690400167917884164.6638992978037625697.metalar.93075.12311370916346925157.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/9616778976773497614.2166594291701918027.metalar.93075.10703455293744354188.tmp (kernels_added=1 skipped=0)
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1267:29: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1267:29: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1267:29: <non-string panic payload>
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/14884838055984028072.10424405096202358610.metalar.93075.2267898460552188835.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/9464793717740158540.4765216478898548316.metalar.93075.14835142211270336070.tmp (kernels_added=1 skipped=0)
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1267:29: <non-string panic payload>
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/15645957498266366212.5643657161069485329.metalar.93075.10651560449287027712.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/4294855281998029116.16433896026351583955.metalar.93075.2028554957069572615.tmp (kernels_added=1 skipped=0)
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1267:29: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1267:29: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1267:29: <non-string panic payload>
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/12643539913963052680.12096655462425133969.metalar.93075.263437939132247503.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/14884838055984028072.1826556122856064162.metalar.93075.15184978903080095323.tmp (kernels_added=1 skipped=0)
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1267:29: <non-string panic payload>
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/9792251698342819226.11330590805300636228.metalar.93075.3696990083901439624.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/15645957498266366212.5277049937263617257.metalar.93075.13780604572268141192.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/9464793717740158540.11742065558016967012.metalar.93075.13107743761731019528.tmp (kernels_added=1 skipped=0)
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1267:29: <non-string panic payload>
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/4294855281998029116.17216641919853059645.metalar.93075.13514137144346202480.tmp (kernels_added=1 skipped=0)
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1267:29: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1267:29: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1267:29: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1267:29: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1267:29: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1267:29: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1267:29: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1267:29: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1267:29: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1267:29: <non-string panic payload>
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/14884838055984028072.14285458814602201829.metalar.93075.12822598235997205801.tmp (kernels_added=1 skipped=0)
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/9464793717740158540.8828384385414280923.metalar.93075.949947383995702286.tmp (kernels_added=1 skipped=0)
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/join-status-20261018/cache-proof19/apps/global/jit-cache/15645957498266366212.10469552254507684694.metalar.93075.887642316177862706.tmp (kernels_added=1 skipped=0)
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1650:51: count callback
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:1736:21: <non-string panic payload>
+PGACCEL PANIC: pid=93075 thread=<unnamed> at pg_accel/src/tests/join_rows.rs:199:60: domain boundary
+2026-10-18 09:27:44.188 MST [93061] LOG:  received fast shutdown request
+2026-10-18 09:27:44.188 MST [93061] LOG:  aborting any active transactions
+2026-10-18 09:27:44.189 MST [93061] LOG:  background worker "logical replication launcher" (PID 93069) exited with exit code 1
+2026-10-18 09:27:44.189 MST [93064] LOG:  shutting down
+2026-10-18 09:27:44.189 MST [93064] LOG:  checkpoint starting: shutdown fast
+2026-10-18 09:27:44.225 MST [93064] LOG:  checkpoint complete: shutdown fast: wrote 986 buffers (6.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.028 s, sync=0.008 s, total=0.036 s; sync files=326, longest=0.001 s, average=0.001 s; distance=4795 kB, estimate=4795 kB; lsn=0/01BF1CC0, redo lsn=0/01BF1CC0
+2026-10-18 09:27:44.229 MST [93061] LOG:  database system is shut down

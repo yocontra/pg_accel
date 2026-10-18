@@ -106,6 +106,8 @@ macro_rules! bridge_status_fns {
 ///   status as a hard error; legacy compatibility wrappers may still expose
 ///   `None` where their public API predates [`crate::gpu::GpuResult`].
 pub fn convert_status(func: &'static str, raw: i32) -> PgaccelStatus {
+    #[cfg(any(test, feature = "pg_test"))]
+    observe_test_join_status(func, raw);
     match PgaccelStatus::from_raw(raw) {
         Ok(PgaccelStatus::Ok) => PgaccelStatus::Ok,
         Ok(status) => {
@@ -136,6 +138,49 @@ pub fn convert_status(func: &'static str, raw: i32) -> PgaccelStatus {
             PgaccelStatus::Error
         }
     }
+}
+
+/// Backend/thread-local observations, deliberately absent from production builds.
+#[cfg(any(test, feature = "pg_test"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TestJoinStatusCounts {
+    pub count_attempts: u64,
+    pub oom: u64,
+    pub timeouts: u64,
+    pub other: u64,
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+thread_local! {
+    static TEST_JOIN_STATUS_COUNTS: std::cell::Cell<TestJoinStatusCounts> =
+        const { std::cell::Cell::new(TestJoinStatusCounts {
+            count_attempts: 0, oom: 0, timeouts: 0, other: 0,
+        }) };
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) fn test_join_status_counts() -> TestJoinStatusCounts {
+    TEST_JOIN_STATUS_COUNTS.get()
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+fn observe_test_join_status(func: &str, raw: i32) {
+    if super::counters::GpuFailureDomain::classify(func)
+        != super::counters::GpuFailureDomain::HashJoin
+    {
+        return;
+    }
+    let mut counts = TEST_JOIN_STATUS_COUNTS.get();
+    if func == "pgaccel_join_rows_count_controlled" {
+        counts.count_attempts += 1;
+    }
+    match PgaccelStatus::from_raw(raw) {
+        Ok(PgaccelStatus::Ok) => {}
+        Ok(PgaccelStatus::ErrorOom) => counts.oom += 1,
+        Ok(PgaccelStatus::ErrorTimeout) => counts.timeouts += 1,
+        _ => counts.other += 1,
+    }
+    TEST_JOIN_STATUS_COUNTS.set(counts);
 }
 
 bridge_status_fns! {
@@ -1206,6 +1251,59 @@ mod tests {
             convert_status("pgaccel_test_unknown_status", i32::MIN),
             PgaccelStatus::Error
         );
+    }
+
+    #[test]
+    fn join_status_observations_distinguish_native_oom_timeout_and_unknown() {
+        use super::super::counters::{
+            GpuFailureDomain, kernel_failure_count, unknown_status_count,
+        };
+        use crate::gpu::{GpuErrorDomain, GpuOperation, GpuStatusDetail, status_to_result};
+
+        let before = test_join_status_counts();
+        let failures = kernel_failure_count(GpuFailureDomain::HashJoin);
+        let unknown = unknown_status_count();
+        let native_oom = convert_status("pgaccel_join_rows_count_controlled", -3);
+        assert_eq!(
+            status_to_result(
+                native_oom,
+                GpuErrorDomain::HashJoin,
+                GpuOperation::Kernel("pgaccel_join_rows_count_controlled")
+            )
+            .expect_err("native OOM remains a hard error")
+            .status,
+            GpuStatusDetail::OutOfMemory
+        );
+        assert_eq!(
+            convert_status("pgaccel_join_rows_count_controlled", -4),
+            PgaccelStatus::ErrorTimeout
+        );
+        assert_eq!(
+            convert_status("pgaccel_join_rows_count_controlled", i32::MIN),
+            PgaccelStatus::Error
+        );
+        assert_eq!(
+            convert_status("pgaccel_join_rows_count_controlled", 0),
+            PgaccelStatus::Ok
+        );
+        // Other HashJoin symbols contribute statuses, but not count attempts.
+        assert_eq!(
+            convert_status("pgaccel_hash_join_test", -1),
+            PgaccelStatus::Error
+        );
+        let after = test_join_status_counts();
+        assert_eq!(after.count_attempts - before.count_attempts, 4);
+        assert_eq!(after.oom - before.oom, 1);
+        assert_eq!(after.timeouts - before.timeouts, 1);
+        assert_eq!(after.other - before.other, 2);
+        // Production counters are process-global; parallel unit tests can add.
+        assert!(kernel_failure_count(GpuFailureDomain::HashJoin) >= failures + 4);
+        assert!(unknown_status_count() > unknown);
+        assert_eq!(
+            convert_status("pgaccel_test_status", -3),
+            PgaccelStatus::ErrorOom
+        );
+        assert_eq!(test_join_status_counts(), after, "ignore unrelated domains");
     }
 
     // -----------------------------------------------------------------------

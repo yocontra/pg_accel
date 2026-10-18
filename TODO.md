@@ -77,6 +77,19 @@ complete objective is implemented and verified.
     SQL121 memory-budget failures remain separate. Evidence:
     `benchmarks/evidence/default-avg-20261018/README.md`.
 
+  - [x] Distinguish resident-join COUNT OOM from benign interrupted retries in
+    test-only status accounting, preserving production all-non-OK counters.
+    Deterministic retry proves exact count, two attempts and one timeout; the
+    old aggregate-counter assertion fails on that same successful retry.
+    Zero/rows/MAX capacities retain exact results without fake capacity OOM;
+    genuine Rust workspace OOM has zero native dispatch/failure increments and
+    unchanged live ledger. Raw native OOM conversion remains a counted hard
+    error (not a forced native allocator-failure test). PG18.4/PG19beta1 each
+    pass two targeted live tests and one status unit; real Metal probes invoke
+    both wrappers with 20,704 kernels and no warnings/errors. No full-suite,
+    hosted-CI or SQL121 budget-resolution claim. Evidence:
+    `benchmarks/evidence/join-status-20261018/README.md`.
+
 - [x] Correct pinned AdaptiveCpp cache-path handling. Native observation,
   targeted clearing, artifact capture and diagnostics now use the actual
   `apps/<application>/jit-cache` layout with runtime default/legacy/token rules.
