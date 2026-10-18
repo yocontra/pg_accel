@@ -1,0 +1,19 @@
+2026-10-17 20:37:04.850 MST [23987] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-17 20:37:04.850 MST [23987] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-17 20:37:04.852 MST [23987] LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-17 20:37:04.852 MST [23987] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/scan-cleanup-20261017/socket-proof18/.s.PGSQL.29818"
+2026-10-17 20:37:04.859 MST [23993] LOG:  database system was shut down at 2026-10-17 20:34:21 MST
+2026-10-17 20:37:04.861 MST [23987] LOG:  database system is ready to accept connections
+2026-10-17 20:37:04.958 MST [23998] WARNING:  resource was not closed: snapshot reference 0x782730c340
+2026-10-17 20:37:04.958 MST [23998] WARNING:  resource was not closed: snapshot reference 0x782730c340
+2026-10-17 20:37:04.958 MST [23998] WARNING:  resource was not closed: snapshot reference 0x782730c250
+2026-10-17 20:37:04.958 MST [23998] WARNING:  resource was not closed: snapshot reference 0x782730c250
+2026-10-17 20:37:04.958 MST [23998] WARNING:  resource was not closed: snapshot reference 0x782730c400
+2026-10-17 20:37:04.958 MST [23998] WARNING:  resource was not closed: snapshot reference 0x782730c400
+2026-10-17 20:37:04.963 MST [23987] LOG:  received fast shutdown request
+2026-10-17 20:37:04.963 MST [23987] LOG:  aborting any active transactions
+2026-10-17 20:37:04.965 MST [23987] LOG:  background worker "logical replication launcher" (PID 23996) exited with exit code 1
+2026-10-17 20:37:04.965 MST [23991] LOG:  shutting down
+2026-10-17 20:37:04.965 MST [23991] LOG:  checkpoint starting: shutdown immediate
+2026-10-17 20:37:04.966 MST [23991] LOG:  checkpoint complete: wrote 9 buffers (0.1%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.002 s; sync files=11, longest=0.001 s, average=0.001 s; distance=42 kB, estimate=42 kB; lsn=0/1B8B9B0, redo lsn=0/1B8B9B0
+2026-10-17 20:37:04.969 MST [23987] LOG:  database system is shut down

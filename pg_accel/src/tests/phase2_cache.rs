@@ -632,7 +632,7 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_generic_groupagg_omitted_group_key_declines_and_matches_native() {
+    fn test_generic_groupagg_omitted_group_key_selects_and_matches_native() {
         if !begin_gpu_test() {
             return;
         }
@@ -650,24 +650,19 @@ mod tests {
         Spi::run("SELECT pg_accel_reset_stats()").expect("reset pg_accel stats");
         let before = kernel_executions();
         let plan = explain_text(&query);
-        assert!(
-            !plan.contains("custom scan (gpuaccelagg)"),
-            "omitted group key must stay native:\n{plan}"
-        );
-        let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
-            .expect("last rejection query should succeed")
-            .expect("omitted group key should record a planner decline");
-        assert_eq!(rejection, "shape_unprojected_group_key");
+        assert_descriptor_plan(&plan);
+        let counts_before = accelerated_and_stock_counts();
 
         let mut accelerated = result_rows(&query);
         let after = kernel_executions();
         accelerated.sort_unstable();
 
-        assert_eq!(
-            after, before,
-            "omitted-group-key aggregate dispatched despite planner decline"
-        );
+        assert!(after > before, "omitted-group-key aggregate must dispatch");
         assert_eq!(accelerated, native);
+        assert_eq!(
+            accelerated_and_stock_counts(),
+            (counts_before.0 + 1, counts_before.1)
+        );
     }
 
     #[pg_test]
@@ -734,8 +729,6 @@ mod tests {
     #[cfg(feature = "pg_test")]
     #[pg_test]
     fn test_prepared_descriptor_revalidates_before_first_fetch_and_cleans_up_caught_error() {
-        use pgrx::prelude::PgTryBuilder;
-
         fn fetch_all(cursor: &str) -> usize {
             Spi::connect(|client| {
                 client
@@ -778,59 +771,123 @@ mod tests {
         Spi::run("CLOSE phase2_prepared_gap").expect("close recovered cursor");
         assert!(!derived_artifact_identities(table).is_empty());
 
-        let cleanup_before = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
-        Spi::run(&format!("DECLARE phase2_prepared_error CURSOR FOR {query}"))
+        Spi::run("CREATE TEMP TABLE phase2_cursor_receipt(code text, message text)")
+            .expect("cursor error receipt");
+        for callback_path in [false, true] {
+            Spi::run("TRUNCATE phase2_cursor_receipt").expect("reset cursor error receipt");
+            // HAVING is evaluated by PostgreSQL's ExecScan callback path; the
+            // plain aggregate takes the direct Rust fetch path.
+            let error_query = if callback_path {
+                format!("SELECT g, sum(v), count(*) FROM {table} GROUP BY g HAVING count(*) > 0")
+            } else {
+                query.clone()
+            };
+            let cleanup_before = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
+            let fetch_before = crate::engine::ffi::custom_scan::test_scan_fetch_counts();
+            Spi::run(&format!(
+                "DECLARE phase2_prepared_error CURSOR FOR {error_query}"
+            ))
             .expect("declare caught-error cursor");
-        Spi::run(&format!(
-            "SELECT pg_accel_unpin('{table}'::regclass); \
+            Spi::run(&format!(
+                "SELECT pg_accel_unpin('{table}'::regclass); \
              SELECT pg_accel_evict('{table}'::regclass); \
              SET LOCAL pg_accel.auto_load = off"
-        ))
-        .expect("make prepared artifact unavailable before caught fetch");
-        let completed = PgTryBuilder::new(|| {
-            let _ = fetch_all("phase2_prepared_error");
-            true
-        })
-        .catch_others(|_| false)
-        .execute();
-        assert!(!completed, "missing prepared artifact must fail closed");
+            ))
+            .expect("make prepared artifact unavailable before caught fetch");
+            // The portal belongs to the outer transaction. Only its failed
+            // FETCH is inside the exception subtransaction, so PostgreSQL
+            // unwinds SPI snapshots without concealing executor cleanup.
+            Spi::run(
+                "DO $fetch$ DECLARE ignored record; \
+                cursor_ref refcursor := 'phase2_prepared_error'; BEGIN \
+                FETCH NEXT FROM cursor_ref INTO ignored; \
+                RAISE EXCEPTION 'missing prepared artifact unexpectedly fetched'; \
+                EXCEPTION WHEN internal_error THEN \
+                INSERT INTO phase2_cursor_receipt VALUES (SQLSTATE, SQLERRM); \
+                END $fetch$",
+            )
+            .expect("catch only expected cursor error");
+            assert_eq!(
+                Spi::get_one::<i64>("SELECT count(*) FROM phase2_cursor_receipt")
+                    .expect("one cursor error receipt"),
+                Some(1)
+            );
+            assert_eq!(
+                Spi::get_one::<String>("SELECT code FROM phase2_cursor_receipt")
+                    .expect("cursor SQLSTATE"),
+                Some("XX000".to_owned())
+            );
+            let message = Spi::get_one::<String>("SELECT message FROM phase2_cursor_receipt")
+                .expect("cursor error message")
+                .expect("cursor error was captured");
+            assert_eq!(
+                message,
+                format!(
+                    "pg_accel: generic aggregate dispatch failed (relation OID {} is not resident and pg_accel.auto_load is off); refusing CPU fallback",
+                    table_oid(table)
+                )
+            );
 
-        let cleanup_after = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
-        assert_eq!(cleanup_after.installed, cleanup_before.installed + 1);
-        assert_eq!(cleanup_after.normal_end, cleanup_before.normal_end);
-        assert_eq!(
-            cleanup_after.query_reset,
-            cleanup_before.query_reset + 1,
-            "caught first-fetch error must release the prepared executor through query reset"
-        );
+            let cleanup_after = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
+            let fetch_after = crate::engine::ffi::custom_scan::test_scan_fetch_counts();
+            assert_eq!(
+                fetch_after.2,
+                fetch_before.2 + 1,
+                "error must release the executor eagerly, not only during subtransaction rollback"
+            );
+            assert_eq!(cleanup_after.installed, cleanup_before.installed + 1);
+            assert_eq!(cleanup_after.normal_end, cleanup_before.normal_end);
+            assert_eq!(
+                cleanup_after.query_reset,
+                cleanup_before.query_reset + 1,
+                "caught first-fetch error must release the prepared executor through query reset"
+            );
+            if callback_path {
+                let fetch_after = crate::engine::ffi::custom_scan::test_scan_fetch_counts();
+                assert!(fetch_after.1 > fetch_before.1);
+                assert_eq!(fetch_after.0, fetch_before.0);
+            } else {
+                let fetch_after = crate::engine::ffi::custom_scan::test_scan_fetch_counts();
+                assert!(fetch_after.0 > fetch_before.0);
+                assert_eq!(fetch_after.1, fetch_before.1);
+            }
+            Spi::run("CLOSE phase2_prepared_error").expect("close failed cursor");
+            let cleanup_closed = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
+            assert_eq!(cleanup_closed.query_reset, cleanup_after.query_reset);
+            assert_eq!(cleanup_closed.normal_end, cleanup_after.normal_end);
+            assert_eq!(
+                crate::engine::ffi::custom_scan::test_scan_fetch_counts().2,
+                fetch_after.2,
+                "cursor close must not release the executor twice"
+            );
+            assert_eq!(
+                Spi::get_one::<i32>("SELECT 42").expect("backend recovery"),
+                Some(42)
+            );
 
-        Spi::run("SET LOCAL pg_accel.auto_load = on").expect("restore auto-load");
-        pin_int4_fixture(table, device_rows);
-        assert_eq!(result_rows(&query).len(), 16);
+            Spi::run("SET LOCAL pg_accel.auto_load = on").expect("restore auto-load");
+            pin_int4_fixture(table, device_rows);
+            assert_eq!(result_rows(&query).len(), 16);
+        }
     }
 
     #[cfg(feature = "pg_test")]
     #[pg_test]
     fn test_bounded_dense_statement_timeout_is_exact_and_recoverable() {
-        use pgrx::pg_sys::panic::CaughtError;
-        use pgrx::prelude::{PgSqlErrorCode, PgTryBuilder};
-
+        use crate::gpu::{
+            cleanup_grouped_allocation_pools, grouped_output_pool_snapshot,
+            grouped_workspace_pool_snapshot,
+        };
         const SUCCESS_CHUNK_ROWS: usize = 65_536;
         const CANCEL_AFTER_CALLS: usize = 3;
+        const CANCEL_ATTEMPTS: usize = 3;
 
-        #[derive(Debug, PartialEq, Eq)]
-        enum Attempt {
-            Completed(usize),
-            Error(PgSqlErrorCode),
-        }
-
-        fn error_code(caught: &CaughtError) -> PgSqlErrorCode {
-            match caught {
-                CaughtError::PostgresError(report) | CaughtError::ErrorReport(report) => {
-                    report.sql_error_code()
-                }
-                CaughtError::RustPanic { ereport, .. } => ereport.sql_error_code(),
-            }
+        fn retained_pool_bytes() -> i64 {
+            i64::try_from(
+                grouped_output_pool_snapshot().retained_bytes
+                    + grouped_workspace_pool_snapshot().retained_bytes,
+            )
+            .expect("pool bytes fit ledger counter")
         }
 
         if !begin_gpu_test() {
@@ -861,45 +918,139 @@ mod tests {
         }
 
         let live_before_cancel = resident_live_bytes();
+        let pools_before_cancel = retained_pool_bytes();
+        let non_pool_baseline = live_before_cancel - pools_before_cancel;
         let status_before_cancel = resident_status(table);
         Spi::run("SELECT pg_accel_reset_stats()")
             .expect("reset counters before cancellation attempt");
         let panic_artifact = crate::engine::panic_hook::PanicLogTestArtifact::fresh()
             .expect("create a test-unique panic artifact");
-        let cleanup_before = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
+        Spi::run("CREATE TEMP TABLE phase2_cancel_receipt(code text, message text)")
+            .expect("cancellation error receipt");
+        let eager_before_attempts = crate::engine::ffi::custom_scan::test_scan_fetch_counts().2;
+        for attempt_index in 0..CANCEL_ATTEMPTS {
+            let cleanup_before = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
+            let eager_before = crate::engine::ffi::custom_scan::test_scan_fetch_counts().2;
+            let workspace_before = grouped_workspace_pool_snapshot();
+            let output_before = grouped_output_pool_snapshot();
+            let live_before_attempt = resident_live_bytes();
+            {
+                let fixture = DenseDispatchTestGuard::new(1, 1, CANCEL_AFTER_CALLS);
+                let kernels_before = kernel_executions();
+                // A real PostgreSQL exception subtransaction releases SPI
+                // snapshots on ERROR. Rust catch_unwind alone cannot do so.
+                // OTHERS does not catch query_canceled; match it explicitly.
+                Spi::run(&format!(
+                    "DO $cancel$ BEGIN \
+                     PERFORM row_to_json(q)::text FROM ({query}) AS q; \
+                     RAISE EXCEPTION 'bounded cancellation unexpectedly completed'; \
+                     EXCEPTION WHEN query_canceled THEN \
+                     INSERT INTO phase2_cancel_receipt VALUES (SQLSTATE, SQLERRM); \
+                     END $cancel$"
+                ))
+                .expect("catch only expected cancellation in a PostgreSQL subtransaction");
+                let kernels_after = kernel_executions();
 
-        {
-            let fixture = DenseDispatchTestGuard::new(1, 1, CANCEL_AFTER_CALLS);
-            let kernels_before = kernel_executions();
-            let attempt = PgTryBuilder::new(|| Attempt::Completed(result_rows(&query).len()))
-                .catch_others(|caught| Attempt::Error(error_code(&caught)))
-                .execute();
-            let kernels_after = kernel_executions();
+                assert_eq!(
+                    Spi::get_one::<String>(
+                        "SELECT code FROM phase2_cancel_receipt ORDER BY ctid DESC LIMIT 1"
+                    )
+                    .expect("cancellation SQLSTATE"),
+                    Some("57014".to_owned()),
+                    "bounded dispatch must surface SQLSTATE 57014 without a result"
+                );
+                assert_eq!(
+                    Spi::get_one::<i64>("SELECT count(*) FROM phase2_cancel_receipt")
+                        .expect("one receipt per cancelled attempt"),
+                    Some((attempt_index + 1) as i64)
+                );
+                assert_eq!(
+                    Spi::get_one::<String>(
+                        "SELECT message FROM phase2_cancel_receipt ORDER BY ctid DESC LIMIT 1"
+                    )
+                    .expect("cancellation error message"),
+                    Some("canceling statement due to statement timeout".to_owned())
+                );
+                assert_eq!(fixture.completed_calls(), CANCEL_AFTER_CALLS);
+                assert_eq!(
+                    kernels_after - kernels_before,
+                    CANCEL_AFTER_CALLS as i64,
+                    "cancellation must occur between completed calls and before finalize"
+                );
+            }
+            let cleanup_after = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
+            assert_eq!(
+                crate::engine::ffi::custom_scan::test_scan_fetch_counts().2,
+                eager_before + 1,
+                "cancellation must release eagerly before PostgreSQL subtransaction cleanup"
+            );
+            assert_eq!(cleanup_after.installed, cleanup_before.installed + 1);
+            assert_eq!(cleanup_after.normal_end, cleanup_before.normal_end);
+            assert_eq!(
+                cleanup_after.query_reset,
+                cleanup_before.query_reset + 1,
+                "statement_timeout must release the Custom Scan executor through query-context reset"
+            );
 
             assert_eq!(
-                attempt,
-                Attempt::Error(PgSqlErrorCode::ERRCODE_QUERY_CANCELED),
-                "bounded dispatch must surface SQLSTATE 57014 without a result"
+                accelerated_and_stock_counts(),
+                ((attempt_index + 1) as i64, 0)
             );
-            assert_eq!(fixture.completed_calls(), CANCEL_AFTER_CALLS);
+            let workspace_after = grouped_workspace_pool_snapshot();
+            let output_after = grouped_output_pool_snapshot();
             assert_eq!(
-                kernels_after - kernels_before,
-                CANCEL_AFTER_CALLS as i64,
-                "cancellation must occur between completed calls and before finalize"
+                resident_live_bytes(),
+                non_pool_baseline + retained_pool_bytes(),
+                "all retained bytes must belong to the measured idle pools, not a leaked executor"
             );
+            if attempt_index == 0 {
+                let retained_delta = retained_pool_bytes() - pools_before_cancel;
+                assert!(
+                    retained_delta > 0,
+                    "one-row cancellation must create its distinct workspace shape"
+                );
+                assert_eq!(resident_live_bytes() - live_before_cancel, retained_delta);
+                assert_eq!(output_after.retained_bytes, output_before.retained_bytes);
+                assert_eq!(
+                    workspace_after.retained_bytes - workspace_before.retained_bytes,
+                    usize::try_from(retained_delta).expect("positive retained delta")
+                );
+                assert_eq!(
+                    workspace_after.fresh_allocation_bytes
+                        - workspace_before.fresh_allocation_bytes,
+                    retained_delta as u64
+                );
+                pgrx::notice!("cancellation retained workspace delta: {retained_delta} bytes");
+            } else {
+                assert_eq!(resident_live_bytes(), live_before_attempt);
+                assert_eq!(
+                    workspace_after.retained_bytes,
+                    workspace_before.retained_bytes
+                );
+                assert_eq!(output_after.retained_bytes, output_before.retained_bytes);
+                assert_eq!(
+                    workspace_after.fresh_allocations,
+                    workspace_before.fresh_allocations
+                );
+                assert_eq!(
+                    output_after.fresh_allocations,
+                    output_before.fresh_allocations
+                );
+            }
+            assert_eq!(resident_status(table), status_before_cancel);
         }
-        let cleanup_after = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
-        assert_eq!(cleanup_after.installed, cleanup_before.installed + 1);
-        assert_eq!(cleanup_after.normal_end, cleanup_before.normal_end);
+        cleanup_grouped_allocation_pools();
         assert_eq!(
-            cleanup_after.query_reset,
-            cleanup_before.query_reset + 1,
-            "statement_timeout must release the Custom Scan executor through query-context reset"
+            crate::engine::ffi::custom_scan::test_scan_fetch_counts().2,
+            eager_before_attempts + CANCEL_ATTEMPTS,
+            "pool reclamation must not release an executor a second time"
         );
-
-        assert_eq!(accelerated_and_stock_counts(), (1, 0));
-        assert_eq!(resident_live_bytes(), live_before_cancel);
-        assert_eq!(resident_status(table), status_before_cancel);
+        assert_eq!(retained_pool_bytes(), 0);
+        assert_eq!(
+            resident_live_bytes(),
+            non_pool_baseline,
+            "idle-pool reclamation must release the entire cancellation delta"
+        );
         let panic_contents = panic_artifact
             .contents()
             .expect("read test-unique panic artifact");
@@ -926,6 +1077,17 @@ mod tests {
                 expected_success_calls as i64
             );
         }
-        assert_eq!(resident_live_bytes(), live_before_cancel);
+        assert_eq!(
+            resident_live_bytes(),
+            non_pool_baseline + retained_pool_bytes()
+        );
+        cleanup_grouped_allocation_pools();
+        assert_eq!(retained_pool_bytes(), 0);
+        assert_eq!(resident_live_bytes(), non_pool_baseline);
+        assert_eq!(
+            crate::engine::ffi::custom_scan::test_scan_fetch_counts().2,
+            eager_before_attempts + CANCEL_ATTEMPTS,
+            "recovery and final reclamation must not repeat caught-error cleanup"
+        );
     }
 }

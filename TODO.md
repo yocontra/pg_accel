@@ -51,6 +51,22 @@ The September implementation plan expands the objective beyond the historical
 completion of this expansion. Retain this file and planning docs until the
 complete objective is implemented and verified.
 
+- [x] Repair direct Rust fetch error cleanup while preserving the guarded
+  PostgreSQL callback. Tests require exact SQLSTATE/message, exactly-once
+  executor release on direct and ExecScan paths, cursor-close safety, repeated
+  cancellation with exact pool accounting/reclamation and GPU recovery.
+  Capability tests now require exact native parity for supported shapes and
+  stable declines for unsupported shapes; cross-column NUMERIC OR remains
+  unsupported. Local PG18.4 and PG19beta1 each pass the full unfiltered
+  1,839-test mixed Rust/live suite plus 55 integration tests, zero ignored or
+  filtered. SQL-subtransaction error tests avoid native SPI snapshot warnings;
+  an old-guard negative control still fails the independent eager-release check.
+  Both final visible lifecycle runs prove Metal dispatch and have zero warning,
+  error or fatal entries in their client/server logs.
+  No planner admission expansion, upstream PostgreSQL regression-suite
+  completion, performance or hosted-release qualification is claimed. Evidence:
+  `benchmarks/evidence/scan-cleanup-20261017/README.md`.
+
 - [x] Correct pinned AdaptiveCpp cache-path handling. Native observation,
   targeted clearing, artifact capture and diagnostics now use the actual
   `apps/<application>/jit-cache` layout with runtime default/legacy/token rules.

@@ -1,0 +1,171 @@
+[32m[1m       Using[0m[39m [37m[1mCliArgument("pg18")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/18.4/bin/pg_config[39m
+CARGO_PGRX_TEST_PGDATA="/private/tmp/pgaccel-scan-cleanup.4UwMyy/pgdata18-baseline" CARGO_TARGET_DIR="/Users/contra/Projects/pg_accel/target" PGRX_ALL_FEATURES="false" PGRX_BUILD_PROFILE="dev" PGRX_FEATURES="pg18 pg_test" PGRX_MANIFEST_PATH="/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" PGRX_NO_DEFAULT_FEATURES="true" PGRX_NO_SCHEMA="false" "/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "test" "--manifest-path" "/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" "--features" "pg18 pg_test" "--no-default-features" "tests::phase2_cache::tests::"
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 20.05s
+     Running unittests src/lib.rs (target/debug/deps/pg_accel-ed206a68dc782b00)
+
+running 9 tests
+test tests::phase2_cache::tests::pg_test_bounded_dense_statement_timeout_is_exact_and_recoverable ... [32m[1m       Using[0m[39m [37m[1mPgConfig("pg18")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/18.4/bin/pg_config[39m
+[32m[1m    Building[0m[39m extension with features [36mpg_test pg18[39m
+[32m[1m     Running[0m[39m command [36m"/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "rustc" "--lib" "--manifest-path" "/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" "--features" "pg_test pg18" "--no-default-features" "--message-format=json-render-diagnostics"[39m
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.22s
+[32m[1m  Installing[0m[39m extension
+[32m[1m     Copying[0m[39m control file to [36m.codex/scratch/uniform-budget-live-20261012/postgres/18.4/share/extension/pg_accel.control[39m
+[32m[1m     Copying[0m[39m shared library to [36m.codex/scratch/uniform-budget-live-20261012/postgres/18.4/lib/pg_accel.dylib[39m
+[32m[1m  Discovered[0m[39m [36m[1m337[0m[39m SQL entities: [36m[1m27[0m[39m schemas ([36m[1m3[0m[39m unique), [36m[1m308[0m[39m functions, [36m[1m0[0m[39m types, [36m[1m0[0m[39m enums, [36m[1m1[0m[39m sqls, [36m[1m0[0m[39m ords, [36m[1m0[0m[39m hashes, [36m[1m0[0m[39m aggregates, [36m[1m1[0m[39m triggers
+[32m[1m     Writing[0m[39m SQL entities to /Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/18.4/share/extension/pg_accel--1.0.0-rc1.sql
+[32m[1m    Finished[0m[39m installing pg_accel
+FAILED
+test tests::phase2_cache::tests::pg_test_darwin_prefork_activity_mode_default_when_requested ... ok
+test tests::phase2_cache::tests::pg_test_generic_groupagg_omitted_group_key_declines_and_matches_native ... FAILED
+test tests::phase2_cache::tests::pg_test_generic_int4_expression_overflow_reports_22003_after_dispatch ... ok
+test tests::phase2_cache::tests::pg_test_prepared_descriptor_revalidates_before_first_fetch_and_cleans_up_caught_error ... FAILED
+test tests::phase2_cache::tests::pg_test_residency_v2_ddl_rename_alter_and_type_freshness ... ok
+test tests::phase2_cache::tests::pg_test_residency_v2_dml_freshness_and_auto_reload ... ok
+test tests::phase2_cache::tests::pg_test_residency_v2_drop_recreate_uses_new_relation ... ok
+test tests::phase2_cache::tests::pg_test_residency_v2_truncate_freshness_and_auto_reload ... ok
+
+failures:
+
+---- tests::phase2_cache::tests::pg_test_bounded_dense_statement_timeout_is_exact_and_recoverable stdout ----
+[32m[1m     Running[0m[39m cd "/private/tmp/pgaccel-scan-cleanup.4UwMyy/pgdata18-baseline" && "/Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/18.4/bin/initdb" "--locale=C" "--lc-ctype=UTF-8" "-D" "/private/tmp/pgaccel-scan-cleanup.4UwMyy/pgdata18-baseline/18-96530"
+[32m[1m    Finished[0m[39m initializing database
+[32m[1m    Starting[0m[39m test Postgres on port [36m[1m56946[0m[39m
+[36m[2026-10-17 20:17:35.792 MST] [96658] [6ad43a4f.17992]: LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)[39m
+[36m[2026-10-17 20:17:35.792 MST] [96658] [6ad43a4f.17992]: LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query[39m
+[36m[2026-10-17 20:17:35.794 MST] [96658] [6ad43a4f.17992]: LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit[39m
+[36m[2026-10-17 20:17:35.796 MST] [96658] [6ad43a4f.17992]: LOG:  listening on IPv6 address "::1", port 56946[39m
+[36m[2026-10-17 20:17:35.796 MST] [96658] [6ad43a4f.17992]: LOG:  listening on IPv4 address "127.0.0.1", port 56946[39m
+[36m[2026-10-17 20:17:35.796 MST] [96658] [6ad43a4f.17992]: LOG:  listening on Unix socket "/tmp/pgrx-test-sockets-18-96530/.s.PGSQL.56946"[39m
+[36m[2026-10-17 20:17:35.802 MST] [96664] [6ad43a4f.17998]: LOG:  database system was shut down at 2026-10-17 20:17:35 MST[39m
+[32m[1m    Creating[0m[39m database [36m[1mpgrx_tests[0m[39m
+
+thread 'tests::phase2_cache::tests::pg_test_bounded_dense_statement_timeout_is_exact_and_recoverable' (17566802) panicked at /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-tests-0.19.1/src/framework.rs:195:9:
+
+
+Postgres Messages:
+[37m[2m[2026-10-17 20:17:35.792 MST] [96658] [6ad43a4f.17992]: LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+[2026-10-17 20:17:35.792 MST] [96658] [6ad43a4f.17992]: LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+[2026-10-17 20:17:35.794 MST] [96658] [6ad43a4f.17992]: LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+[2026-10-17 20:17:35.796 MST] [96658] [6ad43a4f.17992]: LOG:  listening on IPv6 address "::1", port 56946
+[2026-10-17 20:17:35.796 MST] [96658] [6ad43a4f.17992]: LOG:  listening on IPv4 address "127.0.0.1", port 56946
+[2026-10-17 20:17:35.796 MST] [96658] [6ad43a4f.17992]: LOG:  listening on Unix socket "/tmp/pgrx-test-sockets-18-96530/.s.PGSQL.56946"
+[2026-10-17 20:17:35.804 MST] [96658] [6ad43a4f.17992]: LOG:  database system is ready to accept connections
+[0m[39m
+
+Test Function Messages:
+[36m[2026-10-17 20:17:35.963 MST] [96679] [6ad43a4f.179a7]: LOG:  statement: START TRANSACTION
+[2026-10-17 20:17:35.963 MST] [96679] [6ad43a4f.179a7]: LOG:  statement: SELECT "tests"."test_bounded_dense_statement_timeout_is_exact_and_recoverable"();
+[2026-10-17 20:17:41.924 MST] [96679] [6ad43a4f.179a7]: ERROR:  assertion `left == right` failed
+[2026-10-17 20:17:41.924 MST] [96679] [6ad43a4f.179a7]: STATEMENT:  SELECT "tests"."test_bounded_dense_statement_timeout_is_exact_and_recoverable"();
+[2026-10-17 20:17:41.925 MST] [96679] [6ad43a4f.179a7]: LOG:  statement: ROLLBACK
+[39m
+
+Client Error:
+[31m[1massertion `left == right` failed
+  left: 3232068
+ right: 3226076[0m[39m
+postgres location: [37m[2mphase2_cache.rs:901[0m[39m
+rust location: [33m<unknown>[39m
+
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::phase2_cache::tests::pg_test_generic_groupagg_omitted_group_key_declines_and_matches_native stdout ----
+
+thread 'tests::phase2_cache::tests::pg_test_generic_groupagg_omitted_group_key_declines_and_matches_native' (17568218) panicked at /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-tests-0.19.1/src/framework.rs:195:9:
+
+
+Postgres Messages:
+[37m[2m[2026-10-17 20:17:35.792 MST] [96658] [6ad43a4f.17992]: LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+[2026-10-17 20:17:35.792 MST] [96658] [6ad43a4f.17992]: LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+[2026-10-17 20:17:35.794 MST] [96658] [6ad43a4f.17992]: LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+[2026-10-17 20:17:35.796 MST] [96658] [6ad43a4f.17992]: LOG:  listening on IPv6 address "::1", port 56946
+[2026-10-17 20:17:35.796 MST] [96658] [6ad43a4f.17992]: LOG:  listening on IPv4 address "127.0.0.1", port 56946
+[2026-10-17 20:17:35.796 MST] [96658] [6ad43a4f.17992]: LOG:  listening on Unix socket "/tmp/pgrx-test-sockets-18-96530/.s.PGSQL.56946"
+[2026-10-17 20:17:35.804 MST] [96658] [6ad43a4f.17992]: LOG:  database system is ready to accept connections
+[0m[39m
+
+Test Function Messages:
+[36m[2026-10-17 20:17:42.955 MST] [97063] [6ad43a56.17b27]: LOG:  statement: START TRANSACTION
+[2026-10-17 20:17:42.955 MST] [97063] [6ad43a56.17b27]: LOG:  statement: SELECT "tests"."t12_test_generic_groupagg_omitted_group_key_declines_and_matche"();
+[2026-10-17 20:17:43.234 MST] [97063] [6ad43a56.17b27]: ERROR:  omitted group key must stay native:
+[2026-10-17 20:17:43.234 MST] [97063] [6ad43a56.17b27]: STATEMENT:  SELECT "tests"."t12_test_generic_groupagg_omitted_group_key_declines_and_matche"();
+[2026-10-17 20:17:43.235 MST] [97063] [6ad43a56.17b27]: LOG:  statement: ROLLBACK
+[39m
+
+Client Error:
+[31m[1momitted group key must stay native:
+custom scan (gpuaccelagg)
+  output: (sum(v)), g
+  strategy: gpuagg
+  plan selected: true
+  batch size: 65536
+  expected threads: 1
+  gpu resident pipeline: true
+  gpu resident proof version: 2
+  gpu resident operator class: resident_groupagg
+  gpu physical kernel mode: parallel_dense_integer
+  gpu descriptor strategy: descriptor_grouped_aggregate
+  gpu descriptor specialization: dense_int4_sum_avg_plain
+  gpu descriptor specialization cache: miss
+  gpu descriptor artifact policy: not initialized (explain only)
+  gpu descriptor group keys: k0:fact(16708.1:type=23) type=23 collation=0 encoding=hash
+  gpu descriptor aggregates: m0:column(16708.2:type=23) -> value.sum
+  gpu descriptor filter: fact=none; measures=[m0=none]; dimensions=[none]
+  gpu descriptor star dimensions: none
+  gpu descriptor output: slot0:group[k0] source_type=23 result_type=23 typmod=-1 collation=0 nullable=false; slot1:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true
+  gpu descriptor residency state: not initialized (explain only)
+  gpu descriptor artifact: not initialized
+  gpu descriptor generations: not inspected
+  gpu descriptor bytes: not inspected
+  gpu resident stage mask: 16393
+  gpu resident device columns: 2
+  gpu resident boundary: none: no cpu boundary[0m[39m
+postgres location: [37m[2mphase2_cache.rs:653[0m[39m
+rust location: [33m<unknown>[39m
+
+
+
+---- tests::phase2_cache::tests::pg_test_prepared_descriptor_revalidates_before_first_fetch_and_cleans_up_caught_error stdout ----
+
+thread 'tests::phase2_cache::tests::pg_test_prepared_descriptor_revalidates_before_first_fetch_and_cleans_up_caught_error' (17568428) panicked at /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-tests-0.19.1/src/framework.rs:195:9:
+
+
+Postgres Messages:
+[37m[2m[2026-10-17 20:17:35.792 MST] [96658] [6ad43a4f.17992]: LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+[2026-10-17 20:17:35.792 MST] [96658] [6ad43a4f.17992]: LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+[2026-10-17 20:17:35.794 MST] [96658] [6ad43a4f.17992]: LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+[2026-10-17 20:17:35.796 MST] [96658] [6ad43a4f.17992]: LOG:  listening on IPv6 address "::1", port 56946
+[2026-10-17 20:17:35.796 MST] [96658] [6ad43a4f.17992]: LOG:  listening on IPv4 address "127.0.0.1", port 56946
+[2026-10-17 20:17:35.796 MST] [96658] [6ad43a4f.17992]: LOG:  listening on Unix socket "/tmp/pgrx-test-sockets-18-96530/.s.PGSQL.56946"
+[2026-10-17 20:17:35.804 MST] [96658] [6ad43a4f.17992]: LOG:  database system is ready to accept connections
+[0m[39m
+
+Test Function Messages:
+[36m[2026-10-17 20:17:45.024 MST] [97123] [6ad43a59.17b63]: LOG:  statement: START TRANSACTION
+[2026-10-17 20:17:45.024 MST] [97123] [6ad43a59.17b63]: LOG:  statement: SELECT "tests"."t10_test_prepared_descriptor_revalidates_before_first_fetch_and"();
+[2026-10-17 20:17:45.443 MST] [97123] [6ad43a59.17b63]: ERROR:  assertion `left == right` failed: caught first-fetch error must release the prepared executor through query reset
+[2026-10-17 20:17:45.443 MST] [97123] [6ad43a59.17b63]: STATEMENT:  SELECT "tests"."t10_test_prepared_descriptor_revalidates_before_first_fetch_and"();
+[2026-10-17 20:17:45.445 MST] [97123] [6ad43a59.17b63]: LOG:  statement: ROLLBACK
+[39m
+
+Client Error:
+[31m[1massertion `left == right` failed: caught first-fetch error must release the prepared executor through query reset
+  left: 0
+ right: 1[0m[39m
+postgres location: [37m[2mphase2_cache.rs:801[0m[39m
+rust location: [33m<unknown>[39m
+
+
+
+
+failures:
+    tests::phase2_cache::tests::pg_test_bounded_dense_statement_timeout_is_exact_and_recoverable
+    tests::phase2_cache::tests::pg_test_generic_groupagg_omitted_group_key_declines_and_matches_native
+    tests::phase2_cache::tests::pg_test_prepared_descriptor_revalidates_before_first_fetch_and_cleans_up_caught_error
+
+test result: FAILED. 6 passed; 3 failed; 0 ignored; 0 measured; 1830 filtered out; finished in 19.79s
+
+error: test failed, to rerun pass `--lib`

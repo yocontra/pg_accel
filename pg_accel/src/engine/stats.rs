@@ -1904,7 +1904,25 @@ mod tests {
         let count = Spi::get_one::<i64>("SELECT COUNT(*) FROM pg_accel_device_limits()")
             .expect("pg_accel_device_limits() should succeed")
             .expect("pg_accel_device_limits() should return a row count");
-        assert_eq!(count, 75, "expected one SRF row per DeviceLimits field");
+        assert_eq!(count, 76, "expected one SRF row per DeviceLimits field");
+        assert_eq!(
+            Spi::get_one::<i64>("SELECT COUNT(DISTINCT name) FROM pg_accel_device_limits()")
+                .expect("device-limit names should be readable"),
+            Some(count),
+            "device-limit names must be unique"
+        );
+        assert_eq!(
+            Spi::get_one::<String>(
+                "SELECT value FROM pg_accel_device_limits() WHERE name = 'gpu_h3_max_groups'"
+            )
+            .expect("H3 group limit should be readable"),
+            Some(
+                crate::engine::cost::device_limits()
+                    .gpu_h3_max_groups
+                    .to_string()
+            ),
+            "H3 must expose its own group limit, not the generic aggregate limit"
+        );
 
         let grouped_one_shot_limit = Spi::get_one::<String>(
             "SELECT value FROM pg_accel_device_limits() \

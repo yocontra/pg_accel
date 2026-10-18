@@ -1,0 +1,21 @@
+[32m[1m       Using[0m[39m [37m[1mCliArgument("pg18")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/18.4/bin/pg_config[39m
+CARGO_PGRX_TEST_PGDATA="/Users/contra/Projects/pg_accel/.codex/scratch/scan-cleanup-20261017/pgdata18-candidate1" CARGO_TARGET_DIR="/Users/contra/Projects/pg_accel/target" PGRX_ALL_FEATURES="false" PGRX_BUILD_PROFILE="dev" PGRX_FEATURES="pg18 pg_test" PGRX_MANIFEST_PATH="/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" PGRX_NO_DEFAULT_FEATURES="true" PGRX_NO_SCHEMA="false" "/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "test" "--manifest-path" "/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" "--features" "pg18 pg_test" "--no-default-features" "tests::phase2_cache::tests::"
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error: function cannot return without recursing
+    --> pg_accel/src/engine/ffi/custom_scan/mod.rs:1008:1
+     |
+1008 | / unsafe extern "C-unwind" fn fetch_resident_scan_tuple(
+1009 | |     scan: *mut pg_sys::ScanState,
+1010 | | ) -> *mut pg_sys::TupleTableSlot {
+     | |________________________________^ cannot return without recursing
+...
+1018 |       unsafe { fetch_resident_scan_tuple_inner(scan) }
+     |                ------------------------------------- recursive call site
+     |
+     = help: a `loop` may express intention better if this is on purpose
+     = note: `-D unconditional-recursion` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(unconditional_recursion)]`
+
+error: could not compile `pg_accel` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `pg_accel` (lib test) due to 1 previous error

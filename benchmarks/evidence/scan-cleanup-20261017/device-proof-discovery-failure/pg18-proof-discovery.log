@@ -1,0 +1,5 @@
+ nspname |                             proname                             |                                 prosrc                                  
+---------+-----------------------------------------------------------------+-------------------------------------------------------------------------
+ tests   | t13_test_prepared_descriptor_revalidates_before_first_fetch_and | t13_test_prepared_descriptor_revalidates_before_first_fetch_and_wrapper
+(1 row)
+

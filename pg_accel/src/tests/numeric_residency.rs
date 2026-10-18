@@ -239,6 +239,7 @@ mod tests {
             "SELECT count(*) n,sum(v) s FROM numeric_sql WHERE NOT (g=1 OR g=2)",
             "SELECT g,sum(v) s FROM numeric_sql WHERE g NOT IN (0,2) GROUP BY g",
             "SELECT sum(v) s,count(v) c FROM numeric_sql WHERE g IS NOT NULL",
+            "SELECT sum(v) s FROM numeric_sql WHERE g IS NULL OR g=1",
             "SELECT count(*) n,sum(v) s,avg(w) a FROM numeric_sql WHERE b",
             "SELECT g,sum(v) s,avg(g) a FROM numeric_sql WHERE b GROUP BY g",
             "SELECT g,sum(v) s FROM numeric_sql WHERE g<0 GROUP BY g",
@@ -261,13 +262,48 @@ mod tests {
         ] {
             verify_numeric_sql(query);
         }
+        // Cross-column OR needs a hidden scalar-bytecode measure, which cannot
+        // yet be composed with the NUMERIC accumulator family. The test-only
+        // admission override must not bypass that descriptor capability gate.
+        let cross_column_or = "SELECT sum(v) s FROM numeric_sql WHERE g=1 OR h=1";
+        Spi::run("SET pg_accel.enabled=off").expect("native cross-column OR baseline");
+        Spi::run(&format!(
+            "CREATE TEMP TABLE numeric_expected AS {cross_column_or}"
+        ))
+        .expect("native cross-column OR result");
+        Spi::run("SET pg_accel.enabled=on").expect("restore numeric planning");
+        let plan = numeric_sql_plan(cross_column_or, false);
+        assert!(!plan.contains("GpuAccelAgg"), "{cross_column_or}\n{plan}");
+        assert_eq!(
+            Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+                .expect("cross-column OR rejection"),
+            Some("generic_descriptor_capability".to_owned())
+        );
+        let before = crate::gpu::gpu_exec_count();
+        Spi::run(&format!(
+            "CREATE TEMP TABLE numeric_actual AS {cross_column_or}"
+        ))
+        .expect("native cross-column OR with extension enabled");
+        assert_eq!(
+            crate::gpu::gpu_exec_count(),
+            before,
+            "unsupported NUMERIC/scalar composition dispatched"
+        );
+        assert_eq!(
+            Spi::get_one::<bool>(
+                "SELECT numeric_send(a.s) IS NOT DISTINCT FROM numeric_send(e.s) \
+             FROM numeric_actual a CROSS JOIN numeric_expected e"
+            )
+            .expect("cross-column OR binary result parity"),
+            Some(true)
+        );
+        Spi::run("DROP TABLE numeric_actual, numeric_expected")
+            .expect("cross-column OR oracle cleanup");
         for unsupported in [
             "SELECT min(v) FROM numeric_sql",
             "SELECT sum(v+1) FROM numeric_sql",
             "SELECT sum(v) FILTER (WHERE v>0) FROM numeric_sql",
             "SELECT sum(v) FROM numeric_sql WHERE v>0",
-            "SELECT sum(v) FROM numeric_sql WHERE g IS NULL OR g=1",
-            "SELECT sum(v) FROM numeric_sql WHERE g=1 OR h=1",
             "SELECT v,sum(w) FROM numeric_sql GROUP BY v",
         ] {
             assert!(

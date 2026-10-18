@@ -190,11 +190,19 @@ thread_local! {
             normal_end: 0,
             query_reset: 0,
         }) };
+    // Direct Rust fetches, guarded PostgreSQL callbacks, eager error releases.
+    static TEST_SCAN_FETCH_COUNTS: std::cell::Cell<(usize, usize, usize)> =
+        const { std::cell::Cell::new((0, 0, 0)) };
 }
 
 #[cfg(feature = "pg_test")]
 pub(crate) fn test_executor_cleanup_counts() -> TestExecutorCleanupCounts {
     TEST_EXECUTOR_CLEANUP_COUNTS.with(std::cell::Cell::get)
+}
+
+#[cfg(feature = "pg_test")]
+pub(crate) fn test_scan_fetch_counts() -> (usize, usize, usize) {
+    TEST_SCAN_FETCH_COUNTS.with(std::cell::Cell::get)
 }
 
 #[cfg(any(test, feature = "pg_test"))]
@@ -328,6 +336,10 @@ unsafe fn release_executor_after_caught_error(state: &mut GpuAccelState) {
     #[cfg(any(test, feature = "pg_test"))]
     if !state.executor.is_null() {
         record_executor_release(true);
+        TEST_SCAN_FETCH_COUNTS.with(|slot| {
+            let (direct, callback, caught_error) = slot.get();
+            slot.set((direct, callback, caught_error + 1));
+        });
     }
     // SAFETY: the executor and its callbacks are one installed ownership
     // record. PostgreSQL has not deleted query-context children yet.
@@ -969,7 +981,15 @@ unsafe extern "C-unwind" fn exec_custom_scan(
         // SAFETY: strategy and executor were installed together in Begin.
         unsafe {
             if (*node).ss.ps.qual.is_null() && (*node).ss.ps.ps_ProjInfo.is_null() {
-                fetch_resident_scan_tuple(node.cast())
+                #[cfg(any(test, feature = "pg_test"))]
+                TEST_SCAN_FETCH_COUNTS.with(|slot| {
+                    let (direct, callback, caught_error) = slot.get();
+                    slot.set((direct + 1, callback, caught_error));
+                });
+                // This is a Rust call, not a PostgreSQL callback boundary.
+                // Calling the pg_guard wrapper here would turn a Rust error
+                // into a longjmp before the enclosing cleanup handler sees it.
+                fetch_resident_tuple_rust(node.cast())
             } else {
                 // ExecScan owns per-tuple memory reset, SQL NULL/Boolean
                 // semantics, projection and rows-removed instrumentation.
@@ -995,6 +1015,18 @@ unsafe extern "C-unwind" fn exec_custom_scan(
 unsafe extern "C-unwind" fn fetch_resident_scan_tuple(
     scan: *mut pg_sys::ScanState,
 ) -> *mut pg_sys::TupleTableSlot {
+    #[cfg(any(test, feature = "pg_test"))]
+    TEST_SCAN_FETCH_COUNTS.with(|slot| {
+        let (direct, callback, caught_error) = slot.get();
+        slot.set((direct, callback + 1, caught_error));
+    });
+    // SAFETY: ExecScan invokes this callback with the initialized scan state.
+    unsafe { fetch_resident_tuple_rust(scan) }
+}
+
+/// Fetch within Rust, allowing errors to unwind to the executor owner before
+/// the outer PostgreSQL callback converts them to PostgreSQL ERRORs.
+unsafe fn fetch_resident_tuple_rust(scan: *mut pg_sys::ScanState) -> *mut pg_sys::TupleTableSlot {
     let node = scan.cast::<pg_sys::CustomScanState>();
     let state = scan.cast::<GpuAccelScanState>();
     // SAFETY: ScanState is the first field of CustomScanState, which is the

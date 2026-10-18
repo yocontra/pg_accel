@@ -1,0 +1,36 @@
+BEGIN
+                                                      version                                                       
+--------------------------------------------------------------------------------------------------------------------
+ PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+(1 row)
+
+ cpu_cores | configured_workers | gpu_available | gpu_device_name |  memory_model   | pg_version | pg_accel_version 
+-----------+--------------------+---------------+-----------------+-----------------+------------+------------------
+        12 |                  0 | t             | Apple M2 Max    | explicit_device |     180004 | 1.0.0-rc1
+(1 row)
+
+      source      
+------------------
+ hardware_derived
+(1 row)
+
+DO
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/scan-cleanup-20261017/device-proof.sql:16: NOTICE:  cancellation retained workspace delta: 5992 bytes
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/scan-cleanup-20261017/device-proof.sql:16: WARNING:  resource was not closed: snapshot reference 0x78cf094d78
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/scan-cleanup-20261017/device-proof.sql:16: WARNING:  resource was not closed: snapshot reference 0x78cf094d78
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/scan-cleanup-20261017/device-proof.sql:16: WARNING:  resource was not closed: snapshot reference 0x78cf094460
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/scan-cleanup-20261017/device-proof.sql:16: WARNING:  resource was not closed: snapshot reference 0x78cf094460
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/scan-cleanup-20261017/device-proof.sql:16: WARNING:  resource was not closed: snapshot reference 0x78cf094f28
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/scan-cleanup-20261017/device-proof.sql:16: WARNING:  resource was not closed: snapshot reference 0x78cf094f28
+ test_bounded_dense_statement_timeout_is_exact_and_recoverable 
+---------------------------------------------------------------
+ 
+(1 row)
+
+ kernels_before | kernels_after | dispatched_kernel_calls 
+----------------+---------------+-------------------------
+              0 |            22 |                      22
+(1 row)
+
+AFFIRMATIVE_REAL_GPU_DISPATCH_PASS
+ROLLBACK

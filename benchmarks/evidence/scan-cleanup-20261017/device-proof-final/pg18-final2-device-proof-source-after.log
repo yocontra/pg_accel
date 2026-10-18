@@ -1,0 +1,6 @@
+pg_accel/src/tests/phase2_cache.rs: OK
+pg_accel/src/engine/ffi/custom_scan/mod.rs: OK
+pg_accel/src/engine/stats.rs: OK
+pg_accel/src/tests/active_engine.rs: OK
+pg_accel/src/tests/numeric_residency.rs: OK
+pg_accel/src/tests/mod.rs: OK

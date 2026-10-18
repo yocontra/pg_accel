@@ -92,20 +92,6 @@ mod tests {
             .expect("stock executor counter should not be NULL")
     }
 
-    fn assert_planner_decline(query: &str, expected_reason: &str) {
-        Spi::run("SET LOCAL pg_accel.enabled = on").expect("acceleration should be enabled");
-        Spi::run("SET LOCAL pg_accel.execution_profiling = on")
-            .expect("descriptor execution profiling should be enabled for evidence");
-        let plan = explain_text(query, false);
-        let reason = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
-            .expect("planner rejection reason should be readable");
-        assert!(
-            !plan.contains("custom scan (gpuaccelagg)"),
-            "declined query unexpectedly selected pg_accel:\n{plan}"
-        );
-        assert_eq!(reason.as_deref(), Some(expected_reason));
-    }
-
     fn assert_native_decline_matches_native(query: &str, expected_reason: &str) {
         Spi::run("SET LOCAL pg_accel.enabled = off").expect("native baseline should be selectable");
         let native = result_rows(query);
@@ -340,7 +326,7 @@ mod tests {
     }
 
     #[pg_test]
-    fn serial_generic_descriptor_types_decline_with_binary_empty_and_lifecycle_parity() {
+    fn descriptor_types_preserve_selected_declined_empty_and_lifecycle_parity() {
         if !begin_gpu_test() {
             return;
         }
@@ -416,20 +402,24 @@ mod tests {
              FROM pgaccel_active_descriptor_types \
              GROUP BY g_f8 ORDER BY g_f8 NULLS FIRST";
 
-        let queries = [
-            dictionary_query,
-            temporal_query,
-            scalar_query,
-            float_key_query,
-        ];
-        for query in queries {
+        // Dense dictionary keys are independent of the INT2/INT4 measure lane.
+        for query in [dictionary_query, float_key_query] {
+            assert_selected_matches_native(query);
+        }
+        // INT8/floating extrema still require the unqualified generic lane.
+        for query in [temporal_query, scalar_query] {
             assert_native_decline_matches_native(query, "generic_serial_kernel_mode_unqualified");
         }
 
-        Spi::run("DELETE FROM pgaccel_active_descriptor_types")
-            .expect("deleting the typed fixture should succeed");
+        Spi::run(
+            "DELETE FROM pgaccel_active_descriptor_types; ANALYZE pgaccel_active_descriptor_types",
+        )
+        .expect("deleting the typed fixture should succeed");
         pin("pgaccel_active_descriptor_types", &columns, 0);
-        for query in queries {
+        for query in [dictionary_query, float_key_query] {
+            assert_native_decline_matches_native(query, "generic_fact_rows_below_device_minimum");
+        }
+        for query in [temporal_query, scalar_query] {
             assert_native_decline_matches_native(query, "generic_serial_kernel_mode_unqualified");
         }
 
@@ -594,7 +584,7 @@ mod tests {
     }
 
     #[pg_test]
-    fn unfiltered_and_bounded_integer_ranges_select_while_other_ranges_decline() {
+    fn integer_predicates_and_aggregate_filters_select_with_exact_parity() {
         if !begin_gpu_test() {
             return;
         }
@@ -641,12 +631,11 @@ mod tests {
             "selected COUNT(*) grouping must execute the native parallel dense-count branch"
         );
 
-        assert_native_decline_matches_native(
+        assert_selected_matches_native(
             "SELECT product_id, sum(price * quantity) AS sum, count(*) AS count \
              FROM pgaccel_active_and_ranges \
              WHERE price <= 800 \
              GROUP BY product_id ORDER BY product_id",
-            "generic_serial_kernel_mode_unqualified",
         );
 
         let bounded_range_query = "SELECT product_id, sum(price * quantity) AS sum, count(*) AS count \
@@ -677,35 +666,35 @@ mod tests {
             "bounded aggregate FILTER must execute the parallel dense-integer branch"
         );
 
-        assert_native_decline_matches_native(
+        assert_selected_matches_native(
             "SELECT product_id, sum(price) FILTER (WHERE price <= 800), count(*) \
              FROM pgaccel_active_and_ranges GROUP BY product_id ORDER BY product_id",
-            "shape_aggregate_modifier",
         );
-        assert_native_decline_matches_native(
+        assert_selected_matches_native(
             "SELECT product_id, sum(price) FILTER \
                     (WHERE quantity >= 2 AND quantity <= 8), count(*) \
              FROM pgaccel_active_and_ranges GROUP BY product_id ORDER BY product_id",
-            "shape_aggregate_modifier",
         );
 
-        assert_planner_decline(
+        assert_selected_matches_native(
             "SELECT product_id, sum(price * quantity), count(*) \
              FROM pgaccel_active_and_ranges \
-             WHERE price >= 200 AND quantity <= 8 GROUP BY product_id",
-            "shape_multi_filter_relation",
+             WHERE price >= 200 AND quantity <= 8 GROUP BY product_id ORDER BY product_id",
         );
-        assert_planner_decline(
+        assert_selected_matches_native(
             "SELECT product_id, sum(price * quantity), count(*) \
              FROM pgaccel_active_and_ranges \
-             WHERE price < 200 OR price > 800 GROUP BY product_id",
-            "shape_unsupported_predicate",
+             WHERE price < 200 OR price > 800 GROUP BY product_id ORDER BY product_id",
         );
-        assert_planner_decline(
-            "SELECT product_id, sum(price * quantity), count(*) \
+        // Contradictory ranges lower to the scalar program lane; the kernel
+        // must reject every row without creating an empty group.
+        assert!(
+            assert_selected_matches_native(
+                "SELECT product_id, sum(price * quantity), count(*) \
              FROM pgaccel_active_and_ranges \
-             WHERE price >= 900 AND price <= 100 GROUP BY product_id",
-            "shape_invalid_filter_range",
+             WHERE price >= 900 AND price <= 100 GROUP BY product_id ORDER BY product_id",
+            )
+            .is_empty()
         );
     }
 }

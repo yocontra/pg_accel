@@ -45,6 +45,43 @@ mod tests {
         })
     }
 
+    fn exact_result_rows(query: &str) -> Vec<String> {
+        let mut rows = Spi::connect(|client| {
+            client
+                .select(
+                    &format!("SELECT row_to_json(result_row)::text FROM ({query}) result_row"),
+                    None,
+                    &[],
+                )
+                .expect("result query should succeed")
+                .map(|row| {
+                    row.get::<String>(1)
+                        .expect("result text")
+                        .expect("non-NULL JSON")
+                })
+                .collect::<Vec<_>>()
+        });
+        rows.sort();
+        rows
+    }
+
+    fn assert_declined_result_matches_native(query: &str) {
+        Spi::run("SET pg_accel.enabled = off").expect("native baseline");
+        let native = exact_result_rows(query);
+        Spi::run("SET pg_accel.enabled = on").expect("restore acceleration");
+        let before = crate::gpu::gpu_exec_count();
+        assert_eq!(
+            exact_result_rows(query),
+            native,
+            "native decline parity: {query}"
+        );
+        assert_eq!(
+            crate::gpu::gpu_exec_count(),
+            before,
+            "declined query dispatched: {query}"
+        );
+    }
+
     fn planner_rejection_count(reason: &str) -> i64 {
         Spi::get_one::<i64>(&format!(
             "SELECT pg_accel_planner_rejection_count('{reason}')"
@@ -781,11 +818,11 @@ mod tests {
                             WHERE v >= pg_temp._decline_cache_nested(0) GROUP BY g";
         let before_nested = groupagg_fast_declines();
         let nested_first = explain_text(nested_query);
-        assert_reason("generic_serial_kernel_mode_unqualified");
+        assert_reason("generic_fact_rows_below_device_minimum");
         assert_eq!(groupagg_fast_declines(), before_nested);
         let nested_second = explain_text(nested_query);
         assert_eq!(nested_second, nested_first);
-        assert_reason("generic_serial_kernel_mode_unqualified");
+        assert_reason("generic_fact_rows_below_device_minimum");
         assert_eq!(groupagg_fast_declines(), before_nested + 1);
         Spi::run(
             "DO $$ BEGIN \
@@ -797,7 +834,7 @@ mod tests {
         let before_error_reuse = groupagg_fast_declines();
         let nested_after_error = explain_text(nested_query);
         assert_eq!(nested_after_error, nested_first);
-        assert_reason("generic_serial_kernel_mode_unqualified");
+        assert_reason("generic_fact_rows_below_device_minimum");
         assert_eq!(
             groupagg_fast_declines(),
             before_error_reuse + 1,
@@ -814,12 +851,12 @@ mod tests {
         .expect("prepare forced-custom decline query");
         let before_prepared = groupagg_fast_declines();
         let prepared_first = explain_text("EXECUTE _decline_cache_prepared(0)");
-        assert_reason("generic_serial_kernel_mode_unqualified");
+        assert_reason("generic_fact_rows_below_device_minimum");
         let after_prepared_first = groupagg_fast_declines();
         assert_eq!(after_prepared_first, before_prepared);
         let prepared_second = explain_text("EXECUTE _decline_cache_prepared(0)");
         assert_eq!(prepared_second, prepared_first);
-        assert_reason("generic_serial_kernel_mode_unqualified");
+        assert_reason("generic_fact_rows_below_device_minimum");
         assert_eq!(
             groupagg_fast_declines(),
             after_prepared_first + 1,
@@ -827,6 +864,8 @@ mod tests {
         );
         Spi::run("DEALLOCATE _decline_cache_prepared; RESET plan_cache_mode")
             .expect("clean up prepared decline query");
+        assert_declined_result_matches_native(query);
+        assert_declined_result_matches_native(nested_query);
     }
 
     #[pg_test]
@@ -869,14 +908,25 @@ mod tests {
         assert_eq!(pinned, 500_000);
 
         let queries = [
-            "SELECT g, count(b), count(s), min(s), max(s) \
+            // Boolean COUNT is representable but has no qualified dense lane.
+            (
+                "SELECT g, count(b), count(s), min(s), max(s) \
              FROM _straightforward_aggregate_types GROUP BY g",
-            "SELECT g, count(f), min(f), max(f), count(d), min(d), max(d) \
+                "generic_serial_kernel_mode_unqualified",
+            ),
+            // FLOAT4 and timestamp extrema fail the typed shape gate earlier.
+            (
+                "SELECT g, count(f), min(f), max(f), count(d), min(d), max(d) \
              FROM _straightforward_aggregate_types GROUP BY g",
-            "SELECT g, count(ts), min(ts), max(ts), count(tstz), min(tstz), max(tstz) \
+                "shape_unsupported_aggregate_input",
+            ),
+            (
+                "SELECT g, count(ts), min(ts), max(ts), count(tstz), min(tstz), max(tstz) \
              FROM _straightforward_aggregate_types GROUP BY g",
+                "shape_unsupported_aggregate_input",
+            ),
         ];
-        for (index, query) in queries.into_iter().enumerate() {
+        for (index, (query, expected_reason)) in queries.into_iter().enumerate() {
             Spi::run("SET pg_accel.enabled = on").expect("SET ON");
             Spi::run("SELECT pg_accel_reset_stats()").expect("reset aggregate planner evidence");
             let plan = explain_text(query);
@@ -889,9 +939,10 @@ mod tests {
                     .expect("last rejection query succeeds")
                     .expect("unproved aggregate type records a decline");
             assert_eq!(
-                rejection, "shape_unsupported_aggregate_input",
+                rejection, expected_reason,
                 "unproved aggregate query {index} must expose the stable decline"
             );
+            assert_declined_result_matches_native(query);
         }
     }
 
@@ -1126,44 +1177,85 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_non_float_avg_variants_decline_gpu_agg_plan() {
+    fn test_integer_avg_selects_while_cold_numeric_and_interval_decline() {
+        let has_gpu = gpu_device_available();
+        serialize_gpu_tests();
+        let rows = qualifying_device_rows("gpu_reduce_min_rows", 262_144);
         Spi::run(
             "CREATE TEMP TABLE t_avg_variants (\
-                i2 int2 NOT NULL, \
-                i4 int4 NOT NULL, \
+                i2 int2, \
+                i4 int4, \
                 i8 int8 NOT NULL, \
                 n numeric NOT NULL, \
                 d interval NOT NULL\
              )",
         )
         .expect("CREATE TABLE");
-        Spi::run(
+        Spi::run(&format!(
             "INSERT INTO t_avg_variants \
-             SELECT (g % 30000)::int2, g::int4, g::int8, g::numeric, \
+             SELECT CASE WHEN g % 17 = 0 THEN NULL ELSE (g % 30000)::int2 END, \
+                    CASE WHEN g % 19 = 0 THEN NULL ELSE g::int4 END, g::int8, g::numeric, \
                     make_interval(secs => g::double precision) \
-             FROM generate_series(1, 200000) g",
-        )
+             FROM generate_series(1, {rows}) g"
+        ))
         .expect("INSERT");
         Spi::run("ANALYZE t_avg_variants").expect("ANALYZE");
         Spi::run("SET pg_accel.enabled = on").expect("SET ON");
         Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+        Spi::run("SET pg_accel.auto_load = off").expect("keep unpinned decimal inputs cold");
+        if has_gpu {
+            Spi::run("SELECT pg_accel_pin('t_avg_variants', ARRAY['i2','i4'])")
+                .expect("pin the qualified fixed-width AVG inputs only");
+            // admission-audit-allow: exercise exact integer AVG independent of
+            // machine calibration; normal cost admission has separate coverage.
+            Spi::run("SET pg_accel.cost_multiplier = 0.1").expect("integer AVG contract cost");
+
+            for query in [
+                "SELECT avg(i2) AS value FROM t_avg_variants",
+                "SELECT avg(i4) AS value FROM t_avg_variants",
+            ] {
+                Spi::run("SET pg_accel.enabled = off").expect("native AVG baseline");
+                Spi::run(&format!("CREATE TEMP TABLE avg_expected AS {query}"))
+                    .expect("native AVG result");
+                Spi::run("SET pg_accel.enabled = on").expect("enable integer AVG");
+                let plan = explain_text(query);
+                assert!(
+                    plan.contains("Custom Scan (GpuAccelAgg)")
+                        && plan.contains("parallel_dense_integer"),
+                    "qualified integer AVG must select the dense lane: {query}\n{plan}"
+                );
+                let before = crate::gpu::gpu_exec_count();
+                Spi::run(&format!("CREATE TEMP TABLE avg_actual AS {query}"))
+                    .expect("accelerated AVG result");
+                assert!(
+                    crate::gpu::gpu_exec_count() > before,
+                    "integer AVG must dispatch"
+                );
+                assert_eq!(
+                    Spi::get_one::<bool>(
+                        "SELECT numeric_send(a.value) IS NOT DISTINCT FROM numeric_send(e.value) \
+                    FROM avg_actual a CROSS JOIN avg_expected e"
+                    )
+                    .expect("binary AVG parity"),
+                    Some(true),
+                    "integer AVG must preserve NUMERIC value and display scale: {query}"
+                );
+                Spi::run("DROP TABLE avg_actual, avg_expected").expect("AVG oracle cleanup");
+            }
+        } else {
+            pgrx::notice!(
+                "skipping selected integer AVG assertions: no GPU device; retaining native decline coverage"
+            );
+        }
 
         for (query, expected_reason) in [
             (
-                "SELECT avg(i2) FROM t_avg_variants",
-                "generic_serial_kernel_mode_unqualified",
-            ),
-            (
-                "SELECT avg(i4) FROM t_avg_variants",
-                "generic_serial_kernel_mode_unqualified",
-            ),
-            (
                 "SELECT avg(i8) FROM t_avg_variants",
-                "shape_numeric_accumulator_unavailable",
+                "generic_numeric_estimate_unavailable",
             ),
             (
                 "SELECT avg(n) FROM t_avg_variants",
-                "shape_numeric_accumulator_unavailable",
+                "generic_numeric_estimate_unavailable",
             ),
             (
                 "SELECT avg(d) FROM t_avg_variants",
@@ -1176,21 +1268,26 @@ mod tests {
             assert!(
                 !plan_text.contains("Strategy: GpuAgg")
                     && !plan_text.contains("Custom Scan (GpuAccelAgg)"),
-                "non-float AVG must stay on PostgreSQL native accumulator semantics; got:\n{plan_text}"
+                "cold decimal inputs and interval AVG must stay native; got:\n{plan_text}"
             );
-            let rejection =
-                Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
-                    .expect("last rejection query should succeed")
-                    .unwrap_or_else(|| panic!("non-float AVG should record a decline for {query}"));
-            assert_eq!(
-                rejection, expected_reason,
-                "non-float AVG should expose the exact generic accumulator decline; plan:\n{plan_text}"
-            );
+            // Without a device, admission returns before the typed aggregate
+            // and resident-metadata checks; native behavior still needs coverage.
+            if has_gpu {
+                let rejection =
+                    Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+                        .expect("last rejection query should succeed")
+                        .unwrap_or_else(|| panic!("AVG should record a decline for {query}"));
+                assert_eq!(
+                    rejection, expected_reason,
+                    "AVG should expose its exact metadata/capability decline; plan:\n{plan_text}"
+                );
+            }
+            assert_declined_result_matches_native(query);
         }
     }
 
     #[pg_test]
-    fn test_numeric_aggregate_variants_decline_gpu_accumulator_plan() {
+    fn test_cold_numeric_aggregate_metadata_and_unsupported_variants_decline() {
         Spi::run("CREATE TEMP TABLE t_numeric_agg (n numeric NOT NULL)").expect("CREATE TABLE");
         Spi::run(
             "INSERT INTO t_numeric_agg \
@@ -1205,11 +1302,11 @@ mod tests {
         for (query, expected_reason) in [
             (
                 "SELECT sum(n) FROM t_numeric_agg",
-                "shape_numeric_accumulator_unavailable",
+                "generic_numeric_estimate_unavailable",
             ),
             (
                 "SELECT avg(n) FROM t_numeric_agg",
-                "shape_numeric_accumulator_unavailable",
+                "generic_numeric_estimate_unavailable",
             ),
             (
                 "SELECT min(n) FROM t_numeric_agg",
@@ -1246,6 +1343,7 @@ mod tests {
                 rejection, expected_reason,
                 "NUMERIC aggregate should expose its exact generic shape decline; plan:\n{plan_text}"
             );
+            assert_declined_result_matches_native(query);
         }
     }
 
@@ -2239,7 +2337,7 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_postgis_intersects_shape_gate_records_unsupported_shapes() {
+    fn test_postgis_intersects_shape_and_small_input_gates_preserve_native_behavior() {
         if !ensure_extension("postgis") {
             return;
         }
@@ -2271,7 +2369,11 @@ mod tests {
              ANALYZE _postgis_intersects_generic; \
              ANALYZE _postgis_intersects_line; \
              ANALYZE _postgis_intersects_dynamic; \
-             ANALYZE _postgis_intersects_unknown_srid",
+             ANALYZE _postgis_intersects_unknown_srid; \
+             CREATE FUNCTION pg_temp._intersects_outcome(query text) RETURNS text \
+             LANGUAGE plpgsql AS $$ DECLARE result bigint; BEGIN \
+               EXECUTE query INTO result; RETURN 'result:' || result::text; \
+             EXCEPTION WHEN OTHERS THEN RETURN SQLSTATE || ':' || SQLERRM; END $$",
         )
         .expect("PostGIS ST_Intersects shape-gate fixtures should be created");
 
@@ -2322,7 +2424,7 @@ mod tests {
                 "SELECT count(*) FROM _postgis_intersects_dynamic \
                  WHERE ST_Intersects(geom, \
                    'SRID=4326;POLYGON((0 0,0 20,20 20,20 0,0 0),(2 2,18 2,18 18,2 18,2 2))'::geometry)",
-                "generic_descriptor_capability",
+                "postgis_rows_below_device_minimum",
             ),
             (
                 "self-intersecting polygon",
@@ -2337,7 +2439,7 @@ mod tests {
                  WHERE ST_Intersects(geom, \
                    'SRID=4326;POLYGON((0 0,0 20,20 20,20 0,0 0))'::geometry) \
                    AND id < 0",
-                "shape_multi_filter_relation",
+                "postgis_rows_below_device_minimum",
             ),
             (
                 "OR wrapper",
@@ -2368,6 +2470,7 @@ mod tests {
 
             assert!(
                 !plan.contains("GpuAccelScan")
+                    && !plan.contains("GpuAccelAgg")
                     && !plan.contains("Strategy: GpuSpatial")
                     && !plan.contains("Accel Strategy: GpuSpatial"),
                 "{label} ST_Intersects shape should stay native:\n{plan}"
@@ -2380,6 +2483,23 @@ mod tests {
                 rejection, expected_reason,
                 "{label} should expose its exact shape-pass decline; plan:\n{plan}"
             );
+            // The mixed/missing SRID cases error in native PostGIS. Capture
+            // SQLSTATE and message in a real subtransaction, not only row parity.
+            let outcome_query = format!("SELECT pg_temp._intersects_outcome($query${sql}$query$)");
+            Spi::run("SET pg_accel.enabled = off").expect("native spatial baseline");
+            let native = Spi::get_one::<String>(&outcome_query).expect("native spatial outcome");
+            Spi::run("SET pg_accel.enabled = on").expect("restore spatial planning");
+            let before = crate::gpu::gpu_exec_count();
+            assert_eq!(
+                Spi::get_one::<String>(&outcome_query).expect("enabled spatial outcome"),
+                native,
+                "{label} must preserve native rows or the exact error"
+            );
+            assert_eq!(
+                crate::gpu::gpu_exec_count(),
+                before,
+                "{label} must not dispatch"
+            );
         }
 
         Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
@@ -2389,18 +2509,21 @@ mod tests {
         let plan = explain_text(supported_shape_sql);
         assert!(
             !plan.contains("GpuAccelScan")
+                && !plan.contains("GpuAccelAgg")
                 && !plan.contains("Strategy: GpuSpatial")
                 && !plan.contains("Accel Strategy: GpuSpatial"),
-            "structurally covered ST_Intersects must stay native until exact fp64 semantics land:\n{plan}"
+            "supported ST_Intersects must still honor the small-input floor:\n{plan}"
         );
         let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
             .expect("last rejection query should succeed")
             .expect("structurally covered ST_Intersects should record a planner decline");
         assert_eq!(
-            rejection, "generic_descriptor_capability",
-            "structurally covered ST_Intersects proves its shape but must decline at the \
-             dark spatial descriptor executor until Phase 7 calibration flips it live; plan:\n{plan}"
+            rejection, "postgis_rows_below_device_minimum",
+            "a supported spatial shape is not permission to bypass the row floor; plan:\n{plan}"
         );
+        assert_declined_result_matches_native(supported_shape_sql);
+        // Sufficient-size selected spatial/scalar execution is covered by SQL
+        // suites 129 and 134; this fixture isolates the native shape/row gates.
     }
 
     #[pg_test]
