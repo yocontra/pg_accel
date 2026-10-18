@@ -1206,9 +1206,8 @@ mod tests {
         if has_gpu {
             Spi::run("SELECT pg_accel_pin('t_avg_variants', ARRAY['i2','i4'])")
                 .expect("pin the qualified fixed-width AVG inputs only");
-            // admission-audit-allow: exercise exact integer AVG independent of
-            // machine calibration; normal cost admission has separate coverage.
-            Spi::run("SET pg_accel.cost_multiplier = 0.1").expect("integer AVG contract cost");
+            Spi::run("SET LOCAL pg_accel.cost_multiplier = DEFAULT")
+                .expect("integer AVG default admission cost");
 
             for query in [
                 "SELECT avg(i2) AS value FROM t_avg_variants",

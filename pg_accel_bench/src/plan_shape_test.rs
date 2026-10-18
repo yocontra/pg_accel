@@ -741,6 +741,20 @@ fn admission_audit_cost_allow_marker_must_be_exact_adjacent_and_paired_with_defa
 }
 
 #[test]
+fn admission_audit_rejects_invented_avg_contract_override_in_released_tests() {
+    let source = format!(
+        "// admission-audit-allow: exercise exact integer AVG independent of\n\
+         // machine calibration; normal cost admission has separate coverage.\n{}",
+        ["Spi::run(\"SET pg_accel.", "cost_multiplier = ", "0.1\")"].concat()
+    );
+    let name = "pg_accel/src/tests/mod.rs";
+    let audit = audit_numeric_cost_pins(name, &source);
+    assert_eq!(audit.rejected_lines, vec![2]);
+    assert!(audit.approved_lines.is_empty());
+    assert!(!audit.passes_for_source(name));
+}
+
+#[test]
 fn admission_audit_rejects_duplicate_exact_cost_overrides_in_the_allowed_source() {
     let direct_line = numeric_cost_source_line("0.1");
     let duplicate = format!(

@@ -67,6 +67,16 @@ complete objective is implemented and verified.
   completion, performance or hosted-release qualification is claimed. Evidence:
   `benchmarks/evidence/scan-cleanup-20261017/README.md`.
 
+  - [x] Remove the integer AVG test's forced cost and require its existing
+    selection/dispatch/NULL/binary-parity assertions at transaction-local DEFAULT.
+    The released-admission audit and new invented-exemption regression pass;
+    all 590 local benchmark tests pass. Targeted live AVG passes on PG18.4 and
+    PG19beta1 (one test each, not full-suite reruns); separate real Metal probes
+    verify default cost 1 and two kernel calls without warnings/errors.
+    No gate exception was added. Hosted CI, resident-join OOM accounting and
+    SQL121 memory-budget failures remain separate. Evidence:
+    `benchmarks/evidence/default-avg-20261018/README.md`.
+
 - [x] Correct pinned AdaptiveCpp cache-path handling. Native observation,
   targeted clearing, artifact capture and diagnostics now use the actual
   `apps/<application>/jit-cache` layout with runtime default/legacy/token rules.

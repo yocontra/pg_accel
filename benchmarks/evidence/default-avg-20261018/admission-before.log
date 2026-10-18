@@ -1,0 +1,22 @@
+   Compiling pg_accel_bench v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel_bench)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.98s
+     Running unittests src/main.rs (target/debug/deps/pg_accel_bench-8dbe2368e0608457)
+
+running 1 test
+test plan_shape_test::released_planner_evidence_uses_default_admission_settings ... FAILED
+
+failures:
+
+---- plan_shape_test::released_planner_evidence_uses_default_admission_settings stdout ----
+
+thread 'plan_shape_test::released_planner_evidence_uses_default_admission_settings' (19129621) panicked at pg_accel_bench/src/plan_shape_test.rs:439:9:
+released planner evidence `pg_accel/src/tests/mod.rs` line 1211 pins a numeric cost multiplier without the exact direct-contract allow marker
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    plan_shape_test::released_planner_evidence_uses_default_admission_settings
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 588 filtered out; finished in 0.51s
+
+error: test failed, to rerun pass `-p pg_accel_bench --bin pg_accel_bench`
