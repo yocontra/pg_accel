@@ -396,7 +396,14 @@ apply_sscp_host_coverage_patch() {
 
     if grep -q "$marker" \
         "$ACPP_SRC/src/compiler/sscp/TargetSeparationPass.cpp"; then
-        if ! git -C "$ACPP_SRC" apply --unidiff-zero --reverse --check "$patch"; then
+        # Replay changes this shared file. Its complete composed bytes were
+        # checked before patching; retain the existing checks for every other
+        # coverage target on an already composed checkout.
+        local check_args=(--unidiff-zero --reverse --check)
+        if [ "$sscp_replay_state" = "combined" ]; then
+            check_args+=(--exclude=src/compiler/sscp/TargetSeparationPass.cpp)
+        fi
+        if ! git -C "$ACPP_SRC" apply "${check_args[@]}" "$patch"; then
             echo "error: applied AdaptiveCpp SSCP coverage patch has drifted" >&2
             exit 1
         fi
@@ -421,11 +428,89 @@ apply_sscp_host_coverage_patch() {
     fi
 }
 
-apply_metal_cpp_compat_patch
-apply_default_targets_json_patch
-apply_sleef_helper_address_space_patch
-apply_soft_fp_2_package_patch
-apply_sscp_host_coverage_patch
+sscp_replay_targets_match() {
+    local expected="$1" target
+    for target in "${sscp_replay_targets[@]}"; do
+        if [ ! -f "$ACPP_SRC/$target" ] || [ -L "$ACPP_SRC/$target" ] ||
+            ! cmp -s "$expected/$target" "$ACPP_SRC/$target"; then
+            return 1
+        fi
+    done
+}
+
+prepare_sscp_replay_states() {
+    local target state patch
+    for patch in "$sscp_coverage_patch" "$sscp_replay_patch"; do
+        if [ ! -s "$patch" ]; then
+            echo "error: required AdaptiveCpp compiler patch is missing: $patch" >&2
+            exit 1
+        fi
+    done
+    # Build the reference from immutable pinned blobs, never the worktree or
+    # index. The scratch repository keeps git apply independent of parent repos.
+    for state in baseline coverage combined; do
+        git -C "$sscp_expected" init -q "$state"
+        for target in "${sscp_replay_targets[@]}"; do
+            mkdir -p "$sscp_expected/$state/$(dirname "$target")"
+            git -C "$ACPP_SRC" show "$ACPP_REQUIRED_SHA:$target" \
+                >"$sscp_expected/$state/$target"
+        done
+        if [ "$state" != baseline ]; then
+            git -C "$sscp_expected/$state" apply --unidiff-zero \
+                --include=src/compiler/sscp/TargetSeparationPass.cpp "$sscp_coverage_patch"
+        fi
+    done
+    git -C "$sscp_expected/combined" apply "$sscp_replay_patch"
+
+    for state in baseline coverage combined; do
+        if sscp_replay_targets_match "$sscp_expected/$state"; then
+            sscp_replay_state="$state"
+            return 0
+        fi
+    done
+    echo "error: AdaptiveCpp replay targets are partial, missing or drifted from pinned patch states" >&2
+    exit 1
+}
+
+apply_sscp_replay_patch() {
+    if sscp_replay_targets_match "$sscp_expected/combined"; then
+        return 0
+    fi
+    if ! sscp_replay_targets_match "$sscp_expected/coverage"; then
+        echo "error: AdaptiveCpp replay requires exact coverage-patched source" >&2
+        exit 1
+    fi
+    echo "Applying AdaptiveCpp SSCP replay controls patch"
+    git -C "$ACPP_SRC" apply --check "$sscp_replay_patch"
+    git -C "$ACPP_SRC" apply "$sscp_replay_patch"
+    if ! sscp_replay_targets_match "$sscp_expected/combined"; then
+        echo "error: AdaptiveCpp replay patch verification failed" >&2
+        exit 1
+    fi
+}
+
+apply_adaptivecpp_patches() (
+    # This subprocess owns only its fresh reference directory. No persistent
+    # source/build/prefix destination is removed by the cleanup trap.
+    sscp_expected="$(mktemp -d "${TMPDIR:-/tmp}/pgaccel-acpp-patches.XXXXXX")"
+    trap 'rm -rf -- "$sscp_expected"' EXIT
+    sscp_replay_targets=(
+        src/compiler/sscp/TargetSeparationPass.cpp
+        src/compiler/sscp/HostKernelNameExtractionPass.cpp
+    )
+    sscp_coverage_patch="$PG_ACCEL_REPO_ROOT/patches/adaptivecpp/sscp-host-coverage.patch"
+    sscp_replay_patch="$PG_ACCEL_REPO_ROOT/patches/adaptivecpp/sscp-replay-controls.patch"
+    sscp_replay_state=""
+    prepare_sscp_replay_states
+    apply_metal_cpp_compat_patch
+    apply_default_targets_json_patch
+    apply_sleef_helper_address_space_patch
+    apply_soft_fp_2_package_patch
+    apply_sscp_host_coverage_patch
+    apply_sscp_replay_patch
+)
+
+apply_adaptivecpp_patches
 
 if [ ! -d "$SOFT_FP64_SRC/.git" ]; then
     git clone --depth 1 --branch "$SOFT_FP64_REQUIRED_TAG" https://github.com/yocontra/soft-fp.git "$SOFT_FP64_SRC"

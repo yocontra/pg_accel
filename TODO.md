@@ -44,6 +44,16 @@ published release artifact.
   projection proof or closure of the seven findings is introduced. Evidence:
   `benchmarks/evidence/sscp-replay-controls-20261017/README.md`.
 
+  - [x] Wire the committed replay patch into the production setup dispatcher
+    after coverage, validating exact pinned/coverage/combined target bytes and
+    rejecting partial or drifted states. Nine local pinned-fixture integration
+    tests pass, including fresh/repeated application and coverage-only upgrade;
+    original-dispatcher and missing-fixture negative controls fail as expected.
+    Bash syntax and Ruff pass. This qualifies generic-backend source patch
+    composition only, not an installed compiler build, projection device proof,
+    CI or closure of the seven findings. Evidence:
+    `benchmarks/evidence/bootstrap-replay-20261022/README.md`.
+
 ## Active OLAP And Geo Expansion
 
 The September implementation plan expands the objective beyond the historical

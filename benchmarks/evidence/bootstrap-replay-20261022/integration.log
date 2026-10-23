@@ -1,0 +1,14 @@
+test_coverage_only_upgrade (scripts.tests.test_setup_acpp_replay.SetupReplayTests.test_coverage_only_upgrade) ... ok
+test_fresh_and_repeated_full_dispatcher (scripts.tests.test_setup_acpp_replay.SetupReplayTests.test_fresh_and_repeated_full_dispatcher) ... ok
+test_in_hunk_and_out_of_hunk_drift_reject (scripts.tests.test_setup_acpp_replay.SetupReplayTests.test_in_hunk_and_out_of_hunk_drift_reject) ... ok
+test_individual_replay_hunks_reject_without_repair (scripts.tests.test_setup_acpp_replay.SetupReplayTests.test_individual_replay_hunks_reject_without_repair) ... ok
+test_missing_patch_rejects_before_target_mutation (scripts.tests.test_setup_acpp_replay.SetupReplayTests.test_missing_patch_rejects_before_target_mutation) ... ok
+test_missing_pinned_blob_rejects_before_target_mutation (scripts.tests.test_setup_acpp_replay.SetupReplayTests.test_missing_pinned_blob_rejects_before_target_mutation) ... ok
+test_missing_target_rejects_before_other_target_mutation (scripts.tests.test_setup_acpp_replay.SetupReplayTests.test_missing_target_rejects_before_other_target_mutation) ... ok
+test_other_coverage_target_drift_still_rejects (scripts.tests.test_setup_acpp_replay.SetupReplayTests.test_other_coverage_target_drift_still_rejects) ... ok
+test_partial_replay_target_states_reject_without_repair (scripts.tests.test_setup_acpp_replay.SetupReplayTests.test_partial_replay_target_states_reject_without_repair) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 12.524s
+
+OK

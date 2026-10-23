@@ -1,0 +1,19 @@
+setUpClass (scripts.tests.test_setup_acpp_replay.SetupReplayTests) ... ERROR
+
+======================================================================
+ERROR: setUpClass (scripts.tests.test_setup_acpp_replay.SetupReplayTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_setup_acpp_replay.py", line 52, in setUpClass
+    )).resolve(strict=True)
+       ~~~~~~~^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.15/3.15.0/Frameworks/Python.framework/Versions/3.15/lib/python3.15/pathlib/__init__.py", line 1137, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen posixpath>", line 460, in realpath
+FileNotFoundError: [Errno 2] No such file or directory: '/nonexistent'
+
+----------------------------------------------------------------------
+Ran 0 tests in 0.003s
+
+FAILED (errors=1)

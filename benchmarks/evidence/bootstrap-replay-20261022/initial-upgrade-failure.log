@@ -1,0 +1,23 @@
+test_coverage_only_upgrade (scripts.tests.test_setup_acpp_replay.SetupReplayTests.test_coverage_only_upgrade) ... FAIL
+test_fresh_and_repeated_full_dispatcher (scripts.tests.test_setup_acpp_replay.SetupReplayTests.test_fresh_and_repeated_full_dispatcher) ... ok
+test_in_hunk_and_out_of_hunk_drift_reject (scripts.tests.test_setup_acpp_replay.SetupReplayTests.test_in_hunk_and_out_of_hunk_drift_reject) ... ok
+test_individual_replay_hunks_reject_without_repair (scripts.tests.test_setup_acpp_replay.SetupReplayTests.test_individual_replay_hunks_reject_without_repair) ... ok
+test_missing_patch_rejects_before_target_mutation (scripts.tests.test_setup_acpp_replay.SetupReplayTests.test_missing_patch_rejects_before_target_mutation) ... ok
+test_missing_target_rejects_before_other_target_mutation (scripts.tests.test_setup_acpp_replay.SetupReplayTests.test_missing_target_rejects_before_other_target_mutation) ... ok
+test_other_coverage_target_drift_still_rejects (scripts.tests.test_setup_acpp_replay.SetupReplayTests.test_other_coverage_target_drift_still_rejects) ... ok
+test_partial_replay_target_states_reject_without_repair (scripts.tests.test_setup_acpp_replay.SetupReplayTests.test_partial_replay_target_states_reject_without_repair) ... ok
+
+======================================================================
+FAIL: test_coverage_only_upgrade (scripts.tests.test_setup_acpp_replay.SetupReplayTests.test_coverage_only_upgrade)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/scripts/tests/test_setup_acpp_replay.py", line 134, in test_coverage_only_upgrade
+    self.assertEqual(self.target_bytes(), self.combined)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: {'src[1389 chars]ude <map>\n#include <tuple>\n#include <unorder[42329 chars]}\n'} != {'src[1389 chars]ude <limits>\n#include <map>\n#include <tuple>[44573 chars]}\n'}
+Diff is 312898 characters long. Set self.maxDiff to None to see it.
+
+----------------------------------------------------------------------
+Ran 8 tests in 13.066s
+
+FAILED (failures=1)

@@ -1,0 +1,18 @@
+--- .codex/scratch/bootstrap-replay-20261022/setup_acpp.candidate1.sh	2026-10-22 19:49:45
++++ scripts/setup_acpp.sh	2026-10-22 19:48:42
+@@ -399,12 +399,11 @@
+         # Replay changes this shared file. Its complete composed bytes were
+         # checked before patching; retain the existing checks for every other
+         # coverage target on an already composed checkout.
+-        local overlap_args=()
++        local check_args=(--unidiff-zero --reverse --check)
+         if [ "$sscp_replay_state" = "combined" ]; then
+-            overlap_args+=(--exclude=src/compiler/sscp/TargetSeparationPass.cpp)
++            check_args+=(--exclude=src/compiler/sscp/TargetSeparationPass.cpp)
+         fi
+-        if ! git -C "$ACPP_SRC" apply --unidiff-zero --reverse --check \
+-            "${overlap_args[@]}" "$patch"; then
++        if ! git -C "$ACPP_SRC" apply "${check_args[@]}" "$patch"; then
+             echo "error: applied AdaptiveCpp SSCP coverage patch has drifted" >&2
+             exit 1
+         fi

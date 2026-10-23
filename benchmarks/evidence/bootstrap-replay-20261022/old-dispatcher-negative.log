@@ -1,0 +1,10 @@
+Applying AdaptiveCpp soft-fp 2 package integration patch
+Applying AdaptiveCpp SSCP host and Metal device coverage patch
+DISPATCH_COMPLETE
+
+old coverage-only bytes: True
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/.codex/scratch/bootstrap-replay-20261022/old-dispatcher-negative.py", line 17, in <module>
+    assert test.target_bytes() == test.combined, "OLD_DISPATCHER_OMITS_REPLAY_PATCH"
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: OLD_DISPATCHER_OMITS_REPLAY_PATCH
