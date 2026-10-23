@@ -23,6 +23,8 @@ db_a="pg_accel_ledger_a_$suffix"
 db_b="pg_accel_ledger_b_$suffix"
 artifact_dir="${PG_ACCEL_LEDGER_ARTIFACT_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/pgaccel-ledger.XXXXXX")}"
 mkdir -p "$artifact_dir"
+receipts="$artifact_dir/ownership.jsonl"
+accounting="$repo_root/scripts/residency_ledger_accounting.py"
 
 fifo_a="$artifact_dir/session-a.fifo"
 fifo_b="$artifact_dir/session-b.fifo"
@@ -44,21 +46,52 @@ run_db() {
     } | "$psql_bin" "$connection" -X -qAt -v ON_ERROR_STOP=1
 }
 
-terminate_client() {
-    local client_pid="$1"
-    if [ -n "$client_pid" ] && kill -0 "$client_pid" 2>/dev/null; then
-        kill "$client_pid" 2>/dev/null || true
-        wait "$client_pid" 2>/dev/null || true
+wait_client() {
+    local variable_name="$1"
+    case "$variable_name" in
+        client_a|client_b) ;;
+        *) echo "error: refusing to wait for an unowned client variable" >&2; return 1 ;;
+    esac
+    local client_pid="${!variable_name}"
+    local deadline=$((SECONDS + ${2:-15}))
+    local result
+    if [ -z "$client_pid" ]; then
+        return 0
     fi
+    while kill -0 "$client_pid" 2>/dev/null; do
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "error: owned client $client_pid did not exit; terminating" >&2
+            kill "$client_pid" 2>/dev/null || true
+            local grace=$((SECONDS + ${3:-3}))
+            while kill -0 "$client_pid" 2>/dev/null && [ "$SECONDS" -lt "$grace" ]; do
+                sleep 0.1
+            done
+            if kill -0 "$client_pid" 2>/dev/null; then
+                kill -KILL "$client_pid" 2>/dev/null || true
+            fi
+            wait "$client_pid" 2>/dev/null || true
+            printf -v "$variable_name" '%s' ''
+            return 124
+        fi
+        sleep 0.1
+    done
+    if wait "$client_pid"; then result=0; else result=$?; fi
+    printf -v "$variable_name" '%s' ''
+    return "$result"
 }
 
 cleanup() {
+    local original_status=$?
+    set +e
     if [ "$fifos_open" -eq 1 ]; then
+        if [ -n "$client_a" ]; then printf '\\quit\n' >&3; fi
+        if [ -n "$client_b" ]; then printf '\\quit\n' >&4; fi
         exec 3>&-
         exec 4>&-
+        fifos_open=0
     fi
-    terminate_client "$client_a"
-    terminate_client "$client_b"
+    wait_client client_a || true
+    wait_client client_b || true
     run_base "DROP DATABASE IF EXISTS $db_a WITH (FORCE)" >/dev/null 2>&1 || true
     run_base "DROP DATABASE IF EXISTS $db_b WITH (FORCE)" >/dev/null 2>&1 || true
     run_base "DROP DATABASE IF EXISTS $seed_db WITH (FORCE)" >/dev/null 2>&1 || true
@@ -67,15 +100,17 @@ cleanup() {
     elif [ "$succeeded" -ne 1 ]; then
         echo "residency-ledger integration artifacts: $artifact_dir" >&2
     fi
+    exit "$original_status"
 }
 trap cleanup EXIT
 
 wait_for_phase() {
     local database="$1"
     local phase="$2"
+    local table="${3:-ledger_sync}"
     local deadline=$((SECONDS + 60))
     while [ "$SECONDS" -lt "$deadline" ]; do
-        if [ "$(run_db "$database" "SELECT count(*) FROM ledger_sync WHERE phase = '$phase'")" = "1" ]; then
+        if [ "$(run_db "$database" "SELECT count(*) FROM $table WHERE phase = '$phase'")" = "1" ]; then
             return 0
         fi
         sleep 0.1
@@ -87,11 +122,16 @@ wait_for_phase() {
 wait_for_live_bytes() {
     local database="$1"
     local expected="$2"
+    local phase="$3"
     local deadline=$((SECONDS + 30))
     local actual=""
+    local observation
     while [ "$SECONDS" -lt "$deadline" ]; do
-        actual="$(run_db "$database" 'SELECT pg_accel_resident_live_bytes()')"
+        observation="$(run_db "$database" "SELECT pg_backend_pid() || '|' || pg_accel_resident_live_bytes()")"
+        IFS='|' read -r observer_pid actual <<<"$observation"
+        printf '%s\t%s\t%s\t%s\n' "$phase" "$observer_pid" "$actual" "$expected" >>"$artifact_dir/observer.tsv"
         if [ "$actual" = "$expected" ]; then
+            observed_live_bytes="$actual"
             return 0
         fi
         sleep 0.1
@@ -105,6 +145,58 @@ read_phase() {
     local phase="$2"
     run_db "$database" \
         "SELECT generation || '|' || bytes || '|' || backend_pid FROM ledger_sync WHERE phase = '$phase'"
+}
+
+# Each owner records its own complete idle snapshot. The observer only reads
+# those receipts and global usage; global usage never supplies an expectation.
+record_owner() {
+    local database="$1"
+    local fd="$2"
+    local phase="$3"
+    printf "SELECT ledger_capture('%s');\n" "$phase" >&"$fd"
+    wait_for_phase "$database" "$phase" ledger_ownership
+    run_db "$database" "
+SELECT jsonb_build_object('kind', 'owner') || to_jsonb(r)
+FROM ledger_ownership r WHERE phase = '$phase'" >>"$receipts"
+}
+
+verify_checkpoint() {
+    local phase="$1"
+    local expected
+    if [ "$phase" != all_exited ]; then
+        record_owner "$db_a" 3 "$phase"
+        if [ "$phase" != b_exited ] && [ "$phase" != slot_reused ]; then
+            record_owner "$db_b" 4 "$phase"
+        fi
+    fi
+    expected="$(python3 "$accounting" expected "$receipts")"
+    wait_for_live_bytes "$db_a" "$expected" "$phase"
+    printf '{"kind":"checkpoint","phase":"%s","observer_pid":%s,"live_bytes":%s}\n' \
+        "$phase" "$observer_pid" "$observed_live_bytes" >>"$receipts"
+    python3 "$accounting" validate "$receipts" >"$artifact_dir/accounting.log"
+}
+
+record_exit() {
+    local database="$1"
+    local pid="$2"
+    local phase="$3"
+    local mode="$4"
+    local deadline=$((SECONDS + ${5:-30}))
+    local remaining
+    while true; do
+        remaining="$(run_db "$db_a" "SELECT count(*) FROM pg_stat_activity WHERE pid = $pid")" || return 1
+        printf '%s\t%s\t%s\t%s\n' "$phase" "$database" "$pid" "$remaining" >>"$artifact_dir/backend-exit.tsv"
+        if [ "$remaining" = 0 ]; then
+            printf '{"kind":"exit","phase":"%s","database_name":"%s","backend_pid":%s,"mode":"%s","remaining_backends":0}\n' \
+                "$phase" "$database" "$pid" "$mode" >>"$receipts"
+            return 0
+        fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "error: exited ledger backend remains in pg_stat_activity: $remaining" >&2
+            return 1
+        fi
+        sleep 0.1
+    done
 }
 
 preload="$(run_base 'SHOW shared_preload_libraries')"
@@ -139,6 +231,33 @@ CREATE TABLE ledger_sync (
     generation bigint NOT NULL,
     bytes bigint NOT NULL
 );
+CREATE TABLE ledger_ownership (
+    phase text PRIMARY KEY,
+    database_name text NOT NULL,
+    backend_pid integer NOT NULL,
+    raw_bytes bigint NOT NULL,
+    derived_bytes bigint NOT NULL,
+    workspace_bytes bigint NOT NULL,
+    output_bytes bigint NOT NULL
+);
+CREATE FUNCTION ledger_capture(p_phase text) RETURNS void LANGUAGE plpgsql AS $capture$
+DECLARE
+    raw_total bigint;
+    derived_total bigint;
+    workspace_total bigint;
+    output_total bigint;
+BEGIN
+    SELECT sum(raw_bytes)::bigint, sum(derived_bytes)::bigint
+    INTO STRICT raw_total, derived_total FROM pg_accel_resident_status();
+    SELECT w.retained_bytes, o.retained_bytes
+    INTO STRICT workspace_total, output_total
+    FROM pg_accel_grouped_workspace_pool_stats() w,
+         pg_accel_grouped_output_pool_stats() o;
+    INSERT INTO ledger_ownership VALUES
+        (p_phase, current_database(), pg_backend_pid(), raw_total, derived_total,
+         workspace_total, output_total);
+END;
+$capture$;
 CREATE TABLE ledger_results (
     phase text PRIMARY KEY,
     value bigint NOT NULL
@@ -183,6 +302,9 @@ if [ "$oid_a" != "$oid_b" ]; then
 fi
 
 baseline="$(run_db "$db_a" 'SELECT pg_accel_resident_live_bytes()')"
+printf '{"kind":"baseline","db_a":"%s","db_b":"%s","live_bytes":%s}\n' \
+    "$db_a" "$db_b" "$baseline" >"$receipts"
+printf 'phase\tobserver_pid\tobserved_global_bytes\texpected_owner_sum\n' >"$artifact_dir/observer.tsv"
 
 mkfifo "$fifo_a" "$fifo_b"
 exec 3<>"$fifo_a"
@@ -240,14 +362,13 @@ SQL
 
 wait_for_phase "$db_a" ready
 wait_for_phase "$db_b" ready
-IFS='|' read -r a_generation a_bytes _ <<<"$(read_phase "$db_a" ready)"
+IFS='|' read -r a_generation a_bytes a_backend_pid <<<"$(read_phase "$db_a" ready)"
 IFS='|' read -r b_generation b_bytes b_backend_pid <<<"$(read_phase "$db_b" ready)"
 if [ "$a_bytes" -le 0 ] || [ "$b_bytes" -le 0 ]; then
     echo "error: both database backends must hold positive resident ledger charges" >&2
     exit 1
 fi
-expected_both=$((baseline + a_bytes + b_bytes))
-wait_for_live_bytes "$db_a" "$expected_both"
+verify_checkpoint ready
 
 initial_plan_contract="$(run_db "$db_a" "
 SELECT
@@ -346,6 +467,7 @@ if [ "$repaired_custom_scan" -lt 1 ] || [ "$repaired_resident_groupagg" -lt 1 ] 
     echo "error: repaired prepared query did not select and dispatch parallel_dense_integer resident_groupagg" >&2
     exit 1
 fi
+verify_checkpoint trigger_refreshed
 
 worker_pids=()
 for shard in 0 1 2 3; do
@@ -399,12 +521,11 @@ if [ "$b_after_generation" -ne "$b_generation" ] || [ "$b_after_bytes" -ne "$b_b
     exit 1
 fi
 
-expected_refreshed=$((baseline + refreshed_bytes + b_bytes))
-wait_for_live_bytes "$db_a" "$expected_refreshed"
+verify_checkpoint refreshed
 
 # Keep both owners alive, but submit their GPU work sequentially. This tests
-# production shared-ledger ownership, not simultaneous GPU throughput. Existing
-# integer pools are uncharged; measure the new NUMERIC pool capacity separately.
+# production shared-ledger ownership, not simultaneous GPU throughput. Every
+# checkpoint includes all current integer/NUMERIC pools, even after replacement.
 numeric_probe() {
     cat <<'SQL'
 SET pg_accel.enabled = on;
@@ -413,17 +534,12 @@ SET pg_accel.auto_load = off;
 SELECT pg_accel_pin('ledger_numeric', ARRAY['g', 'v']);
 DO $$
 DECLARE
-    before_pool bigint;
-    after_pool bigint;
     before_live bigint;
     before_workspace_hits bigint;
     before_output_hits bigint;
     plan_row record;
     plan text := '';
 BEGIN
-    SELECT w.retained_bytes + o.retained_bytes INTO before_pool
-    FROM pg_accel_grouped_workspace_pool_stats() w,
-         pg_accel_grouped_output_pool_stats() o;
     CREATE TEMP TABLE numeric_actual AS
     SELECT g, sum(v) AS s, avg(v) AS a, count(v) AS c
     FROM ledger_numeric GROUP BY g;
@@ -452,15 +568,13 @@ BEGIN
        (SELECT hits FROM pg_accel_grouped_output_pool_stats()) <= before_output_hits THEN
         RAISE EXCEPTION 'NUMERIC pool reuse changed ledger charge or failed to reuse buffers';
     END IF;
-    SELECT w.retained_bytes + o.retained_bytes INTO after_pool
-    FROM pg_accel_grouped_workspace_pool_stats() w,
-         pg_accel_grouped_output_pool_stats() o;
-    IF after_pool <= before_pool THEN
+    IF (SELECT retained_bytes FROM pg_accel_grouped_workspace_pool_stats()) <= 0 OR
+       (SELECT retained_bytes FROM pg_accel_grouped_output_pool_stats()) <= 0 THEN
         RAISE EXCEPTION 'NUMERIC execution did not retain positively sized buffers';
     END IF;
     INSERT INTO ledger_sync
     SELECT 'numeric_ready', pg_backend_pid(), generation,
-           raw_bytes + derived_bytes + after_pool - before_pool
+           raw_bytes + derived_bytes
     FROM pg_accel_resident_status() WHERE relid = 'ledger_numeric'::regclass;
 END $$;
 SQL
@@ -469,12 +583,11 @@ SQL
 numeric_probe >&3
 wait_for_phase "$db_a" numeric_ready
 IFS='|' read -r _ a_numeric_bytes _ <<<"$(read_phase "$db_a" numeric_ready)"
-wait_for_live_bytes "$db_a" "$((expected_refreshed + a_numeric_bytes))"
+verify_checkpoint numeric_a
 numeric_probe >&4
 wait_for_phase "$db_b" numeric_ready
 IFS='|' read -r _ b_numeric_bytes _ <<<"$(read_phase "$db_b" numeric_ready)"
-wait_for_live_bytes "$db_a" "$((expected_refreshed + a_numeric_bytes + b_numeric_bytes))"
-a_owned_bytes=$((refreshed_bytes + a_numeric_bytes))
+verify_checkpoint numeric_b
 
 # A PostgreSQL FATAL exit must run the registered shared-memory cleanup and
 # release exactly this backend's charge without disturbing the other database.
@@ -483,30 +596,30 @@ run_db "$db_a" "SELECT pg_terminate_backend($b_backend_pid)" >/dev/null
 # FATAL until its next round trip. Force that round trip, then quit if libpq
 # reconnects, so client behavior cannot hang the backend-cleanup assertion.
 printf 'SELECT 1;\n\\quit\n' >&4
-set +e
-wait "$client_b"
-set -e
-client_b=""
-if [ "$(run_db "$db_a" "SELECT count(*) FROM pg_stat_activity WHERE pid = $b_backend_pid")" -ne 0 ]; then
-    echo "error: terminated ledger backend remains in pg_stat_activity" >&2
+if wait_client client_b; then b_client_status=0; else b_client_status=$?; fi
+printf 'fatal_client_exit_status=%s\n' "$b_client_status" >>"$artifact_dir/backend-exit.tsv"
+if [ "$b_client_status" -eq 124 ]; then
     exit 1
 fi
-wait_for_live_bytes "$db_a" "$((baseline + a_owned_bytes))"
+record_exit "$db_b" "$b_backend_pid" b_exited fatal
+verify_checkpoint b_exited
 
 # Reuse a released backend slot in the second database, then prove its normal
 # exit also returns the temporary charge.
 run_db "$db_b" "SELECT pg_accel_pin('ledger_probe', ARRAY['g', 'v']); SELECT pg_accel_resident_live_bytes()" \
     >"$artifact_dir/slot-reuse.log"
-wait_for_live_bytes "$db_a" "$((baseline + a_owned_bytes))"
+verify_checkpoint slot_reused
 
 printf '\\quit\n' >&3
-wait "$client_a"
-client_a=""
-wait_for_live_bytes "$db_a" "$baseline"
+wait_client client_a
+record_exit "$db_a" "$a_backend_pid" all_exited normal
+verify_checkpoint all_exited
+python3 "$accounting" validate "$receipts" --complete >"$artifact_dir/accounting.log"
 
 succeeded=1
 echo "residency-ledger integration: PASS"
 echo "  relation_oid=$oid_a baseline_bytes=$baseline"
 echo "  database_a_bytes=$refreshed_bytes database_b_bytes=$b_bytes"
-echo "  numeric_a_bytes=$a_numeric_bytes numeric_b_bytes=$b_numeric_bytes (raw, derived and retained execution buffers)"
+echo "  numeric_a_bytes=$a_numeric_bytes numeric_b_bytes=$b_numeric_bytes (relation raw and derived only)"
+echo "  complete idle ownership equations: $artifact_dir/accounting.log"
 echo "  generation=$a_generation->$invalidated_generation->$refreshed_generation"

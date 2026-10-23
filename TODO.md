@@ -100,6 +100,18 @@ complete objective is implemented and verified.
     hosted-CI or SQL121 budget-resolution claim. Evidence:
     `benchmarks/evidence/join-status-20261018/README.md`.
 
+  - [x] Repair the maintained production residency-ledger harness to account
+    independently for each owner's raw/derived bytes and integer/NUMERIC idle
+    workspace/output capacities, with checked receipt arithmetic and bounded
+    client/backend cleanup. All 15 accounting/real-child helper tests pass;
+    final production PG18.4/PG19beta1 runs pass eight ownership equations and
+    the preserved asymmetric workload, ending at zero. The old relation-only
+    equation fails against both runs' actual receipts. PG18 retains one 5.519s
+    dispatch warning; both retain LLVM SDK warnings and intentional backend
+    FATAL. This is controlled idle-accounting evidence, not active-output,
+    full-suite, throughput/latency or CI qualification. Evidence:
+    `benchmarks/evidence/residency-ledger-20261022/README.md`.
+
 - [x] Correct pinned AdaptiveCpp cache-path handling. Native observation,
   targeted clearing, artifact capture and diagnostics now use the actual
   `apps/<application>/jit-cache` layout with runtime default/legacy/token rules.

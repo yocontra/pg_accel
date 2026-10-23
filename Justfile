@@ -476,6 +476,7 @@ coverage-audit: safety-contract-audit
         scripts/coverage_ooo_overlap.sh \
         scripts/residency_ledger_integration.sh sql/tests/run_all.sh
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_coverage*.py'
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_residency_ledger_accounting.py
     python3 scripts/coverage_tools.py audit-scope --scope coverage/scope.json --repo-root .
 
 # Execute every registered deterministic fuzz/property family through its real

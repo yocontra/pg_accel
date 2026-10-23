@@ -1,0 +1,7 @@
+{"baseline": 0, "observer": {"kind": "checkpoint", "live_bytes": 10013775, "observer_pid": 59005, "phase": "ready"}, "owners": [{"backend_pid": 58542, "database_name": "pg_accel_ledger_a_58350_1792724626", "derived_bytes": 2000000, "kind": "owner", "output_bytes": 3175, "phase": "ready", "raw_bytes": 4000000, "workspace_bytes": 10600}, {"backend_pid": 58544, "database_name": "pg_accel_ledger_b_58350_1792724626", "derived_bytes": 0, "kind": "owner", "output_bytes": 0, "phase": "ready", "raw_bytes": 4000000, "workspace_bytes": 0}]}
+obsolete_expected=10000000 observed=10013775 omitted_idle_pools=13775
+Traceback (most recent call last):
+  File "/Users/contra/Projects/pg_accel/.codex/scratch/residency-ledger-20261018/check-obsolete-equation.py", line 20, in <module>
+    assert observed["live_bytes"] == old_expected, "OBSOLETE_RELATION_ONLY_EQUATION_FAILED"
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: OBSOLETE_RELATION_ONLY_EQUATION_FAILED

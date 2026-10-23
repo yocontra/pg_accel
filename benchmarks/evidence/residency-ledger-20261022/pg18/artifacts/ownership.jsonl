@@ -1,0 +1,23 @@
+{"kind":"baseline","db_a":"pg_accel_ledger_a_58350_1792724626","db_b":"pg_accel_ledger_b_58350_1792724626","live_bytes":0}
+{"kind": "owner", "phase": "ready", "raw_bytes": 4000000, "backend_pid": 58542, "output_bytes": 3175, "database_name": "pg_accel_ledger_a_58350_1792724626", "derived_bytes": 2000000, "workspace_bytes": 10600}
+{"kind": "owner", "phase": "ready", "raw_bytes": 4000000, "backend_pid": 58544, "output_bytes": 0, "database_name": "pg_accel_ledger_b_58350_1792724626", "derived_bytes": 0, "workspace_bytes": 0}
+{"kind":"checkpoint","phase":"ready","observer_pid":59005,"live_bytes":10013775}
+{"kind": "owner", "phase": "trigger_refreshed", "raw_bytes": 4000000, "backend_pid": 58542, "output_bytes": 3175, "database_name": "pg_accel_ledger_a_58350_1792724626", "derived_bytes": 2000000, "workspace_bytes": 10600}
+{"kind": "owner", "phase": "trigger_refreshed", "raw_bytes": 4000000, "backend_pid": 58544, "output_bytes": 0, "database_name": "pg_accel_ledger_b_58350_1792724626", "derived_bytes": 0, "workspace_bytes": 0}
+{"kind":"checkpoint","phase":"trigger_refreshed","observer_pid":59101,"live_bytes":10013775}
+{"kind": "owner", "phase": "refreshed", "raw_bytes": 4000000, "backend_pid": 58542, "output_bytes": 3175, "database_name": "pg_accel_ledger_a_58350_1792724626", "derived_bytes": 0, "workspace_bytes": 10600}
+{"kind": "owner", "phase": "refreshed", "raw_bytes": 4000000, "backend_pid": 58544, "output_bytes": 0, "database_name": "pg_accel_ledger_b_58350_1792724626", "derived_bytes": 0, "workspace_bytes": 0}
+{"kind":"checkpoint","phase":"refreshed","observer_pid":59202,"live_bytes":8013775}
+{"kind": "owner", "phase": "numeric_a", "raw_bytes": 16290912, "backend_pid": 58542, "output_bytes": 3518, "database_name": "pg_accel_ledger_a_58350_1792724626", "derived_bytes": 2000000, "workspace_bytes": 20456}
+{"kind": "owner", "phase": "numeric_a", "raw_bytes": 4000000, "backend_pid": 58544, "output_bytes": 0, "database_name": "pg_accel_ledger_b_58350_1792724626", "derived_bytes": 0, "workspace_bytes": 0}
+{"kind":"checkpoint","phase":"numeric_a","observer_pid":59779,"live_bytes":22314886}
+{"kind": "owner", "phase": "numeric_b", "raw_bytes": 16290912, "backend_pid": 58542, "output_bytes": 3518, "database_name": "pg_accel_ledger_a_58350_1792724626", "derived_bytes": 2000000, "workspace_bytes": 20456}
+{"kind": "owner", "phase": "numeric_b", "raw_bytes": 16290912, "backend_pid": 58544, "output_bytes": 343, "database_name": "pg_accel_ledger_b_58350_1792724626", "derived_bytes": 2000000, "workspace_bytes": 9856}
+{"kind":"checkpoint","phase":"numeric_b","observer_pid":59951,"live_bytes":36615997}
+{"kind":"exit","phase":"b_exited","database_name":"pg_accel_ledger_b_58350_1792724626","backend_pid":58544,"mode":"fatal","remaining_backends":0}
+{"kind": "owner", "phase": "b_exited", "raw_bytes": 16290912, "backend_pid": 58542, "output_bytes": 3518, "database_name": "pg_accel_ledger_a_58350_1792724626", "derived_bytes": 2000000, "workspace_bytes": 20456}
+{"kind":"checkpoint","phase":"b_exited","observer_pid":59977,"live_bytes":18314886}
+{"kind": "owner", "phase": "slot_reused", "raw_bytes": 16290912, "backend_pid": 58542, "output_bytes": 3518, "database_name": "pg_accel_ledger_a_58350_1792724626", "derived_bytes": 2000000, "workspace_bytes": 20456}
+{"kind":"checkpoint","phase":"slot_reused","observer_pid":59997,"live_bytes":18314886}
+{"kind":"exit","phase":"all_exited","database_name":"pg_accel_ledger_a_58350_1792724626","backend_pid":58542,"mode":"normal","remaining_backends":0}
+{"kind":"checkpoint","phase":"all_exited","observer_pid":60010,"live_bytes":0}

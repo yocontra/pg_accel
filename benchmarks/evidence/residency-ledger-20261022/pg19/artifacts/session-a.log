@@ -1,0 +1,55 @@
+ pg_accel_pin 
+--------------
+       500000
+(1 row)
+
+ ledger_capture 
+----------------
+ 
+(1 row)
+
+ pg_accel_refresh 
+------------------
+           500000
+(1 row)
+
+ ledger_capture 
+----------------
+ 
+(1 row)
+
+ pg_accel_refresh 
+------------------
+           500000
+(1 row)
+
+ ledger_capture 
+----------------
+ 
+(1 row)
+
+ pg_accel_pin 
+--------------
+       500000
+(1 row)
+
+ ledger_capture 
+----------------
+ 
+(1 row)
+
+ ledger_capture 
+----------------
+ 
+(1 row)
+
+ ledger_capture 
+----------------
+ 
+(1 row)
+
+ ledger_capture 
+----------------
+ 
+(1 row)
+

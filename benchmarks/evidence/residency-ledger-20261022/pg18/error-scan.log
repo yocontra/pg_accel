@@ -1,0 +1,4 @@
+.codex/scratch/residency-ledger-20261018/runtime-pg18-final-20261022/artifacts/session-a.log:6:WARNING:  pg_accel: grouped aggregate one-shot dispatch returned after 5518967us (warning threshold 5000ms); cancellation and statement_timeout are observed only between synchronous calls
+.codex/scratch/residency-ledger-20261018/runtime-pg18-final-20261022/server.log:22:2026-10-22 20:03:57.417 MST [58542] WARNING:  pg_accel: grouped aggregate one-shot dispatch returned after 5518967us (warning threshold 5000ms); cancellation and statement_timeout are observed only between synchronous calls
+.codex/scratch/residency-ledger-20261018/runtime-pg18-final-20261022/server.log:66:2026-10-22 20:04:09.565 MST [58544] FATAL:  terminating connection due to administrator command
+.codex/scratch/residency-ledger-20261018/runtime-pg18-final-20261022/artifacts/session-b.log:36:FATAL:  terminating connection due to administrator command

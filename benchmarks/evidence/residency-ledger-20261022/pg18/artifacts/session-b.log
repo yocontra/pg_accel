@@ -1,0 +1,40 @@
+ pg_accel_pin 
+--------------
+       500000
+(1 row)
+
+ ledger_capture 
+----------------
+ 
+(1 row)
+
+ ledger_capture 
+----------------
+ 
+(1 row)
+
+ ledger_capture 
+----------------
+ 
+(1 row)
+
+ ledger_capture 
+----------------
+ 
+(1 row)
+
+ pg_accel_pin 
+--------------
+       500000
+(1 row)
+
+ ledger_capture 
+----------------
+ 
+(1 row)
+
+FATAL:  terminating connection due to administrator command
+server closed the connection unexpectedly
+	This probably means the server terminated abnormally
+	before or while processing the request.
+connection to server was lost

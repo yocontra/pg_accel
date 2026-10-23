@@ -1,0 +1,4 @@
+scripts/residency_ledger_integration.sh: OK
+scripts/residency_ledger_accounting.py: OK
+scripts/tests/test_residency_ledger_accounting.py: OK
+Justfile: OK

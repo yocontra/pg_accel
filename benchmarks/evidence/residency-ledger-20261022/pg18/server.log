@@ -1,0 +1,77 @@
+2026-10-22 20:03:46.361 MST [58332] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-22 20:03:46.361 MST [58332] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-22 20:03:46.363 MST [58332] LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-22 20:03:46.364 MST [58332] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/ledger-f18-20261022/.s.PGSQL.32018"
+2026-10-22 20:03:46.370 MST [58338] LOG:  database system was shut down at 2026-10-22 20:03:46 MST
+2026-10-22 20:03:46.373 MST [58332] LOG:  database system is ready to accept connections
+2026-10-22 20:03:51.008 MST [58336] LOG:  checkpoint starting: immediate force wait
+2026-10-22 20:03:51.528 MST [58336] LOG:  checkpoint complete: wrote 8046 buffers (49.1%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 14 recycled; write=0.490 s, sync=0.028 s, total=0.520 s; sync files=674, longest=0.002 s, average=0.001 s; distance=222303 kB, estimate=222303 kB; lsn=0/F0279B8, redo lsn=0/F027960
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/residency-ledger-20261018/runtime-pg18-final-20261022/cache/apps/global/jit-cache/15708062306988190290.17484074317790106443.metalar.58542.4664919502751867652.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/residency-ledger-20261018/runtime-pg18-final-20261022/cache/apps/global/jit-cache/18384041738596059486.16725411824871431356.metalar.58542.14784878072755064284.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/residency-ledger-20261018/runtime-pg18-final-20261022/cache/apps/global/jit-cache/4939212832255122260.8000747223103531886.metalar.58542.11857067778373881307.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/residency-ledger-20261018/runtime-pg18-final-20261022/cache/apps/global/jit-cache/6229825781897181524.3375839458642094630.metalar.58542.3992616058293744409.tmp (kernels_added=1 skipped=0)
+2026-10-22 20:03:57.417 MST [58542] WARNING:  pg_accel: grouped aggregate one-shot dispatch returned after 5518967us (warning threshold 5000ms); cancellation and statement_timeout are observed only between synchronous calls
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/residency-ledger-20261018/runtime-pg18-final-20261022/cache/apps/global/jit-cache/5436284986568462560.17484074317790106443.metalar.58542.7932470877612496210.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/residency-ledger-20261018/runtime-pg18-final-20261022/cache/apps/global/jit-cache/10900195627355951314.16725411824871431356.metalar.58542.16966885236721866945.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/residency-ledger-20261018/runtime-pg18-final-20261022/cache/apps/global/jit-cache/15645957498266366212.12322505884656627297.metalar.58542.15536454724604438403.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/residency-ledger-20261018/runtime-pg18-final-20261022/cache/apps/global/jit-cache/9636036650450711250.16725411824871431356.metalar.58542.11409928442865917540.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/residency-ledger-20261018/runtime-pg18-final-20261022/cache/apps/global/jit-cache/9620746525974980842.16725411824871431356.metalar.58542.12933782756403416300.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/residency-ledger-20261018/runtime-pg18-final-20261022/cache/apps/global/jit-cache/4939212832255122260.15790768459613954760.metalar.58542.10605933903981974404.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/residency-ledger-20261018/runtime-pg18-final-20261022/cache/apps/global/jit-cache/17815961567180993092.16725411824871431356.metalar.58542.12343865751954858170.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/residency-ledger-20261018/runtime-pg18-final-20261022/cache/apps/global/jit-cache/14690400167917884164.4603991137474618499.metalar.58542.16872906145490922148.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+2026-10-22 20:04:09.565 MST [58544] FATAL:  terminating connection due to administrator command
+2026-10-22 20:04:10.593 MST [58336] LOG:  checkpoint starting: immediate force wait
+2026-10-22 20:04:10.598 MST [58336] LOG:  checkpoint complete: wrote 47 buffers (0.3%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 8 recycled; write=0.003 s, sync=0.001 s, total=0.005 s; sync files=32, longest=0.001 s, average=0.001 s; distance=140240 kB, estimate=214097 kB; lsn=0/1791BC58, redo lsn=0/1791BC00
+2026-10-22 20:04:10.635 MST [58336] LOG:  checkpoint starting: immediate force wait
+2026-10-22 20:04:10.636 MST [58336] LOG:  checkpoint complete: wrote 1 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.002 s; sync files=2, longest=0.001 s, average=0.001 s; distance=1 kB, estimate=192687 kB; lsn=0/1791C238, redo lsn=0/1791C1E0
+2026-10-22 20:04:10.768 MST [58332] LOG:  received fast shutdown request
+2026-10-22 20:04:10.768 MST [58332] LOG:  aborting any active transactions
+2026-10-22 20:04:10.769 MST [58332] LOG:  background worker "logical replication launcher" (PID 58341) exited with exit code 1
+2026-10-22 20:04:10.769 MST [58336] LOG:  shutting down
+2026-10-22 20:04:10.770 MST [58336] LOG:  checkpoint starting: shutdown immediate
+2026-10-22 20:04:10.771 MST [58336] LOG:  checkpoint complete: wrote 2 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.002 s; sync files=3, longest=0.001 s, average=0.001 s; distance=1 kB, estimate=173418 kB; lsn=0/1791C8A0, redo lsn=0/1791C8A0
+2026-10-22 20:04:10.779 MST [58332] LOG:  database system is shut down

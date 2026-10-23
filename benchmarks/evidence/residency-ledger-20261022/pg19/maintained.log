@@ -1,0 +1,6 @@
+residency-ledger integration: PASS
+  relation_oid=16457 baseline_bytes=0
+  database_a_bytes=4000000 database_b_bytes=4000000
+  numeric_a_bytes=14290912 numeric_b_bytes=14290912 (relation raw and derived only)
+  complete idle ownership equations: /Users/contra/Projects/pg_accel/.codex/scratch/residency-ledger-20261018/runtime-pg19-final-20261022/artifacts/accounting.log
+  generation=0->8->8

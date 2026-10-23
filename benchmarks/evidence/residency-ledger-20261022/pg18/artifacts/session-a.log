@@ -1,0 +1,56 @@
+ pg_accel_pin 
+--------------
+       500000
+(1 row)
+
+WARNING:  pg_accel: grouped aggregate one-shot dispatch returned after 5518967us (warning threshold 5000ms); cancellation and statement_timeout are observed only between synchronous calls
+ ledger_capture 
+----------------
+ 
+(1 row)
+
+ pg_accel_refresh 
+------------------
+           500000
+(1 row)
+
+ ledger_capture 
+----------------
+ 
+(1 row)
+
+ pg_accel_refresh 
+------------------
+           500000
+(1 row)
+
+ ledger_capture 
+----------------
+ 
+(1 row)
+
+ pg_accel_pin 
+--------------
+       500000
+(1 row)
+
+ ledger_capture 
+----------------
+ 
+(1 row)
+
+ ledger_capture 
+----------------
+ 
+(1 row)
+
+ ledger_capture 
+----------------
+ 
+(1 row)
+
+ ledger_capture 
+----------------
+ 
+(1 row)
+
