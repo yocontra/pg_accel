@@ -1,0 +1,139 @@
+error: let chains are only allowed in Rust 2024 or later
+    --> /Users/contra/Projects/pg_accel/pg_accel/src/engine/executor/agg/descriptor.rs:2574:20
+     |
+2574 |     if targeted && let Some(mut evidence) = cell.get() {
+     |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /Users/contra/Projects/pg_accel/pg_accel/src/engine/executor/agg/descriptor.rs:2586:8
+     |
+2586 |     if let Some(cell) = cell
+     |        ^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /Users/contra/Projects/pg_accel/pg_accel/src/engine/executor/agg/descriptor.rs:2587:12
+     |
+2587 |         && let Some(mut evidence) = cell.get()
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /Users/contra/Projects/pg_accel/pg_accel/src/engine/executor/agg/descriptor.rs:2599:8
+     |
+2599 |     if let Some(report) = residency
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /Users/contra/Projects/pg_accel/pg_accel/src/engine/executor/agg/descriptor.rs:2600:12
+     |
+2600 |         && let Some(evidence) = cell.get()
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /Users/contra/Projects/pg_accel/pg_accel/src/engine/executor/agg/descriptor.rs:2916:12
+     |
+2916 |         if let DescriptorArtifactKind::Spatial(plan) = &artifact_kind
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /Users/contra/Projects/pg_accel/pg_accel/src/engine/executor/agg/descriptor.rs:3668:16
+     |
+3668 |             && let Some(previous) = previous_raw_capacity
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /Users/contra/Projects/pg_accel/pg_accel/src/engine/executor/agg/descriptor.rs:3669:16
+     |
+3669 |               && let Some(EphemeralDescriptorArtifact::Hash(owner)) =
+     |  ________________^
+3670 | |                 self.ephemeral_artifact.borrow().as_ref()
+     | |_________________________________________________________^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /Users/contra/Projects/pg_accel/pg_accel/src/engine/executor/agg/descriptor.rs:4616:16
+     |
+4616 |             && let Some((column, _, _)) = measure.filter.range_parts()
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /Users/contra/Projects/pg_accel/pg_accel/src/engine/executor/agg/descriptor.rs:4995:16
+     |
+4995 |             && let Some((input, _, _)) = measure.filter.range_parts()
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+   --> /Users/contra/Projects/pg_accel/pg_accel/src/engine/executor/agg/artifact.rs:323:12
+    |
+323 |         if let Self::Bool { values, .. } = self
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+   --> /Users/contra/Projects/pg_accel/pg_accel/src/engine/executor/agg/artifact.rs:572:12
+    |
+572 |         && let Some(input) = h3_count_filter(spec)?
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Error writing files: failed to resolve mod `artifact`: cannot parse /Users/contra/Projects/pg_accel/pg_accel/src/engine/executor/agg/artifact.rs
+error: let chains are only allowed in Rust 2024 or later
+   --> /Users/contra/Projects/pg_accel/pg_accel/src/gpu/grouped_agg.rs:222:16
+    |
+222 |             if let Some(view) = numeric_metadata(&measure.value)?
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+   --> /Users/contra/Projects/pg_accel/pg_accel/src/gpu/grouped_agg.rs:498:16
+    |
+498 |             if let Some(view) = numeric_metadata(&measure.value)?
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /Users/contra/Projects/pg_accel/pg_accel/src/engine/ffi/planner_hooks/shape/builder.rs:1172:11
+     |
+1172 |       }) && let Some(index) = measures.iter().position(|measure| {
+     |  ___________^
+1173 | |         measure.expression == MeasureExpr::CountStar && measure.filter == FilterSpec::None
+1174 | |     }) {
+     | |______^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /Users/contra/Projects/pg_accel/pg_accel/src/engine/ffi/planner_hooks/shape/builder.rs:1279:24
+     |
+1279 |                       && let MeasureExpr::Bytecode {
+     |  ________________________^
+1280 | |                         result_type_oid, ..
+1281 | |                     } = measures[measure_index].expression
+     | |__________________________________________________________^
+
+Error writing files: failed to resolve mod `builder`: cannot parse /Users/contra/Projects/pg_accel/pg_accel/src/engine/ffi/planner_hooks/shape/builder.rs
+error: let chains are only allowed in Rust 2024 or later
+    --> /Users/contra/Projects/pg_accel/pg_accel/src/engine/residency/store.rs:3618:8
+     |
+3618 |     if let Some(declared) = expected_accounting
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /Users/contra/Projects/pg_accel/pg_accel/src/engine/residency/store.rs:4571:16
+     |
+4571 |               if let Some(owner) = store
+     |  ________________^
+4572 | |                 .entries
+4573 | |                 .iter_mut()
+4574 | |                 .find(|entry| entry.relid == owner_relid)
+     | |_________________________________________________________^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /Users/contra/Projects/pg_accel/pg_accel/src/engine/residency/store.rs:4575:20
+     |
+4575 |                   && let Some(index) = owner
+     |  ____________________^
+4576 | |                     .derived
+4577 | |                     .iter()
+4578 | |                     .position(|entry| entry.has_identity(identity))
+     | |___________________________________________________________________^
+
+error: let chains are only allowed in Rust 2024 or later
+   --> /Users/contra/Projects/pg_accel/pg_accel/src/engine/residency/domain.rs:145:8
+    |
+145 |     if let Some(nulls) = nulls
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+Error writing files: failed to resolve mod `domain`: cannot parse /Users/contra/Projects/pg_accel/pg_accel/src/engine/residency/domain.rs

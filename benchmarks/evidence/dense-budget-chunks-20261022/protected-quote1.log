@@ -1,0 +1,10 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 21.24s
+     Running unittests src/lib.rs (target/debug/deps/pg_accel-4b4c215d478719d0)
+
+running 2 tests
+test engine::residency::store::tests::protected_execution_quote_matches_reclamation_without_double_credit ... ok
+test engine::residency::store::tests::protected_execution_quote_preserves_ephemeral_full_dependencies_and_currentness ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1322 filtered out; finished in 0.00s
+

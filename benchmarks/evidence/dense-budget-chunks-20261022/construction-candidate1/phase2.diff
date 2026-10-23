@@ -1,0 +1,66 @@
+--- .codex/scratch/dense-budget-chunks-20261022/integration-candidate4/pg_accel/src/tests/phase2_cache.rs	2026-10-22 21:16:20
++++ pg_accel/src/tests/phase2_cache.rs	2026-10-22 21:26:15
+@@ -466,7 +466,7 @@
+         assert_eq!(original.derived_bytes, 0);
+         // Exact motivating SQL121 shape: qty SUM, v AVG and the independent
+         // WHERE g carrier require three value lanes, not one shared v lane.
+-        let query = "SELECT g,h,k,sum(qty) q,avg(v) a,count(*) n \
++        let query = "SELECT g,h,k,sum(qty) qty_sum,avg(v) a,count(*) n \
+             FROM phase2_budget_chunks WHERE g IN (0,2) GROUP BY g,h,k ORDER BY g,h,k";
+         Spi::run("SET LOCAL pg_accel.enabled=off").expect("native reference");
+         let native = result_rows(query);
+@@ -593,11 +593,50 @@
+             );
+             Spi::run("DROP TABLE phase2_budget_actual").expect("drop prepared parity result");
+         }
+-        Spi::run(
+-            "DEALLOCATE phase2_budget_prepared; SET LOCAL pg_accel.resident_memory_budget_mb=32",
+-        )
+-        .expect("impossible fixed-owner budget");
++        Spi::run("DEALLOCATE phase2_budget_prepared").expect("release prepared target");
++        // Changing shape needs a new three-key artifact plus Boolean mask.
++        // Construction runs before execution selection and must recover idle
++        // pools from the previous shape without touching the pinned raw owner.
++        let where_b = "SELECT g,h,k,count(*) n,sum(v) s,avg(v) a,count(v) c \
++            FROM phase2_budget_chunks WHERE b GROUP BY g,h,k ORDER BY g,h,k";
++        Spi::run("SET LOCAL pg_accel.enabled=off").expect("native second shape");
++        let where_b_native = result_rows(where_b);
++        Spi::run("SET LOCAL pg_accel.enabled=on").expect("normal second shape admission");
++        let idle_before = crate::gpu::grouped_agg::idle_grouped_execution_bytes()
++            .expect("exact previous-shape idle charge");
++        let new_artifact_bytes = 1_000_017_u64 * (3 * 4 + 1);
++        let raw = u64::try_from(original.raw_bytes).expect("pinned raw bytes");
++        let budget = 64 * 1024 * 1024;
++        assert!(raw + new_artifact_bytes < budget);
++        let requires_idle_release = raw + new_artifact_bytes + idle_before > budget;
++        assert_descriptor_plan(&explain_text(where_b));
+         let before = kernel_executions();
++        assert_eq!(result_rows(where_b), where_b_native);
++        assert!(kernel_executions() > before, "second shape must dispatch");
++        let after_build = resident_status(table);
++        assert_eq!(after_build.raw_bytes, original.raw_bytes);
++        assert_eq!(after_build.generation, original.generation);
++        assert_eq!(after_build.column_count, original.column_count);
++        assert!(after_build.pinned);
++        assert!(u64::try_from(after_build.derived_bytes).expect("derived") >= new_artifact_bytes);
++        let idle_after = crate::gpu::grouped_agg::idle_grouped_execution_bytes()
++            .expect("second-shape idle charge");
++        assert!(u64::try_from(resident_live_bytes()).expect("live bytes") <= budget);
++        if requires_idle_release {
++            assert!(idle_after <= budget - raw - new_artifact_bytes);
++            assert!(idle_after < idle_before);
++        }
++        pgrx::notice!(
++            "construction pressure raw={} new_artifact={} idle_before={} idle_after={} required_idle_release={}",
++            raw,
++            new_artifact_bytes,
++            idle_before,
++            idle_after,
++            requires_idle_release
++        );
++        Spi::run("SET LOCAL pg_accel.resident_memory_budget_mb=32")
++            .expect("impossible fixed-owner budget");
++        let before = kernel_executions();
+         assert!(!explain_text(query).contains("custom scan (gpuaccelagg)"));
+         assert_eq!(
+             crate::engine::stats::read_last_planner_rejection_reason().as_deref(),

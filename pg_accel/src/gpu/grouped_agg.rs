@@ -2912,6 +2912,27 @@ impl GroupedAggMemoryRequirements {
 pub unsafe fn query_dense_grouped_memory_layout(
     desc: &abi::PgaccelGroupedAggDesc,
 ) -> GpuResult<GroupedAggMemoryRequirements> {
+    // SAFETY: forwarded host-only metadata contract.
+    let (requirements, mode) = unsafe { query_dense_grouped_layout_and_mode(desc) }?;
+    if !matches!(
+        mode,
+        GroupedAggKernelMode::ParallelDenseInteger | GroupedAggKernelMode::ParallelDenseCount
+    ) {
+        return Err(descriptor_error(
+            "layout forecast requires parallel dense integer/count execution",
+        ));
+    }
+    Ok(requirements)
+}
+
+/// Layout-only oracle including the actual native mode. Zero-row lifecycle
+/// controls may use a different mode from positive-row accumulation calls.
+///
+/// # Safety
+/// Same host-metadata-only contract as `query_dense_grouped_memory_layout`.
+pub unsafe fn query_dense_grouped_layout_and_mode(
+    desc: &abi::PgaccelGroupedAggDesc,
+) -> GpuResult<(GroupedAggMemoryRequirements, GroupedAggKernelMode)> {
     // The shell checks execution-owner canonicality (flags must be zero).
     // A layout query may describe a bounded RESET/ACCUMULATE call; native
     // validation below validates those actual flags against the row count.
@@ -2927,25 +2948,21 @@ pub unsafe fn query_dense_grouped_memory_layout(
         ));
     }
     let query = workspace_query_descriptor(desc);
-    if !matches!(
-        native_kernel_mode(&query)?,
-        GroupedAggKernelMode::ParallelDenseInteger | GroupedAggKernelMode::ParallelDenseCount
-    ) {
-        return Err(descriptor_error(
-            "layout forecast requires parallel dense integer/count execution",
-        ));
-    }
+    let mode = native_kernel_mode(&query)?;
     let workspace = GroupedAggWorkspace::requirements_for_descriptor(&query)?;
     let output_bytes = grouped_output_required_bytes(&query)?;
     let total_bytes = workspace
         .bytes
         .checked_add(output_bytes)
         .ok_or_else(|| capacity_error("grouped layout forecast overflows usize"))?;
-    Ok(GroupedAggMemoryRequirements {
-        workspace_bytes: workspace.bytes,
-        output_bytes,
-        total_bytes,
-    })
+    Ok((
+        GroupedAggMemoryRequirements {
+            workspace_bytes: workspace.bytes,
+            output_bytes,
+            total_bytes,
+        },
+        mode,
+    ))
 }
 
 fn bounded_workspace_descriptor(

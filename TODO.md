@@ -127,6 +127,27 @@ complete objective is implemented and verified.
     full 64 MiB SQL121, performance, release-proof or hosted-CI work. Evidence:
     `benchmarks/evidence/dense-budget-20261022/README.md`.
 
+  - [x] Select budget-fitting parallel dense integer/COUNT chunks using exact
+    native layouts and existing device ceilings, with shared planner costing,
+    protected runtime ownership and revalidation before allocation/dispatch.
+    At default admission costs, the motivating million-row query now selects
+    605,184-row chunks at 64 MiB (three lifecycle calls), with exact PostgreSQL
+    parity; prepared 128-to-64 MiB execution reselects 1,000,000-to-605,184 rows.
+    Repair construction-stage pressure by releasing local idle grouped pools
+    only after a budget rejection and retrying the same protected reservation
+    once; active/foreign owners remain charged. Unchanged production SQL121
+    passes at 64/128/256 MiB and DEFAULT on PG18.4/PG19beta1, along with fixed-raw
+    impossibility controls and real shared-owner active/idle/exit accounting.
+    Both complete pre-lint suites pass 1,867 library/live + 55 integration tests,
+    zero ignored/filtered; the final behavior-preserving lint cleanup passes
+    all 13 affected lifecycle/budget tests on each major, strict feature-enabled
+    Clippy and formatting. Preserve the original construction failure, corrected
+    test-fixture/planning failures, source boundaries and SDK/JIT warnings.
+    This expands tight-budget execution, not throughput or bounded latency;
+    NUMERIC/hash/H3 chunk selection, upstream regression completion, hosted CI
+    and the seven release-proof findings remain separate. Evidence:
+    `benchmarks/evidence/dense-budget-chunks-20261022/README.md`.
+
 - [x] Correct pinned AdaptiveCpp cache-path handling. Native observation,
   targeted clearing, artifact capture and diagnostics now use the actual
   `apps/<application>/jit-cache` layout with runtime default/legacy/token rules.

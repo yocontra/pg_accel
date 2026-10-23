@@ -1,0 +1,25 @@
+CREATE EXTENSION
+SET
+                                                        version                                                        
+-----------------------------------------------------------------------------------------------------------------------
+ PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+(1 row)
+
+ cpu_cores | configured_workers | gpu_available | gpu_device_name |  memory_model   | pg_version | pg_accel_version 
+-----------+--------------------+---------------+-----------------+-----------------+------------+------------------
+        12 |                  0 | t             | Apple M2 Max    | explicit_device |     190000 | 1.0.0-rc1
+(1 row)
+
+      source      
+------------------
+ hardware_derived
+(1 row)
+
+BEGIN
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/dense-budget-chunks-20261022/visible-budget-proof.sql:31: NOTICE:  dense budget selected chunk=605184 calls=3 peak=19104216 raw=36000693 derived=12000204
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/dense-budget-chunks-20261022/visible-budget-proof.sql:31: NOTICE:  prepared dense budget=128 chunk=1000000 calls=3 peak=31555032 native_cap_chunk=1000000 native_cap_peak=31555032
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/dense-budget-chunks-20261022/visible-budget-proof.sql:31: NOTICE:  prepared dense budget=64 chunk=605184 calls=3 peak=19104216 native_cap_chunk=1000000 native_cap_peak=31555032
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/dense-budget-chunks-20261022/visible-budget-proof.sql:31: NOTICE:  construction pressure policy=ephemeral_fused raw=36000693 new_artifact=13000221 retained_derived=0 idle_before=50648304 idle_after=10530264 required_idle_release=true
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/dense-budget-chunks-20261022/visible-budget-proof.sql:31: NOTICE:  DENSE_BUDGET_ACTUAL_DEVICE_PROOF function=tests.test_dense_budget_chunks_select_and_revalidate_at_default_cost kernels=0->12 mode=0->8
+DO
+ROLLBACK

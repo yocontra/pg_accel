@@ -1,0 +1,161 @@
+SET
+SET
+SET
+                                                      version                                                       
+--------------------------------------------------------------------------------------------------------------------
+ PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+(1 row)
+
+ extname  | extversion 
+----------+------------
+ pg_accel | 1.0.0-rc1
+(1 row)
+
+ cpu_cores | configured_workers | gpu_available | gpu_device_name |  memory_model   | pg_version | pg_accel_version 
+-----------+--------------------+---------------+-----------------+-----------------+------------+------------------
+        12 |                  0 | t             | Apple M2 Max    | explicit_device |     180004 | 1.0.0-rc1
+(1 row)
+
+                     name                      |    value    |      source      
+-----------------------------------------------+-------------+------------------
+ resident_memory_budget_bytes                  | 8589934592  | hardware_derived
+ resident_domain_max_exact_value_bytes         | 1048576     | hardware_derived
+ auto_load_amortization_queries                | 8           | hardware_derived
+ resident_load_scan_per_row_cost               | 0.01        | hardware_derived
+ resident_load_per_byte_cost                   | 0.001       | hardware_derived
+ gpu_min_rows                                  | 8421        | hardware_derived
+ gpu_sort_min_rows                             | 84210       | hardware_derived
+ gpu_sort_planner_min_rows                     | 84210       | hardware_derived
+ gpu_window_min_rows                           | 84210       | hardware_derived
+ gpu_reduce_min_rows                           | 21052       | hardware_derived
+ gpu_hash_agg_min_rows                         | 210526      | hardware_derived
+ gpu_hash_agg_unsafe_input_rows                | 100000      | hardware_derived
+ gpu_hash_agg_max_groups                       | 100000      | hardware_derived
+ gpu_h3_max_groups                             | 16776704    | hardware_derived
+ gpu_reduce_max_chunk                          | 1000000     | hardware_derived
+ gpu_grouped_agg_one_shot_max_rows             | 1000000     | hardware_derived
+ gpu_sort_max_elements                         | 4000000     | hardware_derived
+ gpu_sort_topk_max_limit                       | 128         | hardware_derived
+ gpu_sort_heap_topk_max_fraction               | 0.25        | hardware_derived
+ gpu_sort_heap_topk_max_width_bytes            | 16          | hardware_derived
+ gpu_join_max_output_rows                      | 118750      | hardware_derived
+ gpu_h3_group_min_rows                         | 84210       | hardware_derived
+ gpu_h3_max_chunk_rows                         | 4000000     | hardware_derived
+ gpu_spatial_min_vertices                      | 84          | hardware_derived
+ gpu_spatial_max_vertices_per_row              | 1000000     | hardware_derived
+ gpu_spatial_max_output_fraction               | 0.8         | hardware_derived
+ gpu_spatial_max_recheck_fraction              | 0.1         | hardware_derived
+ gpu_spatial_pairwise_chunk_rows               | 65536       | hardware_derived
+ gpu_raster_min_pixels                         | 55188       | hardware_derived
+ gpu_raster_max_chunk_pixels                   | 4000000     | hardware_derived
+ gpu_expr_min_rows                             | 210526      | hardware_derived
+ gpu_hash_join_build_max_rows                  | 99999       | hardware_derived
+ gpu_pipeline_fusion_min_rows                  | 8421        | hardware_derived
+ gpu_preagg_min_fact_rows                      | 42105       | hardware_derived
+ gpu_preagg_max_dim_rows                       | 2000000     | hardware_derived
+ preagg_dim_materialize_cost                   | 0.1         | hardware_derived
+ preagg_fact_scan_cost                         | 0.001       | hardware_derived
+ preagg_probe_cost                             | 0.003       | hardware_derived
+ preagg_agg_cost                               | 0.002       | hardware_derived
+ preagg_yield_cost                             | 0.03        | hardware_derived
+ optimal_batch_min                             | 256         | hardware_derived
+ optimal_batch_max                             | 32768       | hardware_derived
+ fused_interrupt_interval                      | 65536       | hardware_derived
+ gpu_op_cost_reduce                            | 0.0005      | hardware_derived
+ gpu_op_cost_hash_agg                          | 0.002       | hardware_derived
+ gpu_op_cost_sort                              | 0.003       | hardware_derived
+ gpu_op_cost_window                            | 0.001       | hardware_derived
+ gpu_op_cost_filter                            | 0.001       | hardware_derived
+ gpu_op_cost_h3_parent_resident                | 0.001       | hardware_derived
+ gpu_hashjoin_build_per_row                    | 0.001       | hardware_derived
+ gpu_hashjoin_probe_per_row                    | 0.001       | hardware_derived
+ custom_scan_yield_per_row                     | 0.001       | hardware_derived
+ gpu_partial_agg_per_row                       | 0.001       | hardware_derived
+ gpu_agg_cost_ratio                            | 0.8         | hardware_derived
+ gpu_window_cost_ratio                         | 1.5         | hardware_derived
+ gpu_preagg_cost_ratio                         | 1.5         | hardware_derived
+ reduce_f32_break_even_rows                    | 21052       | hardware_derived
+ reduce_f64_break_even_rows                    | 42105       | hardware_derived
+ reduce_i64_break_even_rows                    | 63157       | hardware_derived
+ reduce_bit_break_even_rows                    | 252631      | hardware_derived
+ reduce_bool_break_even_rows                   | 421052      | hardware_derived
+ hashagg_min_rows_per_group                    | 32          | hardware_derived
+ hashagg_max_state_bytes_per_group             | 256         | hardware_derived
+ sort_break_even_rows_int                      | 84210       | hardware_derived
+ sort_break_even_rows_float                    | 67368       | hardware_derived
+ spatial_point_in_ring_break_even_verts_x_rows | 500000000   | hardware_derived
+ spatial_point_in_ring_max_verts_x_rows        | 50000000000 | hardware_derived
+ window_min_partition_rows                     | 8421        | hardware_derived
+ expr_min_predicate_complexity_x_rows          | 50000       | hardware_derived
+ hashjoin_min_build_rows                       | 4210        | hardware_derived
+ gpu_nlj_min_outer_rows                        | 842         | hardware_derived
+ gpu_nlj_min_inner_rows                        | 842         | hardware_derived
+ gpu_nlj_max_output_rows                       | 118750      | hardware_derived
+ gpu_nlj_per_pair_cost                         | 0.0000001   | hardware_derived
+ has_native_fp64                               | false       | hardware_derived
+ soft_fp64_cost_multiplier                     | 32          | hardware_derived
+(76 rows)
+
+                name                | setting | unit | source  | boot_val 
+------------------------------------+---------+------+---------+----------
+ pg_accel.assert_dispatch           | off     |      | default | off
+ pg_accel.auto_load                 | on      |      | default | on
+ pg_accel.cost_multiplier           | 1       |      | default | 1
+ pg_accel.enabled                   | on      |      | default | on
+ pg_accel.execution_profiling       | off     |      | default | off
+ pg_accel.fp64_enabled              | on      |      | default | on
+ pg_accel.gpu_enabled               | on      |      | default | on
+ pg_accel.kernel_timeout_ms         | 60000   | ms   | session | 5000
+ pg_accel.log_level                 | Notice  |      | default | Notice
+ pg_accel.max_workers_total         | 0       |      | default | 0
+ pg_accel.min_batch_size            | 65536   |      | default | 65536
+ pg_accel.otel_log_max_mb           | 256     | MB   | default | 256
+ pg_accel.otel_log_max_rotations    | 4       |      | default | 4
+ pg_accel.parallel_fused_count      | off     |      | default | off
+ pg_accel.planner_profiling         | off     |      | default | off
+ pg_accel.resident_memory_budget_mb | 64      | MB   | session | -1
+ pg_accel.soft_fp64_cost_multiplier | 32      |      | default | 32
+(17 rows)
+
+DO
+SET
+SET
+SELECT 1000017
+ANALYZE
+ pg_accel_pin 
+--------------
+      1000017
+(1 row)
+
+SELECT 1
+DO
+SET
+SELECT 64
+SET
+DO
+SET
+SELECT 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/dense-budget-chunks-20261022/qualification/fixed-owner-negative.sql:42: NOTICE:  FIXED_RAW_NEGATIVE_PLAN reason=generic_residency_budget_exceeded plan=HashAggregate
+  Group Key: g, h, k
+  ->  Seq Scan on _integer_where_agg
+        Filter: (g = ANY ('{0,2}'::integer[]))
+
+DO
+SELECT 64
+DO
+ relid |      columns      | raw_bytes | pinned | generation | budget_bytes 
+-------+-------------------+-----------+--------+------------+--------------
+ 25159 | {1,2,3,4,5,6,7,8} |  36000693 | t      |          1 |     33554432
+(1 row)
+
+ relid |      columns      | raw_bytes | pinned | generation 
+-------+-------------------+-----------+--------+------------
+ 25159 | {1,2,3,4,5,6,7,8} |  36000693 | t      |          1
+(1 row)
+
+ before_count | after_count 
+--------------+-------------
+            0 |           0
+(1 row)
+
+FIXED_RAW_IMPOSSIBILITY_NATIVE_PARITY_ZERO_DISPATCH_COMPLETE

@@ -1,0 +1,8 @@
+.codex/scratch/dense-budget-chunks-20261022/qualification/run-known-production.sh: OK
+.codex/scratch/dense-budget-chunks-20261022/qualification/bounded-command.py: OK
+.codex/scratch/dense-budget-chunks-20261022/qualification/profile.sql: OK
+.codex/scratch/dense-budget-chunks-20261022/qualification/fixture.sql: OK
+.codex/scratch/dense-budget-chunks-20261022/qualification/fresh-derived-positive.sql: OK
+.codex/scratch/dense-budget-chunks-20261022/qualification/fixed-owner-negative.sql: OK
+.codex/scratch/dense-budget-chunks-20261022/qualification/README.md: OK
+.codex/scratch/dense-budget-chunks-20261022/qualification/PREPARATION.md: OK

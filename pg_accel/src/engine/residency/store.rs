@@ -690,6 +690,309 @@ impl<T> EphemeralDerivedArtifact<T> {
     }
 }
 
+/// Pointer-free protection shared by execution quoting and reclamation.
+/// A quote is not a reservation. Every use revalidates the complete dependency
+/// stamps, requested raw coverage and (when cached) full canonical identity.
+#[derive(Debug, Clone)]
+pub struct ExecutionMemoryProtection {
+    owner: pg_sys::Oid,
+    identity: Option<DerivedArtifactIdentity>,
+    dependencies: Box<[ResidentDependencyStamp]>,
+    columns: Box<[ResidentColumnRef]>,
+}
+
+impl ExecutionMemoryProtection {
+    pub fn cached(
+        owner: pg_sys::Oid,
+        identity: &DerivedArtifactIdentity,
+        columns: &[ResidentColumnRef],
+    ) -> Result<Self, ResidentLoadError> {
+        STORE.with(|store| {
+            let store = store
+                .try_borrow_mut()
+                .map_err(|_| execution_borrow_error())?;
+            let artifact = store
+                .entries
+                .iter()
+                .find(|entry| entry.relid == owner)
+                .and_then(|entry| {
+                    entry
+                        .derived
+                        .iter()
+                        .find(|entry| entry.has_identity(identity))
+                })
+                .ok_or(ResidentLoadError::ArtifactNotFound {
+                    digest: identity.digest,
+                })?;
+            let protection = Self {
+                owner,
+                identity: Some(identity.clone()),
+                dependencies: artifact.dependencies.clone(),
+                columns: columns.into(),
+            };
+            protection.validate(&store)?;
+            Ok(protection)
+        })
+    }
+
+    pub fn ephemeral<T>(
+        owner: pg_sys::Oid,
+        artifact: &EphemeralDerivedArtifact<T>,
+        columns: &[ResidentColumnRef],
+    ) -> Result<Self, ResidentLoadError> {
+        let protection = Self {
+            owner,
+            identity: None,
+            dependencies: artifact.dependencies.clone(),
+            columns: columns.into(),
+        };
+        STORE.with(|store| {
+            let store = store
+                .try_borrow_mut()
+                .map_err(|_| execution_borrow_error())?;
+            protection.validate(&store)
+        })?;
+        Ok(protection)
+    }
+
+    fn validate(&self, store: &RelationStore) -> Result<(), ResidentLoadError> {
+        let relids = canonical_dependency_relids(
+            self.owner,
+            &self
+                .dependencies
+                .iter()
+                .map(|stamp| stamp.relid)
+                .collect::<Vec<_>>(),
+            &self.columns,
+        )?;
+        if !dependency_relids_match(&self.dependencies, &relids)
+            || first_dependency_mismatch(store, &self.dependencies).is_some()
+        {
+            return Err(ResidentLoadError::InvalidArtifactDependencies(
+                "execution protection dependency stamps changed".into(),
+            ));
+        }
+        if let Some(identity) = &self.identity {
+            let artifact = store
+                .entries
+                .iter()
+                .find(|entry| entry.relid == self.owner)
+                .and_then(|entry| {
+                    entry
+                        .derived
+                        .iter()
+                        .find(|entry| entry.has_identity(identity))
+                })
+                .ok_or(ResidentLoadError::ArtifactNotFound {
+                    digest: identity.digest,
+                })?;
+            if artifact.dependencies != self.dependencies {
+                return Err(ResidentLoadError::InvalidArtifactDependencies(
+                    "execution artifact dependency identity changed".into(),
+                ));
+            }
+        }
+        for column in &self.columns {
+            let relation = store
+                .entries
+                .iter()
+                .find(|entry| entry.relid == column.relid)
+                .ok_or(ResidentLoadError::MissingRelation(column.relid))?;
+            if !relation.columns.contains_key(&column.attno) {
+                return Err(ResidentLoadError::MissingColumn {
+                    relid: column.relid,
+                    attno: column.attno,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn protects_raw(&self, relid: pg_sys::Oid) -> bool {
+        relid == self.owner
+            || self.dependencies.iter().any(|stamp| stamp.relid == relid)
+            || self.columns.iter().any(|column| column.relid == relid)
+    }
+
+    fn protects_derived(&self, owner: pg_sys::Oid, artifact: &DerivedEntry) -> bool {
+        self.owner == owner
+            && self
+                .identity
+                .as_ref()
+                .is_some_and(|id| artifact.has_identity(id))
+    }
+}
+
+fn execution_borrow_error() -> ResidentLoadError {
+    ResidentLoadError::InvalidArtifactDependencies(
+        "cannot quote or reclaim execution memory while resident inputs are borrowed".into(),
+    )
+}
+
+/// Exact disjoint reclaimable credits and surviving owners at one instant.
+/// Foreign/active owners and query-owned ephemeral artifacts stay in the base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecutionBudgetQuote {
+    pub cluster_live_bytes: u64,
+    pub reclaimable_raw_bytes: u64,
+    pub reclaimable_derived_bytes: u64,
+    pub reclaimable_idle_bytes: u64,
+    pub surviving_bytes: u64,
+    pub headroom_bytes: u64,
+}
+
+fn protected_execution_quote(
+    store: &RelationStore,
+    protection: &ExecutionMemoryProtection,
+    budget: u64,
+    cluster_live: u64,
+    local_live: u64,
+    execution_live: u64,
+    idle: u64,
+) -> Result<ExecutionBudgetQuote, ResidentLoadError> {
+    protection.validate(store)?;
+    let mut raw = 0_u64;
+    let mut derived = 0_u64;
+    for relation in &store.entries {
+        if !relation.pinned && !protection.protects_raw(relation.relid) {
+            raw = raw
+                .checked_add(relation.raw_bytes())
+                .ok_or(ResidentLoadError::ArtifactAccountingOverflow)?;
+        }
+        for artifact in &relation.derived {
+            if !protection.protects_derived(relation.relid, artifact) {
+                derived = derived
+                    .checked_add(artifact.bytes())
+                    .ok_or(ResidentLoadError::ArtifactAccountingOverflow)?;
+            }
+        }
+    }
+    let reclaimable = raw
+        .checked_add(derived)
+        .and_then(|bytes| bytes.checked_add(idle))
+        .ok_or(ResidentLoadError::ArtifactAccountingOverflow)?;
+    if idle > execution_live
+        || execution_live > local_live
+        || reclaimable > local_live
+        || local_live > cluster_live
+    {
+        return Err(ResidentLoadError::ArtifactAccountingOverflow);
+    }
+    let surviving = cluster_live
+        .checked_sub(reclaimable)
+        .ok_or(ResidentLoadError::ArtifactAccountingOverflow)?;
+    let headroom = budget
+        .checked_sub(surviving)
+        .ok_or(ResidentLoadError::BudgetExceeded {
+            requested: 0,
+            live: surviving,
+            budget,
+        })?;
+    Ok(ExecutionBudgetQuote {
+        cluster_live_bytes: cluster_live,
+        reclaimable_raw_bytes: raw,
+        reclaimable_derived_bytes: derived,
+        reclaimable_idle_bytes: idle,
+        surviving_bytes: surviving,
+        headroom_bytes: headroom,
+    })
+}
+
+pub fn quote_execution_memory(
+    protection: &ExecutionMemoryProtection,
+) -> Result<ExecutionBudgetQuote, ResidentLoadError> {
+    quote_execution_memory_with_budget(protection, gucs::resident_memory_budget_bytes())
+}
+
+fn quote_execution_memory_with_budget(
+    protection: &ExecutionMemoryProtection,
+    budget: u64,
+) -> Result<ExecutionBudgetQuote, ResidentLoadError> {
+    STORE.with(|store| {
+        // Exclusive access proves that no raw/native pointers are leased. This
+        // operation does not touch LRU state, invalidations, pools or charges.
+        let store = store
+            .try_borrow_mut()
+            .map_err(|_| execution_borrow_error())?;
+        let (cluster, local) = ledger::byte_snapshot();
+        let idle = crate::gpu::grouped_agg::idle_grouped_execution_bytes()
+            .map_err(ResidentLoadError::Gpu)?;
+        protected_execution_quote(
+            &store,
+            protection,
+            budget,
+            cluster,
+            local,
+            ledger::execution_memory_bytes(),
+            idle,
+        )
+    })
+}
+
+pub fn reclaim_protected_execution_memory(
+    protection: &ExecutionMemoryProtection,
+    required_bytes: u64,
+) -> Result<(), ResidentLoadError> {
+    reclaim_protected_execution_memory_with_budget(
+        protection,
+        required_bytes,
+        gucs::resident_memory_budget_bytes(),
+    )
+}
+
+fn reclaim_protected_execution_memory_with_budget(
+    protection: &ExecutionMemoryProtection,
+    required_bytes: u64,
+    budget: u64,
+) -> Result<(), ResidentLoadError> {
+    STORE.with(|store| {
+        let mut store = store
+            .try_borrow_mut()
+            .map_err(|_| execution_borrow_error())?;
+        protection.validate(&store)?;
+        let protected = store
+            .entries
+            .iter()
+            .filter(|entry| protection.protects_raw(entry.relid))
+            .map(|entry| u32::from(entry.relid))
+            .collect::<BTreeSet<_>>();
+        let idle = crate::gpu::grouped_agg::idle_grouped_execution_bytes()
+            .map_err(ResidentLoadError::Gpu)?;
+        let minimum = resident_live_bytes()
+            .checked_sub(idle)
+            .and_then(|bytes| bytes.checked_add(required_bytes))
+            .ok_or(ResidentLoadError::ArtifactAccountingOverflow)?;
+        if minimum <= budget {
+            // The allocator itself can release exactly these idle pools.
+            return Ok(());
+        }
+        crate::gpu::cleanup_grouped_allocation_pools();
+        loop {
+            let live = resident_live_bytes();
+            if live
+                .checked_add(required_bytes)
+                .ok_or(ResidentLoadError::ArtifactAccountingOverflow)?
+                <= budget
+            {
+                return Ok(());
+            }
+            if !store.evict_lru_derived_except(
+                protection
+                    .identity
+                    .as_ref()
+                    .map(|identity| (protection.owner, identity)),
+            ) && !store.evict_lru_unpinned(&protected)
+            {
+                return Err(ResidentLoadError::BudgetExceeded {
+                    requested: required_bytes,
+                    live,
+                    budget,
+                });
+            }
+        }
+    })
+}
+
 /// Exact evidence returned with a newly built, query-owned artifact.
 pub struct EphemeralArtifactBuildReport<T> {
     pub artifact: EphemeralDerivedArtifact<T>,
@@ -2207,6 +2510,49 @@ fn reserve_with_local_eviction_excluding(
     })
 }
 
+// Artifact construction precedes execution preflight. Preserve the existing
+// STORE eviction order, but let an exhausted construction reservation recover
+// backend-local idle execution owners before its final authoritative retry.
+// Raw loading and transforms intentionally retain their existing policy.
+fn reserve_artifact_with_local_eviction_excluding(
+    protected: &BTreeSet<u32>,
+    bytes: u64,
+) -> Result<LedgerCharge, ResidentLoadError> {
+    reserve_artifact_with_idle_recovery(
+        || reserve_with_local_eviction_excluding(protected, bytes),
+        || crate::gpu::grouped_agg::idle_grouped_execution_bytes().map_err(ResidentLoadError::Gpu),
+        crate::gpu::cleanup_grouped_allocation_pools,
+    )
+}
+
+fn reserve_artifact_with_idle_recovery<T>(
+    mut reserve: impl FnMut() -> Result<T, ResidentLoadError>,
+    idle_bytes: impl FnOnce() -> Result<u64, ResidentLoadError>,
+    cleanup_idle: impl FnOnce(),
+) -> Result<T, ResidentLoadError> {
+    // Check before even the first reservation: its existing eviction path
+    // takes borrow_mut, so discovering a busy resolver afterward is too late.
+    STORE.with(|store| {
+        let exclusive = store
+            .try_borrow_mut()
+            .map_err(|_| execution_borrow_error())?;
+        drop(exclusive);
+        Ok::<_, ResidentLoadError>(())
+    })?;
+    match reserve() {
+        Err(error @ ResidentLoadError::BudgetExceeded { .. }) => {
+            if idle_bytes()? == 0 {
+                return Err(error);
+            }
+            cleanup_idle();
+            // Active/foreign owners remain charged. This is one pre-build
+            // reservation retry, never a post-dispatch fallback or retry loop.
+            reserve()
+        }
+        result => result,
+    }
+}
+
 fn reserve_transform_charges_excluding(
     protected: &BTreeSet<u32>,
     persistent_bytes: u64,
@@ -3452,7 +3798,8 @@ pub fn ensure_host_device_derived_artifact_with_report<T: DerivedArtifact, P>(
     for raw_relid in &protected {
         STORE.with(|store| store.borrow_mut().touch(pg_sys::Oid::from(*raw_relid)));
     }
-    let host_charge = reserve_with_local_eviction_excluding(&protected, retained_host_exact_bytes)?;
+    let host_charge =
+        reserve_artifact_with_local_eviction_excluding(&protected, retained_host_exact_bytes)?;
     let (prepared, captured_dependencies) = STORE.with(|store| {
         let store = store.borrow();
         let captured_dependencies = dependency_stamps(&store, &protected)?;
@@ -3471,7 +3818,7 @@ pub fn ensure_host_device_derived_artifact_with_report<T: DerivedArtifact, P>(
         .checked_total()
         .map_err(|_| ResidentLoadError::ArtifactAccountingOverflow)?;
     let charge = host_charge
-        .merge(reserve_with_local_eviction_excluding(
+        .merge(reserve_artifact_with_local_eviction_excluding(
             &protected,
             prepared.device_bytes,
         )?)
@@ -3547,7 +3894,8 @@ pub fn build_ephemeral_host_device_derived_artifact_with_report<T: DerivedArtifa
     for raw_relid in &protected {
         STORE.with(|store| store.borrow_mut().touch(pg_sys::Oid::from(*raw_relid)));
     }
-    let host_charge = reserve_with_local_eviction_excluding(&protected, retained_host_exact_bytes)?;
+    let host_charge =
+        reserve_artifact_with_local_eviction_excluding(&protected, retained_host_exact_bytes)?;
     let (prepared, captured_dependencies) = STORE.with(|store| {
         let store = store.borrow();
         let captured_dependencies = dependency_stamps(&store, &protected)?;
@@ -3565,7 +3913,7 @@ pub fn build_ephemeral_host_device_derived_artifact_with_report<T: DerivedArtifa
         .checked_total()
         .map_err(|_| ResidentLoadError::ArtifactAccountingOverflow)?;
     let charge = host_charge
-        .merge(reserve_with_local_eviction_excluding(
+        .merge(reserve_artifact_with_local_eviction_excluding(
             &protected,
             prepared.device_bytes,
         )?)
@@ -6399,6 +6747,152 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn protected_execution_quote_matches_reclamation_without_double_credit() {
+        STORE.with(|store| store.borrow_mut().entries.clear());
+        crate::gpu::cleanup_grouped_allocation_pools();
+        let baseline = resident_live_bytes();
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![10]);
+        let mut owner = empty_relation(100, true, 1);
+        owner.raw_charge = LedgerCharge::reserve(40, u64::MAX).expect("raw owner");
+        let stamp = ResidentDependencyStamp::from_relation(&owner);
+        for (words, bytes) in [(vec![10], 64), (vec![20], 128)] {
+            owner.derived.push(DerivedEntry {
+                // A digest collision must not protect the unrelated owner.
+                digest: identity.digest,
+                canonical_words: words.into_boxed_slice(),
+                dependencies: vec![stamp].into_boxed_slice(),
+                artifact: Box::new(EmptyArtifact),
+                charge: LedgerCharge::reserve(bytes, u64::MAX).expect("derived owner"),
+            });
+        }
+        let mut unpinned = empty_relation(200, false, 0);
+        unpinned.raw_charge = LedgerCharge::reserve(32, u64::MAX).expect("evictable raw");
+        let mut pinned = empty_relation(300, true, 0);
+        pinned.raw_charge = LedgerCharge::reserve(256, u64::MAX).expect("pinned raw");
+        for (relation, bytes) in [(&mut unpinned, 16), (&mut pinned, 8)] {
+            relation.derived.push(DerivedEntry {
+                digest: 99,
+                canonical_words: Box::default(),
+                dependencies: Box::default(),
+                artifact: Box::new(EmptyArtifact),
+                charge: LedgerCharge::reserve(bytes, u64::MAX).expect("other derived"),
+            });
+        }
+        STORE.with(|store| store.borrow_mut().entries = vec![owner, unpinned, pinned]);
+        // Ordinary query-owned charge is deliberately not classified by STORE
+        // or execution pools. It must remain in the surviving base.
+        let ephemeral = LedgerCharge::reserve(55, u64::MAX).expect("query-owned artifact");
+        let active = LedgerCharge::reserve(64, u64::MAX).expect("active charge");
+        let protection = ExecutionMemoryProtection::cached(pg_sys::Oid::from(100), &identity, &[])
+            .expect("complete protection");
+        let live = resident_live_bytes();
+        assert_eq!(live, baseline + 663);
+        let quote = quote_execution_memory_with_budget(&protection, live).expect("quote");
+        assert_eq!(quote.reclaimable_raw_bytes, 32);
+        assert_eq!(quote.reclaimable_derived_bytes, 152);
+        assert_eq!(quote.reclaimable_idle_bytes, 0);
+        assert_eq!(quote.surviving_bytes, baseline + 479);
+        assert_eq!(quote.headroom_bytes, 184);
+        assert_eq!(resident_live_bytes(), live, "quote cannot release owners");
+        STORE.with(|store| {
+            let lease = store.borrow();
+            assert!(quote_execution_memory_with_budget(&protection, live).is_err());
+            assert!(
+                reclaim_protected_execution_memory_with_budget(&protection, 1, u64::MAX).is_err()
+            );
+            assert_eq!(lease.entries.len(), 3);
+            // Synthetic foreign, active and idle ledgers exercise the exact
+            // subtraction independently of physical test pool availability.
+            let quote = protected_execution_quote(&lease, &protection, 2000, 1675, 675, 76, 12)
+                .expect("disjoint synthetic ledger");
+            assert_eq!(quote.surviving_bytes, 1479);
+            assert_eq!(quote.headroom_bytes, 521);
+            assert!(
+                protected_execution_quote(&lease, &protection, u64::MAX, 1675, 675, 11, 12)
+                    .is_err()
+            );
+            assert!(
+                protected_execution_quote(
+                    &lease,
+                    &protection,
+                    u64::MAX,
+                    1675,
+                    675,
+                    u64::MAX,
+                    u64::MAX
+                )
+                .is_err()
+            );
+        });
+        let requested = 20;
+        let exact_budget = quote.surviving_bytes + requested;
+        reclaim_protected_execution_memory_with_budget(&protection, requested, exact_budget)
+            .expect("exact quoted fit");
+        assert_eq!(resident_live_bytes(), quote.surviving_bytes);
+        assert!(matches!(
+            reclaim_protected_execution_memory_with_budget(
+                &protection,
+                requested,
+                exact_budget - 1
+            ),
+            Err(ResidentLoadError::BudgetExceeded { .. })
+        ));
+        let mut missing = protection;
+        missing.identity = Some(DerivedArtifactIdentity::from_canonical_words(vec![999]));
+        assert!(quote_execution_memory_with_budget(&missing, u64::MAX).is_err());
+        STORE.with(|store| {
+            let store = store.borrow();
+            assert_eq!(store.entries.len(), 2);
+            assert_eq!(store.entries[0].derived.len(), 1);
+            assert!(store.entries[0].derived[0].has_identity(&identity));
+            assert_eq!(store.entries[1].raw_bytes(), 256);
+        });
+        drop(active);
+        drop(ephemeral);
+        STORE.with(|store| store.borrow_mut().entries.clear());
+        assert_eq!(resident_live_bytes(), baseline);
+    }
+
+    #[test]
+    fn protected_execution_quote_preserves_ephemeral_full_dependencies_and_currentness() {
+        STORE.with(|store| store.borrow_mut().entries.clear());
+        crate::gpu::cleanup_grouped_allocation_pools();
+        let baseline = resident_live_bytes();
+        let mut owner = empty_relation(100, false, 1);
+        let mut dependency = empty_relation(200, false, 1);
+        owner.raw_charge = LedgerCharge::reserve(40, u64::MAX).expect("owner");
+        dependency.raw_charge = LedgerCharge::reserve(80, u64::MAX).expect("dependency");
+        let dependencies = vec![
+            ResidentDependencyStamp::from_relation(&owner),
+            ResidentDependencyStamp::from_relation(&dependency),
+        ]
+        .into_boxed_slice();
+        STORE.with(|store| store.borrow_mut().entries = vec![owner, dependency]);
+        let ephemeral = EphemeralDerivedArtifact {
+            artifact: EmptyArtifact,
+            _charge: LedgerCharge::reserve(16, u64::MAX).expect("ephemeral owner"),
+            dependencies,
+            accounting: ResidentByteAccounting::default(),
+        };
+        let protection =
+            ExecutionMemoryProtection::ephemeral(pg_sys::Oid::from(100), &ephemeral, &[])
+                .expect("full dependencies, no requested raw columns");
+        let live = resident_live_bytes();
+        let quote = quote_execution_memory_with_budget(&protection, live + 1).expect("exact quote");
+        assert_eq!(quote.reclaimable_raw_bytes, 0);
+        assert_eq!(quote.surviving_bytes, live);
+        assert_eq!(quote.headroom_bytes, 1);
+        assert!(reclaim_protected_execution_memory_with_budget(&protection, 2, live + 1).is_err());
+        assert_eq!(resident_live_bytes(), live);
+        STORE.with(|store| store.borrow_mut().entries[1].generation.relation += 1);
+        assert!(quote_execution_memory_with_budget(&protection, u64::MAX).is_err());
+        assert!(reclaim_protected_execution_memory_with_budget(&protection, 0, u64::MAX).is_err());
+        drop(ephemeral);
+        STORE.with(|store| store.borrow_mut().entries.clear());
+        assert_eq!(resident_live_bytes(), baseline);
+    }
+
+    #[test]
     fn execution_idle_credit_preserves_active_foreign_and_pinned_owners() {
         let snapshot = ResidentBudgetSnapshot {
             cluster_live_bytes: 1000,
@@ -6730,6 +7224,157 @@ pub(super) mod tests {
         assert!(store.entries[0].derived.is_empty());
         assert_eq!(store.entries[1].derived.len(), 1);
         assert_eq!(store.entries[0].relid, pg_sys::Oid::from(900_u32));
+    }
+
+    #[test]
+    fn artifact_idle_recovery_is_pressure_only_and_refuses_active_leases() {
+        let budget_error = ResidentLoadError::BudgetExceeded {
+            requested: 2,
+            live: 9,
+            budget: 10,
+        };
+        for outcome in [
+            Ok(()),
+            Err(ResidentLoadError::Loader("original".into())),
+            Err(ResidentLoadError::ArtifactAccountingOverflow),
+            Err(ResidentLoadError::Gpu(GpuError::new(
+                crate::gpu::GpuErrorDomain::GroupedAgg,
+                crate::gpu::GpuOperation::Kernel("artifact reservation test"),
+                crate::gpu::GpuStatusDetail::ExecutionFailed,
+            ))),
+        ] {
+            let expected = outcome.clone();
+            let attempts = Cell::new(0);
+            let actual = reserve_artifact_with_idle_recovery(
+                || {
+                    attempts.set(attempts.get() + 1);
+                    outcome.clone()
+                },
+                || panic!("no idle inspection without a budget failure"),
+                || panic!("no cleanup without a budget failure"),
+            );
+            assert_eq!(actual, expected);
+            assert_eq!(attempts.get(), 1);
+        }
+        let attempts = Cell::new(0);
+        let actual = reserve_artifact_with_idle_recovery(
+            || {
+                attempts.set(attempts.get() + 1);
+                Err::<(), _>(budget_error.clone())
+            },
+            || Ok(0),
+            || panic!("zero idle bytes must not flush or retry"),
+        );
+        assert_eq!(actual, Err(budget_error.clone()));
+        assert_eq!(attempts.get(), 1);
+        let actual = reserve_artifact_with_idle_recovery(
+            || Err::<(), _>(budget_error.clone()),
+            || Err(ResidentLoadError::ArtifactAccountingOverflow),
+            || panic!("a failed exact quote must not flush"),
+        );
+        assert_eq!(actual, Err(ResidentLoadError::ArtifactAccountingOverflow));
+        STORE.with(|store| {
+            let lease = store.borrow();
+            let actual = reserve_artifact_with_idle_recovery(
+                || panic!("busy STORE must reject before the reservation"),
+                || panic!("busy STORE must not inspect pools"),
+                || panic!("busy STORE must not mutate pools"),
+            );
+            assert_eq!(actual, Err::<(), _>(execution_borrow_error()));
+            drop(lease);
+        });
+    }
+
+    #[test]
+    fn artifact_idle_recovery_keeps_active_owners_and_retries_exactly_once() {
+        use super::super::ledger::ExecutionMemoryCharge;
+
+        let _guard = reserved_lifecycle_test_guard();
+        cleanup_backend();
+        let baseline = resident_live_bytes();
+        let raw = LedgerCharge::reserve(32, u64::MAX).expect("raw owner");
+        let active = ExecutionMemoryCharge::reserve(16, u64::MAX).expect("active execution");
+        // An ordinary owner outside STORE must not be mistaken for idle credit.
+        let external = LedgerCharge::reserve(24, u64::MAX).expect("external owner");
+        let host = LedgerCharge::reserve(8, u64::MAX).expect("prepared retained host");
+        let idle = RefCell::new(Some(
+            ExecutionMemoryCharge::reserve(40, u64::MAX).expect("idle execution fixture"),
+        ));
+        let attempts = Cell::new(0);
+        let cleanups = Cell::new(0);
+        let budget = baseline + 100;
+        let device = reserve_artifact_with_idle_recovery(
+            || {
+                attempts.set(attempts.get() + 1);
+                LedgerCharge::reserve(20, budget).map_err(|live| {
+                    ResidentLoadError::BudgetExceeded {
+                        requested: 20,
+                        live,
+                        budget,
+                    }
+                })
+            },
+            || Ok(idle.borrow().as_ref().expect("idle owner").bytes()),
+            || {
+                cleanups.set(cleanups.get() + 1);
+                idle.borrow_mut().take();
+            },
+        )
+        .expect("exact local idle release makes construction fit");
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(cleanups.get(), 1);
+        assert_eq!(resident_live_bytes(), budget);
+        assert_eq!(active.bytes(), 16);
+        assert_eq!(host.bytes(), 8);
+        assert_eq!(raw.bytes(), 32);
+        assert_eq!(external.bytes(), 24);
+        drop(device);
+        drop(host);
+
+        // Even after idle release, active and external owners can make the
+        // device stage genuinely impossible. Its host charge must unwind.
+        let idle = RefCell::new(Some(
+            ExecutionMemoryCharge::reserve(1, u64::MAX).expect("second idle fixture"),
+        ));
+        attempts.set(0);
+        cleanups.set(0);
+        let result = (|| -> Result<LedgerCharge, ResidentLoadError> {
+            let host = LedgerCharge::reserve(8, u64::MAX).expect("second host owner");
+            let device = reserve_artifact_with_idle_recovery(
+                || {
+                    attempts.set(attempts.get() + 1);
+                    LedgerCharge::reserve(21, budget).map_err(|live| {
+                        ResidentLoadError::BudgetExceeded {
+                            requested: 21,
+                            live,
+                            budget,
+                        }
+                    })
+                },
+                || Ok(idle.borrow().as_ref().expect("second idle owner").bytes()),
+                || {
+                    cleanups.set(cleanups.get() + 1);
+                    idle.borrow_mut().take();
+                },
+            )?;
+            host.merge(device)
+                .map_err(|()| ResidentLoadError::ArtifactAccountingOverflow)
+        })();
+        assert_eq!(
+            result.expect_err("active owners leave one byte too little"),
+            ResidentLoadError::BudgetExceeded {
+                requested: 21,
+                live: baseline + 80,
+                budget,
+            }
+        );
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(cleanups.get(), 1);
+        assert_eq!(resident_live_bytes(), baseline + 72, "host charge unwinds");
+        drop(raw);
+        drop(active);
+        drop(external);
+        assert_eq!(resident_live_bytes(), baseline);
     }
 
     #[test]

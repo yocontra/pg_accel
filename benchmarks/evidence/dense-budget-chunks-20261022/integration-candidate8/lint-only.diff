@@ -1,0 +1,47 @@
+diff -ru .codex/scratch/dense-budget-chunks-20261022/integration-candidate7/pg_accel/src/engine/executor/agg/descriptor.rs .codex/scratch/dense-budget-chunks-20261022/integration-candidate8/pg_accel/src/engine/executor/agg/descriptor.rs
+--- .codex/scratch/dense-budget-chunks-20261022/integration-candidate7/pg_accel/src/engine/executor/agg/descriptor.rs	2026-10-22 22:01:05
++++ .codex/scratch/dense-budget-chunks-20261022/integration-candidate8/pg_accel/src/engine/executor/agg/descriptor.rs	2026-10-22 22:09:07
+@@ -6659,6 +6659,9 @@
+     }
+ }
+ 
++// Keep this thin ownership adapter parallel to the ephemeral adapter and the
++// shared executor contract; no execution parameter is interpreted here.
++#[allow(clippy::too_many_arguments)]
+ fn execute_bounded_dense_artifact(
+     owner_relid: pg_sys::Oid,
+     identity: &DerivedArtifactIdentity,
+@@ -6685,6 +6688,9 @@
+     )
+ }
+ 
++// The additional artifact-owner argument only constructs the matching resolver;
++// all execution parameters pass unchanged to the shared executor.
++#[allow(clippy::too_many_arguments)]
+ fn execute_bounded_dense_ephemeral(
+     owner_relid: pg_sys::Oid,
+     artifact: &EphemeralDerivedArtifact<DescriptorAggArtifact>,
+diff -ru .codex/scratch/dense-budget-chunks-20261022/integration-candidate7/pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs .codex/scratch/dense-budget-chunks-20261022/integration-candidate8/pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs
+--- .codex/scratch/dense-budget-chunks-20261022/integration-candidate7/pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs	2026-10-22 22:01:05
++++ .codex/scratch/dense-budget-chunks-20261022/integration-candidate8/pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs	2026-10-22 22:09:07
+@@ -426,7 +426,7 @@
+         .ok_or(AdmissionDecline::ResidencyBytesOverflow)?;
+     // An already impossible fixed base still follows the exact decline path
+     // below. It does not receive fake headroom through unsigned underflow.
+-    let headroom = policy.budget_bytes.checked_sub(owner_bytes).unwrap_or(0);
++    let headroom = policy.budget_bytes.saturating_sub(owner_bytes);
+     let (scalar_execution_bytes, dense_decision) =
+         scalar_memory(shape, estimates, model, headroom)?;
+     let prospective_execution_bytes = numeric_resources
+diff -ru .codex/scratch/dense-budget-chunks-20261022/integration-candidate7/pg_accel/src/tests/phase2_cache.rs .codex/scratch/dense-budget-chunks-20261022/integration-candidate8/pg_accel/src/tests/phase2_cache.rs
+--- .codex/scratch/dense-budget-chunks-20261022/integration-candidate7/pg_accel/src/tests/phase2_cache.rs	2026-10-22 22:01:05
++++ .codex/scratch/dense-budget-chunks-20261022/integration-candidate8/pg_accel/src/tests/phase2_cache.rs	2026-10-22 22:09:07
+@@ -672,7 +672,7 @@
+         let before = kernel_executions();
+         assert!(!explain_text(query).contains("custom scan (gpuaccelagg)"));
+         assert_eq!(
+-            crate::engine::stats::read_last_planner_rejection_reason().as_deref(),
++            crate::engine::stats::read_last_planner_rejection_reason(),
+             Some("generic_residency_budget_exceeded")
+         );
+         assert_eq!(result_rows(query), native);

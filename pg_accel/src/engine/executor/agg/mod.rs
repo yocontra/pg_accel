@@ -20,6 +20,10 @@ mod spatial;
 #[cfg(feature = "pg_test")]
 pub(crate) use descriptor::scalar_measure_column;
 #[cfg(feature = "pg_test")]
+pub(crate) use descriptor::test_last_dense_execution_decision;
+#[cfg(feature = "pg_test")]
+pub(crate) use descriptor::test_last_dense_unconstrained_decision;
+#[cfg(feature = "pg_test")]
 pub(crate) use descriptor::test_scalar_resident_aggregate;
 
 #[cfg(any(test, feature = "pg_test"))]
@@ -144,6 +148,7 @@ fn test_execute_descriptor(
 pub(crate) use artifact::descriptor_program_clone_bytes;
 pub(crate) use artifact::estimate_descriptor_artifact_bytes_upper_bound;
 pub(crate) use descriptor::dense_descriptor_memory_requirements;
+pub(crate) use descriptor::{DenseExecutionDecision, select_dense_execution};
 // Keep the existing pg_test scalar-layout probes on the shared native quote.
 #[cfg(feature = "pg_test")]
 pub(crate) use descriptor::dense_descriptor_memory_requirements as scalar_descriptor_memory_requirements;

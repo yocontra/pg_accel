@@ -564,6 +564,29 @@ impl std::fmt::Display for ShapeDecline {
 impl std::error::Error for ShapeDecline {}
 
 impl ShapePlan {
+    /// Budget chunk selection changes only ordinary, dimension-free dense
+    /// integer/COUNT execution. Resolve grouping policy, not placeholder key
+    /// encodings, and leave spatial producers and every other family alone.
+    pub(crate) fn supports_budget_selected_dense(&self) -> bool {
+        let hash = match &self.descriptor_resolution {
+            DescriptorResolution::BeginTimeArtifacts { grouping_mode, .. } => {
+                *grouping_mode == DescriptorGroupingMode::Hash
+            }
+            DescriptorResolution::Ready => self
+                .spec
+                .group_keys
+                .iter()
+                .any(|key| key.encoding == GroupKeyEncoding::Hash),
+        };
+        self.spec.star_dims.is_empty()
+            && self.spec.fact_filter.spatial().is_none()
+            && matches!(
+                crate::engine::executor::agg::planned_descriptor_kernel_mode(&self.spec, hash),
+                crate::gpu::GroupedAggKernelMode::ParallelDenseInteger
+                    | crate::gpu::GroupedAggKernelMode::ParallelDenseCount
+            )
+    }
+
     /// Borrow a spec only when no Begin-time artifact is needed.
     pub fn descriptor_spec(&self) -> Result<&AggQuerySpec, ShapeDecline> {
         if self.descriptor_resolution != DescriptorResolution::Ready

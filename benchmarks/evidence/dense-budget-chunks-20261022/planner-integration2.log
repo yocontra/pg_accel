@@ -1,0 +1,70 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.14s
+     Running unittests src/lib.rs (target/debug/deps/pg_accel-4b4c215d478719d0)
+
+running 62 tests
+test engine::ffi::planner_hooks::generic_groupagg::tests::admission_decline_codes_cover_every_local_reason ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::aggregate_group_estimate_rounds_up_and_rejects_invalid_values ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::auto_load_state_and_cost_use_exact_estimate ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::budget_selected_dense_calls_replace_old_one_shot_cost_without_double_charging_owners ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::cheap_exact_rows_decline_below_floor_dense_and_star_before_full_estimation ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::cheap_exact_rows_fall_through_when_missing_or_at_floor ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::childless_path_rows_follow_the_shape_group_estimate ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::cost_gate_requires_device_eligibility_and_native_margin ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::dense_atomic_cost_matches_exact_sum_count_operation_count ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::dense_atomic_cost_requires_runtime_proof_boundaries ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::dense_atomic_exact_rows_must_clear_the_applicable_shape_floor ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::dense_atomic_measure_filter_costs_two_comparisons_and_independent_sum_state ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::dense_count_forecast_covers_loaded_and_conservative_cold_inputs ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::dense_forecast_admission_exact_fit_and_one_byte_under ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::dense_sum_count_caps_admission_but_costs_bounded_calls_above_one_shot ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::derived_artifact_upper_bound_participates_in_tight_budget_gate ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::exact_residency_estimate_batch_suspends_planner_hooks ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::exact_residency_marks_hits_resident_without_load_cost ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::exact_residency_never_uses_an_optimistic_row_estimate_for_atomic_cost ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::exact_residency_preserves_spatial_cost_components ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::exact_resident_rows_replace_only_the_generic_dense_row_gate ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::global_cost_multiplier_controls_gate_and_scales_auto_load ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::h3_capacity_uses_exact_resident_rows_before_selecting_a_path ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::h3_device_floor_has_a_stable_admission_decline_code ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::h3_parent_shape_proof_includes_the_h3_resident_stage ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::live_agg_fallback_accepts_parallel_finalize_cost ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::live_agg_fallback_rejects_nonaggregate_foreign_and_invalid_paths ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::missing_pinned_residency_reloads_with_auto_load_disabled ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::missing_residency_requires_auto_load_before_begin ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::mixed_fixed_and_variable_loads_sum_per_relation_before_amortization ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::native_baseline_uses_cheapest_valid_serial_cost ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::normal_spatial_row_envelope_requires_exact_loaded_evidence_not_a_fixture_size ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::null_path_guards_and_filter_stages_need_no_postgres_backend ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::numeric_planning_charges_exact_digits_memory_and_rejects_missing_evidence ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::numeric_work_accounts_for_digits_chunk_tails_and_limits ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::only_dense_below_floor_gate_waits_for_resident_row_refinement ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::partial_raw_snapshot_is_replaced_by_full_selected_estimate ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::planner_rejects_serial_generic_while_retaining_executor_validation ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::projected_cluster_budget_is_checked_before_begin ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::proof_accounts_for_device_output_without_input_lanes ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::pure_residency_error_guards_preserve_decline_identity ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::reconstructed_baseline_requires_consistent_live_group_estimate ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::reconstructed_baseline_selects_cheapest_proved_serial_input ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::retained_execution_memory_participates_in_planner_budget_gate ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::scalar_execution_and_metadata_peak_participate_in_planner_budget_before_costing ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::scalar_layout_planning_requires_exact_rows_nulls_and_dense_slots ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::selected_relation_preserves_exact_attribute_order ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::serial_agg_baseline_fails_closed_without_proved_serial_agg ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::serial_agg_baseline_ignores_cheaper_parallel_finalize_agg ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::serial_agg_baseline_ignores_invalid_costs ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::serial_agg_baseline_rejects_gather_nested_in_join_branch ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::serial_agg_baseline_rejects_nested_sort_over_gather ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::serial_agg_baseline_rejects_opaque_custom_and_foreign_inputs ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::serial_agg_baseline_selects_cheapest_ordinary_serial_agg ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::shape_path_contains_only_strict_contracts ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::sorted_lower_bound_requires_sort_grouping_capability ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::spilling_hash_reconstruction_cannot_inflate_serial_baseline ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::star_shapes_use_preagg_cost_ratio ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::test_force_only_bypasses_spatial_minimum_work_gates ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::unrelated_unpinned_local_bytes_are_reclaimable_for_admission ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::warm_descriptor_artifact_is_charged_once_in_final_footprint ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::zero_column_load_still_charges_full_relation_scan_rows ... ok
+
+test result: ok. 62 passed; 0 failed; 0 ignored; 0 measured; 1267 filtered out; finished in 0.02s
+

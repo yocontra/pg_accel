@@ -1,0 +1,70 @@
+    Checking pgrx-tests v0.19.1
+    Checking pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error: this function has too many arguments (8/7)
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:6662:1
+     |
+6662 | / fn execute_bounded_dense_artifact(
+6663 | |     owner_relid: pg_sys::Oid,
+6664 | |     identity: &DerivedArtifactIdentity,
+6665 | |     requests: &[ResidentColumnRef],
+...    |
+6670 | |     policy_evidence: Option<&Cell<Option<ArtifactPolicyEvidence>>>,
+6671 | | ) -> Result<DescriptorAggDispatch, DescriptorDispatchFailure> {
+     | |_____________________________________________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#too_many_arguments
+     = note: `-D clippy::too-many-arguments` implied by `-D clippy::all`
+     = help: to override `-D clippy::all` add `#[allow(clippy::too_many_arguments)]`
+
+error: this function has too many arguments (8/7)
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:6688:1
+     |
+6688 | / fn execute_bounded_dense_ephemeral(
+6689 | |     owner_relid: pg_sys::Oid,
+6690 | |     artifact: &EphemeralDerivedArtifact<DescriptorAggArtifact>,
+6691 | |     requests: &[ResidentColumnRef],
+...    |
+6696 | |     policy_evidence: Option<&Cell<Option<ArtifactPolicyEvidence>>>,
+6697 | | ) -> Result<DescriptorAggDispatch, DescriptorDispatchFailure> {
+     | |_____________________________________________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#too_many_arguments
+
+error: manual saturating arithmetic
+   --> pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs:429:20
+    |
+429 |     let headroom = policy.budget_bytes.checked_sub(owner_bytes).unwrap_or(0);
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider using `saturating_sub`: `policy.budget_bytes.saturating_sub(owner_bytes)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#manual_saturating_arithmetic
+    = note: `-D clippy::manual-saturating-arithmetic` implied by `-D clippy::all`
+    = help: to override `-D clippy::all` add `#[allow(clippy::manual_saturating_arithmetic)]`
+
+error: derefed type is same as origin
+   --> pg_accel/src/tests/phase2_cache.rs:675:13
+    |
+675 |             crate::engine::stats::read_last_planner_rejection_reason().as_deref(),
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `crate::engine::stats::read_last_planner_rejection_reason()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#needless_option_as_deref
+    = note: `-D clippy::needless-option-as-deref` implied by `-D clippy::all`
+    = help: to override `-D clippy::all` add `#[allow(clippy::needless_option_as_deref)]`
+
+error: could not compile `pg_accel` (lib) due to 4 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: redundant clone
+    --> pg_accel/src/engine/residency/store.rs:6840:37
+     |
+6840 |         let mut missing = protection.clone();
+     |                                     ^^^^^^^^ help: remove this
+     |
+note: this value is dropped without further use
+    --> pg_accel/src/engine/residency/store.rs:6840:27
+     |
+6840 |         let mut missing = protection.clone();
+     |                           ^^^^^^^^^^
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_clone
+     = note: `-D clippy::redundant-clone` implied by `-D clippy::nursery`
+     = help: to override `-D clippy::nursery` add `#[allow(clippy::redundant_clone)]`
+
+error: could not compile `pg_accel` (lib test) due to 5 previous errors

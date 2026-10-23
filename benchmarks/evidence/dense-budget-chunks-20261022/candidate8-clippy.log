@@ -1,0 +1,17 @@
+    Checking pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error: redundant clone
+    --> pg_accel/src/engine/residency/store.rs:6840:37
+     |
+6840 |         let mut missing = protection.clone();
+     |                                     ^^^^^^^^ help: remove this
+     |
+note: this value is dropped without further use
+    --> pg_accel/src/engine/residency/store.rs:6840:27
+     |
+6840 |         let mut missing = protection.clone();
+     |                           ^^^^^^^^^^
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_clone
+     = note: `-D clippy::redundant-clone` implied by `-D clippy::nursery`
+     = help: to override `-D clippy::nursery` add `#[allow(clippy::redundant_clone)]`
+
+error: could not compile `pg_accel` (lib test) due to 1 previous error

@@ -46,6 +46,16 @@ impl ShapeCost {
         self.recompute_total();
     }
 
+    /// The selector counts the chosen data calls plus FINALIZE (or one
+    /// one-shot/control call). Do not infer this from the old device row cap.
+    pub(crate) fn replace_selected_dense_lifecycle_calls(&mut self, calls: u64) -> Option<()> {
+        let additional = calls.checked_sub(1)?;
+        self.replace_additional_aggregate_launches(PgCost::new(
+            additional as f64 * GPU_LAUNCH_OVERHEAD,
+        ));
+        Some(())
+    }
+
     fn recompute_total(&mut self) {
         self.total = PgCost::new(
             self.fact_scan.get()

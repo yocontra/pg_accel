@@ -1,0 +1,11 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 28.78s
+     Running unittests src/lib.rs (target/debug/deps/pg_accel-4b4c215d478719d0)
+
+running 3 tests
+test engine::executor::agg::descriptor::tests::dense_budget_selector_exhaustive_oracle_crosses_native_partial_steps ... ok
+test engine::executor::agg::descriptor::tests::dense_budget_selector_matches_native_maximal_fit_and_boundaries ... ok
+test engine::executor::agg::descriptor::tests::dense_budget_selector_preserves_one_shot_counterexample_and_partial_mode_cap ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1325 filtered out; finished in 0.05s
+

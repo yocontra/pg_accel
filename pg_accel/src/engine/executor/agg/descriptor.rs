@@ -31,9 +31,9 @@ use crate::engine::ffi::syscache::{PostgisCatalogIdentity, resolve_postgis_catal
 use crate::engine::gucs;
 use crate::engine::residency::{
     ArtifactEnsureOutcome, ArtifactProbeOutcome, DerivedArtifact, DerivedArtifactIdentity,
-    EphemeralDerivedArtifact, PreparedDerived, ResidentByteAccounting, ResidentColumnRef,
-    ResidentColumnView, ResidentLoadError, ResidentRelationEvidence, ResolvedDerivedInputs,
-    SelectedRelation, build_ephemeral_derived_artifact_with_report,
+    EphemeralDerivedArtifact, ExecutionMemoryProtection, PreparedDerived, ResidentByteAccounting,
+    ResidentColumnRef, ResidentColumnView, ResidentLoadError, ResidentRelationEvidence,
+    ResolvedDerivedInputs, SelectedRelation, build_ephemeral_derived_artifact_with_report,
     build_ephemeral_host_device_derived_artifact_with_report,
     build_ephemeral_staged_device_transform_artifact_with_report,
     ensure_device_derived_artifact_with_report, ensure_host_device_derived_artifact_with_report,
@@ -2307,7 +2307,7 @@ struct ArtifactPolicyInput {
     invalidation_risk_ppm: u32,
     cached_build_launches: u64,
     ephemeral_build_launches: u64,
-    consumer_launches: u64,
+    consumer_launches: Option<u64>,
     budget_headroom_bytes: u64,
 }
 
@@ -2336,7 +2336,9 @@ impl ArtifactPolicyEvidence {
             self.input.invalidation_risk_ppm,
             self.input.cached_build_launches,
             self.input.ephemeral_build_launches,
-            self.input.consumer_launches,
+            self.input
+                .consumer_launches
+                .map_or_else(|| "pending".to_owned(), |calls| calls.to_string()),
             self.input.budget_headroom_bytes,
         )
     }
@@ -2379,7 +2381,7 @@ fn choose_artifact_policy(input: ArtifactPolicyInput) -> ArtifactPolicyEvidence 
         .saturating_div(1_000_000)
         .saturating_add(
             reuses
-                .saturating_mul(u128::from(input.consumer_launches))
+                .saturating_mul(u128::from(input.consumer_launches.unwrap_or(0)))
                 .saturating_mul(LAUNCH_US),
         )
         // Retained bytes carry a bounded pressure penalty as headroom shrinks.
@@ -2392,7 +2394,9 @@ fn choose_artifact_policy(input: ArtifactPolicyInput) -> ArtifactPolicyEvidence 
     let ephemeral_cost = reuses.saturating_mul(
         fused_compute
             .saturating_add(u128::from(input.ephemeral_build_launches).saturating_mul(LAUNCH_US))
-            .saturating_add(u128::from(input.consumer_launches).saturating_mul(LAUNCH_US)),
+            .saturating_add(
+                u128::from(input.consumer_launches.unwrap_or(0)).saturating_mul(LAUNCH_US),
+            ),
     );
     ArtifactPolicyEvidence {
         policy: if ephemeral_cost <= cached_cost {
@@ -2416,7 +2420,7 @@ pub(super) fn test_artifact_policy_evidence() -> ArtifactPolicyEvidence {
         invalidation_risk_ppm: 0,
         cached_build_launches: 0,
         ephemeral_build_launches: 0,
-        consumer_launches: 1,
+        consumer_launches: Some(1),
         budget_headroom_bytes: 1_024,
     })
 }
@@ -2564,6 +2568,39 @@ pub(super) struct DescriptorResidencyReport {
     pub(super) artifact_bytes: u64,
     pub(super) raw_load_ms: f64,
     pub(super) preparation_time_us: u64,
+}
+
+fn begin_artifact_consumer_attempt(cell: &Cell<Option<ArtifactPolicyEvidence>>, targeted: bool) {
+    if targeted && let Some(mut evidence) = cell.get() {
+        // A failed repeat must not expose the previous attempt's decision.
+        evidence.input.consumer_launches = None;
+        cell.set(Some(evidence));
+    }
+}
+
+fn validate_and_record_consumer_prediction(
+    cell: Option<&Cell<Option<ArtifactPolicyEvidence>>>,
+    validate: impl FnOnce() -> Result<u64, DescriptorAggExecutionError>,
+) -> Result<(), DescriptorAggExecutionError> {
+    let calls = validate()?;
+    if let Some(cell) = cell
+        && let Some(mut evidence) = cell.get()
+    {
+        evidence.input.consumer_launches = Some(calls);
+        cell.set(Some(evidence));
+    }
+    Ok(())
+}
+
+fn refresh_rebuilt_artifact_policy(
+    residency: &mut Option<DescriptorResidencyReport>,
+    cell: &Cell<Option<ArtifactPolicyEvidence>>,
+) {
+    if let Some(report) = residency
+        && let Some(evidence) = cell.get()
+    {
+        report.artifact_policy = evidence;
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2763,25 +2800,33 @@ fn descriptor_artifact_policy_input(
         }
         DescriptorArtifactKind::Dense | DescriptorArtifactKind::Spatial(_) => construction_bytes,
     };
-    let consumer_launches = match &plan.artifact_kind {
-        DescriptorArtifactKind::Spatial(_)
-            if plan.planned_kernel_mode == GroupedAggKernelMode::ParallelDenseNumeric
-                || canonical_dense_integer_rollup(&plan.spec)
-                || canonical_dense_scalar_programs(&plan.spec) =>
-        {
-            bounded_dispatch_call_count(fact_rows, plan.dispatch_chunk_rows)
-                .and_then(|calls| u64::try_from(calls).ok())
-                .ok_or_else(|| "spatial rollup lifecycle-call estimate overflow".to_owned())?
-        }
-        DescriptorArtifactKind::H3Parent { .. }
-        | DescriptorArtifactKind::RawHash { .. }
-        | DescriptorArtifactKind::Spatial(_) => 1,
-        DescriptorArtifactKind::Dense if fact_rows <= plan.grouped_agg_one_shot_max_rows.get() => 1,
-        DescriptorArtifactKind::Dense => {
-            bounded_dispatch_call_count(fact_rows, plan.dispatch_chunk_rows)
-                .and_then(|calls| u64::try_from(calls).ok())
-                .ok_or_else(|| "dense lifecycle-call estimate overflow".to_owned())?
-        }
+    let consumer_launches = if plan.budget_selected_dense_family() {
+        None
+    } else {
+        Some(match &plan.artifact_kind {
+            DescriptorArtifactKind::Spatial(_)
+                if plan.planned_kernel_mode == GroupedAggKernelMode::ParallelDenseNumeric
+                    || canonical_dense_integer_rollup(&plan.spec)
+                    || canonical_dense_scalar_programs(&plan.spec) =>
+            {
+                bounded_dispatch_call_count(fact_rows, plan.dispatch_chunk_rows)
+                    .and_then(|calls| u64::try_from(calls).ok())
+                    .ok_or_else(|| "spatial rollup lifecycle-call estimate overflow".to_owned())?
+            }
+            DescriptorArtifactKind::H3Parent { .. }
+            | DescriptorArtifactKind::RawHash { .. }
+            | DescriptorArtifactKind::Spatial(_) => 1,
+            DescriptorArtifactKind::Dense
+                if fact_rows <= plan.grouped_agg_one_shot_max_rows.get() =>
+            {
+                1
+            }
+            DescriptorArtifactKind::Dense => {
+                bounded_dispatch_call_count(fact_rows, plan.dispatch_chunk_rows)
+                    .and_then(|calls| u64::try_from(calls).ok())
+                    .ok_or_else(|| "dense lifecycle-call estimate overflow".to_owned())?
+            }
+        })
     };
     // Twelve GB/s is deliberately conservative for a transform that reads and
     // writes fixed-width resident lanes. Spatial exact recheck also receives a
@@ -2938,6 +2983,16 @@ impl DescriptorAggPlan {
 
     pub(super) fn artifact_policy_evidence(&self) -> Option<ArtifactPolicyEvidence> {
         self.artifact_policy_evidence.get()
+    }
+
+    fn budget_selected_dense_family(&self) -> bool {
+        matches!(self.artifact_kind, DescriptorArtifactKind::Dense)
+            && self.spec.star_dims.is_empty()
+            && matches!(
+                self.planned_kernel_mode,
+                GroupedAggKernelMode::ParallelDenseInteger
+                    | GroupedAggKernelMode::ParallelDenseCount
+            )
     }
 
     pub(super) fn ensure_artifact(
@@ -3379,6 +3434,10 @@ impl DescriptorAggPlan {
         &self,
         pending: &mut dyn FnMut() -> bool,
     ) -> Result<Result<DescriptorAggDispatch, DescriptorAggExecutionError>, ResidentLoadError> {
+        begin_artifact_consumer_attempt(
+            &self.artifact_policy_evidence,
+            self.budget_selected_dense_family(),
+        );
         let owner_relid = pg_sys::Oid::from(self.spec.fact_rel);
         let result: Result<DescriptorAggDispatch, DescriptorDispatchFailure> =
             if self.artifact_policy.get() == DescriptorArtifactPolicy::CachedReusable {
@@ -3396,6 +3455,7 @@ impl DescriptorAggPlan {
                         self.dispatch_chunk_rows,
                         self.grouped_agg_one_shot_max_rows.get(),
                         self.planned_kernel_mode,
+                        Some(&self.artifact_policy_evidence),
                     ),
                     DescriptorArtifactKind::H3Parent { cell, .. } => {
                         match with_derived_artifact_inputs::<H3ParentArtifact, _>(
@@ -3433,6 +3493,7 @@ impl DescriptorAggPlan {
                             self.dispatch_chunk_rows,
                             self.grouped_agg_one_shot_max_rows.get(),
                             self.planned_kernel_mode,
+                            None,
                         )
                     }
                     DescriptorArtifactKind::Spatial(_) => {
@@ -3468,6 +3529,7 @@ impl DescriptorAggPlan {
                         self.dispatch_chunk_rows,
                         self.grouped_agg_one_shot_max_rows.get(),
                         self.planned_kernel_mode,
+                        Some(&self.artifact_policy_evidence),
                     ),
                     (
                         DescriptorArtifactKind::H3Parent { cell, .. }
@@ -3509,6 +3571,7 @@ impl DescriptorAggPlan {
                             self.dispatch_chunk_rows,
                             self.grouped_agg_one_shot_max_rows.get(),
                             self.planned_kernel_mode,
+                            None,
                         )
                     }
                     (
@@ -3628,7 +3691,7 @@ impl DescriptorAggPlan {
         if let DescriptorArtifactKind::Spatial(plan) = &self.artifact_kind {
             plan.verify_catalog()?;
         }
-        let (mut result, residency) = execute_with_single_artifact_rebuild(
+        let (mut result, mut residency) = execute_with_single_artifact_rebuild(
             || self.execute_hash_once_interruptible(&mut pending),
             || self.ensure_artifact(),
         )?;
@@ -3639,6 +3702,7 @@ impl DescriptorAggPlan {
                 result.kernel_mode.label()
             )));
         }
+        refresh_rebuilt_artifact_policy(&mut residency, &self.artifact_policy_evidence);
         result.residency = residency;
         Ok(result)
     }
@@ -4119,6 +4183,233 @@ pub(crate) fn scalar_measure_program(
 /// integer/count families. Native mode/layout validation remains authoritative.
 /// Metadata lives on the stack and borrows program words; no ledger owners or
 /// allocation-pool entries are created by this query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DenseExecutionLifecycle {
+    Empty,
+    OneShot,
+    Bounded,
+}
+
+/// A prediction, not a reservation or a count of completed work. No pointers
+/// from the private layout descriptor are retained in this decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DenseExecutionDecision {
+    pub lifecycle: DenseExecutionLifecycle,
+    pub chunk_rows: usize,
+    pub native_mode: GroupedAggKernelMode,
+    pub memory: crate::gpu::GroupedAggMemoryRequirements,
+    pub metadata_peak_bytes: u64,
+    pub peak_bytes: u64,
+    pub calls: u64,
+}
+
+#[cfg(feature = "pg_test")]
+thread_local! {
+    static TEST_DENSE_SELECTED_DECISION: Cell<Option<DenseExecutionDecision>> = const { Cell::new(None) };
+    static TEST_DENSE_UNCONSTRAINED_DECISION: Cell<Option<DenseExecutionDecision>> = const { Cell::new(None) };
+}
+
+/// Test-only observation of the actual validated execution decision. This is
+/// not a selector injection and never changes a production execution choice.
+#[cfg(feature = "pg_test")]
+pub fn test_last_dense_execution_decision() -> Option<DenseExecutionDecision> {
+    TEST_DENSE_SELECTED_DECISION.with(Cell::get)
+}
+
+#[cfg(feature = "pg_test")]
+pub fn test_last_dense_unconstrained_decision() -> Option<DenseExecutionDecision> {
+    TEST_DENSE_UNCONSTRAINED_DECISION.with(Cell::get)
+}
+
+/// Select the largest admissible positive chunk in the existing parallel
+/// family. An already eligible fitting one-shot operation is preferred. `None`
+/// means the fixed/native minimum cannot fit; invalid layouts remain errors.
+pub fn select_dense_execution(
+    spec: &AggQuerySpec,
+    nullable_columns: &[i16],
+    group_capacity: usize,
+    rows: usize,
+    max_chunk_rows: usize,
+    one_shot_max_rows: usize,
+    headroom_bytes: u64,
+) -> Result<Option<DenseExecutionDecision>, String> {
+    let metadata = scalar_metadata_peak_bytes(spec)?;
+    with_dense_layout_descriptor(spec, nullable_columns, group_capacity, rows, |desc| {
+        select_dense_execution_descriptor(
+            desc,
+            max_chunk_rows,
+            one_shot_max_rows,
+            metadata,
+            headroom_bytes,
+        )
+    })
+}
+
+fn select_dense_execution_descriptor(
+    desc: &abi::PgaccelGroupedAggDesc,
+    max_chunk_rows: usize,
+    one_shot_max_rows: usize,
+    metadata_peak_bytes: u64,
+    headroom_bytes: u64,
+) -> Result<Option<DenseExecutionDecision>, String> {
+    let expected_mode = if parallel_dense_count_shape(desc) {
+        GroupedAggKernelMode::ParallelDenseCount
+    } else if parallel_dense_integer_shape(desc) {
+        GroupedAggKernelMode::ParallelDenseInteger
+    } else {
+        return Err("budget selection requires parallel dense integer/count".into());
+    };
+    if desc.row_count == 0
+        || dense_one_shot_eligible(desc, dense_one_shot_row_cap(one_shot_max_rows))
+    {
+        let decision = dense_execution_candidate(desc, None, expected_mode, metadata_peak_bytes)?;
+        if decision.peak_bytes <= headroom_bytes {
+            return Ok(Some(decision));
+        }
+        if desc.row_count == 0 {
+            return Ok(None);
+        }
+    }
+    // Native partial allocation plateaus beyond this ceiling, but its mode
+    // becomes serial/unsupported. That region is NOT part of the search.
+    let cap = dense_partial_chunk_rows(
+        desc,
+        effective_dense_chunk_rows(dense_session_chunk_rows(max_chunk_rows, one_shot_max_rows)),
+    )
+    .min(desc.row_count);
+    if cap == 0 {
+        return Err("parallel dense chunk ceiling is zero".into());
+    }
+    maximal_fitting_dense_chunk(cap, headroom_bytes, |chunk| {
+        dense_execution_candidate(desc, Some(chunk), expected_mode, metadata_peak_bytes)
+    })
+}
+
+fn maximal_fitting_dense_chunk(
+    cap: usize,
+    headroom: u64,
+    mut query: impl FnMut(usize) -> Result<DenseExecutionDecision, String>,
+) -> Result<Option<DenseExecutionDecision>, String> {
+    if cap == 0 {
+        return Err("positive chunk search requires a nonzero ceiling".into());
+    }
+    let upper = query(cap)?;
+    if upper.peak_bytes <= headroom {
+        return Ok(Some(upper));
+    }
+    if cap == 1 {
+        return Ok(None);
+    }
+    let mut best = query(1)?;
+    if best.peak_bytes > headroom {
+        return Ok(None);
+    }
+    let mut low = 1;
+    let mut high = cap;
+    // Fixed flags/mode and clipped integer partial eligibility make native
+    // layout bytes nondecreasing. Search the last fitting value, not a rounded
+    // power of two; query failure is propagated, never treated as budget false.
+    while high - low > 1 {
+        let mid = low + (high - low) / 2;
+        let candidate = query(mid)?;
+        if candidate.peak_bytes <= headroom {
+            best = candidate;
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    Ok(Some(best))
+}
+
+fn dense_execution_candidate(
+    desc: &abi::PgaccelGroupedAggDesc,
+    chunk: Option<usize>,
+    expected_mode: GroupedAggKernelMode,
+    metadata_peak_bytes: u64,
+) -> Result<DenseExecutionDecision, String> {
+    let mut workspace = 0;
+    let mut output = 0;
+    let mut native_mode = expected_mode;
+    let mut query = |rows, flags| -> Result<(), String> {
+        let mut call = *desc;
+        call.row_count = rows;
+        call.execution_flags = flags;
+        // SAFETY: borrowed host metadata belongs to the surrounding private
+        // query descriptor. Native requirements never read resident payloads.
+        let (memory, mode) =
+            unsafe { crate::gpu::grouped_agg::query_dense_grouped_layout_and_mode(&call) }
+                .map_err(|error| error.to_string())?;
+        if rows != 0 && mode != expected_mode {
+            return Err(format!(
+                "dense candidate changed native mode from {} to {}",
+                expected_mode.label(),
+                mode.label()
+            ));
+        }
+        if rows != 0 || chunk.is_none() {
+            native_mode = mode;
+        }
+        workspace = workspace.max(memory.workspace_bytes);
+        output = output.max(memory.output_bytes);
+        Ok(())
+    };
+    let (lifecycle, chunk_rows, calls) = if let Some(chunk) = chunk {
+        if chunk == 0 || desc.row_count == 0 {
+            return Err("bounded data candidate requires positive chunk and input".into());
+        }
+        let rows = desc.row_count.min(chunk);
+        query(
+            rows,
+            abi::PGACCEL_GROUPED_AGG_EXEC_RESET | abi::PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE,
+        )?;
+        query(rows, abi::PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE)?;
+        let tail = desc.row_count % chunk;
+        if tail != 0 && tail != rows {
+            query(tail, abi::PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE)?;
+        }
+        query(0, abi::PGACCEL_GROUPED_AGG_EXEC_FINALIZE)?;
+        let calls = desc
+            .row_count
+            .div_ceil(chunk)
+            .checked_add(1)
+            .and_then(|calls| u64::try_from(calls).ok())
+            .ok_or("dense lifecycle call count overflow")?;
+        (DenseExecutionLifecycle::Bounded, chunk, calls)
+    } else {
+        query(desc.row_count, 0)?;
+        (
+            if desc.row_count == 0 {
+                DenseExecutionLifecycle::Empty
+            } else {
+                DenseExecutionLifecycle::OneShot
+            },
+            0,
+            1,
+        )
+    };
+    let total = workspace
+        .checked_add(output)
+        .ok_or("dense allocation sum overflow")?;
+    let peak = u64::try_from(total)
+        .map_err(|_| "dense allocation bytes exceed u64")?
+        .checked_add(metadata_peak_bytes)
+        .ok_or("dense complete peak overflow")?;
+    Ok(DenseExecutionDecision {
+        lifecycle,
+        chunk_rows,
+        native_mode,
+        memory: crate::gpu::GroupedAggMemoryRequirements {
+            workspace_bytes: workspace,
+            output_bytes: output,
+            total_bytes: total,
+        },
+        metadata_peak_bytes,
+        peak_bytes: peak,
+        calls,
+    })
+}
+
 pub fn dense_descriptor_memory_requirements(
     spec: &AggQuerySpec,
     nullable_columns: &[i16],
@@ -4127,6 +4418,37 @@ pub fn dense_descriptor_memory_requirements(
     max_chunk_rows: usize,
     one_shot_max_rows: usize,
 ) -> Result<crate::gpu::GroupedAggMemoryRequirements, String> {
+    with_dense_layout_descriptor(spec, nullable_columns, group_capacity, rows, |desc| {
+        let mut desc = *desc;
+        if !dense_one_shot_eligible(&desc, dense_one_shot_row_cap(one_shot_max_rows)) {
+            let chunk = dense_partial_chunk_rows(
+                &desc,
+                effective_dense_chunk_rows(dense_session_chunk_rows(
+                    max_chunk_rows,
+                    one_shot_max_rows,
+                )),
+            );
+            if chunk == 0 {
+                return Err("scalar layout forecast has no bounded chunk capacity".into());
+            }
+            desc.row_count = rows.min(chunk);
+            desc.execution_flags =
+                abi::PGACCEL_GROUPED_AGG_EXEC_RESET | abi::PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+        }
+        // SAFETY: query-only descriptor and its nested host metadata remain
+        // borrowed inside with_dense_layout_descriptor; never used to execute.
+        unsafe { crate::gpu::query_dense_grouped_memory_layout(&desc) }
+            .map_err(|error| error.to_string())
+    })
+}
+
+fn with_dense_layout_descriptor<R>(
+    spec: &AggQuerySpec,
+    nullable_columns: &[i16],
+    group_capacity: usize,
+    rows: usize,
+    query: impl FnOnce(&abi::PgaccelGroupedAggDesc) -> Result<R, String>,
+) -> Result<R, String> {
     if spec.measures.is_empty()
         || spec.measures.len() > abi::PGACCEL_GROUPED_AGG_MAX_MEASURES
         || spec.group_keys.len() > abi::PGACCEL_GROUPED_AGG_MAX_KEYS
@@ -4308,23 +4630,7 @@ pub fn dense_descriptor_memory_requirements(
             "dense layout forecast is outside the parallel dense integer/count family".into(),
         );
     }
-    if !dense_one_shot_eligible(&desc, dense_one_shot_row_cap(one_shot_max_rows)) {
-        let chunk = dense_partial_chunk_rows(
-            &desc,
-            effective_dense_chunk_rows(dense_session_chunk_rows(max_chunk_rows, one_shot_max_rows)),
-        );
-        if chunk == 0 {
-            return Err("scalar layout forecast has no bounded chunk capacity".into());
-        }
-        desc.row_count = rows.min(chunk);
-        desc.execution_flags =
-            abi::PGACCEL_GROUPED_AGG_EXEC_RESET | abi::PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
-    }
-    // SAFETY: every host view and nested slice above is live and validated.
-    // Native layout queries inspect pointer presence but never resident rows;
-    // markers and this private descriptor are never exposed for execution.
-    unsafe { crate::gpu::query_dense_grouped_memory_layout(&desc) }
-        .map_err(|error| error.to_string())
+    query(&desc)
 }
 
 pub fn scalar_measure_column(
@@ -6089,6 +6395,14 @@ impl DenseExecutionArtifact for SpatialAggArtifact {
 
 trait DenseArtifactInputResolver {
     type Artifact: DenseExecutionArtifact;
+    fn budget_aware(&self) -> bool {
+        false
+    }
+    /// Only ordinary dense artifacts participate in budget-aware selection;
+    /// spatial/NUMERIC callers keep their existing execution policy.
+    fn execution_protection(&self) -> Result<Option<ExecutionMemoryProtection>, ResidentLoadError> {
+        Ok(None)
+    }
     fn reclaim(&self, required_bytes: u64) -> Result<(), ResidentLoadError>;
     fn resolve<R>(
         &self,
@@ -6104,6 +6418,12 @@ struct CachedDenseArtifactResolver<'a> {
 
 impl DenseArtifactInputResolver for CachedDenseArtifactResolver<'_> {
     type Artifact = DescriptorAggArtifact;
+    fn budget_aware(&self) -> bool {
+        true
+    }
+    fn execution_protection(&self) -> Result<Option<ExecutionMemoryProtection>, ResidentLoadError> {
+        ExecutionMemoryProtection::cached(self.owner_relid, self.identity, self.requests).map(Some)
+    }
     fn reclaim(&self, required_bytes: u64) -> Result<(), ResidentLoadError> {
         crate::engine::residency::reclaim_execution_memory(
             self.owner_relid,
@@ -6233,6 +6553,7 @@ pub fn test_scalar_resident_aggregate(
             1024,
             one_shot_rows,
             GroupedAggKernelMode::ParallelDenseInteger,
+            None,
         )
         .map_err(|error| match error {
             DescriptorDispatchFailure::Residency(error) => error.to_string(),
@@ -6267,6 +6588,13 @@ struct EphemeralDenseArtifactResolver<'a> {
 
 impl DenseArtifactInputResolver for EphemeralDenseArtifactResolver<'_> {
     type Artifact = DescriptorAggArtifact;
+    fn budget_aware(&self) -> bool {
+        true
+    }
+    fn execution_protection(&self) -> Result<Option<ExecutionMemoryProtection>, ResidentLoadError> {
+        ExecutionMemoryProtection::ephemeral(self.owner_relid, self.artifact, self.requests)
+            .map(Some)
+    }
     fn reclaim(&self, required_bytes: u64) -> Result<(), ResidentLoadError> {
         crate::engine::residency::reclaim_execution_memory(
             self.owner_relid,
@@ -6331,6 +6659,9 @@ impl DenseArtifactInputResolver for EphemeralSpatialArtifactResolver<'_> {
     }
 }
 
+// Keep this thin ownership adapter parallel to the ephemeral adapter and the
+// shared executor contract; no execution parameter is interpreted here.
+#[allow(clippy::too_many_arguments)]
 fn execute_bounded_dense_artifact(
     owner_relid: pg_sys::Oid,
     identity: &DerivedArtifactIdentity,
@@ -6339,6 +6670,7 @@ fn execute_bounded_dense_artifact(
     max_chunk_rows: usize,
     one_shot_max_rows: usize,
     expected_kernel_mode: GroupedAggKernelMode,
+    policy_evidence: Option<&Cell<Option<ArtifactPolicyEvidence>>>,
 ) -> Result<DescriptorAggDispatch, DescriptorDispatchFailure> {
     let resolver = CachedDenseArtifactResolver {
         owner_relid,
@@ -6352,9 +6684,13 @@ fn execute_bounded_dense_artifact(
         max_chunk_rows,
         one_shot_max_rows,
         expected_kernel_mode,
+        policy_evidence,
     )
 }
 
+// The additional artifact-owner argument only constructs the matching resolver;
+// all execution parameters pass unchanged to the shared executor.
+#[allow(clippy::too_many_arguments)]
 fn execute_bounded_dense_ephemeral(
     owner_relid: pg_sys::Oid,
     artifact: &EphemeralDerivedArtifact<DescriptorAggArtifact>,
@@ -6363,6 +6699,7 @@ fn execute_bounded_dense_ephemeral(
     max_chunk_rows: usize,
     one_shot_max_rows: usize,
     expected_kernel_mode: GroupedAggKernelMode,
+    policy_evidence: Option<&Cell<Option<ArtifactPolicyEvidence>>>,
 ) -> Result<DescriptorAggDispatch, DescriptorDispatchFailure> {
     let resolver = EphemeralDenseArtifactResolver {
         owner_relid,
@@ -6376,6 +6713,7 @@ fn execute_bounded_dense_ephemeral(
         max_chunk_rows,
         one_shot_max_rows,
         expected_kernel_mode,
+        policy_evidence,
     )
 }
 
@@ -6431,6 +6769,108 @@ fn dense_runtime_nullable_columns(
     Ok(nullable)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct DenseExecutionFingerprint {
+    words: Vec<i32>,
+    rows: usize,
+    groups: usize,
+    domains: Vec<(u32, u32, u32, Option<i32>)>,
+    nullable: Vec<i16>,
+    sources: Vec<(u32, u64, u64, u32, u64, u64)>,
+}
+
+fn dense_execution_fingerprint<T: DenseExecutionArtifact>(
+    inputs: &ResolvedDerivedInputs<'_, T>,
+    requests: &[ResidentColumnRef],
+) -> Result<DenseExecutionFingerprint, String> {
+    let base = inputs.artifact.base();
+    Ok(DenseExecutionFingerprint {
+        words: base
+            .resolved_spec
+            .encode_i32()
+            .map_err(|error| error.to_string())?,
+        rows: base.fact_rows,
+        groups: base.group_capacity,
+        domains: base
+            .domains
+            .iter()
+            .map(|domain| {
+                Ok((
+                    domain.type_oid,
+                    domain.collation_oid,
+                    domain.cardinality()?,
+                    domain.null_code,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?,
+        nullable: dense_runtime_nullable_columns(base, requests, &inputs.columns)?,
+        sources: inputs
+            .evidence
+            .iter()
+            .map(|source| {
+                (
+                    u32::from(source.relid),
+                    source.generation,
+                    source.global_generation,
+                    u32::from(source.relfilenode),
+                    source.row_count,
+                    source.raw_bytes,
+                )
+            })
+            .collect(),
+    })
+}
+
+fn select_runtime_dense_execution(
+    resolver: &impl DenseArtifactInputResolver,
+    requests: &[ResidentColumnRef],
+    max_chunk_rows: usize,
+    one_shot_max_rows: usize,
+) -> Result<(DenseExecutionFingerprint, DenseExecutionDecision), DescriptorDispatchFailure> {
+    #[cfg(feature = "pg_test")]
+    TEST_DENSE_SELECTED_DECISION.with(|decision| decision.set(None));
+    #[cfg(feature = "pg_test")]
+    TEST_DENSE_UNCONSTRAINED_DECISION.with(|decision| decision.set(None));
+    let execution_error =
+        |detail| DescriptorDispatchFailure::Execution(DescriptorAggExecutionError::Failure(detail));
+    let fingerprint = resolver
+        .resolve(|inputs| dense_execution_fingerprint(&inputs, requests))
+        .map_err(DescriptorDispatchFailure::Residency)?
+        .map_err(execution_error)?;
+    let protection = resolver
+        .execution_protection()
+        .map_err(DescriptorDispatchFailure::Residency)?
+        .ok_or_else(|| execution_error("dense selector has no protected ownership quote".into()))?;
+    let quote = crate::engine::residency::quote_execution_memory(&protection)
+        .map_err(DescriptorDispatchFailure::Residency)?;
+    let decision = resolver
+        .resolve(|inputs| {
+            if dense_execution_fingerprint(&inputs, requests)? != fingerprint {
+                return Err("dense shape changed before budget selection".into());
+            }
+            select_dense_execution(
+                &inputs.artifact.base().resolved_spec,
+                &fingerprint.nullable,
+                fingerprint.groups,
+                fingerprint.rows,
+                max_chunk_rows,
+                one_shot_max_rows,
+                quote.headroom_bytes,
+            )?
+            .ok_or_else(|| {
+                format!(
+                    "no parallel dense lifecycle fits protected execution headroom {}",
+                    quote.headroom_bytes
+                )
+            })
+        })
+        .map_err(DescriptorDispatchFailure::Residency)?
+        .map_err(execution_error)?;
+    crate::engine::residency::reclaim_protected_execution_memory(&protection, decision.peak_bytes)
+        .map_err(DescriptorDispatchFailure::Residency)?;
+    Ok((fingerprint, decision))
+}
+
 fn execute_bounded_dense_with_resolver(
     resolver: &impl DenseArtifactInputResolver,
     requests: &[ResidentColumnRef],
@@ -6438,6 +6878,7 @@ fn execute_bounded_dense_with_resolver(
     max_chunk_rows: usize,
     one_shot_max_rows: usize,
     expected_kernel_mode: GroupedAggKernelMode,
+    policy_evidence: Option<&Cell<Option<ArtifactPolicyEvidence>>>,
 ) -> Result<DescriptorAggDispatch, DescriptorDispatchFailure> {
     let bounded_chunk_rows =
         effective_dense_chunk_rows(dense_session_chunk_rows(max_chunk_rows, one_shot_max_rows));
@@ -6452,11 +6893,33 @@ fn execute_bounded_dense_with_resolver(
         caught.rethrow();
     }
 
+    let selected = if resolver.budget_aware()
+        && matches!(
+            expected_kernel_mode,
+            GroupedAggKernelMode::ParallelDenseInteger | GroupedAggKernelMode::ParallelDenseCount
+        )
+        && resolver
+            .resolve(|inputs| inputs.artifact.base().resolved_spec.star_dims.is_empty())
+            .map_err(DescriptorDispatchFailure::Residency)?
+    {
+        Some(select_runtime_dense_execution(
+            resolver,
+            requests,
+            max_chunk_rows,
+            one_shot_max_rows,
+        )?)
+    } else {
+        None
+    };
+
     // Quote using only stack descriptor metadata. Binding or constructing a
     // ResolvedGroupedAggPlan here would charge scalar snapshots before idle
     // artifacts have been reclaimed. No borrowed pointers escape this phase.
     let requirement = resolver
         .resolve(|inputs| -> Result<Option<u64>, String> {
+            if selected.is_some() {
+                return Ok(None);
+            }
             let base = inputs.artifact.base();
             if !base.resolved_spec.star_dims.is_empty()
                 || !matches!(
@@ -6496,6 +6959,66 @@ fn execute_bounded_dense_with_resolver(
 
     let initialized = resolver
         .resolve(|inputs| {
+            if let Some((fingerprint, decision)) = &selected {
+                validate_and_record_consumer_prediction(policy_evidence, || {
+                    let current = dense_execution_fingerprint(&inputs, requests)
+                        .map_err(DescriptorAggExecutionError::Failure)?;
+                    if current != *fingerprint {
+                        return Err(DescriptorAggExecutionError::Failure(
+                            "dense shape changed after protected execution reclamation".into(),
+                        ));
+                    }
+                    // Verify the exact chosen lifecycle against current metadata,
+                    // not a fresh budget search that could silently choose again.
+                    let verified = with_dense_layout_descriptor(
+                        &inputs.artifact.base().resolved_spec,
+                        &current.nullable,
+                        current.groups,
+                        current.rows,
+                        |desc| {
+                            dense_execution_candidate(
+                                desc,
+                                (decision.lifecycle == DenseExecutionLifecycle::Bounded)
+                                    .then_some(decision.chunk_rows),
+                                expected_kernel_mode,
+                                scalar_metadata_peak_bytes(&inputs.artifact.base().resolved_spec)?,
+                            )
+                        },
+                    )
+                    .map_err(DescriptorAggExecutionError::Failure)?;
+                    if verified != *decision {
+                        return Err(DescriptorAggExecutionError::Failure(
+                            "dense native lifecycle changed after reclamation".into(),
+                        ));
+                    }
+                    #[cfg(feature = "pg_test")]
+                    {
+                        // Independent budget-free native oracle for live tests:
+                        // unchanged real device/partial ceilings and exact shape.
+                        // This never substitutes or injects an execution decision.
+                        let maximum = select_dense_execution(
+                            &inputs.artifact.base().resolved_spec,
+                            &current.nullable,
+                            current.groups,
+                            current.rows,
+                            max_chunk_rows,
+                            one_shot_max_rows,
+                            u64::MAX,
+                        )
+                        .map_err(DescriptorAggExecutionError::Failure)?
+                        .ok_or_else(|| {
+                            DescriptorAggExecutionError::Failure(
+                                "validated dense shape has no unconstrained native lifecycle"
+                                    .into(),
+                            )
+                        })?;
+                        TEST_DENSE_UNCONSTRAINED_DECISION
+                            .with(|selected| selected.set(Some(maximum)));
+                        TEST_DENSE_SELECTED_DECISION.with(|selected| selected.set(Some(*decision)));
+                    }
+                    Ok(decision.calls)
+                })?;
+            }
             let desc = stats::profile_descriptor_stage(
                 stats::DescriptorExecStage::DerivedInputBinding,
                 || inputs.artifact.bind(requests, &inputs.columns),
@@ -6506,8 +7029,15 @@ fn execute_bounded_dense_with_resolver(
             // submits or dereferences those pointer values after return.
             let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc.desc) }
                 .map_err(|error| gpu_execution_error("grouped descriptor rejected", error))?;
-            if dense_one_shot_eligible(plan.descriptor(), dense_one_shot_row_cap(one_shot_max_rows))
-            {
+            if selected.as_ref().map_or_else(
+                || {
+                    dense_one_shot_eligible(
+                        plan.descriptor(),
+                        dense_one_shot_row_cap(one_shot_max_rows),
+                    )
+                },
+                |(_, decision)| decision.lifecycle != DenseExecutionLifecycle::Bounded,
+            ) {
                 verify_native_one_shot_mode(&plan, expected_kernel_mode)?;
                 plan.preflight_one_shot_memory().map_err(|error| {
                     gpu_execution_error("grouped one-shot memory preflight failed", error)
@@ -6561,8 +7091,10 @@ fn execute_bounded_dense_with_resolver(
                     elapsed,
                 });
             }
-            let bounded_chunk_rows =
-                dense_partial_chunk_rows(plan.descriptor(), bounded_chunk_rows);
+            let bounded_chunk_rows = selected.as_ref().map_or_else(
+                || dense_partial_chunk_rows(plan.descriptor(), bounded_chunk_rows),
+                |(_, decision)| decision.chunk_rows,
+            );
             let session = stats::profile_descriptor_stage(
                 stats::DescriptorExecStage::WorkspaceAllocation,
                 || GroupedAggSession::start(&plan, bounded_chunk_rows),
@@ -6992,8 +7524,453 @@ mod tests {
             invalidation_risk_ppm: 0,
             cached_build_launches: 2,
             ephemeral_build_launches: 2,
-            consumer_launches: 1,
+            consumer_launches: Some(1),
             budget_headroom_bytes: 100_000_000,
+        }
+    }
+
+    #[test]
+    fn artifact_consumer_attempt_preserves_uninitialized_and_non_target_evidence() {
+        let empty = Cell::new(None);
+        begin_artifact_consumer_attempt(&empty, true);
+        validate_and_record_consumer_prediction(Some(&empty), || Ok(7))
+            .expect("uninitialized evidence stays uninitialized");
+        assert_eq!(empty.get(), None);
+        validate_and_record_consumer_prediction(None, || Ok(7))
+            .expect("optional evidence does not prevent validation");
+
+        let known = choose_artifact_policy(policy_input());
+        let cell = Cell::new(Some(known));
+        begin_artifact_consumer_attempt(&cell, false);
+        assert_eq!(cell.get(), Some(known), "non-target forecast is retained");
+    }
+
+    #[test]
+    fn artifact_consumer_attempt_resets_prediction_and_preserves_validation_errors() {
+        let known = choose_artifact_policy(policy_input());
+        let cell = Cell::new(Some(known));
+        let mut pending = known;
+        pending.input.consumer_launches = None;
+        let validations = Cell::new(0);
+        for calls in [0, 19] {
+            begin_artifact_consumer_attempt(&cell, true);
+            assert_eq!(cell.get(), Some(pending));
+            assert!(
+                cell.get()
+                    .expect("pending evidence")
+                    .summary()
+                    .contains("consumer_launches=pending")
+            );
+            let message = String::from("final fingerprint mismatch");
+            let failure = validate_and_record_consumer_prediction(Some(&cell), || {
+                validations.set(validations.get() + 1);
+                Err(DescriptorAggExecutionError::Failure(message))
+            });
+            assert_eq!(
+                failure,
+                Err(DescriptorAggExecutionError::Failure(
+                    "final fingerprint mismatch".into()
+                ))
+            );
+            assert_eq!(cell.get(), Some(pending));
+            validate_and_record_consumer_prediction(Some(&cell), || {
+                validations.set(validations.get() + 1);
+                Ok(calls)
+            })
+            .expect("validated prediction");
+            let mut selected = known;
+            selected.input.consumer_launches = Some(calls);
+            assert_eq!(
+                cell.get(),
+                Some(selected),
+                "only the consumer field changes"
+            );
+            assert!(
+                selected
+                    .summary()
+                    .contains(&format!("consumer_launches={calls}"))
+            );
+        }
+        assert_eq!(
+            validations.get(),
+            4,
+            "each validation executes exactly once"
+        );
+        begin_artifact_consumer_attempt(&cell, true);
+        assert_eq!(
+            cell.get(),
+            Some(pending),
+            "repeat cannot expose the previous prediction"
+        );
+    }
+
+    #[test]
+    fn artifact_consumer_prediction_survives_failure_after_validation() {
+        let known = choose_artifact_policy(policy_input());
+        let cell = Cell::new(Some(known));
+        begin_artifact_consumer_attempt(&cell, true);
+        let result: Result<(), DescriptorAggExecutionError> = (|| {
+            validate_and_record_consumer_prediction(Some(&cell), || Ok(5))?;
+            Err(DescriptorAggExecutionError::DivisionByZero)
+        })();
+        assert_eq!(result, Err(DescriptorAggExecutionError::DivisionByZero));
+        let mut predicted = known;
+        predicted.input.consumer_launches = Some(5);
+        assert_eq!(
+            cell.get(),
+            Some(predicted),
+            "prediction is not a completed-call counter"
+        );
+    }
+
+    #[test]
+    fn rebuilt_artifact_report_receives_final_consumer_prediction() {
+        let known = choose_artifact_policy(policy_input());
+        let cell = Cell::new(Some(known));
+        begin_artifact_consumer_attempt(&cell, true);
+        let mut residency = Some(DescriptorResidencyReport {
+            artifact_outcome: ArtifactEnsureOutcome::Built,
+            artifact_policy: cell.get().expect("pending build evidence"),
+            relations: Vec::new(),
+            loaded_relations: vec![pg_sys::Oid::from(10_u32)],
+            artifact_bytes: 23,
+            raw_load_ms: 1.5,
+            preparation_time_us: 7,
+        });
+        validate_and_record_consumer_prediction(Some(&cell), || Ok(11))
+            .expect("successful validated execution");
+        refresh_rebuilt_artifact_policy(&mut residency, &cell);
+        let report = residency.as_ref().expect("rebuilt report");
+        assert_eq!(Some(report.artifact_policy), cell.get());
+        assert_eq!(report.artifact_policy.input.consumer_launches, Some(11));
+        assert_eq!(report.artifact_outcome, ArtifactEnsureOutcome::Built);
+        assert!(report.relations.is_empty());
+        assert_eq!(report.loaded_relations, vec![pg_sys::Oid::from(10_u32)]);
+        assert_eq!(report.artifact_bytes, 23);
+        assert_eq!(report.raw_load_ms, 1.5);
+        assert_eq!(report.preparation_time_us, 7);
+        refresh_rebuilt_artifact_policy(&mut residency, &Cell::new(None));
+        assert_eq!(
+            residency
+                .expect("report retained")
+                .artifact_policy
+                .input
+                .consumer_launches,
+            Some(11)
+        );
+        let mut no_rebuild = None;
+        refresh_rebuilt_artifact_policy(&mut no_rebuild, &cell);
+        assert!(no_rebuild.is_none());
+    }
+
+    #[test]
+    fn artifact_policy_pending_consumer_is_exactly_cost_invariant() {
+        for reuses in [0, 1, 2, u32::MAX] {
+            for risk in [0, 1_000_000, u32::MAX] {
+                for headroom in [0, 1, u64::MAX] {
+                    for large in [false, true] {
+                        let mut input = policy_input();
+                        input.expected_reuses = reuses;
+                        input.invalidation_risk_ppm = risk;
+                        input.budget_headroom_bytes = headroom;
+                        if large {
+                            input.construction_bytes = u64::MAX;
+                            input.ephemeral_bytes = u64::MAX;
+                            input.construction_time_us = u64::MAX;
+                            input.cached_build_launches = u64::MAX;
+                            input.ephemeral_build_launches = u64::MAX;
+                        }
+                        for branch in 0..4 {
+                            let input = match branch {
+                                1 => ArtifactPolicyInput {
+                                    cache_hit: true,
+                                    ..input
+                                },
+                                2 => ArtifactPolicyInput {
+                                    construction_bytes: 0,
+                                    ..input
+                                },
+                                3 => ArtifactPolicyInput {
+                                    ephemeral_bytes: 0,
+                                    ..input
+                                },
+                                _ => input,
+                            };
+                            let pending = choose_artifact_policy(ArtifactPolicyInput {
+                                consumer_launches: None,
+                                ..input
+                            });
+                            assert!(pending.summary().contains("consumer_launches=pending"));
+                            for calls in [0, 1, u64::MAX] {
+                                let known = choose_artifact_policy(ArtifactPolicyInput {
+                                    consumer_launches: Some(calls),
+                                    ..input
+                                });
+                                assert_eq!(
+                                    (pending.policy, pending.reason),
+                                    (known.policy, known.reason)
+                                );
+                                assert!(
+                                    known
+                                        .summary()
+                                        .contains(&format!("consumer_launches={calls} "))
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Exact type-domain bound: even the largest pre-division cached
+        // construction product fits below 2^122. Removing the common consumer
+        // term cannot change saturation or tie behavior in either score.
+        let reuses = u128::from(u32::MAX);
+        let maximum = u128::from(u64::MAX);
+        let construction = maximum + maximum * 50;
+        let rebuilds = 1_000_000 + (reuses - 1) * 1_000_000;
+        assert!(construction * rebuilds < (1_u128 << 122));
+        assert!(reuses * maximum * 50 < (1_u128 << 102));
+        let tie = ArtifactPolicyInput {
+            construction_time_us: 0,
+            cached_build_launches: 0,
+            ephemeral_build_launches: 0,
+            construction_bytes: 1,
+            budget_headroom_bytes: u64::MAX,
+            consumer_launches: None,
+            ..policy_input()
+        };
+        assert_eq!(
+            choose_artifact_policy(tie).policy,
+            DescriptorArtifactPolicy::EphemeralFused
+        );
+    }
+
+    #[test]
+    fn dense_budget_selector_matches_native_maximal_fit_and_boundaries() {
+        let mut count = dense_bool_count_spec();
+        count.measures = spec(MeasureExpr::CountStar, AggregateKind::Count).measures;
+        let mut scalar = dense_integer_sum_avg_spec(INT4OID);
+        scalar.measures[0].expression = scalar_expression_fixture();
+        scalar.measures[0].outputs = [
+            AggregateKind::Sum,
+            AggregateKind::Count,
+            AggregateKind::Min,
+            AggregateKind::Max,
+        ]
+        .into_iter()
+        .map(|kind| AggregateOutput {
+            source: AggregateSource::Value,
+            kind,
+        })
+        .collect();
+        let mut extrema = dense_integer_sum_avg_spec(INT4OID);
+        extrema.measures[0].outputs = scalar.measures[0].outputs.clone();
+        for shape in [
+            count,
+            dense_integer_sum_avg_spec(INT4OID),
+            dense_integer_measure_range_spec(),
+            dense_bool_count_spec(),
+            dense_int8_count_spec(),
+            scalar,
+            extrema,
+        ] {
+            for groups in [8, 9] {
+                for nullable in [vec![], vec![1, 2]] {
+                    with_dense_layout_descriptor(&shape, &nullable, groups, 2051, |desc| {
+                        let mode = if parallel_dense_count_shape(desc) {
+                            GroupedAggKernelMode::ParallelDenseCount
+                        } else {
+                            GroupedAggKernelMode::ParallelDenseInteger
+                        };
+                        let metadata = scalar_metadata_peak_bytes(&shape)?;
+                        let oracle = (1..=65)
+                            .map(|rows| dense_execution_candidate(desc, Some(rows), mode, metadata))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        for edge in [
+                            oracle[0].peak_bytes,
+                            oracle[32].peak_bytes,
+                            oracle[64].peak_bytes,
+                        ] {
+                            for budget in [edge - 1, edge] {
+                                let expected = oracle
+                                    .iter()
+                                    .rev()
+                                    .find(|decision| decision.peak_bytes <= budget)
+                                    .copied();
+                                let mut queries = 0;
+                                let selected = maximal_fitting_dense_chunk(65, budget, |rows| {
+                                    queries += 1;
+                                    dense_execution_candidate(desc, Some(rows), mode, metadata)
+                                })?;
+                                assert_eq!(selected, expected);
+                                assert!(queries <= 9, "bounded logarithmic query count: {queries}");
+                            }
+                        }
+                        for rows in [1, 1023, 1024, 1025] {
+                            let exact =
+                                dense_execution_candidate(desc, Some(rows), mode, metadata)?;
+                            let selected = select_dense_execution_descriptor(
+                                desc,
+                                rows,
+                                rows,
+                                metadata,
+                                exact.peak_bytes,
+                            )?
+                            .expect("exact native complete fit");
+                            assert_eq!(selected, exact);
+                            let under = select_dense_execution_descriptor(
+                                desc,
+                                rows,
+                                rows,
+                                metadata,
+                                exact.peak_bytes - 1,
+                            )?;
+                            assert!(under.is_none_or(|candidate| candidate.chunk_rows < rows));
+                        }
+                        assert!(dense_execution_candidate(desc, Some(1), mode, u64::MAX).is_err());
+                        Ok(())
+                    })
+                    .expect("native oracle and clipped selection");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dense_budget_selector_exhaustive_oracle_crosses_native_partial_steps() {
+        let count = spec(MeasureExpr::CountStar, AggregateKind::Count);
+        for shape in [
+            count,
+            spec(MeasureExpr::Column(column(INT4OID)), AggregateKind::Sum),
+        ] {
+            with_dense_layout_descriptor(&shape, &[1], 1, 4099, |desc| {
+                let mode = if parallel_dense_count_shape(desc) {
+                    GroupedAggKernelMode::ParallelDenseCount
+                } else {
+                    GroupedAggKernelMode::ParallelDenseInteger
+                };
+                let oracle = (1..=2051)
+                    .map(|chunk| dense_execution_candidate(desc, Some(chunk), mode, 0))
+                    .collect::<Result<Vec<_>, _>>()?;
+                assert!(oracle[1023].peak_bytes < oracle[1024].peak_bytes);
+                assert!(oracle[2047].peak_bytes < oracle[2048].peak_bytes);
+                for expected_rows in [1024, 2048] {
+                    let budget = oracle[expected_rows - 1].peak_bytes;
+                    let expected = oracle
+                        .iter()
+                        .rev()
+                        .find(|candidate| candidate.peak_bytes <= budget)
+                        .copied()
+                        .expect("known interior oracle fit");
+                    assert_eq!(expected.chunk_rows, expected_rows);
+                    let mut queries = 0;
+                    let selected = maximal_fitting_dense_chunk(2051, budget, |chunk| {
+                        queries += 1;
+                        dense_execution_candidate(desc, Some(chunk), mode, 0)
+                    })?
+                    .expect("interior fit");
+                    assert_eq!(selected, expected);
+                    assert!(queries <= 14);
+                    assert!(selected.chunk_rows < 2051);
+                }
+                let mut queries = 0;
+                let error = maximal_fitting_dense_chunk(2051, oracle[1023].peak_bytes, |chunk| {
+                    queries += 1;
+                    if queries == 3 {
+                        Err("native layout query failed".into())
+                    } else {
+                        dense_execution_candidate(desc, Some(chunk), mode, 0)
+                    }
+                })
+                .expect_err("query failure must not be converted to too-large or no-fit");
+                assert_eq!(error, "native layout query failed");
+                assert_eq!(queries, 3);
+                Ok(())
+            })
+            .expect("non-flat exhaustive native oracle");
+        }
+    }
+
+    #[test]
+    fn dense_budget_selector_preserves_one_shot_counterexample_and_partial_mode_cap() {
+        let mut shape = dense_integer_sum_avg_spec(INT4OID);
+        shape.measures.truncate(1);
+        shape.measures[0].outputs.truncate(1);
+        with_dense_layout_descriptor(&shape, &[], 9, 1024, |desc| {
+            let one = dense_execution_candidate(
+                desc,
+                None,
+                GroupedAggKernelMode::ParallelDenseInteger,
+                0,
+            )?;
+            let bounded = dense_execution_candidate(
+                desc,
+                Some(1024),
+                GroupedAggKernelMode::ParallelDenseInteger,
+                0,
+            )?;
+            assert!(
+                bounded.peak_bytes > one.peak_bytes,
+                "one-shot and bounded are distinct non-monotone families"
+            );
+            let selected = select_dense_execution_descriptor(desc, 1024, 1024, 0, one.peak_bytes)?
+                .expect("fitting one-shot");
+            assert_eq!(selected, one);
+            assert_eq!(selected.lifecycle, DenseExecutionLifecycle::OneShot);
+            Ok(())
+        })
+        .expect("9-group one-shot counterexample");
+        with_dense_layout_descriptor(&shape, &[], 1025, 2_000_017, |desc| {
+            let cap = dense_partial_chunk_rows(desc, 1_000_000);
+            let exact = dense_execution_candidate(
+                desc,
+                Some(cap),
+                GroupedAggKernelMode::ParallelDenseInteger,
+                0,
+            )?;
+            assert!(
+                dense_execution_candidate(
+                    desc,
+                    Some(cap + 1),
+                    GroupedAggKernelMode::ParallelDenseInteger,
+                    0
+                )
+                .is_err()
+            );
+            assert_eq!(
+                select_dense_execution_descriptor(desc, 1_000_000, 1_000_000, 0, u64::MAX)?,
+                Some(exact)
+            );
+            Ok(())
+        })
+        .expect("partial cap clips mode plateau");
+        for rows in [0, 1] {
+            let empty = spec(MeasureExpr::CountStar, AggregateKind::Count);
+            let selected = select_dense_execution(&empty, &[], 1, rows, 1024, 1024, u64::MAX)
+                .expect("empty/control quote")
+                .expect("unlimited budget");
+            assert_eq!(selected.calls, 1);
+            assert_eq!(
+                selected.lifecycle,
+                if rows == 0 {
+                    DenseExecutionLifecycle::Empty
+                } else {
+                    DenseExecutionLifecycle::OneShot
+                }
+            );
+            let integer = spec(MeasureExpr::Column(column(INT4OID)), AggregateKind::Sum);
+            let selected = select_dense_execution(&integer, &[1], 1, rows, 1024, 1024, u64::MAX)
+                .expect("empty/integer control quote")
+                .expect("unlimited budget");
+            assert_eq!(selected.calls, 1);
+            assert_eq!(
+                selected.lifecycle,
+                if rows == 0 {
+                    DenseExecutionLifecycle::Empty
+                } else {
+                    DenseExecutionLifecycle::OneShot
+                }
+            );
         }
     }
 
@@ -9231,6 +10208,70 @@ mod tests {
                     bytes + bounded.group_capacity * lanes * DENSE_INTEGER_PARTIAL_BYTES
                         > DENSE_INTEGER_MAX_PARTIAL_BYTES
                 );
+                // Exercise every simultaneous lane count with the same native
+                // layout oracle used by the selector, including the real
+                // partial-memory ceiling rather than an invented byte model.
+                with_dense_layout_descriptor(&spec, &[], 100_000, 2_000_017, |native| {
+                    let cap = dense_partial_chunk_rows(native, 1_000_000);
+                    let exact = dense_execution_candidate(native, Some(cap), mode, 0)?;
+                    assert_eq!(
+                        select_dense_execution(
+                            &spec,
+                            &[],
+                            100_000,
+                            2_000_017,
+                            1_000_000,
+                            1_000_000,
+                            u64::MAX
+                        )?,
+                        Some(exact)
+                    );
+                    assert_eq!(
+                        select_dense_execution(
+                            &spec,
+                            &[],
+                            100_000,
+                            2_000_017,
+                            1_000_000,
+                            1_000_000,
+                            exact.peak_bytes
+                        )?,
+                        Some(exact)
+                    );
+                    let under_budget = exact
+                        .peak_bytes
+                        .checked_sub(1)
+                        .expect("nonzero native peak");
+                    let under = select_dense_execution(
+                        &spec,
+                        &[],
+                        100_000,
+                        2_000_017,
+                        1_000_000,
+                        1_000_000,
+                        under_budget,
+                    )?;
+                    if let Some(under) = under {
+                        assert!(under.chunk_rows < cap);
+                        assert!(under.peak_bytes <= under_budget);
+                        assert_eq!(
+                            under,
+                            dense_execution_candidate(native, Some(under.chunk_rows), mode, 0)?
+                        );
+                        assert!(
+                            dense_execution_candidate(native, Some(under.chunk_rows + 1), mode, 0)?
+                                .peak_bytes
+                                > under_budget
+                        );
+                    } else {
+                        assert!(
+                            dense_execution_candidate(native, Some(1), mode, 0)?.peak_bytes
+                                > under_budget
+                        );
+                    }
+                    Ok(())
+                })
+                .expect("maximum-lane native selector boundary");
                 let mut unsupported = desc;
                 unsupported.measures[1].agg_mask |= abi::PGACCEL_GROUPED_AGG_LANE_SUMSQ;
                 assert!(!parallel_dense_integer_shape(&unsupported));

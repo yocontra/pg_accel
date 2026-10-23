@@ -1,0 +1,88 @@
+--- .codex/scratch/dense-budget-chunks-20261022/integration-candidate3/pg_accel/src/tests/phase2_cache.rs	2026-10-22 21:10:33
++++ .codex/scratch/dense-budget-chunks-20261022/integration-candidate4/pg_accel/src/tests/phase2_cache.rs	2026-10-22 21:16:20
+@@ -464,8 +464,10 @@
+         assert!(original.pinned);
+         assert!(original.raw_bytes > 32 * 1024 * 1024);
+         assert_eq!(original.derived_bytes, 0);
+-        let query = "SELECT g,h,k,sum(v) s,avg(v) a,count(v) c,count(*) n \
+-            FROM phase2_budget_chunks GROUP BY g,h,k ORDER BY g,h,k";
++        // Exact motivating SQL121 shape: qty SUM, v AVG and the independent
++        // WHERE g carrier require three value lanes, not one shared v lane.
++        let query = "SELECT g,h,k,sum(qty) q,avg(v) a,count(*) n \
++            FROM phase2_budget_chunks WHERE g IN (0,2) GROUP BY g,h,k ORDER BY g,h,k";
+         Spi::run("SET LOCAL pg_accel.enabled=off").expect("native reference");
+         let native = result_rows(query);
+         Spi::run("SET LOCAL pg_accel.enabled=on").expect("normal admission");
+@@ -531,8 +533,6 @@
+             PREPARE phase2_budget_prepared AS {query}"
+         ))
+         .expect("prepared target");
+-        #[cfg(feature = "pg_test")]
+-        let mut prepared_chunks = Vec::new();
+         for budget in [128, 64] {
+             Spi::run(&format!(
+                 "SET LOCAL pg_accel.resident_memory_budget_mb={budget}"
+@@ -548,13 +548,27 @@
+             {
+                 let selected = crate::engine::executor::agg::test_last_dense_execution_decision()
+                     .expect("current prepared attempt decision");
++                let maximum =
++                    crate::engine::executor::agg::test_last_dense_unconstrained_decision()
++                        .expect("exact current native device/partial cap oracle");
+                 let current = resident_status(table);
+-                assert!(
+-                    u64::try_from(current.raw_bytes + current.derived_bytes)
+-                        .expect("current fixed owners")
+-                        + selected.peak_bytes
+-                        <= budget * 1024 * 1024
+-                );
++                let fixed = u64::try_from(current.raw_bytes + current.derived_bytes)
++                    .expect("current fixed owners");
++                assert!(fixed + selected.peak_bytes <= budget * 1024 * 1024);
++                // Small supported devices can already fit their full cap at
++                // both budgets. Equality is allowed only when the exact native
++                // maximum fits; otherwise this fixture must actually shrink.
++                if fixed + maximum.peak_bytes <= budget * 1024 * 1024 {
++                    assert_eq!(
++                        selected, maximum,
++                        "do not reuse a stale smaller chunk at a larger budget"
++                    );
++                } else {
++                    assert!(
++                        selected.chunk_rows < maximum.chunk_rows,
++                        "current budget requires a smaller-than-device-cap chunk"
++                    );
++                }
+                 assert_eq!(
+                     selected.calls,
+                     u64::try_from(
+@@ -563,13 +577,14 @@
+                     )
+                     .expect("prepared same-attempt completed calls")
+                 );
+-                prepared_chunks.push(selected.chunk_rows);
+                 pgrx::notice!(
+-                    "prepared dense budget={} chunk={} calls={} peak={}",
++                    "prepared dense budget={} chunk={} calls={} peak={} native_cap_chunk={} native_cap_peak={}",
+                     budget,
+                     selected.chunk_rows,
+                     selected.calls,
+-                    selected.peak_bytes
++                    selected.peak_bytes,
++                    maximum.chunk_rows,
++                    maximum.peak_bytes,
+                 );
+             }
+             assert_eq!(
+@@ -578,11 +593,6 @@
+             );
+             Spi::run("DROP TABLE phase2_budget_actual").expect("drop prepared parity result");
+         }
+-        #[cfg(feature = "pg_test")]
+-        assert!(
+-            prepared_chunks[1] < prepared_chunks[0],
+-            "prepared execution must reselect smaller chunks after 128->64 MiB: {prepared_chunks:?}"
+-        );
+         Spi::run(
+             "DEALLOCATE phase2_budget_prepared; SET LOCAL pg_accel.resident_memory_budget_mb=32",
+         )

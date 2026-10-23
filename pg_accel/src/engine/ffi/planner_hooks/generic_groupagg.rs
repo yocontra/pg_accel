@@ -16,10 +16,10 @@ use super::shape::{
 use super::{PlannerSubstageGuard, add_gpu_path_with_resident_proof, rel_rows_estimate};
 use crate::engine::cost::{self, PgCost, Rows, TypedCostModel};
 use crate::engine::executor::agg::{
-    dense_descriptor_memory_requirements, descriptor_program_clone_bytes,
+    DenseExecutionDecision, dense_descriptor_memory_requirements, descriptor_program_clone_bytes,
     estimate_descriptor_artifact_bytes_upper_bound, is_weighted_global_count_descriptor,
     numeric_descriptor_memory_requirements, planned_descriptor_kernel_mode,
-    scalar_metadata_peak_bytes, validate_normal_descriptor_capability,
+    scalar_metadata_peak_bytes, select_dense_execution, validate_normal_descriptor_capability,
     validate_normal_spatial_candidate_capability,
 };
 use crate::engine::ffi::custom_scan;
@@ -301,13 +301,31 @@ fn apply_exact_residency(
         estimates,
         policy,
         model,
-        |shape, estimates, model| {
-            scalar_planning_memory_with(
+        |shape, estimates, model, headroom| {
+            let mut decision = None;
+            let bytes = scalar_planning_memory_with(
                 shape,
                 estimates,
                 model,
-                dense_descriptor_memory_requirements,
-            )
+                |spec, nullable, groups, rows, max_chunk, one_shot| {
+                    if shape.supports_budget_selected_dense() {
+                        decision = select_dense_execution(
+                            spec, nullable, groups, rows, max_chunk, one_shot, headroom,
+                        )?;
+                        if let Some(selected) = decision {
+                            return Ok(selected.memory);
+                        }
+                        // Keep the existing complete budget-decline evidence
+                        // when no legal candidate fits. This is not dispatch or
+                        // fallback; the default requirement necessarily exceeds
+                        // the same headroom (including metadata below).
+                    }
+                    dense_descriptor_memory_requirements(
+                        spec, nullable, groups, rows, max_chunk, one_shot,
+                    )
+                },
+            )?;
+            Ok((bytes, decision))
         },
     )
 }
@@ -321,7 +339,8 @@ fn apply_exact_residency_with_scalar_memory(
         &ShapePlan,
         &[ResidentLoadEstimate],
         &TypedCostModel,
-    ) -> Result<u64, AdmissionDecline>,
+        u64,
+    ) -> Result<(u64, Option<DenseExecutionDecision>), AdmissionDecline>,
 ) -> Result<(), AdmissionDecline> {
     for estimate in estimates {
         let relation_oid = u32::from(estimate.relid);
@@ -401,7 +420,15 @@ fn apply_exact_residency_with_scalar_memory(
             )
             .ok_or(AdmissionDecline::ResidencyBytesOverflow)?;
     let numeric_resources = numeric_planning_resources(shape, estimates, model)?;
-    let scalar_execution_bytes = scalar_memory(shape, estimates, model)?;
+    let owner_bytes = policy
+        .budget_snapshot
+        .projected_final_bytes(total_required_bytes, derived_artifact_bytes)
+        .ok_or(AdmissionDecline::ResidencyBytesOverflow)?;
+    // An already impossible fixed base still follows the exact decline path
+    // below. It does not receive fake headroom through unsigned underflow.
+    let headroom = policy.budget_bytes.saturating_sub(owner_bytes);
+    let (scalar_execution_bytes, dense_decision) =
+        scalar_memory(shape, estimates, model, headroom)?;
     let prospective_execution_bytes = numeric_resources
         .as_ref()
         .map_or(0, |resources| resources.bytes)
@@ -411,10 +438,8 @@ fn apply_exact_residency_with_scalar_memory(
         )
         .and_then(|bytes| bytes.checked_add(scalar_execution_bytes))
         .ok_or(AdmissionDecline::ResidencyBytesOverflow)?;
-    let projected_final_bytes = policy
-        .budget_snapshot
-        .projected_final_bytes(total_required_bytes, derived_artifact_bytes)
-        .and_then(|bytes| bytes.checked_add(prospective_execution_bytes))
+    let projected_final_bytes = owner_bytes
+        .checked_add(prospective_execution_bytes)
         .ok_or(AdmissionDecline::ResidencyBytesOverflow)?;
     if projected_final_bytes > policy.budget_bytes {
         return Err(AdmissionDecline::ResidencyBudgetExceeded {
@@ -509,6 +534,11 @@ fn apply_exact_residency_with_scalar_memory(
         shape
             .cost
             .replace_additional_aggregate_launches(resources.launches);
+    } else if let Some(decision) = dense_decision {
+        shape
+            .cost
+            .replace_selected_dense_lifecycle_calls(decision.calls)
+            .ok_or(AdmissionDecline::ResidencyBytesOverflow)?;
     } else if let Some(calls) = planned_dense_lifecycle_calls(shape, lifecycle_fact_rows, model) {
         let additional_calls = calls.saturating_sub(1);
         shape
@@ -4215,6 +4245,39 @@ mod tests {
     }
 
     #[test]
+    fn budget_selected_dense_calls_replace_old_one_shot_cost_without_double_charging_owners() {
+        let mut shape = count_shape();
+        let rows = 2051;
+        shape.residency.relations[0].estimated_rows = rows;
+        let mut estimate = estimate(true, 4096);
+        estimate.resident_rows = Some(rows);
+        let mut model = model();
+        model.executor.gpu_reduce_max_chunk = Rows::new(2051);
+        model.executor.gpu_grouped_agg_one_shot_max_rows = Rows::new(2051);
+        let memory =
+            dense_descriptor_memory_requirements(&shape.spec, &[], 1, rows as usize, 1024, 1024)
+                .expect("one partial block bounded layout");
+        let budget = 4096 + u64::try_from(memory.total_bytes).expect("layout bytes");
+        apply_exact_residency(
+            &mut shape,
+            &[estimate],
+            AdmissionPolicy {
+                auto_load: false,
+                budget_bytes: budget,
+                budget_snapshot: budget_snapshot(0, 0, 0),
+            },
+            &model,
+        )
+        .expect("smaller chunk fits exact raw plus execution budget");
+        assert_eq!(
+            shape.cost.additional_aggregate_launches,
+            PgCost::new(3.0 * cost::GPU_LAUNCH_OVERHEAD),
+            "three accumulate calls and finalize, not previous one-shot cost"
+        );
+        assert_eq!(shape.residency.total_required_bytes, Some(4096));
+    }
+
+    #[test]
     fn scalar_execution_and_metadata_peak_participate_in_planner_budget_before_costing() {
         let mut shape = count_shape();
         shape.spec.measures[0].expression = MeasureExpr::Bytecode {
@@ -4238,7 +4301,7 @@ mod tests {
             &[estimate(true, 4096)],
             policy,
             &model(),
-            |_, _, _| Ok(8192),
+            |_, _, _, _| Ok((8192, None)),
         )
         .expect_err("native layout plus four scalar snapshots must fit too");
         assert!(matches!(
@@ -4263,7 +4326,7 @@ mod tests {
                 budget_snapshot: budget_snapshot(0, 0, 0),
             },
             &model(),
-            |_, _, _| Ok(8192),
+            |_, _, _, _| Ok((8192, None)),
         )
         .expect_err("opaque words cannot be budgeted as scalar programs");
         assert_eq!(decline.code(), "generic_scalar_estimate_unavailable");
@@ -4334,7 +4397,7 @@ mod tests {
                     budget_snapshot: snapshot,
                 },
                 &model,
-                |_, _, _| Ok(8192),
+                |_, _, _, _| Ok((8192, None)),
             );
             if fits {
                 result.expect("exact raw + active + foreign + native layout fit");

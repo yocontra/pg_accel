@@ -431,6 +431,263 @@ mod tests {
     }
 
     #[pg_test]
+    fn test_dense_budget_chunks_select_and_revalidate_at_default_cost() {
+        if !begin_gpu_test() {
+            return;
+        }
+        assert_eq!(
+            Spi::get_one::<bool>(
+                "SELECT count(*)=2 AND bool_and(setting=reset_val) FROM pg_settings \
+             WHERE name IN ('pg_accel.cost_multiplier','pg_accel.min_batch_size')"
+            )
+            .expect("default admission settings"),
+            Some(true)
+        );
+        crate::gpu::cleanup_grouped_allocation_pools();
+        Spi::run(
+            "SET LOCAL pg_accel.resident_memory_budget_mb=256; \
+            CREATE UNLOGGED TABLE phase2_budget_chunks AS \
+            SELECT i id, CASE WHEN i%97=0 THEN NULL ELSE i%5 END g, \
+            CASE WHEN i%101=0 THEN NULL ELSE date '2026-01-01'+i%7 END h, \
+            (CASE WHEN i%103=0 THEN NULL ELSE 'r-'||i%3 END) COLLATE \"C\" k, \
+            CASE WHEN i%11=0 THEN NULL ELSE (i%10001-5000)::int4 END v, \
+            CASE WHEN i%13=0 THEN NULL ELSE (i%7919-3959)::int4 END w, \
+            CASE WHEN i%17=0 THEN NULL ELSE (i%60001-30000)::int2 END qty, \
+            CASE WHEN i%29=0 THEN NULL ELSE i%2=0 END b \
+            FROM generate_series(1,1000017) s(i); ANALYZE phase2_budget_chunks; \
+            SELECT pg_accel_pin('phase2_budget_chunks',ARRAY['id','g','h','k','v','w','qty','b']); \
+            SET LOCAL pg_accel.resident_memory_budget_mb=64",
+        )
+        .expect("unchanged motivating SQL121 data and pinned columns");
+        let table = "phase2_budget_chunks";
+        let original = resident_status(table);
+        assert!(original.pinned);
+        assert!(original.raw_bytes > 32 * 1024 * 1024);
+        assert_eq!(original.derived_bytes, 0);
+        // Exact motivating SQL121 shape: qty SUM, v AVG and the independent
+        // WHERE g carrier require three value lanes, not one shared v lane.
+        let query = "SELECT g,h,k,sum(qty) qty_sum,avg(v) a,count(*) n \
+            FROM phase2_budget_chunks WHERE g IN (0,2) GROUP BY g,h,k ORDER BY g,h,k";
+        Spi::run("SET LOCAL pg_accel.enabled=off").expect("native reference");
+        let native = result_rows(query);
+        Spi::run("SET LOCAL pg_accel.enabled=on").expect("normal admission");
+        assert_descriptor_plan(&explain_text(query));
+        let before = kernel_executions();
+        #[cfg(feature = "pg_test")]
+        let calls_before = crate::engine::executor::agg::dense_dispatch_test_completed_calls();
+        assert_eq!(result_rows(query), native);
+        assert!(
+            kernel_executions() > before,
+            "64 MiB must actually dispatch"
+        );
+        let loaded = resident_status(table);
+        assert_eq!(loaded.raw_bytes, original.raw_bytes);
+        assert_eq!(loaded.generation, original.generation);
+        assert!(loaded.derived_bytes > 0);
+        #[cfg(feature = "pg_test")]
+        {
+            let selected = crate::engine::executor::agg::test_last_dense_execution_decision()
+                .expect("actual validated budget-selected lifecycle");
+            assert!(selected.chunk_rows > 0);
+            assert!(selected.chunk_rows < 1_000_017);
+            assert_eq!(
+                selected.calls,
+                1_000_017_u64.div_ceil(selected.chunk_rows as u64) + 1
+            );
+            assert_eq!(
+                selected.calls,
+                u64::try_from(
+                    crate::engine::executor::agg::dense_dispatch_test_completed_calls()
+                        - calls_before
+                )
+                .expect("same-attempt completed lifecycle calls")
+            );
+            assert_eq!(
+                crate::gpu::grouped_workspace_pool_snapshot().retained_bytes,
+                selected.memory.workspace_bytes,
+                "fresh actual session workspace agrees with native quote"
+            );
+            assert_eq!(
+                crate::gpu::grouped_output_pool_snapshot().retained_bytes,
+                selected.memory.output_bytes,
+                "fresh actual output agrees with native quote"
+            );
+            assert!(
+                u64::try_from(loaded.raw_bytes + loaded.derived_bytes).expect("fixed owners")
+                    + selected.peak_bytes
+                    <= 64 * 1024 * 1024
+            );
+            pgrx::notice!(
+                "dense budget selected chunk={} calls={} peak={} raw={} derived={}",
+                selected.chunk_rows,
+                selected.calls,
+                selected.peak_bytes,
+                loaded.raw_bytes,
+                loaded.derived_bytes
+            );
+        }
+        // A prepared plan is not a memory reservation. Both budgets use the
+        // same supported SQL, and each attempt computes a current decision.
+        Spi::run(&format!(
+            "SET LOCAL plan_cache_mode=force_generic_plan; \
+            PREPARE phase2_budget_prepared AS {query}"
+        ))
+        .expect("prepared target");
+        for budget in [128, 64] {
+            Spi::run(&format!(
+                "SET LOCAL pg_accel.resident_memory_budget_mb={budget}"
+            ))
+            .expect("new execution budget");
+            let before = kernel_executions();
+            #[cfg(feature = "pg_test")]
+            let calls_before = crate::engine::executor::agg::dense_dispatch_test_completed_calls();
+            Spi::run("CREATE TEMP TABLE phase2_budget_actual AS EXECUTE phase2_budget_prepared")
+                .expect("prepared budget revalidation");
+            assert!(kernel_executions() > before);
+            #[cfg(feature = "pg_test")]
+            {
+                let selected = crate::engine::executor::agg::test_last_dense_execution_decision()
+                    .expect("current prepared attempt decision");
+                let maximum =
+                    crate::engine::executor::agg::test_last_dense_unconstrained_decision()
+                        .expect("exact current native device/partial cap oracle");
+                let current = resident_status(table);
+                let fixed = u64::try_from(current.raw_bytes + current.derived_bytes)
+                    .expect("current fixed owners");
+                assert!(fixed + selected.peak_bytes <= budget * 1024 * 1024);
+                // Small supported devices can already fit their full cap at
+                // both budgets. Equality is allowed only when the exact native
+                // maximum fits; otherwise this fixture must actually shrink.
+                if fixed + maximum.peak_bytes <= budget * 1024 * 1024 {
+                    assert_eq!(
+                        selected, maximum,
+                        "do not reuse a stale smaller chunk at a larger budget"
+                    );
+                } else {
+                    assert!(
+                        selected.chunk_rows < maximum.chunk_rows,
+                        "current budget requires a smaller-than-device-cap chunk"
+                    );
+                }
+                assert_eq!(
+                    selected.calls,
+                    u64::try_from(
+                        crate::engine::executor::agg::dense_dispatch_test_completed_calls()
+                            - calls_before
+                    )
+                    .expect("prepared same-attempt completed calls")
+                );
+                pgrx::notice!(
+                    "prepared dense budget={} chunk={} calls={} peak={} native_cap_chunk={} native_cap_peak={}",
+                    budget,
+                    selected.chunk_rows,
+                    selected.calls,
+                    selected.peak_bytes,
+                    maximum.chunk_rows,
+                    maximum.peak_bytes,
+                );
+            }
+            assert_eq!(
+                result_rows("SELECT * FROM phase2_budget_actual ORDER BY g,h,k"),
+                native
+            );
+            Spi::run("DROP TABLE phase2_budget_actual").expect("drop prepared parity result");
+        }
+        Spi::run("DEALLOCATE phase2_budget_prepared").expect("release prepared target");
+        // Changing shape needs a new three-key artifact plus Boolean mask.
+        // Construction runs before execution selection and must recover idle
+        // pools from the previous shape without touching the pinned raw owner.
+        let where_b = "SELECT g,h,k,count(*) n,sum(v) s,avg(v) a,count(v) c \
+            FROM phase2_budget_chunks WHERE b GROUP BY g,h,k ORDER BY g,h,k";
+        Spi::run("SET LOCAL pg_accel.enabled=off").expect("native second shape");
+        let where_b_native = result_rows(where_b);
+        Spi::run("SET LOCAL pg_accel.enabled=on").expect("normal second shape admission");
+        let idle_before = crate::gpu::grouped_agg::idle_grouped_execution_bytes()
+            .expect("exact previous-shape idle charge");
+        let new_artifact_bytes = 1_000_017_u64 * (3 * 4 + 1);
+        let raw = u64::try_from(original.raw_bytes).expect("pinned raw bytes");
+        let budget = 64 * 1024 * 1024;
+        assert!(raw + new_artifact_bytes < budget);
+        let requires_idle_release = raw + new_artifact_bytes + idle_before > budget;
+        assert_descriptor_plan(&explain_text(where_b));
+        let derived_before = resident_status(table).derived_bytes;
+        let before = kernel_executions();
+        assert_eq!(result_rows(where_b), where_b_native);
+        let construction_policy = crate::engine::stats::read_last_artifact_policy()
+            .expect("actual second-shape ownership policy");
+        #[cfg(feature = "pg_test")]
+        let second_selected = crate::engine::executor::agg::test_last_dense_execution_decision()
+            .expect("same-attempt second-shape selected decision");
+        assert!(kernel_executions() > before, "second shape must dispatch");
+        let after_build = resident_status(table);
+        assert_eq!(after_build.raw_bytes, original.raw_bytes);
+        assert_eq!(after_build.generation, original.generation);
+        assert_eq!(after_build.column_count, original.column_count);
+        assert!(after_build.pinned);
+        match construction_policy {
+            "cached_reusable" => {
+                assert!(
+                    u64::try_from(after_build.derived_bytes).expect("derived")
+                        >= new_artifact_bytes
+                );
+                if requires_idle_release {
+                    assert_eq!(after_build.derived_bytes as u64, new_artifact_bytes);
+                }
+            }
+            "ephemeral_fused" => {
+                assert!(after_build.derived_bytes <= derived_before);
+                if requires_idle_release {
+                    assert_eq!(
+                        after_build.derived_bytes, 0,
+                        "old sole cached artifact was evicted"
+                    );
+                }
+            }
+            other => panic!("unexpected second-shape ownership policy: {other}"),
+        }
+        #[cfg(feature = "pg_test")]
+        assert!(
+            raw + new_artifact_bytes + second_selected.peak_bytes <= budget,
+            "include the live artifact even when its ephemeral owner has since dropped"
+        );
+        let idle_after = crate::gpu::grouped_agg::idle_grouped_execution_bytes()
+            .expect("second-shape idle charge");
+        assert!(u64::try_from(resident_live_bytes()).expect("live bytes") <= budget);
+        if requires_idle_release {
+            assert!(idle_after <= budget - raw - new_artifact_bytes);
+            assert!(idle_after < idle_before);
+        }
+        pgrx::notice!(
+            "construction pressure policy={} raw={} new_artifact={} retained_derived={} idle_before={} idle_after={} required_idle_release={}",
+            construction_policy,
+            raw,
+            new_artifact_bytes,
+            after_build.derived_bytes,
+            idle_before,
+            idle_after,
+            requires_idle_release
+        );
+        Spi::run("SET LOCAL pg_accel.resident_memory_budget_mb=32")
+            .expect("impossible fixed-owner budget");
+        let before = kernel_executions();
+        assert!(!explain_text(query).contains("custom scan (gpuaccelagg)"));
+        assert_eq!(
+            crate::engine::stats::read_last_planner_rejection_reason(),
+            Some("generic_residency_budget_exceeded")
+        );
+        assert_eq!(result_rows(query), native);
+        assert_eq!(
+            kernel_executions(),
+            before,
+            "impossible fixed owner must never dispatch"
+        );
+        let after = resident_status(table);
+        assert_eq!(after.raw_bytes, loaded.raw_bytes);
+        assert_eq!(after.generation, loaded.generation);
+        assert!(after.pinned);
+    }
+
+    #[pg_test]
     fn test_loaded_raw_quote_keeps_full_union_and_selected_type_metadata() {
         use crate::engine::residency::{
             SelectedRelation, estimate_selected_relation, revalidate_loaded_estimates,
@@ -1164,7 +1421,9 @@ mod tests {
 
         // Warm the exact artifact and native program before measuring call
         // counts, so the test covers bounded dispatch rather than JIT setup.
+        Spi::run("SET LOCAL pg_accel.enabled = off").expect("native cancellation baseline");
         let expected_rows = result_rows(&query);
+        Spi::run("SET LOCAL pg_accel.enabled = on").expect("restore GPU cancellation path");
         let expected_success_calls = usize::try_from(device_rows)
             .expect("fixture rows fit usize")
             .div_ceil(SUCCESS_CHUNK_ROWS)
@@ -1179,6 +1438,38 @@ mod tests {
             assert_eq!(after - before, expected_success_calls as i64);
         }
 
+        // Materialize a normally costed generic GPU plan before forcing the
+        // runtime-only one-row cancellation fixture. Planning that fixture as
+        // a fresh query correctly rejects its enormous lifecycle-call cost.
+        // All DDL precedes materialization so it cannot invalidate this plan.
+        Spi::run("CREATE TEMP TABLE phase2_cancel_receipt(code text, message text)")
+            .expect("cancellation error receipt");
+        Spi::run("SET LOCAL plan_cache_mode = force_generic_plan")
+            .expect("materialize the cancellation generic plan");
+        Spi::run(&format!(
+            "PREPARE phase2_bounded_cancel_plan AS \
+             SELECT row_to_json(q)::text FROM ({query}) AS q"
+        ))
+        .expect("prepare normally costed cancellation query");
+        let warm_kernels_before = kernel_executions();
+        let prepared_rows = Spi::connect(|client| {
+            client
+                .select("EXECUTE phase2_bounded_cancel_plan", None, &[])
+                .expect("materialize normally costed GPU plan")
+                .map(|row| {
+                    row.get::<String>(1)
+                        .expect("prepared JSON row")
+                        .expect("prepared JSON row must not be NULL")
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(prepared_rows, expected_rows);
+        assert!(kernel_executions() > warm_kernels_before);
+        {
+            let _fixture = DenseDispatchTestGuard::new(1, 1, CANCEL_AFTER_CALLS);
+            assert_descriptor_plan(&explain_text("EXECUTE phase2_bounded_cancel_plan"));
+        }
+
         let live_before_cancel = resident_live_bytes();
         let pools_before_cancel = retained_pool_bytes();
         let non_pool_baseline = live_before_cancel - pools_before_cancel;
@@ -1187,8 +1478,6 @@ mod tests {
             .expect("reset counters before cancellation attempt");
         let panic_artifact = crate::engine::panic_hook::PanicLogTestArtifact::fresh()
             .expect("create a test-unique panic artifact");
-        Spi::run("CREATE TEMP TABLE phase2_cancel_receipt(code text, message text)")
-            .expect("cancellation error receipt");
         let eager_before_attempts = crate::engine::ffi::custom_scan::test_scan_fetch_counts().2;
         for attempt_index in 0..CANCEL_ATTEMPTS {
             let cleanup_before = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
@@ -1202,16 +1491,23 @@ mod tests {
                 // A real PostgreSQL exception subtransaction releases SPI
                 // snapshots on ERROR. Rust catch_unwind alone cannot do so.
                 // OTHERS does not catch query_canceled; match it explicitly.
-                Spi::run(&format!(
+                Spi::run(
                     "DO $cancel$ BEGIN \
-                     PERFORM row_to_json(q)::text FROM ({query}) AS q; \
+                     EXECUTE 'EXECUTE phase2_bounded_cancel_plan'; \
                      RAISE EXCEPTION 'bounded cancellation unexpectedly completed'; \
                      EXCEPTION WHEN query_canceled THEN \
                      INSERT INTO phase2_cancel_receipt VALUES (SQLSTATE, SQLERRM); \
-                     END $cancel$"
-                ))
+                     END $cancel$",
+                )
                 .expect("catch only expected cancellation in a PostgreSQL subtransaction");
                 let kernels_after = kernel_executions();
+                assert_eq!(
+                    crate::engine::executor::agg::test_last_dense_execution_decision()
+                        .expect("cancelled prepared GPU attempt selected a runtime layout")
+                        .chunk_rows,
+                    1,
+                    "the normally planned query must execute the one-row interrupt fixture"
+                );
 
                 assert_eq!(
                     Spi::get_one::<String>(

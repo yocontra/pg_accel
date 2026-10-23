@@ -1,0 +1,88 @@
+--- .codex/scratch/dense-budget-chunks-20261022/integration-candidate6/pg_accel/src/tests/phase2_cache.rs	2026-10-22 21:36:40
++++ pg_accel/src/tests/phase2_cache.rs	2026-10-22 22:00:59
+@@ -1421,7 +1421,9 @@
+ 
+         // Warm the exact artifact and native program before measuring call
+         // counts, so the test covers bounded dispatch rather than JIT setup.
++        Spi::run("SET LOCAL pg_accel.enabled = off").expect("native cancellation baseline");
+         let expected_rows = result_rows(&query);
++        Spi::run("SET LOCAL pg_accel.enabled = on").expect("restore GPU cancellation path");
+         let expected_success_calls = usize::try_from(device_rows)
+             .expect("fixture rows fit usize")
+             .div_ceil(SUCCESS_CHUNK_ROWS)
+@@ -1436,6 +1438,38 @@
+             assert_eq!(after - before, expected_success_calls as i64);
+         }
+ 
++        // Materialize a normally costed generic GPU plan before forcing the
++        // runtime-only one-row cancellation fixture. Planning that fixture as
++        // a fresh query correctly rejects its enormous lifecycle-call cost.
++        // All DDL precedes materialization so it cannot invalidate this plan.
++        Spi::run("CREATE TEMP TABLE phase2_cancel_receipt(code text, message text)")
++            .expect("cancellation error receipt");
++        Spi::run("SET LOCAL plan_cache_mode = force_generic_plan")
++            .expect("materialize the cancellation generic plan");
++        Spi::run(&format!(
++            "PREPARE phase2_bounded_cancel_plan AS \
++             SELECT row_to_json(q)::text FROM ({query}) AS q"
++        ))
++        .expect("prepare normally costed cancellation query");
++        let warm_kernels_before = kernel_executions();
++        let prepared_rows = Spi::connect(|client| {
++            client
++                .select("EXECUTE phase2_bounded_cancel_plan", None, &[])
++                .expect("materialize normally costed GPU plan")
++                .map(|row| {
++                    row.get::<String>(1)
++                        .expect("prepared JSON row")
++                        .expect("prepared JSON row must not be NULL")
++                })
++                .collect::<Vec<_>>()
++        });
++        assert_eq!(prepared_rows, expected_rows);
++        assert!(kernel_executions() > warm_kernels_before);
++        {
++            let _fixture = DenseDispatchTestGuard::new(1, 1, CANCEL_AFTER_CALLS);
++            assert_descriptor_plan(&explain_text("EXECUTE phase2_bounded_cancel_plan"));
++        }
++
+         let live_before_cancel = resident_live_bytes();
+         let pools_before_cancel = retained_pool_bytes();
+         let non_pool_baseline = live_before_cancel - pools_before_cancel;
+@@ -1444,8 +1478,6 @@
+             .expect("reset counters before cancellation attempt");
+         let panic_artifact = crate::engine::panic_hook::PanicLogTestArtifact::fresh()
+             .expect("create a test-unique panic artifact");
+-        Spi::run("CREATE TEMP TABLE phase2_cancel_receipt(code text, message text)")
+-            .expect("cancellation error receipt");
+         let eager_before_attempts = crate::engine::ffi::custom_scan::test_scan_fetch_counts().2;
+         for attempt_index in 0..CANCEL_ATTEMPTS {
+             let cleanup_before = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
+@@ -1459,16 +1491,23 @@
+                 // A real PostgreSQL exception subtransaction releases SPI
+                 // snapshots on ERROR. Rust catch_unwind alone cannot do so.
+                 // OTHERS does not catch query_canceled; match it explicitly.
+-                Spi::run(&format!(
++                Spi::run(
+                     "DO $cancel$ BEGIN \
+-                     PERFORM row_to_json(q)::text FROM ({query}) AS q; \
++                     EXECUTE 'EXECUTE phase2_bounded_cancel_plan'; \
+                      RAISE EXCEPTION 'bounded cancellation unexpectedly completed'; \
+                      EXCEPTION WHEN query_canceled THEN \
+                      INSERT INTO phase2_cancel_receipt VALUES (SQLSTATE, SQLERRM); \
+-                     END $cancel$"
+-                ))
++                     END $cancel$",
++                )
+                 .expect("catch only expected cancellation in a PostgreSQL subtransaction");
+                 let kernels_after = kernel_executions();
++                assert_eq!(
++                    crate::engine::executor::agg::test_last_dense_execution_decision()
++                        .expect("cancelled prepared GPU attempt selected a runtime layout")
++                        .chunk_rows,
++                    1,
++                    "the normally planned query must execute the one-row interrupt fixture"
++                );
+ 
+                 assert_eq!(
+                     Spi::get_one::<String>(

@@ -1,0 +1,2 @@
+FIXED_OWNER_BOUND a_foreign_resident=9000153 b_pinned_raw=9000153 fixed=18000306 budget=17825792 standalone_b_live=13990335
+SHARED_LEDGER_OK b_live=13990335 b_idle=990114 local_budget=14680064 foreign_owned=9039907 foreign_active=9225 foreign_budget=17825792 final=0

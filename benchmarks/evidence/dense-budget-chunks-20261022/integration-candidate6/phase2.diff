@@ -1,0 +1,63 @@
+--- .codex/scratch/dense-budget-chunks-20261022/integration-candidate5/pg_accel/src/tests/phase2_cache.rs	2026-10-22 21:32:08
++++ pg_accel/src/tests/phase2_cache.rs	2026-10-22 21:36:40
+@@ -610,15 +610,46 @@
+         assert!(raw + new_artifact_bytes < budget);
+         let requires_idle_release = raw + new_artifact_bytes + idle_before > budget;
+         assert_descriptor_plan(&explain_text(where_b));
++        let derived_before = resident_status(table).derived_bytes;
+         let before = kernel_executions();
+         assert_eq!(result_rows(where_b), where_b_native);
++        let construction_policy = crate::engine::stats::read_last_artifact_policy()
++            .expect("actual second-shape ownership policy");
++        #[cfg(feature = "pg_test")]
++        let second_selected = crate::engine::executor::agg::test_last_dense_execution_decision()
++            .expect("same-attempt second-shape selected decision");
+         assert!(kernel_executions() > before, "second shape must dispatch");
+         let after_build = resident_status(table);
+         assert_eq!(after_build.raw_bytes, original.raw_bytes);
+         assert_eq!(after_build.generation, original.generation);
+         assert_eq!(after_build.column_count, original.column_count);
+         assert!(after_build.pinned);
+-        assert!(u64::try_from(after_build.derived_bytes).expect("derived") >= new_artifact_bytes);
++        match construction_policy {
++            "cached_reusable" => {
++                assert!(
++                    u64::try_from(after_build.derived_bytes).expect("derived")
++                        >= new_artifact_bytes
++                );
++                if requires_idle_release {
++                    assert_eq!(after_build.derived_bytes as u64, new_artifact_bytes);
++                }
++            }
++            "ephemeral_fused" => {
++                assert!(after_build.derived_bytes <= derived_before);
++                if requires_idle_release {
++                    assert_eq!(
++                        after_build.derived_bytes, 0,
++                        "old sole cached artifact was evicted"
++                    );
++                }
++            }
++            other => panic!("unexpected second-shape ownership policy: {other}"),
++        }
++        #[cfg(feature = "pg_test")]
++        assert!(
++            raw + new_artifact_bytes + second_selected.peak_bytes <= budget,
++            "include the live artifact even when its ephemeral owner has since dropped"
++        );
+         let idle_after = crate::gpu::grouped_agg::idle_grouped_execution_bytes()
+             .expect("second-shape idle charge");
+         assert!(u64::try_from(resident_live_bytes()).expect("live bytes") <= budget);
+@@ -627,9 +658,11 @@
+             assert!(idle_after < idle_before);
+         }
+         pgrx::notice!(
+-            "construction pressure raw={} new_artifact={} idle_before={} idle_after={} required_idle_release={}",
++            "construction pressure policy={} raw={} new_artifact={} retained_derived={} idle_before={} idle_after={} required_idle_release={}",
++            construction_policy,
+             raw,
+             new_artifact_bytes,
++            after_build.derived_bytes,
+             idle_before,
+             idle_after,
+             requires_idle_release
