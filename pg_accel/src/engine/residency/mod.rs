@@ -51,12 +51,12 @@ pub use store::{
     ensure_staged_device_derived_artifact, ensure_staged_device_derived_artifact_with_report,
     ensure_staged_device_transform_artifact, ensure_staged_device_transform_artifact_with_report,
     estimate_selected_relation, prepare_resident_geometry_exact_selection, probe_derived_artifact,
-    refill_resident_geometry_exact_selection, register_derived_artifact, resident_budget_snapshot,
-    resident_geometry_exact_selection_words, resident_geometry_exact_snapshot_words,
-    resident_live_bytes, resident_selected_relation_rows, revalidate_loaded_estimates,
-    revalidate_planner_dependencies, shape_digest, snapshot_resident_geometry_exact,
-    with_derived_artifact, with_derived_artifact_inputs, with_ephemeral_artifact_inputs,
-    with_resident_column, with_resolved_artifact,
+    reclaim_execution_memory, refill_resident_geometry_exact_selection, register_derived_artifact,
+    resident_budget_snapshot, resident_geometry_exact_selection_words,
+    resident_geometry_exact_snapshot_words, resident_live_bytes, resident_selected_relation_rows,
+    revalidate_loaded_estimates, revalidate_planner_dependencies, shape_digest,
+    snapshot_resident_geometry_exact, with_derived_artifact, with_derived_artifact_inputs,
+    with_ephemeral_artifact_inputs, with_resident_column, with_resolved_artifact,
 };
 pub use store::{ResidentPlannerDependency, resident_planner_dependency};
 pub use store::{

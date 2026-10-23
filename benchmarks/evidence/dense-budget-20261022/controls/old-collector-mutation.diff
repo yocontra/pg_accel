@@ -1,0 +1,11 @@
+--- .codex/scratch/hosted-budget-20261018/candidate5/descriptor.rs	2026-10-18 09:42:27
++++ .codex/scratch/hosted-budget-20261018/old-collector-descriptor.rs	2026-10-18 09:42:57
+@@ -6417,7 +6417,7 @@
+         .iter()
+         .zip(base.domains.iter())
+     {
+-        if domain.null_code.is_some() {
++        if domain.null_code.is_some() && false {
+             let GroupKeySource::FactColumn(column) = key.source else {
+                 return Err("dense layout forecast requires fact dictionary keys".into());
+             };

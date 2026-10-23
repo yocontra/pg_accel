@@ -431,6 +431,270 @@ mod tests {
     }
 
     #[pg_test]
+    fn test_loaded_raw_quote_keeps_full_union_and_selected_type_metadata() {
+        use crate::engine::residency::{
+            SelectedRelation, estimate_selected_relation, revalidate_loaded_estimates,
+        };
+        if !begin_gpu_test() {
+            return;
+        }
+        let table = "phase2_raw_quote_t";
+        // CTAS deliberately leaves v catalog-nullable even though its values
+        // contain no NULLs. Other columns really do need NULL sidecars.
+        Spi::run(&format!(
+            "CREATE UNLOGGED TABLE {table} AS SELECT \
+             CASE WHEN i%13=0 THEN NULL ELSE i::int4 END g, \
+             (i%17)::int4 v, \
+             CASE WHEN i%11=0 THEN NULL ELSE i::numeric/100 END n, \
+             i::float8 h, CASE WHEN i%7=0 THEN NULL ELSE i::int4 END extra \
+             FROM generate_series(1,64) i; ANALYZE {table}"
+        ))
+        .expect("mixed typed raw fixture");
+        let relid = pg_sys::Oid::from(u32::try_from(table_oid(table)).expect("table OID fits u32"));
+        let request = SelectedRelation {
+            relid,
+            columns: vec![1, 2],
+        };
+        let cold = estimate_selected_relation(&request).expect("cold quote");
+        assert!(!cold.loaded);
+        assert_eq!(cold.estimated_bytes, 64 * (4 + 1 + 4 + 1));
+        assert_eq!(cold.resident_required_columns, None);
+        Spi::run(&format!("SELECT pg_accel_pin('{table}',ARRAY['g'])")).expect("partial pin");
+        let partial = estimate_selected_relation(&request).expect("partial quote");
+        assert!(!partial.loaded);
+        assert_eq!(partial.estimated_bytes, cold.estimated_bytes);
+        assert_eq!(partial.resident_required_columns, None);
+        Spi::run(&format!(
+            "SELECT pg_accel_pin('{table}',ARRAY['g','v','n','h','extra'])"
+        ))
+        .expect("complete mixed pin");
+        let raw = u64::try_from(resident_status(table).raw_bytes).expect("positive raw bytes");
+        let union = vec![
+            (1, pg_sys::INT4OID),
+            (2, pg_sys::INT4OID),
+            (3, pg_sys::NUMERICOID),
+            (4, pg_sys::FLOAT8OID),
+            (5, pg_sys::INT4OID),
+        ];
+        // These are shared raw-evidence contracts for dense, scalar, NUMERIC
+        // and hash-key consumers, not assertions that every shape dispatches.
+        for (family, columns, nullable, numeric_count) in [
+            ("dense", vec![1, 2], vec![1], 0),
+            ("scalar", vec![2], vec![], 0),
+            ("numeric", vec![1, 3], vec![1, 3], 1),
+            ("hash", vec![4], vec![], 0),
+        ] {
+            let request = SelectedRelation {
+                relid,
+                columns: columns.clone(),
+            };
+            let estimate = estimate_selected_relation(&request).expect("loaded quote");
+            assert!(estimate.loaded, "{family}");
+            assert_eq!(
+                estimate.estimated_bytes, raw,
+                "{family}: complete retained owner"
+            );
+            assert_eq!(
+                estimate.resident_required_columns.as_ref(),
+                Some(&union),
+                "{family}"
+            );
+            assert_eq!(
+                estimate.resident_selected_columns,
+                Some(columns),
+                "{family}"
+            );
+            assert_eq!(
+                estimate.resident_nullable_columns,
+                Some(nullable),
+                "{family}"
+            );
+            assert_eq!(
+                estimate
+                    .resident_numeric_columns
+                    .as_ref()
+                    .expect("selected NUMERIC metadata")
+                    .len(),
+                numeric_count,
+                "{family}"
+            );
+            assert!(
+                revalidate_loaded_estimates(std::slice::from_ref(&request), &[estimate]),
+                "{family}"
+            );
+        }
+    }
+
+    #[pg_test]
+    fn test_loaded_scalar_coalesce_aggregate_selects_at_default_admission() {
+        use crate::engine::residency::{SelectedRelation, estimate_selected_relation};
+        if !begin_gpu_test() {
+            return;
+        }
+        assert_eq!(
+            Spi::get_one::<bool>(
+                "SELECT count(*)=2 AND bool_and(setting=reset_val) FROM pg_settings \
+                 WHERE name IN ('pg_accel.cost_multiplier','pg_accel.min_batch_size')"
+            )
+            .expect("default admission settings"),
+            Some(true)
+        );
+        let table = "phase2_scalar_default_t";
+        let rows = device_fixture_rows().max(1_000_017);
+        create_int4_fixture(table, rows, 16, 0);
+        Spi::run(&format!(
+            "ALTER TABLE {table} ALTER COLUMN v DROP NOT NULL; \
+             UPDATE {table} SET v=NULL WHERE g=3; ANALYZE {table}"
+        ))
+        .expect("real nullable scalar input");
+        pin_int4_fixture(table, rows);
+        let request = SelectedRelation {
+            relid: pg_sys::Oid::from(u32::try_from(table_oid(table)).expect("table OID fits u32")),
+            columns: vec![1, 2],
+        };
+        let raw = u64::try_from(resident_status(table).raw_bytes).expect("positive raw charge");
+        let quote = estimate_selected_relation(&request).expect("loaded scalar raw quote");
+        assert!(quote.loaded);
+        assert_eq!(quote.estimated_bytes, raw);
+        assert_eq!(quote.resident_nullable_columns, Some(vec![2]));
+        let query =
+            format!("SELECT g,sum(COALESCE(v,7)) s,count(*) n FROM {table} GROUP BY g ORDER BY g");
+        Spi::run("SET LOCAL pg_accel.enabled=off").expect("native scalar baseline");
+        let native = result_rows(&query);
+        Spi::run("SET LOCAL pg_accel.enabled=on").expect("default scalar admission");
+        let plan = explain_text(&query);
+        assert_descriptor_plan(&plan);
+        let aggregates = plan
+            .lines()
+            .find(|line| line.contains("gpu descriptor aggregates:"))
+            .expect("aggregate descriptor field");
+        assert!(
+            aggregates.contains("bytecode(inputs=1, words="),
+            "{aggregates}"
+        );
+        assert!(
+            aggregates.contains("result_type=23) -> value.sum"),
+            "{aggregates}"
+        );
+        assert!(
+            plan.contains("gpu physical kernel mode: parallel_dense_integer"),
+            "{plan}"
+        );
+        let mode_calls = || {
+            Spi::get_one::<i64>(
+            "SELECT calls FROM pg_accel_grouped_kernel_mode_stats() WHERE mode='parallel_dense_integer'"
+        ).expect("dense integer mode counter").unwrap_or(0)
+        };
+        let mode_before = mode_calls();
+        let kernels_before = kernel_executions();
+        assert_eq!(result_rows(&query), native);
+        assert!(
+            kernel_executions() > kernels_before,
+            "scalar aggregate must dispatch"
+        );
+        assert!(
+            mode_calls() > mode_before,
+            "scalar aggregate must execute the selected native mode"
+        );
+        assert_eq!(
+            resident_status(table).raw_bytes,
+            i64::try_from(raw).expect("SQL raw charge")
+        );
+        assert_eq!(
+            estimate_selected_relation(&request)
+                .expect("warm raw quote")
+                .estimated_bytes,
+            raw
+        );
+    }
+
+    #[pg_test]
+    fn test_dense_execution_reclaims_stale_artifact_at_exact_pressure() {
+        use crate::engine::residency::ExecutionMemoryCharge;
+        if !begin_gpu_test() {
+            return;
+        }
+        let table = "phase2_dense_pressure_t";
+        let rows = device_fixture_rows().max(1_000_017);
+        create_int4_fixture(table, rows, 16, 0);
+        Spi::run(&format!(
+            "ALTER TABLE {table} ALTER COLUMN g DROP NOT NULL; UPDATE {table} SET g=NULL WHERE v%97=0; ANALYZE {table}"
+        ))
+        .expect("independent nullable grouping key");
+        pin_int4_fixture(table, rows);
+        Spi::run("SET LOCAL pg_accel.resident_memory_budget_mb=64")
+            .expect("bounded resident budget");
+        let stale = format!("SELECT g,sum(v) s,count(*) n FROM {table} WHERE v>0 GROUP BY g");
+        let target = format!("SELECT g,count(*) n FROM {table} GROUP BY g ORDER BY g NULLS LAST");
+        // No cost overrides: both queries must be selected at normal admission.
+        assert_descriptor_plan(&explain_text(&stale));
+        let before = kernel_executions();
+        result_rows(&stale);
+        assert!(kernel_executions() > before);
+        let stale_status = resident_status(table);
+        let stale_keys = derived_artifact_identities(table);
+        assert_eq!(stale_keys.len(), 1);
+        crate::gpu::cleanup_grouped_allocation_pools();
+        Spi::run("SET LOCAL pg_accel.enabled=off").expect("native reference");
+        let native = result_rows(&target);
+        Spi::run("SET LOCAL pg_accel.enabled=on").expect("accelerated target");
+        assert_descriptor_plan(&explain_text(&target));
+        assert_eq!(result_rows(&target), native);
+        let status = resident_status(table);
+        let keys = derived_artifact_identities(table);
+        assert_eq!(keys.len(), 2);
+        let target_key = keys
+            .iter()
+            .find(|key| !stale_keys.contains(key))
+            .expect("target identity")
+            .clone();
+        let required = crate::gpu::grouped_agg::idle_grouped_execution_bytes()
+            .expect("exact target idle charges");
+        assert!(required > 0);
+        crate::gpu::cleanup_grouped_allocation_pools();
+        let unpooled = crate::engine::residency::resident_live_bytes();
+        let budget = crate::engine::gucs::resident_memory_budget_bytes();
+        let active_bytes = budget
+            .checked_sub(unpooled)
+            .and_then(|free| free.checked_sub(required))
+            .and_then(|free| free.checked_add(1))
+            .expect("fixture has recoverable room");
+        let active =
+            ExecutionMemoryCharge::reserve(active_bytes, budget).expect("active executor pressure");
+        let pressured = crate::engine::residency::resident_live_bytes();
+        assert_eq!(pressured + required, budget + 1);
+        assert_descriptor_plan(&explain_text(&target));
+        let before = kernel_executions();
+        assert_eq!(result_rows(&target), native);
+        assert!(kernel_executions() > before);
+        assert_eq!(derived_artifact_identities(table), [target_key]);
+        let after = resident_status(table);
+        assert_eq!(after.raw_bytes, status.raw_bytes);
+        assert_eq!(after.generation, status.generation);
+        assert!(after.pinned);
+        assert_eq!(
+            after.derived_bytes,
+            status.derived_bytes - stale_status.derived_bytes
+        );
+        assert_eq!(
+            crate::engine::residency::resident_live_bytes(),
+            pressured + required - stale_status.derived_bytes as u64
+        );
+        for _ in 0..2 {
+            let before = kernel_executions();
+            assert_eq!(result_rows(&target), native);
+            assert!(kernel_executions() > before);
+            assert_eq!(resident_status(table), after);
+        }
+        drop(active);
+        crate::gpu::cleanup_grouped_allocation_pools();
+        assert_eq!(
+            crate::engine::residency::resident_live_bytes(),
+            unpooled - stale_status.derived_bytes as u64
+        );
+    }
+
+    #[pg_test]
     fn test_residency_v2_dml_freshness_and_auto_reload() {
         if !begin_gpu_test() {
             return;
@@ -843,11 +1107,9 @@ mod tests {
                 "caught first-fetch error must release the prepared executor through query reset"
             );
             if callback_path {
-                let fetch_after = crate::engine::ffi::custom_scan::test_scan_fetch_counts();
                 assert!(fetch_after.1 > fetch_before.1);
                 assert_eq!(fetch_after.0, fetch_before.0);
             } else {
-                let fetch_after = crate::engine::ffi::custom_scan::test_scan_fetch_counts();
                 assert!(fetch_after.0 > fetch_before.0);
                 assert_eq!(fetch_after.1, fetch_before.1);
             }

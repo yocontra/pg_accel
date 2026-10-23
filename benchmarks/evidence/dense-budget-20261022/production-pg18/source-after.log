@@ -1,0 +1,9 @@
+pg_accel/src/engine/executor/agg/descriptor.rs: OK
+pg_accel/src/engine/executor/agg/mod.rs: OK
+pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs: OK
+pg_accel/src/engine/ffi/planner_hooks/shape/mod.rs: OK
+pg_accel/src/engine/residency/store.rs: OK
+pg_accel/src/engine/residency/mod.rs: OK
+pg_accel/src/gpu/grouped_agg.rs: OK
+pg_accel/src/tests/phase2_cache.rs: OK
+sql/tests/121_integer_where_aggregates.sql: OK

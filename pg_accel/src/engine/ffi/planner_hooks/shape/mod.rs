@@ -724,10 +724,7 @@ pub unsafe fn extract_shape(
         )
     }?;
     let mut shape = build_shape(input, model)?;
-    if shape.spec.measures.iter().any(|measure| {
-        measure.requires_numeric_accumulator()
-            || matches!(measure.expression, MeasureExpr::Bytecode { .. })
-    }) {
+    if needs_dense_key_estimate(&shape.spec, &shape.descriptor_resolution) {
         let rows = shape
             .residency
             .relations
@@ -736,12 +733,141 @@ pub unsafe fn extract_shape(
             .map_or(0, |relation| relation.estimated_rows);
         // SAFETY: root remains owned by this live planner invocation. The
         // function only obtains per-key PostgreSQL estimates, never device data.
-        // Scalar workspace forecasts need the same Cartesian dictionary-slot
-        // estimate as NUMERIC; a joint output-row estimate cannot replace it.
+        // Every qualified dense workspace forecast needs Cartesian dictionary
+        // slots; a joint output-row estimate cannot replace this product.
         shape.estimated_dense_key_cardinalities =
             unsafe { postgres::estimate_dense_key_cardinalities(root, rows) };
     }
     Ok(shape)
+}
+
+fn needs_dense_key_estimate(spec: &AggQuerySpec, resolution: &DescriptorResolution) -> bool {
+    // Preserve the existing decimal/scalar evidence contract independently of
+    // the newly covered fixed-width families.
+    if spec.measures.iter().any(|measure| {
+        measure.requires_numeric_accumulator()
+            || matches!(measure.expression, MeasureExpr::Bytecode { .. })
+    }) {
+        return true;
+    }
+    let hash_grouping = match resolution {
+        DescriptorResolution::BeginTimeArtifacts { grouping_mode, .. } => {
+            *grouping_mode == DescriptorGroupingMode::Hash
+        }
+        DescriptorResolution::Ready => spec
+            .group_keys
+            .iter()
+            .any(|key| key.encoding == GroupKeyEncoding::Hash),
+    };
+    spec.star_dims.is_empty()
+        && matches!(
+            crate::engine::executor::agg::planned_descriptor_kernel_mode(spec, hash_grouping),
+            crate::gpu::GroupedAggKernelMode::ParallelDenseInteger
+                | crate::gpu::GroupedAggKernelMode::ParallelDenseCount
+        )
+}
+
+#[cfg(test)]
+#[test]
+fn dense_key_estimate_trigger_preserves_families_and_actual_resolution() {
+    use crate::engine::spec::{
+        AggregateKind, AggregateSource, DimSpec, FilterSpec, GroupKeyRef, GroupKeySource,
+        JoinMultiplicity, MeasureSpec,
+    };
+    let column = ColumnRef {
+        relation_oid: 42,
+        attno: 1,
+        type_oid: 23,
+    };
+    let mut spec = AggQuerySpec {
+        fact_rel: 42,
+        group_keys: vec![],
+        star_dims: vec![],
+        having: None,
+        fact_filter: FilterSpec::None,
+        measures: vec![MeasureSpec {
+            expression: MeasureExpr::CountStar,
+            filter: FilterSpec::None,
+            outputs: vec![AggregateOutput {
+                source: AggregateSource::Value,
+                kind: AggregateKind::Count,
+            }],
+        }],
+    };
+    let dense = DescriptorResolution::BeginTimeArtifacts {
+        dictionary_keys: vec![],
+        derived_keys: vec![],
+        joins: vec![],
+        grouping_mode: DescriptorGroupingMode::DenseDictionary,
+        max_group_count: 1024,
+    };
+    let mut hash = dense.clone();
+    if let DescriptorResolution::BeginTimeArtifacts { grouping_mode, .. } = &mut hash {
+        *grouping_mode = DescriptorGroupingMode::Hash;
+    }
+    assert!(needs_dense_key_estimate(
+        &spec,
+        &DescriptorResolution::Ready
+    ));
+    spec.group_keys.push(GroupKeyRef {
+        source: GroupKeySource::FactColumn(column),
+        type_oid: 23,
+        collation_oid: 0,
+        encoding: GroupKeyEncoding::Hash,
+    });
+    assert!(
+        needs_dense_key_estimate(&spec, &dense),
+        "unresolved Hash encoding is a future dense dictionary"
+    );
+    assert!(!needs_dense_key_estimate(&spec, &hash));
+    assert!(!needs_dense_key_estimate(
+        &spec,
+        &DescriptorResolution::Ready
+    ));
+    spec.measures[0].expression = MeasureExpr::Column(column);
+    spec.measures[0].outputs[0].kind = AggregateKind::Sum;
+    assert!(needs_dense_key_estimate(&spec, &dense));
+    spec.measures[0].outputs[0].kind = AggregateKind::Avg;
+    assert!(needs_dense_key_estimate(&spec, &dense));
+    spec.star_dims.push(DimSpec {
+        relation_oid: 43,
+        fact_key: column,
+        dim_key: ColumnRef {
+            relation_oid: 43,
+            ..column
+        },
+        collation_oid: 0,
+        multiplicity: JoinMultiplicity::Unique,
+        filter: FilterSpec::None,
+    });
+    assert!(!needs_dense_key_estimate(&spec, &dense));
+    spec.star_dims.clear();
+    spec.measures[0].expression = MeasureExpr::Column(ColumnRef {
+        type_oid: 701,
+        ..column
+    });
+    spec.measures[0].outputs[0].kind = AggregateKind::Sum;
+    assert!(
+        !needs_dense_key_estimate(&spec, &dense),
+        "serial float SUM is not newly covered"
+    );
+    spec.measures[0].expression = MeasureExpr::Column(ColumnRef {
+        type_oid: 1700,
+        ..column
+    });
+    assert!(
+        needs_dense_key_estimate(&spec, &hash),
+        "existing NUMERIC trigger is unchanged"
+    );
+    spec.measures[0].expression = MeasureExpr::Bytecode {
+        inputs: vec![],
+        program: vec![],
+        result_type_oid: 23,
+    };
+    assert!(
+        needs_dense_key_estimate(&spec, &hash),
+        "existing scalar trigger is unchanged"
+    );
 }
 
 #[cfg(test)]

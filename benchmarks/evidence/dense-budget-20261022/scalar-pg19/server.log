@@ -1,0 +1,39 @@
+2026-10-22 19:43:13.175 MST [18106] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-22 19:43:13.176 MST [18106] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-22 19:43:13.180 MST [18106] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-22 19:43:13.180 MST [18106] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/hosted-budget-20261018/scalar-s19/.s.PGSQL.30419"
+2026-10-22 19:43:13.189 MST [18111] LOG:  database system was shut down at 2026-10-22 19:43:13 MST
+2026-10-22 19:43:13.191 MST [18106] LOG:  database system is ready to accept connections
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/hosted-budget-20261018/pg19-scalar-proof-candidate11/cache/apps/global/jit-cache/4939212832255122260.10714619014531049738.metalar.18126.2648585498376408140.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/hosted-budget-20261018/pg19-scalar-proof-candidate11/cache/apps/global/jit-cache/2457796378833377408.15291313301800751018.metalar.18126.15107439043081309138.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/hosted-budget-20261018/pg19-scalar-proof-candidate11/cache/apps/global/jit-cache/1568825256363117468.15291313301800751018.metalar.18126.12183964124653455650.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/hosted-budget-20261018/pg19-scalar-proof-candidate11/cache/apps/global/jit-cache/9987852344331157594.15291313301800751018.metalar.18126.3121019751679487879.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/hosted-budget-20261018/pg19-scalar-proof-candidate11/cache/apps/global/jit-cache/14690400167917884164.8744226197215643185.metalar.18126.8427878515233279331.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/hosted-budget-20261018/pg19-scalar-proof-candidate11/cache/apps/global/jit-cache/16881181002366429274.14882947525344919645.metalar.18126.14763085731003694731.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/hosted-budget-20261018/pg19-scalar-proof-candidate11/cache/apps/global/jit-cache/6229825781897181524.1364684166377355568.metalar.18126.2477736305035483863.tmp (kernels_added=1 skipped=0)
+2026-10-22 19:43:21.150 MST [18126] WARNING:  pg_accel: grouped aggregate accumulate chunk dispatch returned after 6550240us (warning threshold 5000ms); cancellation and statement_timeout are observed only between synchronous calls
+2026-10-22 19:43:21.150 MST [18126] CONTEXT:  SQL statement "SELECT row_to_json(q)::text FROM (SELECT g,sum(COALESCE(v,7)) s,count(*) n FROM phase2_scalar_default_t GROUP BY g ORDER BY g) AS q"
+	SQL statement "SELECT tests.t16_test_loaded_scalar_coalesce_aggregate_selects_at_default_ad()"
+	PL/pgSQL function inline_code_block line 16 at EXECUTE
+2026-10-22 19:43:21.278 MST [18106] LOG:  received fast shutdown request
+2026-10-22 19:43:21.278 MST [18106] LOG:  aborting any active transactions
+2026-10-22 19:43:21.279 MST [18106] LOG:  background worker "logical replication launcher" (PID 18115) exited with exit code 1
+2026-10-22 19:43:21.280 MST [18109] LOG:  shutting down
+2026-10-22 19:43:21.280 MST [18109] LOG:  checkpoint starting: shutdown fast
+2026-10-22 19:43:21.285 MST [18109] LOG:  checkpoint complete: shutdown fast: wrote 142 buffers (0.9%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.003 s, sync=0.003 s, total=0.006 s; sync files=52, longest=0.001 s, average=0.001 s; distance=948 kB, estimate=948 kB; lsn=0/0182FDF8, redo lsn=0/0182FDF8
+2026-10-22 19:43:21.290 MST [18106] LOG:  database system is shut down

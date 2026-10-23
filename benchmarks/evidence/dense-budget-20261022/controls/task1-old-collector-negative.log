@@ -1,0 +1,24 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.94s
+     Running unittests src/lib.rs (target/debug/deps/pg_accel-b644036d5025dca3)
+
+running 1 test
+test engine::executor::agg::descriptor::tests::dense_runtime_quote_includes_group_only_null_domains_at_budget_boundary ... FAILED
+
+failures:
+
+---- engine::executor::agg::descriptor::tests::dense_runtime_quote_includes_group_only_null_domains_at_budget_boundary stdout ----
+
+thread 'engine::executor::agg::descriptor::tests::dense_runtime_quote_includes_group_only_null_domains_at_budget_boundary' (19236633) panicked at pg_accel/src/engine/executor/agg/descriptor.rs:11092:9:
+assertion `left == right` failed
+  left: []
+ right: [1]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    engine::executor::agg::descriptor::tests::dense_runtime_quote_includes_group_only_null_domains_at_budget_boundary
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1319 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p pg_accel --lib`

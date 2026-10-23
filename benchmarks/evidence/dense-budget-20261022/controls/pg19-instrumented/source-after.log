@@ -1,0 +1,10 @@
+sql/tests/121_integer_where_aggregates.sql: OK
+pg_accel/src/gpu/grouped_agg.rs: OK
+pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs: OK
+pg_accel/src/engine/executor/agg/descriptor.rs: OK
+pg_accel/src/engine/residency/store.rs: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hosted-budget-20261018/sql121-original.sql: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hosted-budget-20261018/sql121-instrumented.sql: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hosted-budget-20261018/cold-target.sql: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hosted-budget-20261018/profile.sql: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hosted-budget-20261018/run-diagnostic.sh: OK

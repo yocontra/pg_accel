@@ -1,0 +1,4 @@
+major	stage	budget_mib	psql_exit
+19	instrumented	64	3
+19	instrumented	128	3
+19	instrumented	256	3

@@ -1,0 +1,187 @@
+SET
+SET
+                                                        version                                                        
+-----------------------------------------------------------------------------------------------------------------------
+ PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+(1 row)
+
+ extname  | extversion 
+----------+------------
+ pg_accel | 1.0.0-rc1
+(1 row)
+
+ installed_pg_test_functions 
+-----------------------------
+                         278
+(1 row)
+
+ cpu_cores | configured_workers | gpu_available | gpu_device_name |  memory_model   | pg_version | pg_accel_version 
+-----------+--------------------+---------------+-----------------+-----------------+------------+------------------
+        12 |                  0 | t             | Apple M2 Max    | explicit_device |     190000 | 1.0.0-rc1
+(1 row)
+
+                     name                      |    value    |      source      
+-----------------------------------------------+-------------+------------------
+ resident_memory_budget_bytes                  | 8589934592  | hardware_derived
+ resident_domain_max_exact_value_bytes         | 1048576     | hardware_derived
+ auto_load_amortization_queries                | 8           | hardware_derived
+ resident_load_scan_per_row_cost               | 0.01        | hardware_derived
+ resident_load_per_byte_cost                   | 0.001       | hardware_derived
+ gpu_min_rows                                  | 8421        | hardware_derived
+ gpu_sort_min_rows                             | 84210       | hardware_derived
+ gpu_sort_planner_min_rows                     | 84210       | hardware_derived
+ gpu_window_min_rows                           | 84210       | hardware_derived
+ gpu_reduce_min_rows                           | 21052       | hardware_derived
+ gpu_hash_agg_min_rows                         | 210526      | hardware_derived
+ gpu_hash_agg_unsafe_input_rows                | 100000      | hardware_derived
+ gpu_hash_agg_max_groups                       | 100000      | hardware_derived
+ gpu_h3_max_groups                             | 16776704    | hardware_derived
+ gpu_reduce_max_chunk                          | 1000000     | hardware_derived
+ gpu_grouped_agg_one_shot_max_rows             | 1000000     | hardware_derived
+ gpu_sort_max_elements                         | 4000000     | hardware_derived
+ gpu_sort_topk_max_limit                       | 128         | hardware_derived
+ gpu_sort_heap_topk_max_fraction               | 0.25        | hardware_derived
+ gpu_sort_heap_topk_max_width_bytes            | 16          | hardware_derived
+ gpu_join_max_output_rows                      | 118750      | hardware_derived
+ gpu_h3_group_min_rows                         | 84210       | hardware_derived
+ gpu_h3_max_chunk_rows                         | 4000000     | hardware_derived
+ gpu_spatial_min_vertices                      | 84          | hardware_derived
+ gpu_spatial_max_vertices_per_row              | 1000000     | hardware_derived
+ gpu_spatial_max_output_fraction               | 0.8         | hardware_derived
+ gpu_spatial_max_recheck_fraction              | 0.1         | hardware_derived
+ gpu_spatial_pairwise_chunk_rows               | 65536       | hardware_derived
+ gpu_raster_min_pixels                         | 55188       | hardware_derived
+ gpu_raster_max_chunk_pixels                   | 4000000     | hardware_derived
+ gpu_expr_min_rows                             | 210526      | hardware_derived
+ gpu_hash_join_build_max_rows                  | 99999       | hardware_derived
+ gpu_pipeline_fusion_min_rows                  | 8421        | hardware_derived
+ gpu_preagg_min_fact_rows                      | 42105       | hardware_derived
+ gpu_preagg_max_dim_rows                       | 2000000     | hardware_derived
+ preagg_dim_materialize_cost                   | 0.1         | hardware_derived
+ preagg_fact_scan_cost                         | 0.001       | hardware_derived
+ preagg_probe_cost                             | 0.003       | hardware_derived
+ preagg_agg_cost                               | 0.002       | hardware_derived
+ preagg_yield_cost                             | 0.03        | hardware_derived
+ optimal_batch_min                             | 256         | hardware_derived
+ optimal_batch_max                             | 32768       | hardware_derived
+ fused_interrupt_interval                      | 65536       | hardware_derived
+ gpu_op_cost_reduce                            | 0.0005      | hardware_derived
+ gpu_op_cost_hash_agg                          | 0.002       | hardware_derived
+ gpu_op_cost_sort                              | 0.003       | hardware_derived
+ gpu_op_cost_window                            | 0.001       | hardware_derived
+ gpu_op_cost_filter                            | 0.001       | hardware_derived
+ gpu_op_cost_h3_parent_resident                | 0.001       | hardware_derived
+ gpu_hashjoin_build_per_row                    | 0.001       | hardware_derived
+ gpu_hashjoin_probe_per_row                    | 0.001       | hardware_derived
+ custom_scan_yield_per_row                     | 0.001       | hardware_derived
+ gpu_partial_agg_per_row                       | 0.001       | hardware_derived
+ gpu_agg_cost_ratio                            | 0.8         | hardware_derived
+ gpu_window_cost_ratio                         | 1.5         | hardware_derived
+ gpu_preagg_cost_ratio                         | 1.5         | hardware_derived
+ reduce_f32_break_even_rows                    | 21052       | hardware_derived
+ reduce_f64_break_even_rows                    | 42105       | hardware_derived
+ reduce_i64_break_even_rows                    | 63157       | hardware_derived
+ reduce_bit_break_even_rows                    | 252631      | hardware_derived
+ reduce_bool_break_even_rows                   | 421052      | hardware_derived
+ hashagg_min_rows_per_group                    | 32          | hardware_derived
+ hashagg_max_state_bytes_per_group             | 256         | hardware_derived
+ sort_break_even_rows_int                      | 84210       | hardware_derived
+ sort_break_even_rows_float                    | 67368       | hardware_derived
+ spatial_point_in_ring_break_even_verts_x_rows | 500000000   | hardware_derived
+ spatial_point_in_ring_max_verts_x_rows        | 50000000000 | hardware_derived
+ window_min_partition_rows                     | 8421        | hardware_derived
+ expr_min_predicate_complexity_x_rows          | 50000       | hardware_derived
+ hashjoin_min_build_rows                       | 4210        | hardware_derived
+ gpu_nlj_min_outer_rows                        | 842         | hardware_derived
+ gpu_nlj_min_inner_rows                        | 842         | hardware_derived
+ gpu_nlj_max_output_rows                       | 118750      | hardware_derived
+ gpu_nlj_per_pair_cost                         | 0.0000001   | hardware_derived
+ has_native_fp64                               | false       | hardware_derived
+ soft_fp64_cost_multiplier                     | 32          | hardware_derived
+(76 rows)
+
+                    name                     | setting | unit | source  
+---------------------------------------------+---------+------+---------
+ pg_accel.assert_dispatch                    | off     |      | default
+ pg_accel.auto_load                          | on      |      | default
+ pg_accel.cost_multiplier                    | 1       |      | default
+ pg_accel.enabled                            | on      |      | default
+ pg_accel.execution_profiling                | off     |      | default
+ pg_accel.fp64_enabled                       | on      |      | default
+ pg_accel.gpu_enabled                        | on      |      | default
+ pg_accel.kernel_timeout_ms                  | 60000   | ms   | session
+ pg_accel.log_level                          | Notice  |      | default
+ pg_accel.max_workers_total                  | 0       |      | default
+ pg_accel.min_batch_size                     | 65536   |      | default
+ pg_accel.otel_log_max_mb                    | 256     | MB   | default
+ pg_accel.otel_log_max_rotations             | 4       |      | default
+ pg_accel.parallel_fused_count               | off     |      | default
+ pg_accel.planner_profiling                  | off     |      | default
+ pg_accel.resident_memory_budget_mb          | 64      | MB   | session
+ pg_accel.soft_fp64_cost_multiplier          | 32      |      | default
+ pg_accel.test_force_numeric_groupagg        | off     |      | default
+ pg_accel.test_force_spatial_groupagg        | off     |      | default
+ pg_accel.test_inject_spatial_kernel_failure | off     |      | default
+(20 rows)
+
+DO
+CREATE FUNCTION
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/hosted-budget-20261018/profile.sql:26: NOTICE:  BUDGET_LEDGER phase=profile query= state={"live": 0, "output": {"hits": 0, "misses": 0, "returns": 0, "evictions": 0, "retained_bytes": 0, "retained_outputs": 0, "fresh_allocations": 0, "fresh_allocation_bytes": 0}, "kernels": 0, "relations": null, "workspace": {"hits": 0, "misses": 0, "returns": 0, "evictions": 0, "poisoned_frees": 0, "retained_bytes": 0, "fresh_allocations": 0, "retained_workspaces": 0, "fresh_allocation_bytes": 0}, "budget_mib": "64MB"}
+ budget_receipt 
+----------------
+ 
+(1 row)
+
+SET
+SET
+SELECT 1000017
+ANALYZE
+ pg_accel_pin 
+--------------
+      1000017
+(1 row)
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/hosted-budget-20261018/cold-target.sql:16: NOTICE:  BUDGET_LEDGER phase=cold-pinned query= state={"live": 36000693, "output": {"hits": 0, "misses": 0, "returns": 0, "evictions": 0, "retained_bytes": 0, "retained_outputs": 0, "fresh_allocations": 0, "fresh_allocation_bytes": 0}, "kernels": 0, "relations": [{"relid": "16704", "pinned": true, "columns": [1, 2, 3, 4, 5, 6, 7, 8], "load_ms": 919.894959, "last_used": 1792340155782590, "loaded_at": 1792340155776835, "raw_bytes": 36000693, "generation": 1, "derived_bytes": 0}], "workspace": {"hits": 0, "misses": 0, "returns": 0, "evictions": 0, "poisoned_frees": 0, "retained_bytes": 0, "fresh_allocations": 0, "retained_workspaces": 0, "fresh_allocation_bytes": 0}, "budget_mib": "64MB"}
+ budget_receipt 
+----------------
+ 
+(1 row)
+
+SET
+SELECT 64
+SET
+                                                                                                                                                                                                                                                                                          QUERY PLAN                                                                                                                                                                                                                                                                                           
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuAccelAgg)
+   Strategy: GpuAgg
+   Plan Selected: true
+   Batch Size: 65536
+   Expected Threads: 1
+   GPU Resident Pipeline: true
+   GPU Resident Proof Version: 2
+   GPU Resident Operator Class: resident_groupagg
+   GPU Physical Kernel Mode: parallel_dense_integer
+   GPU Descriptor Strategy: descriptor_grouped_aggregate
+   GPU Descriptor Specialization: dense_integer_with_counts_plain
+   GPU Descriptor Specialization Cache: miss
+   GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+   GPU Descriptor Group Keys: k0:fact(16704.2:type=23) type=23 collation=0 encoding=hash; k1:fact(16704.3:type=1082) type=1082 collation=0 encoding=hash; k2:fact(16704.4:type=25) type=25 collation=950 encoding=hash
+   GPU Descriptor Aggregates: m0:column(16704.7:type=21) -> value.sum; m1:column(16704.5:type=23) -> value.avg; m2:column(16704.2:type=23) -> value.count; m3:count_star -> value.count
+   GPU Descriptor Filter: fact=ranges(input=16704.2:type=23, count=2); measures=[m0=none; m1=none; m2=none; m3=none]; dimensions=[none]
+   GPU Descriptor Star Dimensions: none
+   GPU Descriptor Output: slot0:group[k0] source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot1:group[k1] source_type=1082 result_type=1082 typmod=-1 collation=0 nullable=true; slot2:group[k2] source_type=25 result_type=25 typmod=-1 collation=950 nullable=true; slot3:aggregate[m0].value.sum source_type=21 result_type=20 typmod=-1 collation=0 nullable=true; slot4:aggregate[m1].value.avg source_type=23 result_type=1700 typmod=-1 collation=0 nullable=true; slot5:aggregate[m3].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+   GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+   GPU Descriptor Artifact: not initialized
+   GPU Descriptor Generations: not inspected
+   GPU Descriptor Bytes: not inspected
+   GPU Resident Stage Mask: 16395
+   GPU Resident Device Columns: 5
+   GPU Resident Boundary: none: no CPU boundary
+(25 rows)
+
+ pg_accel_last_planner_rejection_reason 
+----------------------------------------
+ no_gpu_resident_pipeline
+(1 row)
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/hosted-budget-20261018/cold-target.sql:23: ERROR:  pg_accel: generic aggregate dispatch failed (grouped session setup failed: GPU memory build_column_batch failed with out_of_memory: combined grouped workspace/output exceeds execution budget); refusing CPU fallback

@@ -112,6 +112,21 @@ complete objective is implemented and verified.
     full-suite, throughput/latency or CI qualification. Evidence:
     `benchmarks/evidence/residency-ledger-20261022/README.md`.
 
+  - [x] Correct dense integer/COUNT memory admission and protected idle
+    reclamation, including nullable group-only keys and exact fully loaded raw
+    ownership across planner consumers. Preserve active/foreign ownership and
+    conservative cold/partial estimates. PG18.4/PG19beta1 production SQL121
+    passes at 128/256 MiB and DEFAULT; the pinned fresh-derived 64 MiB case
+    correctly declines, while an explicitly modified warm subset passes.
+    Original nullable shared-owner and default-cost COALESCE aggregate proofs
+    pass. Correct live join retry accounting without changing production retry
+    behavior. Each complete pre-lint suite passes 1853 library + 55 integration
+    tests, zero ignored/filtered; a subsequent two-line test-only lint cleanup
+    passes focused lifecycle tests on both majors, feature-enabled Clippy and
+    rustfmt. Retain SDK/slow-chunk warnings: this does not close chunk latency,
+    full 64 MiB SQL121, performance, release-proof or hosted-CI work. Evidence:
+    `benchmarks/evidence/dense-budget-20261022/README.md`.
+
 - [x] Correct pinned AdaptiveCpp cache-path handling. Native observation,
   targeted clearing, artifact capture and diagnostics now use the actual
   `apps/<application>/jit-cache` layout with runtime default/legacy/token rules.

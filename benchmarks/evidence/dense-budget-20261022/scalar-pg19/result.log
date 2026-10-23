@@ -1,0 +1,21 @@
+CREATE EXTENSION
+                                                        version                                                        
+-----------------------------------------------------------------------------------------------------------------------
+ PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+(1 row)
+
+ cpu_cores | configured_workers | gpu_available | gpu_device_name |  memory_model   | pg_version | pg_accel_version 
+-----------+--------------------+---------------+-----------------+-----------------+------------+------------------
+        12 |                  0 | t             | Apple M2 Max    | explicit_device |     190000 | 1.0.0-rc1
+(1 row)
+
+      source      
+------------------
+ hardware_derived
+(1 row)
+
+BEGIN
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/hosted-budget-20261018/scalar-device-proof.sql:28: WARNING:  pg_accel: grouped aggregate accumulate chunk dispatch returned after 6550240us (warning threshold 5000ms); cancellation and statement_timeout are observed only between synchronous calls
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/hosted-budget-20261018/scalar-device-proof.sql:28: NOTICE:  SCALAR_DEFAULT_DEVICE_PROOF function=tests.t16_test_loaded_scalar_coalesce_aggregate_selects_at_default_ad kernels=0->3 mode=0->2
+DO
+ROLLBACK

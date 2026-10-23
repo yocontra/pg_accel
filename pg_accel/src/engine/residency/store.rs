@@ -1488,15 +1488,31 @@ impl RelationStore {
     }
 
     fn evict_lru_derived(&mut self) -> bool {
+        self.evict_lru_derived_except(None)
+    }
+
+    fn evict_lru_derived_except(
+        &mut self,
+        protected: Option<(pg_sys::Oid, &DerivedArtifactIdentity)>,
+    ) -> bool {
         let candidate = self
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, entry)| !entry.derived.is_empty())
-            .min_by_key(|(_, entry)| entry.last_used_tick)
-            .map(|(index, _)| index);
-        candidate.is_some_and(|index| {
-            self.entries[index].remove_derived(0);
+            .filter_map(|(index, entry)| {
+                entry
+                    .derived
+                    .iter()
+                    .position(|artifact| {
+                        !protected.is_some_and(|(owner, identity)| {
+                            entry.relid == owner && artifact.has_identity(identity)
+                        })
+                    })
+                    .map(|artifact| (index, artifact, entry.last_used_tick))
+            })
+            .min_by_key(|(_, _, tick)| *tick);
+        candidate.is_some_and(|(index, artifact, _)| {
+            self.entries[index].remove_derived(artifact);
             true
         })
     }
@@ -1566,6 +1582,10 @@ pub struct ResidentLoadEstimate {
     /// Exact selected-column request covered by `resident_dependency`.
     /// This prevents row/null facts from being reused for a different union.
     pub resident_selected_columns: Option<Vec<i16>>,
+    /// Complete retained raw owner: selected, pinned and already-loaded columns.
+    /// Unlike selected NULL/NUMERIC metadata, this union includes columns that
+    /// the query does not read but that must remain charged during execution.
+    pub resident_required_columns: Option<Vec<(i16, pg_sys::Oid)>>,
     /// Exact row count of the current resident entry when it covers every
     /// selected column. Missing/partial entries have no exact row proof.
     pub resident_rows: Option<u64>,
@@ -1579,6 +1599,7 @@ pub struct ResidentLoadEstimate {
     /// key staging exactly. None denotes unavailable loaded evidence.
     pub resident_nullable_columns: Option<Vec<i16>>,
     pub pinned: bool,
+    /// Exact entire raw-owner charge when loaded; catalog estimate otherwise.
     pub estimated_bytes: u64,
     /// True when the complete selected/pinned/existing column union is
     /// zero-column or catalog-proved fixed-width resident input.
@@ -1600,13 +1621,24 @@ pub struct ResidentBudgetSnapshot {
     pub current_backend_live_bytes: u64,
     pub other_backend_live_bytes: u64,
     pub pinned_unselected_raw_bytes: u64,
-    /// Executor allocations, including retained pools, cannot be reclaimed by
-    /// the relation LRU. Keep them in the planner's surviving footprint.
+    /// Executor allocations before any explicitly verified local idle credit.
+    /// Active owners and foreign-backend owners must never receive that credit.
     pub retained_execution_bytes: u64,
     pub evictable_or_replaced_local_bytes: u64,
 }
 
 impl ResidentBudgetSnapshot {
+    /// Only ledger-charged idle buffers owned by this backend are reclaimable.
+    /// Keep active execution, foreign backends and pinned raw bytes intact.
+    #[must_use]
+    pub fn discount_idle_execution(mut self, idle_bytes: u64) -> Option<Self> {
+        self.retained_execution_bytes = self.retained_execution_bytes.checked_sub(idle_bytes)?;
+        self.evictable_or_replaced_local_bytes = self
+            .evictable_or_replaced_local_bytes
+            .checked_add(idle_bytes)?;
+        Some(self)
+    }
+
     /// Upper-bound the final cluster footprint after local eviction and
     /// selected-relation replacement. Returns `None` on byte-count overflow.
     #[must_use]
@@ -2064,6 +2096,98 @@ fn reserve_with_local_eviction(
     reserve_with_local_eviction_excluding(&BTreeSet::from([u32::from(relid)]), bytes)
 }
 
+/// Make room before acquiring a dispatch borrow. This is not a reservation:
+/// subsequent atomic allocation charges still enforce the cluster budget.
+/// Current raw dependencies and the exact cached artifact survive pressure.
+/// An immutable resolver borrow prevents this operation, rather than allowing
+/// eviction of pointers leased to an active native call.
+pub fn reclaim_execution_memory(
+    owner_relid: pg_sys::Oid,
+    identity: Option<&DerivedArtifactIdentity>,
+    columns: &[ResidentColumnRef],
+    required_bytes: u64,
+) -> Result<(), ResidentLoadError> {
+    reclaim_execution_memory_with_budget(
+        owner_relid,
+        identity,
+        columns,
+        required_bytes,
+        gucs::resident_memory_budget_bytes(),
+    )
+}
+
+fn reclaim_execution_memory_with_budget(
+    owner_relid: pg_sys::Oid,
+    identity: Option<&DerivedArtifactIdentity>,
+    columns: &[ResidentColumnRef],
+    required_bytes: u64,
+    budget: u64,
+) -> Result<(), ResidentLoadError> {
+    let idle =
+        crate::gpu::grouped_agg::idle_grouped_execution_bytes().map_err(ResidentLoadError::Gpu)?;
+    let live = resident_live_bytes();
+    let minimum = live
+        .checked_sub(idle)
+        .and_then(|active| active.checked_add(required_bytes))
+        .ok_or(ResidentLoadError::ArtifactAccountingOverflow)?;
+    if minimum <= budget {
+        return Ok(());
+    }
+    STORE.with(|store| {
+        let mut store = store.try_borrow_mut().map_err(|_| {
+            ResidentLoadError::InvalidArtifactDependencies(
+                "cannot reclaim execution memory while resident inputs are borrowed".into(),
+            )
+        })?;
+        let mut protected = columns
+            .iter()
+            .map(|column| u32::from(column.relid))
+            .collect::<BTreeSet<_>>();
+        protected.insert(u32::from(owner_relid));
+        if let Some(identity) = identity {
+            let artifact = store
+                .entries
+                .iter()
+                .find(|entry| entry.relid == owner_relid)
+                .and_then(|entry| {
+                    entry
+                        .derived
+                        .iter()
+                        .find(|artifact| artifact.has_identity(identity))
+                })
+                .ok_or(ResidentLoadError::ArtifactNotFound {
+                    digest: identity.digest,
+                })?;
+            protected.extend(
+                artifact
+                    .dependencies
+                    .iter()
+                    .map(|dependency| u32::from(dependency.relid)),
+            );
+        }
+        // Pools do not borrow STORE; only their idle allocations are dropped.
+        crate::gpu::cleanup_grouped_allocation_pools();
+        loop {
+            let live = resident_live_bytes();
+            let minimum = live
+                .checked_add(required_bytes)
+                .ok_or(ResidentLoadError::ArtifactAccountingOverflow)?;
+            if minimum <= budget {
+                return Ok(());
+            }
+            if !store.evict_lru_derived_except(identity.map(|identity| (owner_relid, identity)))
+                && !store.evict_lru_unpinned(&protected)
+            {
+                return Err(ResidentLoadError::BudgetExceeded {
+                    requested: required_bytes,
+                    live,
+                    budget,
+                });
+            }
+        }
+    })
+}
+
 fn reserve_with_local_eviction_excluding(
     protected: &BTreeSet<u32>,
     bytes: u64,
@@ -2206,6 +2330,24 @@ fn required_columns_for(
 
 fn has_requested_columns(entry: &ResidentRelation, attnos: &[i16]) -> bool {
     attnos.iter().all(|attno| entry.columns.contains_key(attno))
+}
+
+fn retained_column_identity(entry: &ResidentRelation) -> Vec<(i16, pg_sys::Oid)> {
+    entry
+        .columns
+        .iter()
+        .map(|(&attno, column)| (attno, column.type_oid()))
+        .collect()
+}
+
+fn covers_planner_column_union(entry: &ResidentRelation, required: &[ColumnRequest]) -> bool {
+    entry.columns.len() == required.len()
+        && required.iter().all(|column| {
+            entry
+                .columns
+                .get(&column.attno)
+                .is_some_and(|resident| resident.type_oid() == column.type_oid)
+        })
 }
 
 fn selected_columns_have_no_null_sidecars(
@@ -2381,7 +2523,10 @@ pub fn estimate_selected_relation(
             .entries
             .iter()
             .find(|entry| entry.relid == request.relid);
-        let loaded_entry = entry.filter(|entry| has_requested_columns(entry, &request.columns));
+        // The resolved request includes pinned and already-loaded columns.
+        // Only complete coverage permits replacing a catalog estimate with the
+        // actual retained charge. A selected subset must not hide other owners.
+        let loaded_entry = entry.filter(|entry| covers_planner_column_union(entry, &columns));
         (
             loaded_entry.map(|entry| {
                 (
@@ -2389,6 +2534,8 @@ pub fn estimate_selected_relation(
                     entry.row_count,
                     selected_columns_have_no_null_sidecars(entry, &request.columns)
                         .expect("loaded entry covers every selected column"),
+                    entry.raw_bytes(),
+                    retained_column_identity(entry),
                 )
             }),
             loaded_entry.and_then(|entry| selected_numeric_column_stats(entry, &request.columns)),
@@ -2400,14 +2547,19 @@ pub fn estimate_selected_relation(
     Ok(ResidentLoadEstimate {
         relid: request.relid,
         loaded: resident_evidence.is_some(),
-        resident_dependency: resident_evidence.map(|evidence| evidence.0),
-        resident_selected_columns: resident_evidence.map(|_| request.columns.clone()),
-        resident_rows: resident_evidence.map(|evidence| evidence.1),
-        selected_columns_have_no_null_sidecars: resident_evidence.map(|evidence| evidence.2),
+        resident_dependency: resident_evidence.as_ref().map(|evidence| evidence.0),
+        resident_selected_columns: resident_evidence.as_ref().map(|_| request.columns.clone()),
+        resident_required_columns: resident_evidence
+            .as_ref()
+            .map(|evidence| evidence.4.clone()),
+        resident_rows: resident_evidence.as_ref().map(|evidence| evidence.1),
+        selected_columns_have_no_null_sidecars: resident_evidence
+            .as_ref()
+            .map(|evidence| evidence.2),
         resident_numeric_columns,
         resident_nullable_columns,
         pinned,
-        estimated_bytes,
+        estimated_bytes: resident_evidence.map_or(estimated_bytes, |evidence| evidence.3),
         fixed_width,
         last_load_ms,
         amortization_queries: crate::engine::cost::device_limits().auto_load_amortization_queries,
@@ -2525,6 +2677,7 @@ fn loaded_estimate_matches(
     if !estimate.loaded {
         return estimate.resident_dependency.is_none()
             && estimate.resident_selected_columns.is_none()
+            && estimate.resident_required_columns.is_none()
             && estimate.resident_rows.is_none()
             && estimate.resident_numeric_columns.is_none()
             && estimate.resident_nullable_columns.is_none()
@@ -2533,6 +2686,7 @@ fn loaded_estimate_matches(
     let (
         Some(dependency),
         Some(selected_columns),
+        Some(required_columns),
         Some(row_count),
         Some(no_null_sidecars),
         Some(numeric_columns),
@@ -2540,6 +2694,7 @@ fn loaded_estimate_matches(
     ) = (
         estimate.resident_dependency,
         estimate.resident_selected_columns.as_deref(),
+        estimate.resident_required_columns.as_deref(),
         estimate.resident_rows,
         estimate.selected_columns_have_no_null_sidecars,
         estimate.resident_numeric_columns.as_ref(),
@@ -2559,6 +2714,16 @@ fn loaded_estimate_matches(
         return false;
     };
     ResidentDependencyStamp::from_relation(entry) == dependency
+        && retained_column_identity(entry) == required_columns
+        && store.pins.get(&u32::from(request.relid)).is_none_or(|pin| {
+            pin.columns.iter().all(|column| {
+                entry
+                    .columns
+                    .get(&column.attno)
+                    .is_some_and(|resident| resident.type_oid() == column.type_oid)
+            })
+        })
+        && entry.raw_bytes() == estimate.estimated_bytes
         && entry.row_count == row_count
         && selected_columns_have_no_null_sidecars(entry, &request.columns) == Some(no_null_sidecars)
         && selected_numeric_column_stats(entry, &request.columns).as_ref() == Some(numeric_columns)
@@ -5888,6 +6053,7 @@ pub(super) mod tests {
                 loaded: true,
                 resident_dependency: Some(ResidentDependencyStamp::from_relation(entry)),
                 resident_selected_columns: Some(request.columns.clone()),
+                resident_required_columns: Some(retained_column_identity(entry)),
                 resident_rows: Some(entry.row_count),
                 selected_columns_have_no_null_sidecars: selected_columns_have_no_null_sidecars(
                     entry,
@@ -5896,7 +6062,7 @@ pub(super) mod tests {
                 resident_numeric_columns: selected_numeric_column_stats(entry, &request.columns),
                 resident_nullable_columns: selected_nullable_columns(entry, &request.columns),
                 pinned: false,
-                estimated_bytes: 0,
+                estimated_bytes: entry.raw_bytes(),
                 fixed_width: true,
                 last_load_ms: Some(entry.load_ms),
                 amortization_queries: 1,
@@ -5977,6 +6143,122 @@ pub(super) mod tests {
             std::slice::from_ref(&request),
             std::slice::from_ref(&estimate)
         ));
+
+        let estimate = setup();
+        STORE.with(|store| {
+            store.borrow_mut().entries[0].raw_charge =
+                LedgerCharge::reserve(1, u64::MAX).expect("same-generation replacement charge");
+        });
+        assert!(!revalidate_loaded_estimates(
+            std::slice::from_ref(&request),
+            std::slice::from_ref(&estimate)
+        ));
+
+        let estimate = setup();
+        STORE.with(|store| {
+            store.borrow_mut().entries[0].columns.insert(
+                2,
+                ResidentColumn::Empty {
+                    type_oid: pg_sys::INT4OID,
+                },
+            );
+        });
+        assert!(!revalidate_loaded_estimates(
+            std::slice::from_ref(&request),
+            std::slice::from_ref(&estimate)
+        ));
+
+        let estimate = setup();
+        STORE.with(|store| {
+            store.borrow_mut().pins.insert(
+                RELID,
+                PinSpec {
+                    columns: vec![ColumnRequest {
+                        attno: 2,
+                        type_oid: pg_sys::INT4OID,
+                    }],
+                },
+            );
+        });
+        assert!(!revalidate_loaded_estimates(
+            std::slice::from_ref(&request),
+            std::slice::from_ref(&estimate)
+        ));
+        STORE.with(|store| {
+            store.borrow_mut().pins.remove(&RELID);
+        });
+    }
+
+    #[test]
+    fn planner_raw_owner_requires_complete_typed_union_and_preserves_selected_metadata() {
+        let request = SelectedRelation {
+            relid: pg_sys::Oid::from(1454_u32),
+            columns: vec![1],
+        };
+        install_planner_evidence_relation(1454, 0);
+        let required = vec![
+            ColumnRequest {
+                attno: 1,
+                type_oid: pg_sys::INT4OID,
+            },
+            ColumnRequest {
+                attno: 2,
+                type_oid: pg_sys::NUMERICOID,
+            },
+            ColumnRequest {
+                attno: 3,
+                type_oid: pg_sys::FLOAT8OID,
+            },
+        ];
+        STORE.with(|store| {
+            let mut store = store.borrow_mut();
+            let entry = &mut store.entries[0];
+            assert!(!covers_planner_column_union(entry, &required));
+            entry.columns.insert(
+                2,
+                ResidentColumn::Empty {
+                    type_oid: pg_sys::NUMERICOID,
+                },
+            );
+            entry.columns.insert(
+                3,
+                ResidentColumn::Empty {
+                    type_oid: pg_sys::FLOAT8OID,
+                },
+            );
+            entry.raw_charge = LedgerCharge::reserve(123, u64::MAX).expect("complete raw owner");
+            assert!(covers_planner_column_union(entry, &required));
+            assert!(!covers_planner_column_union(entry, &required[..1]));
+            let mut wrong_type = required.clone();
+            wrong_type[2].type_oid = pg_sys::INT8OID;
+            assert!(!covers_planner_column_union(entry, &wrong_type));
+            store.pins.insert(
+                1454,
+                PinSpec {
+                    columns: vec![required[1]],
+                },
+            );
+        });
+        let estimate = planner_evidence_estimate(&request);
+        assert_eq!(estimate.estimated_bytes, 123);
+        assert_eq!(estimate.resident_selected_columns, Some(vec![1]));
+        assert_eq!(
+            estimate.resident_required_columns,
+            Some(vec![
+                (1, pg_sys::INT4OID),
+                (2, pg_sys::NUMERICOID),
+                (3, pg_sys::FLOAT8OID),
+            ])
+        );
+        assert_eq!(estimate.resident_numeric_columns, Some(vec![]));
+        assert_eq!(estimate.resident_nullable_columns, Some(vec![]));
+        assert!(revalidate_loaded_estimates(
+            std::slice::from_ref(&request),
+            &[estimate]
+        ));
+        STORE.with(|store| {
+            store.borrow_mut().pins.remove(&1454);
+        });
     }
 
     #[test]
@@ -6114,6 +6396,147 @@ pub(super) mod tests {
         schedule_test_generation_bump(requests[1].relid);
         assert!(!revalidate_loaded_estimates(&requests, &estimates));
         assert!(TEST_PENDING_GENERATION_BUMP.with(Cell::take).is_none());
+    }
+
+    #[test]
+    fn execution_idle_credit_preserves_active_foreign_and_pinned_owners() {
+        let snapshot = ResidentBudgetSnapshot {
+            cluster_live_bytes: 1000,
+            current_backend_live_bytes: 700,
+            other_backend_live_bytes: 300,
+            pinned_unselected_raw_bytes: 200,
+            retained_execution_bytes: 400,
+            evictable_or_replaced_local_bytes: 100,
+        };
+        let discounted = snapshot.discount_idle_execution(150).expect("idle owner");
+        assert_eq!(discounted.retained_execution_bytes, 250);
+        assert_eq!(discounted.evictable_or_replaced_local_bytes, 250);
+        assert_eq!(discounted.projected_final_bytes(20, 30), Some(800));
+        assert_eq!(discounted.cluster_live_bytes, 1000);
+        assert_eq!(discounted.current_backend_live_bytes, 700);
+        assert_eq!(discounted.other_backend_live_bytes, 300);
+        assert_eq!(discounted.pinned_unselected_raw_bytes, 200);
+        assert!(snapshot.discount_idle_execution(401).is_none());
+        assert!(
+            ResidentBudgetSnapshot {
+                evictable_or_replaced_local_bytes: u64::MAX,
+                ..snapshot
+            }
+            .discount_idle_execution(1)
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn execution_reclamation_protects_full_artifact_identity_and_raw_pins() {
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![1, 2]);
+        let mut store = RelationStore::default();
+        let mut owner = empty_relation(100, true, 1);
+        for words in [vec![1, 2], vec![1, 3]] {
+            owner.derived.push(DerivedEntry {
+                // Deliberately collide the digest; only full identity protects.
+                digest: identity.digest,
+                canonical_words: words.into_boxed_slice(),
+                dependencies: Box::default(),
+                artifact: Box::new(EmptyArtifact),
+                charge: LedgerCharge::reserve(0, 0).expect("zero-byte derived charge"),
+            });
+        }
+        store.entries.push(owner);
+        store.entries.push(empty_relation(200, false, 0));
+        store.entries.push(empty_relation(300, true, 0));
+        assert!(store.evict_lru_derived_except(Some((pg_sys::Oid::from(100), &identity))));
+        assert_eq!(store.entries[0].derived.len(), 1);
+        assert!(store.entries[0].derived[0].has_identity(&identity));
+        assert!(!store.evict_lru_derived_except(Some((pg_sys::Oid::from(100), &identity))));
+        let protected = BTreeSet::from([100, 200]);
+        assert!(!store.evict_lru_unpinned(&protected));
+        assert_eq!(store.entries.len(), 3);
+    }
+
+    #[test]
+    fn execution_reclamation_releases_only_enough_unprotected_owners() {
+        STORE.with(|store| store.borrow_mut().entries.clear());
+        crate::gpu::cleanup_grouped_allocation_pools();
+        let baseline = resident_live_bytes();
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![10]);
+        let mut owner = empty_relation(100, true, 1);
+        owner.raw_charge = LedgerCharge::reserve(40, u64::MAX).expect("pinned raw owner");
+        for (words, bytes) in [(vec![10], 64), (vec![20], 128), (vec![30], 128)] {
+            let key = DerivedArtifactIdentity::from_canonical_words(words);
+            owner.derived.push(DerivedEntry {
+                digest: key.digest,
+                canonical_words: key.canonical_words,
+                dependencies: Box::default(),
+                artifact: Box::new(EmptyArtifact),
+                charge: LedgerCharge::reserve(bytes, u64::MAX).expect("derived owner"),
+            });
+        }
+        STORE.with(|store| store.borrow_mut().entries.push(owner));
+        let active = LedgerCharge::reserve(64, u64::MAX).expect("active owner");
+        let before = resident_live_bytes();
+        assert_eq!(before, baseline + 424);
+        reclaim_execution_memory_with_budget(
+            pg_sys::Oid::from(100),
+            Some(&identity),
+            &[],
+            100,
+            before - 128 + 100,
+        )
+        .expect("one eligible owner is enough");
+        assert_eq!(resident_live_bytes(), before - 128);
+        STORE.with(|store| {
+            let store = store.borrow();
+            assert_eq!(store.entries.len(), 1);
+            assert!(store.entries[0].pinned);
+            assert_eq!(store.entries[0].derived.len(), 2);
+            assert!(store.entries[0].derived[0].has_identity(&identity));
+        });
+        drop(active);
+        STORE.with(|store| store.borrow_mut().entries.clear());
+        assert_eq!(resident_live_bytes(), baseline);
+    }
+
+    #[test]
+    fn execution_reclamation_refuses_active_borrow_and_checks_exact_boundary() {
+        // Thread-local store/ledger isolate this from parallel unit tests.
+        STORE.with(|store| store.borrow_mut().entries.clear());
+        crate::gpu::cleanup_grouped_allocation_pools();
+        let active = LedgerCharge::reserve(64, u64::MAX).expect("active executor stand-in");
+        let live = resident_live_bytes();
+        assert!(live >= 64);
+        let required = 32;
+        let owner = pg_sys::Oid::from(100);
+        assert!(
+            reclaim_execution_memory_with_budget(owner, None, &[], required, live + required)
+                .is_ok()
+        );
+        STORE.with(|store| {
+            let lease = store.borrow();
+            assert!(matches!(
+                reclaim_execution_memory_with_budget(
+                    owner,
+                    None,
+                    &[],
+                    required,
+                    live + required - 1
+                ),
+                Err(ResidentLoadError::InvalidArtifactDependencies(_))
+            ));
+            assert!(lease.entries.is_empty());
+        });
+        assert!(matches!(
+            reclaim_execution_memory_with_budget(owner, None, &[], required, live + required - 1),
+            Err(ResidentLoadError::BudgetExceeded { requested: 32, live: actual, budget })
+                if actual == live && budget == live + required - 1
+        ));
+        assert_eq!(
+            resident_live_bytes(),
+            live,
+            "active charge survives failed reclamation"
+        );
+        drop(active);
+        assert_eq!(resident_live_bytes(), live - 64);
     }
 
     #[test]

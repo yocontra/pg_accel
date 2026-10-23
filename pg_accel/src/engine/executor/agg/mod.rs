@@ -143,9 +143,12 @@ fn test_execute_descriptor(
 
 pub(crate) use artifact::descriptor_program_clone_bytes;
 pub(crate) use artifact::estimate_descriptor_artifact_bytes_upper_bound;
+pub(crate) use descriptor::dense_descriptor_memory_requirements;
+// Keep the existing pg_test scalar-layout probes on the shared native quote.
+#[cfg(feature = "pg_test")]
+pub(crate) use descriptor::dense_descriptor_memory_requirements as scalar_descriptor_memory_requirements;
 pub(crate) use descriptor::numeric_descriptor_memory_requirements;
 pub(crate) use descriptor::planned_descriptor_kernel_mode;
-pub(crate) use descriptor::scalar_descriptor_memory_requirements;
 pub(crate) use descriptor::scalar_measure_program;
 pub(crate) use descriptor::scalar_metadata_peak_bytes;
 pub use execute::AggExecState;

@@ -1,0 +1,4 @@
+major	stage	budget_mib	psql_exit
+19	baseline	64	3
+19	baseline	128	3
+19	baseline	256	3

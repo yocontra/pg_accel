@@ -16,9 +16,9 @@ use super::shape::{
 use super::{PlannerSubstageGuard, add_gpu_path_with_resident_proof, rel_rows_estimate};
 use crate::engine::cost::{self, PgCost, Rows, TypedCostModel};
 use crate::engine::executor::agg::{
-    descriptor_program_clone_bytes, estimate_descriptor_artifact_bytes_upper_bound,
-    is_weighted_global_count_descriptor, numeric_descriptor_memory_requirements,
-    planned_descriptor_kernel_mode, scalar_descriptor_memory_requirements,
+    dense_descriptor_memory_requirements, descriptor_program_clone_bytes,
+    estimate_descriptor_artifact_bytes_upper_bound, is_weighted_global_count_descriptor,
+    numeric_descriptor_memory_requirements, planned_descriptor_kernel_mode,
     scalar_metadata_peak_bytes, validate_normal_descriptor_capability,
     validate_normal_spatial_candidate_capability,
 };
@@ -287,9 +287,15 @@ fn unamortized_resident_load_cost(
 fn apply_exact_residency(
     shape: &mut ShapePlan,
     estimates: &[ResidentLoadEstimate],
-    policy: AdmissionPolicy,
+    mut policy: AdmissionPolicy,
     model: &TypedCostModel,
 ) -> Result<(), AdmissionDecline> {
+    let idle = crate::gpu::grouped_agg::idle_grouped_execution_bytes()
+        .map_err(|_| AdmissionDecline::ResidencyBudgetSnapshotUnavailable)?;
+    policy.budget_snapshot = policy
+        .budget_snapshot
+        .discount_idle_execution(idle)
+        .ok_or(AdmissionDecline::ResidencyBudgetSnapshotUnavailable)?;
     apply_exact_residency_with_scalar_memory(
         shape,
         estimates,
@@ -300,7 +306,7 @@ fn apply_exact_residency(
                 shape,
                 estimates,
                 model,
-                scalar_descriptor_memory_requirements,
+                dense_descriptor_memory_requirements,
             )
         },
     )
@@ -594,11 +600,18 @@ fn scalar_planning_memory_with(
         usize,
     ) -> Result<crate::gpu::GroupedAggMemoryRequirements, String>,
 ) -> Result<u64, AdmissionDecline> {
-    if !shape
+    let scalar = shape
         .spec
         .measures
         .iter()
-        .any(|measure| matches!(measure.expression, MeasureExpr::Bytecode { .. }))
+        .any(|measure| matches!(measure.expression, MeasureExpr::Bytecode { .. }));
+    if !scalar
+        && (!shape.spec.star_dims.is_empty()
+            || !matches!(
+                shape_kernel_mode(shape),
+                GroupedAggKernelMode::ParallelDenseInteger
+                    | GroupedAggKernelMode::ParallelDenseCount
+            ))
     {
         return Ok(0);
     }
@@ -607,20 +620,51 @@ fn scalar_planning_memory_with(
     };
     let estimate = estimates
         .iter()
-        .find(|estimate| u32::from(estimate.relid) == shape.spec.fact_rel && estimate.loaded)
+        .find(|estimate| u32::from(estimate.relid) == shape.spec.fact_rel)
         .ok_or_else(|| {
             unavailable("scalar layout forecast requires a complete resident snapshot")
         })?;
-    let rows = usize::try_from(
-        estimate
-            .resident_rows
-            .ok_or_else(|| unavailable("missing scalar resident row count"))?,
-    )
-    .map_err(|_| unavailable("scalar resident rows exceed usize"))?;
-    let nullable = estimate
-        .resident_nullable_columns
-        .as_deref()
-        .ok_or_else(|| unavailable("missing scalar per-column NULL metadata"))?;
+    // Scalar admission retains its exact resident metadata contract. Plain
+    // fixed-width cold loading uses the same base-row estimate as raw loading,
+    // conservatively budgeting NULL lanes until exact metadata is available.
+    if scalar && !estimate.loaded {
+        return Err(unavailable(
+            "scalar layout forecast requires a complete resident snapshot",
+        ));
+    }
+    let cold_nullable;
+    let (rows, nullable) = if estimate.loaded {
+        (
+            estimate
+                .resident_rows
+                .ok_or_else(|| unavailable("missing dense resident row count"))?,
+            estimate
+                .resident_nullable_columns
+                .as_deref()
+                .ok_or_else(|| unavailable("missing dense per-column NULL metadata"))?,
+        )
+    } else {
+        let relation = shape
+            .residency
+            .relations
+            .iter()
+            .find(|relation| relation.relation_oid == shape.spec.fact_rel)
+            .ok_or_else(|| unavailable("missing dense base-row estimate"))?;
+        cold_nullable = shape
+            .required_relations
+            .iter()
+            .find(|relation| relation.relation_oid == shape.spec.fact_rel)
+            .ok_or_else(|| unavailable("missing dense selected columns"))?
+            .attnos
+            .iter()
+            .map(|attno| {
+                i16::try_from(*attno).map_err(|_| unavailable("dense selected column exceeds i16"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        (relation.estimated_rows, cold_nullable.as_slice())
+    };
+    let rows =
+        usize::try_from(rows).map_err(|_| unavailable("scalar resident rows exceed usize"))?;
     let cardinalities = shape
         .estimated_dense_key_cardinalities
         .as_deref()
@@ -2787,6 +2831,7 @@ mod tests {
                 relfilenode: pg_sys::Oid::from(relation_oid + 100),
             }),
             resident_selected_columns: loaded.then_some(vec![1]),
+            resident_required_columns: loaded.then_some(vec![(1, pg_sys::INT4OID)]),
             resident_rows: loaded.then_some(100_000),
             selected_columns_have_no_null_sidecars: loaded.then_some(true),
             resident_numeric_columns: loaded.then(Vec::new),
@@ -2809,6 +2854,16 @@ mod tests {
     fn expected_exact_load(rows: u64, bytes: u64, fixed_width: bool) -> PgCost {
         let model = model();
         PgCost::new(unamortized_resident_load_cost(rows, bytes, fixed_width, &model) / 4.0)
+    }
+
+    fn count_native_execution_bytes() -> u64 {
+        scalar_planning_memory_with(
+            &count_shape(),
+            &[estimate(true, 0)],
+            &model(),
+            dense_descriptor_memory_requirements,
+        )
+        .expect("native COUNT execution quote")
     }
 
     fn budget_snapshot(
@@ -2889,6 +2944,7 @@ mod tests {
         };
         shape.descriptor_measures.projected_measure_count = 2;
         shape.descriptor_measures.descriptor_measure_count = 2;
+        shape.estimated_dense_key_cardinalities = Some(vec![100]);
         let hash_cost =
             estimated_fact_rows as f64 * model().coefficients.gpu_op_cost_hash_agg.get() * 2.0;
         shape.cost.replace_aggregate(PgCost::new(hash_cost));
@@ -3554,6 +3610,7 @@ mod tests {
                 loaded: false,
                 resident_dependency: None,
                 resident_selected_columns: None,
+                resident_required_columns: None,
                 resident_rows: None,
                 selected_columns_have_no_null_sidecars: None,
                 resident_numeric_columns: None,
@@ -3581,7 +3638,7 @@ mod tests {
             &[estimate(true, 4096)],
             AdmissionPolicy {
                 auto_load: false,
-                budget_bytes: 4096,
+                budget_bytes: 4096 + count_native_execution_bytes(),
                 budget_snapshot: budget_snapshot(0, 0, 4096),
             },
             &model(),
@@ -3632,7 +3689,7 @@ mod tests {
             &[pinned],
             AdmissionPolicy {
                 auto_load: false,
-                budget_bytes: 8192,
+                budget_bytes: 4096 + count_native_execution_bytes(),
                 budget_snapshot: budget_snapshot(0, 0, 0),
             },
             &model(),
@@ -3670,10 +3727,12 @@ mod tests {
                 other_backend_live_bytes: 5000,
                 selected_raw_bytes: 4096,
                 derived_artifact_bytes: 0,
-                projected_final_bytes: 9096,
+                projected_final_bytes,
+                prospective_execution_bytes,
                 budget_bytes: 8192,
                 ..
-            }
+            } if prospective_execution_bytes == count_native_execution_bytes()
+                && projected_final_bytes == 9096 + prospective_execution_bytes
         ));
     }
 
@@ -4147,9 +4206,11 @@ mod tests {
             AdmissionDecline::ResidencyBudgetExceeded {
                 retained_execution_bytes: 4097,
                 selected_raw_bytes: 4096,
-                projected_final_bytes: 8193,
+                projected_final_bytes,
+                prospective_execution_bytes,
                 ..
-            }
+            } if prospective_execution_bytes == count_native_execution_bytes()
+                && projected_final_bytes == 8193 + prospective_execution_bytes
         ));
     }
 
@@ -4206,6 +4267,85 @@ mod tests {
         )
         .expect_err("opaque words cannot be budgeted as scalar programs");
         assert_eq!(decline.code(), "generic_scalar_estimate_unavailable");
+    }
+
+    #[test]
+    fn dense_count_forecast_covers_loaded_and_conservative_cold_inputs() {
+        let shape = count_shape();
+        let model = model();
+        for loaded in [false, true] {
+            let evidence = estimate(loaded, 4096);
+            let bytes = scalar_planning_memory_with(
+                &shape,
+                &[evidence],
+                &model,
+                |_, nullable, groups, rows, _, _| {
+                    assert_eq!(groups, 1);
+                    assert_eq!(rows, 100_000);
+                    assert!(nullable.is_empty());
+                    Ok(crate::gpu::GroupedAggMemoryRequirements {
+                        workspace_bytes: 8000,
+                        output_bytes: 192,
+                        total_bytes: 8192,
+                    })
+                },
+            )
+            .expect("COUNT must quote workspace even without scalar bytecode");
+            assert_eq!(bytes, 8192);
+        }
+        let mut integer = dense_sum_count_shape(123_456);
+        integer.estimated_dense_key_cardinalities = Some(vec![16]);
+        scalar_planning_memory_with(
+            &integer,
+            &[estimate(false, 4096)],
+            &model,
+            |_, nullable, groups, rows, _, _| {
+                assert_eq!(nullable, &[1, 2, 3]);
+                assert_eq!((groups, rows), (17, 123_456));
+                Ok(crate::gpu::GroupedAggMemoryRequirements {
+                    workspace_bytes: 8000,
+                    output_bytes: 192,
+                    total_bytes: 8192,
+                })
+            },
+        )
+        .expect("cold fixed-width forecast reserves potential NULL lanes");
+    }
+
+    #[test]
+    fn dense_forecast_admission_exact_fit_and_one_byte_under() {
+        let model = model();
+        let snapshot = ResidentBudgetSnapshot {
+            retained_execution_bytes: 400,
+            current_backend_live_bytes: 1000,
+            cluster_live_bytes: 1300,
+            ..budget_snapshot(300, 200, 400)
+        }
+        .discount_idle_execution(150)
+        .expect("local idle credit");
+        let exact = snapshot.projected_final_bytes(4096, 0).expect("footprint") + 8192;
+        for (budget, fits) in [(exact, true), (exact - 1, false)] {
+            let result = apply_exact_residency_with_scalar_memory(
+                &mut count_shape(),
+                &[estimate(true, 4096)],
+                AdmissionPolicy {
+                    auto_load: false,
+                    budget_bytes: budget,
+                    budget_snapshot: snapshot,
+                },
+                &model,
+                |_, _, _| Ok(8192),
+            );
+            if fits {
+                result.expect("exact raw + active + foreign + native layout fit");
+            } else {
+                assert!(
+                    matches!(result, Err(AdmissionDecline::ResidencyBudgetExceeded {
+                    prospective_execution_bytes: 8192, projected_final_bytes, ..
+                }) if projected_final_bytes == exact)
+                );
+            }
+        }
     }
 
     #[test]
@@ -4320,10 +4460,13 @@ mod tests {
             .is_err()
         );
         assert_eq!(
-            scalar_planning_memory_with(&count_shape(), &[], &model, |_, _, _, _, _, _| panic!(
-                "non-scalar shapes do not query scalar layouts"
-            ))
-            .expect("no scalar allocation"),
+            scalar_planning_memory_with(
+                &grouped_count_shape(),
+                &[],
+                &model,
+                |_, _, _, _, _, _| panic!("hash shapes do not query dense layouts")
+            )
+            .expect("hash allocation is outside dense forecast"),
             0
         );
     }
@@ -4357,7 +4500,7 @@ mod tests {
             &[estimate(false, 4_096)],
             AdmissionPolicy {
                 auto_load: true,
-                budget_bytes: 4_096,
+                budget_bytes: 4_096 + count_native_execution_bytes(),
                 budget_snapshot: budget_snapshot(0, 0, 2_000),
             },
             &model(),
@@ -4377,7 +4520,7 @@ mod tests {
             &[estimate(false, 4_096)],
             AdmissionPolicy {
                 auto_load: true,
-                budget_bytes: 4_096,
+                budget_bytes: 4_096 + count_native_execution_bytes(),
                 budget_snapshot: budget_snapshot(0, 0, 16_384),
             },
             &model(),
@@ -4394,7 +4537,7 @@ mod tests {
             &[estimate(false, 4096)],
             AdmissionPolicy {
                 auto_load: true,
-                budget_bytes: 8192,
+                budget_bytes: 4096 + count_native_execution_bytes(),
                 budget_snapshot: budget_snapshot(0, 0, 0),
             },
             &model(),
@@ -4419,12 +4562,12 @@ mod tests {
             &[estimate(false, 0)],
             AdmissionPolicy {
                 auto_load: true,
-                budget_bytes: 0,
+                budget_bytes: count_native_execution_bytes(),
                 budget_snapshot: budget_snapshot(0, 0, 0),
             },
             &model(),
         )
-        .expect("zero-column COUNT(*) scan has no resident byte allocation");
+        .expect("zero-column COUNT(*) has no raw allocation but needs native execution memory");
 
         let expected_load = expected_exact_load(100_000, 0, true);
         assert!(expected_load.get() > 0.0);
@@ -4489,7 +4632,7 @@ mod tests {
             &[estimate(false, 4_096)],
             AdmissionPolicy {
                 auto_load: true,
-                budget_bytes: 8_192,
+                budget_bytes: 4_096 + count_native_execution_bytes(),
                 budget_snapshot: budget_snapshot(0, 0, 0),
             },
             &model(),

@@ -4115,10 +4115,11 @@ pub(crate) fn scalar_measure_program(
     Ok(decoded)
 }
 
-/// Native workspace/output forecast for the fused dense scalar family.
-/// Metadata lives on the stack and borrows program words; no payloads, owners,
-/// ledger reservations or allocation-pool entries are created by this query.
-pub fn scalar_descriptor_memory_requirements(
+/// Pointer-free layout quote for the already qualified dimension-free dense
+/// integer/count families. Native mode/layout validation remains authoritative.
+/// Metadata lives on the stack and borrows program words; no ledger owners or
+/// allocation-pool entries are created by this query.
+pub fn dense_descriptor_memory_requirements(
     spec: &AggQuerySpec,
     nullable_columns: &[i16],
     group_capacity: usize,
@@ -4130,17 +4131,12 @@ pub fn scalar_descriptor_memory_requirements(
         || spec.measures.len() > abi::PGACCEL_GROUPED_AGG_MAX_MEASURES
         || spec.group_keys.len() > abi::PGACCEL_GROUPED_AGG_MAX_KEYS
         || !spec.star_dims.is_empty()
-        || spec.having.is_some()
         || group_capacity == 0
         || (spec.group_keys.is_empty() && group_capacity != 1)
-        || !spec
-            .measures
-            .iter()
-            .any(|measure| matches!(measure.expression, MeasureExpr::Bytecode { .. }))
     {
-        return Err("scalar layout forecast requires a bounded dense scalar shape".into());
+        return Err("dense layout forecast requires a dimension-free dense shape".into());
     }
-    let marker = 0_i32;
+    let marker = 0_i64;
     let null_marker = 0_u8;
     let nullable = |column: ColumnRef| {
         nullable_columns
@@ -4151,10 +4147,19 @@ pub fn scalar_descriptor_memory_requirements(
         if column.relation_oid != spec.fact_rel
             || column.attno <= 0
             || i16::try_from(column.attno).is_err()
-            || !matches!(column.type_oid, INT2OID | INT4OID)
         {
-            return Err("scalar layout forecast raw inputs must be fact INT2/INT4 columns".into());
+            return Err("dense layout forecast raw inputs must be fact columns".into());
         }
+        let (physical_type, element_bytes) = match column.type_oid {
+            BOOLOID => (abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL, 1),
+            INT2OID | INT4OID => (abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32, 4),
+            INT8OID => (abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT64, 8),
+            DATEOID => (abi::PGACCEL_GROUPED_AGG_PHYSICAL_DATE, 4),
+            TIMESTAMPOID | TIMESTAMPTZOID => (abi::PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP, 8),
+            FLOAT4OID => (abi::PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT32, 4),
+            FLOAT8OID => (abi::PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64, 8),
+            _ => return Err("dense layout forecast input physical type is unsupported".into()),
+        };
         Ok(abi::PgaccelGroupedAggMeasureCol {
             values: std::ptr::from_ref(&marker).cast(),
             nulls: if nullable(column) {
@@ -4162,8 +4167,8 @@ pub fn scalar_descriptor_memory_requirements(
             } else {
                 std::ptr::null()
             },
-            physical_type: abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32,
-            element_bytes: 4,
+            physical_type,
+            element_bytes,
             scale: 0,
             flags: 0,
         })
@@ -4298,13 +4303,15 @@ pub fn scalar_descriptor_memory_requirements(
         };
     }
     desc.where_filter = build_filter(spec, rows, Some(std::ptr::from_ref(&null_marker).cast()))?;
-    if !parallel_dense_integer_shape(&desc) {
-        return Err("scalar layout forecast is outside the parallel dense integer family".into());
+    if !parallel_dense_integer_shape(&desc) && !parallel_dense_count_shape(&desc) {
+        return Err(
+            "dense layout forecast is outside the parallel dense integer/count family".into(),
+        );
     }
     if !dense_one_shot_eligible(&desc, dense_one_shot_row_cap(one_shot_max_rows)) {
         let chunk = dense_partial_chunk_rows(
             &desc,
-            dense_session_chunk_rows(max_chunk_rows, one_shot_max_rows),
+            effective_dense_chunk_rows(dense_session_chunk_rows(max_chunk_rows, one_shot_max_rows)),
         );
         if chunk == 0 {
             return Err("scalar layout forecast has no bounded chunk capacity".into());
@@ -6082,6 +6089,7 @@ impl DenseExecutionArtifact for SpatialAggArtifact {
 
 trait DenseArtifactInputResolver {
     type Artifact: DenseExecutionArtifact;
+    fn reclaim(&self, required_bytes: u64) -> Result<(), ResidentLoadError>;
     fn resolve<R>(
         &self,
         callback: impl FnOnce(ResolvedDerivedInputs<'_, Self::Artifact>) -> R,
@@ -6096,6 +6104,14 @@ struct CachedDenseArtifactResolver<'a> {
 
 impl DenseArtifactInputResolver for CachedDenseArtifactResolver<'_> {
     type Artifact = DescriptorAggArtifact;
+    fn reclaim(&self, required_bytes: u64) -> Result<(), ResidentLoadError> {
+        crate::engine::residency::reclaim_execution_memory(
+            self.owner_relid,
+            Some(self.identity),
+            self.requests,
+            required_bytes,
+        )
+    }
     fn resolve<R>(
         &self,
         callback: impl FnOnce(ResolvedDerivedInputs<'_, DescriptorAggArtifact>) -> R,
@@ -6251,6 +6267,14 @@ struct EphemeralDenseArtifactResolver<'a> {
 
 impl DenseArtifactInputResolver for EphemeralDenseArtifactResolver<'_> {
     type Artifact = DescriptorAggArtifact;
+    fn reclaim(&self, required_bytes: u64) -> Result<(), ResidentLoadError> {
+        crate::engine::residency::reclaim_execution_memory(
+            self.owner_relid,
+            None,
+            self.requests,
+            required_bytes,
+        )
+    }
     fn resolve<R>(
         &self,
         callback: impl FnOnce(ResolvedDerivedInputs<'_, DescriptorAggArtifact>) -> R,
@@ -6267,6 +6291,14 @@ struct CachedSpatialArtifactResolver<'a> {
 
 impl DenseArtifactInputResolver for CachedSpatialArtifactResolver<'_> {
     type Artifact = SpatialAggArtifact;
+    fn reclaim(&self, required_bytes: u64) -> Result<(), ResidentLoadError> {
+        crate::engine::residency::reclaim_execution_memory(
+            self.owner_relid,
+            Some(self.identity),
+            self.requests,
+            required_bytes,
+        )
+    }
     fn resolve<R>(
         &self,
         callback: impl FnOnce(ResolvedDerivedInputs<'_, SpatialAggArtifact>) -> R,
@@ -6283,6 +6315,14 @@ struct EphemeralSpatialArtifactResolver<'a> {
 
 impl DenseArtifactInputResolver for EphemeralSpatialArtifactResolver<'_> {
     type Artifact = SpatialAggArtifact;
+    fn reclaim(&self, required_bytes: u64) -> Result<(), ResidentLoadError> {
+        crate::engine::residency::reclaim_execution_memory(
+            self.owner_relid,
+            None,
+            self.requests,
+            required_bytes,
+        )
+    }
     fn resolve<R>(
         &self,
         callback: impl FnOnce(ResolvedDerivedInputs<'_, SpatialAggArtifact>) -> R,
@@ -6339,6 +6379,58 @@ fn execute_bounded_dense_ephemeral(
     )
 }
 
+fn dense_runtime_nullable_columns(
+    base: &DescriptorAggArtifact,
+    requests: &[ResidentColumnRef],
+    columns: &[ResidentColumnView<'_>],
+) -> Result<Vec<i16>, String> {
+    if requests.len() != columns.len() {
+        return Err("dense layout forecast input bundle differs from requests".into());
+    }
+    let mut nullable = requests
+        .iter()
+        .zip(columns)
+        .filter_map(|(request, view)| {
+            let has_nulls = match view {
+                ResidentColumnView::Bool { nulls, .. }
+                | ResidentColumnView::I32 { nulls, .. }
+                | ResidentColumnView::I64 { nulls, .. }
+                | ResidentColumnView::H3 { nulls, .. }
+                | ResidentColumnView::F32 { nulls, .. }
+                | ResidentColumnView::F64 { nulls, .. }
+                | ResidentColumnView::TextDictionary { nulls, .. } => nulls.is_some(),
+                _ => false,
+            };
+            (u32::from(request.relid) == base.resolved_spec.fact_rel && has_nulls)
+                .then_some(request.attno)
+        })
+        .collect::<Vec<_>>();
+    // Group dictionaries are artifact-owned and need not appear in
+    // dispatch_column_refs (COUNT(*) can have no raw dispatch inputs).
+    // Their exact NULL codes still allocate native staged key lanes.
+    if base.resolved_spec.group_keys.len() != base.domains.len() {
+        return Err("dense layout forecast dictionary domains differ from keys".into());
+    }
+    for (key, domain) in base
+        .resolved_spec
+        .group_keys
+        .iter()
+        .zip(base.domains.iter())
+    {
+        if domain.null_code.is_some() {
+            let GroupKeySource::FactColumn(column) = key.source else {
+                return Err("dense layout forecast requires fact dictionary keys".into());
+            };
+            let attno =
+                i16::try_from(column.attno).map_err(|_| "dense dictionary column exceeds i16")?;
+            if !nullable.contains(&attno) {
+                nullable.push(attno);
+            }
+        }
+    }
+    Ok(nullable)
+}
+
 fn execute_bounded_dense_with_resolver(
     resolver: &impl DenseArtifactInputResolver,
     requests: &[ResidentColumnRef],
@@ -6358,6 +6450,48 @@ fn execute_bounded_dense_with_resolver(
     }
     if let Some(caught) = capture_postgres_interrupt() {
         caught.rethrow();
+    }
+
+    // Quote using only stack descriptor metadata. Binding or constructing a
+    // ResolvedGroupedAggPlan here would charge scalar snapshots before idle
+    // artifacts have been reclaimed. No borrowed pointers escape this phase.
+    let requirement = resolver
+        .resolve(|inputs| -> Result<Option<u64>, String> {
+            let base = inputs.artifact.base();
+            if !base.resolved_spec.star_dims.is_empty()
+                || !matches!(
+                    expected_kernel_mode,
+                    GroupedAggKernelMode::ParallelDenseInteger
+                        | GroupedAggKernelMode::ParallelDenseCount
+                )
+            {
+                return Ok(None);
+            }
+            let nullable = dense_runtime_nullable_columns(base, requests, &inputs.columns)?;
+            let memory = dense_descriptor_memory_requirements(
+                &base.resolved_spec,
+                &nullable,
+                base.group_capacity,
+                base.fact_rows,
+                max_chunk_rows,
+                one_shot_max_rows,
+            )?;
+            let bytes = u64::try_from(memory.total_bytes)
+                .map_err(|_| "dense layout bytes exceed u64")?
+                .checked_add(scalar_metadata_peak_bytes(&base.resolved_spec)?)
+                .ok_or("dense execution peak bytes exceed u64")?;
+            Ok(Some(bytes))
+        })
+        .map_err(DescriptorDispatchFailure::Residency)?
+        .map_err(|error| {
+            DescriptorDispatchFailure::Execution(DescriptorAggExecutionError::Failure(error))
+        })?;
+    if let Some(required_bytes) = requirement {
+        // STORE's immutable lease has ended. Protect this exact cached artifact
+        // and its raw dependencies, then resolve again to validate currentness.
+        resolver
+            .reclaim(required_bytes)
+            .map_err(DescriptorDispatchFailure::Residency)?;
     }
 
     let initialized = resolver
@@ -10921,6 +11055,247 @@ mod tests {
         invalid.attno = i32::MAX;
         dispatch_spec.measures[0].expression = MeasureExpr::Column(invalid);
         assert!(dispatch_column_refs(&dispatch_spec).is_err());
+    }
+
+    #[test]
+    fn dense_runtime_quote_includes_group_only_null_domains_at_budget_boundary() {
+        use super::super::artifact::GroupDatum;
+        use crate::engine::residency::ExecutionMemoryCharge;
+        crate::gpu::cleanup_grouped_allocation_pools();
+        let mut count = dense_bool_count_spec();
+        count.measures = spec(MeasureExpr::CountStar, AggregateKind::Count).measures;
+        count.group_keys[0].source = GroupKeySource::FactColumn(ColumnRef {
+            relation_oid: 42,
+            attno: 1,
+            type_oid: INT4OID,
+        });
+        count.group_keys[0].type_oid = INT4OID;
+        let mut artifact = zero_artifact(&count, &[INT4OID]);
+        artifact.group_capacity = 1025;
+        let domain = &mut std::rc::Rc::make_mut(&mut artifact.domains)[0];
+        domain.values = (0..1024)
+            .map(GroupDatum::I32)
+            .chain([GroupDatum::Null])
+            .collect();
+        domain.null_code = Some(1024);
+        artifact.resolved_spec.group_keys[0].encoding = GroupKeyEncoding::DictionaryI32 {
+            cardinality: 1025,
+            null_code: Some(1024),
+        };
+        let requests = dispatch_column_refs(&artifact.resolved_spec).expect("group-only COUNT");
+        assert!(
+            requests.is_empty(),
+            "group keys are not dispatch measure inputs"
+        );
+        let nullable =
+            dense_runtime_nullable_columns(&artifact, &requests, &[]).expect("runtime metadata");
+        assert_eq!(nullable, [1]);
+        let bound =
+            build_descriptor(&artifact, &requests, &[]).expect("canonical bound descriptor");
+        // SAFETY: zero-row artifact owns all metadata; native query reads no rows.
+        let plan =
+            unsafe { ResolvedGroupedAggPlan::from_abi(bound.desc) }.expect("native COUNT plan");
+        let actual = plan
+            .one_shot_memory_requirements()
+            .expect("native nullable-key layout");
+        let quote = dense_descriptor_memory_requirements(
+            &artifact.resolved_spec,
+            &nullable,
+            1025,
+            0,
+            4096,
+            1_000_000,
+        )
+        .expect("runtime quote");
+        assert_eq!(quote, actual);
+        let omitted = dense_descriptor_memory_requirements(
+            &artifact.resolved_spec,
+            &[],
+            1025,
+            0,
+            4096,
+            1_000_000,
+        )
+        .expect("old incomplete quote");
+        assert!(
+            omitted.total_bytes < actual.total_bytes,
+            "independent key NULL lane must affect native layout"
+        );
+        let baseline = resident_live_bytes();
+        let budget = gucs::resident_memory_budget_bytes();
+        let held =
+            ExecutionMemoryCharge::reserve(budget - baseline - actual.total_bytes as u64, budget)
+                .expect("exact active owner");
+        plan.preflight_one_shot_memory()
+            .expect("exact complete layout fit");
+        drop(held);
+        let held = ExecutionMemoryCharge::reserve(
+            budget - baseline - actual.total_bytes as u64 + 1,
+            budget,
+        )
+        .expect("one byte under complete layout");
+        assert!(
+            crate::engine::residency::reclaim_execution_memory(
+                pg_sys::InvalidOid,
+                None,
+                &[],
+                omitted.total_bytes as u64
+            )
+            .is_ok(),
+            "old omitted-key quote incorrectly fits"
+        );
+        assert!(matches!(
+            crate::engine::residency::reclaim_execution_memory(
+                pg_sys::InvalidOid,
+                None,
+                &[],
+                quote.total_bytes as u64
+            ),
+            Err(ResidentLoadError::BudgetExceeded { .. })
+        ));
+        assert_eq!(
+            plan.preflight_one_shot_memory()
+                .expect_err("native agrees with complete quote")
+                .status,
+            GpuStatusDetail::OutOfMemory
+        );
+        drop(held);
+        assert_eq!(resident_live_bytes(), baseline);
+    }
+
+    #[test]
+    fn dense_forecast_matches_bound_native_count_integer_and_filter_layouts() {
+        let mut grouped_count = dense_bool_count_spec();
+        grouped_count.measures = spec(MeasureExpr::CountStar, AggregateKind::Count).measures;
+        assert!(
+            dispatch_column_refs(&grouped_count)
+                .expect("COUNT inputs")
+                .is_empty()
+        );
+        let mut multiple_keys = dense_integer_sum_avg_spec(INT4OID);
+        for attno in [3, 4] {
+            let mut key = multiple_keys.group_keys[0].clone();
+            key.source = GroupKeySource::FactColumn(ColumnRef {
+                relation_oid: 42,
+                attno,
+                type_oid: INT4OID,
+            });
+            key.type_oid = INT4OID;
+            multiple_keys.group_keys.push(key);
+        }
+        let variants = [
+            (
+                spec(MeasureExpr::CountStar, AggregateKind::Count),
+                vec![],
+                vec![],
+            ),
+            (dense_bool_count_spec(), vec![BOOLOID], vec![BOOLOID]),
+            (dense_int8_count_spec(), vec![BOOLOID], vec![INT8OID]),
+            (grouped_count, vec![BOOLOID], vec![]),
+            (
+                multiple_keys,
+                vec![BOOLOID, INT4OID, INT4OID],
+                vec![INT4OID],
+            ),
+            (
+                dense_integer_sum_avg_spec(INT4OID),
+                vec![BOOLOID],
+                vec![INT4OID],
+            ),
+            (
+                dense_integer_measure_range_spec(),
+                vec![INT4OID],
+                vec![INT4OID],
+            ),
+        ];
+        for (spec, artifact_types, dispatch_types) in variants {
+            let bound = zero_descriptor(&spec, &artifact_types, &dispatch_types);
+            for first_cardinality in [1_u32, 17, 1025] {
+                for rows in [0, 17, 100_003] {
+                    for nullable in [false, true] {
+                        let mut desc = bound;
+                        desc.row_count = rows;
+                        let marker = 0_i64;
+                        let null_marker = 0_u8;
+                        desc.group_capacity = 1;
+                        let mut nullable_columns = if nullable { vec![2] } else { vec![] };
+                        for (index, key) in
+                            desc.keys[..desc.key_count as usize].iter_mut().enumerate()
+                        {
+                            key.values.values = std::ptr::from_ref(&marker).cast();
+                            key.cardinality = if index == 0 { first_cardinality } else { 7 };
+                            key.null_code = if nullable {
+                                i32::try_from(key.cardinality - 1).expect("test cardinality")
+                            } else {
+                                abi::PGACCEL_GROUPED_AGG_KEY_NO_NULL_CODE
+                            };
+                            desc.group_capacity *= key.cardinality as usize;
+                            if nullable {
+                                let GroupKeySource::FactColumn(column) =
+                                    spec.group_keys[index].source
+                                else {
+                                    unreachable!()
+                                };
+                                nullable_columns
+                                    .push(i16::try_from(column.attno).expect("key attno"));
+                            }
+                        }
+                        for measure in &mut desc.measures[..desc.measure_count as usize] {
+                            if measure.op != abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR {
+                                measure.value.values = std::ptr::from_ref(&marker).cast();
+                                measure.value.nulls = if nullable {
+                                    &raw const null_marker
+                                } else {
+                                    std::ptr::null()
+                                };
+                            }
+                            if measure.flags & abi::PGACCEL_GROUPED_AGG_MEASURE_FLAG_FILTER_INPUT
+                                != 0
+                            {
+                                measure.rhs.values = std::ptr::from_ref(&marker).cast();
+                                measure.rhs.nulls = if nullable {
+                                    &raw const null_marker
+                                } else {
+                                    std::ptr::null()
+                                };
+                            }
+                        }
+                        for one_shot in [1024, 1_000_000] {
+                            // SAFETY: stack markers are used only for native layout
+                            // inspection, which never executes or reads input rows.
+                            let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }
+                                .expect("bound dense shape");
+                            let actual = if dense_one_shot_eligible(
+                                plan.descriptor(),
+                                dense_one_shot_row_cap(one_shot),
+                            ) {
+                                plan.one_shot_memory_requirements().expect("one-shot quote")
+                            } else {
+                                let chunk = effective_dense_chunk_rows(dense_partial_chunk_rows(
+                                    plan.descriptor(),
+                                    dense_session_chunk_rows(4096, one_shot),
+                                ));
+                                GroupedAggSession::memory_requirements(&plan, chunk)
+                                    .expect("bounded quote")
+                            };
+                            let quote = dense_descriptor_memory_requirements(
+                                &spec,
+                                &nullable_columns,
+                                desc.group_capacity,
+                                rows,
+                                4096,
+                                one_shot,
+                            )
+                            .expect("pointer-free quote");
+                            assert_eq!(
+                                quote, actual,
+                                "rows={rows} nullable={nullable} one_shot={one_shot} spec={spec:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

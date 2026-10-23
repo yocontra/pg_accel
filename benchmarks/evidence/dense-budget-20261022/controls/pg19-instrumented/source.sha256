@@ -1,0 +1,10 @@
+d9732308961e22a96aaf9a26262cb11e69db584a4ad605ba01d2b53b9be701d0  sql/tests/121_integer_where_aggregates.sql
+3ebf1a40e6290233f88fbfd7e9e8d2a81e0d46057a380ab01457da00961627e9  pg_accel/src/gpu/grouped_agg.rs
+326b206f5fe3c1c3edd4ab9301348e458d642dbf039e9070e05c13799b6f4be9  pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs
+4e87bf1fa2cadb800ee79057a85e2650f04c5eb90ff45642398880e166157407  pg_accel/src/engine/executor/agg/descriptor.rs
+a1911b743e837b2d02a9fc9352adf577a424c9be90dd3d527b8592dddce3253c  pg_accel/src/engine/residency/store.rs
+d9732308961e22a96aaf9a26262cb11e69db584a4ad605ba01d2b53b9be701d0  /Users/contra/Projects/pg_accel/.codex/scratch/hosted-budget-20261018/sql121-original.sql
+7280c48cde06a79a8b5c9a423906d07b65c7088ce5f3b1bf4797e932889de7c3  /Users/contra/Projects/pg_accel/.codex/scratch/hosted-budget-20261018/sql121-instrumented.sql
+e63f4e58f92d183beee7780860771ea24ac9cab88e4957e58b89fe168c626f37  /Users/contra/Projects/pg_accel/.codex/scratch/hosted-budget-20261018/cold-target.sql
+78f4543030b6b8c3d33e6190678b0aea9c50a64e25978d547ccfc1349fbb7469  /Users/contra/Projects/pg_accel/.codex/scratch/hosted-budget-20261018/profile.sql
+2d55e441dd674ac90bb79a61644b7aabaec9ec172c5ed8df692827ab58a6fcd1  /Users/contra/Projects/pg_accel/.codex/scratch/hosted-budget-20261018/run-diagnostic.sh

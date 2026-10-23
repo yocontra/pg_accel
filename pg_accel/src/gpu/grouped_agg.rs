@@ -1177,7 +1177,7 @@ pub struct GroupedAggWorkspace {
     charge: Option<ExecutionMemoryCharge>,
 }
 
-fn idle_grouped_execution_bytes() -> GpuResult<u64> {
+pub fn idle_grouped_execution_bytes() -> GpuResult<u64> {
     let sum = |total: u64, charge: &ExecutionMemoryCharge| {
         total
             .checked_add(charge.bytes())
@@ -2927,9 +2927,12 @@ pub unsafe fn query_dense_grouped_memory_layout(
         ));
     }
     let query = workspace_query_descriptor(desc);
-    if native_kernel_mode(&query)? != GroupedAggKernelMode::ParallelDenseInteger {
+    if !matches!(
+        native_kernel_mode(&query)?,
+        GroupedAggKernelMode::ParallelDenseInteger | GroupedAggKernelMode::ParallelDenseCount
+    ) {
         return Err(descriptor_error(
-            "layout forecast requires parallel dense integer execution",
+            "layout forecast requires parallel dense integer/count execution",
         ));
     }
     let workspace = GroupedAggWorkspace::requirements_for_descriptor(&query)?;

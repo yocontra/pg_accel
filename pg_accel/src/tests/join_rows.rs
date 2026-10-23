@@ -1089,12 +1089,15 @@ mod tests {
             crate::gpu::cleanup_grouped_allocation_pools();
             assert_eq!(resident_live_bytes(), baseline);
         }
-        // The initial native poll precedes all kernels. Interrupt it once, then
-        // require exactly one complete retry, including empty-input counts.
+        // The initial native poll precedes all kernels. Inject one interrupt,
+        // then account for every retry, including independently arriving benign
+        // PostgreSQL interrupts and empty-input counts.
         let statuses = crate::gpu::bridge::test_join_status_counts();
         let failures = crate::gpu::kernel_failure_count(crate::gpu::GpuFailureDomain::HashJoin);
         let kernels = crate::gpu::gpu_exec_count();
         let mut polls = 0;
+        let mut injection_writes = 0;
+        let mut injection_readback = 0;
         let (rows, launches) = inputs
             .execute_cardinality_test_hook(limits, || {
                 polls += 1;
@@ -1102,23 +1105,42 @@ mod tests {
                     // Native callback: no PostgreSQL calls or longjmp here.
                     unsafe {
                         std::ptr::write_volatile(&raw mut pgrx::pg_sys::InterruptPending, 1);
+                        injection_writes += 1;
+                        injection_readback =
+                            std::ptr::read_volatile(&raw const pgrx::pg_sys::InterruptPending);
                     }
                 }
             })
             .expect("benign interrupt retries exact device cardinality");
         let after = crate::gpu::bridge::test_join_status_counts();
-        assert_eq!(rows, joined_rows as u64);
-        assert_eq!(after.count_attempts - statuses.count_attempts, 2);
-        assert_eq!(after.timeouts - statuses.timeouts, 1);
-        assert_eq!(after.oom, statuses.oom);
-        assert_eq!(after.other, statuses.other);
-        assert_eq!(
-            crate::gpu::kernel_failure_count(crate::gpu::GpuFailureDomain::HashJoin) - failures,
-            1,
-            "successful retry still records its interrupted native attempt"
+        let attempts = after.count_attempts - statuses.count_attempts;
+        let retries = after.timeouts - statuses.timeouts;
+        let failure_delta =
+            crate::gpu::kernel_failure_count(crate::gpu::GpuFailureDomain::HashJoin) - failures;
+        let kernel_delta = crate::gpu::gpu_exec_count() - kernels;
+        let receipt = format!(
+            "before={statuses:?} after={after:?} injection_writes={injection_writes} \
+             injection_readback={injection_readback} polls={polls} rows={rows} \
+             expected_rows={joined_rows} launches={launches} kernel_delta={kernel_delta} \
+             failure_delta={failure_delta}"
         );
-        assert_eq!(launches, crate::gpu::gpu_exec_count() - kernels);
-        assert_eq!(polls, launches + 2, "one initial poll per native attempt");
+        assert_eq!(injection_writes, 1, "{receipt}");
+        assert_eq!(injection_readback, 1, "{receipt}");
+        assert_eq!(rows, joined_rows as u64, "{receipt}");
+        assert!(retries >= 1, "{receipt}");
+        assert_eq!(attempts, retries + 1, "{receipt}");
+        assert_eq!(after.oom, statuses.oom, "{receipt}");
+        assert_eq!(after.other, statuses.other, "{receipt}");
+        assert_eq!(
+            failure_delta, retries,
+            "successful retry records every interrupted native attempt: {receipt}"
+        );
+        assert_eq!(launches, kernel_delta, "{receipt}");
+        assert_eq!(
+            polls,
+            launches + attempts,
+            "one initial poll per native attempt: {receipt}"
+        );
         crate::gpu::cleanup_grouped_allocation_pools();
         assert_eq!(resident_live_bytes(), baseline);
         if joined_rows != 0 {

@@ -1,0 +1,14 @@
+--- .codex/scratch/hosted-budget-20261018/pre-lint-phase2_cache.rs	2026-10-22 20:17:02
++++ pg_accel/src/tests/phase2_cache.rs	2026-10-22 20:17:02
+@@ -1107,11 +1107,9 @@
+                 "caught first-fetch error must release the prepared executor through query reset"
+             );
+             if callback_path {
+-                let fetch_after = crate::engine::ffi::custom_scan::test_scan_fetch_counts();
+                 assert!(fetch_after.1 > fetch_before.1);
+                 assert_eq!(fetch_after.0, fetch_before.0);
+             } else {
+-                let fetch_after = crate::engine::ffi::custom_scan::test_scan_fetch_counts();
+                 assert!(fetch_after.0 > fetch_before.0);
+                 assert_eq!(fetch_after.1, fetch_before.1);
+             }
