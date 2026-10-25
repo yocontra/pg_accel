@@ -1,0 +1,13 @@
+Command: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts.tests.test_upstream_pg_tests -v
+test_catalog_fixture_uses_observed_floor_without_capping_total_by_one_shot (scripts.tests.test_upstream_pg_tests.UpstreamPostgresGateContractTests.test_catalog_fixture_uses_observed_floor_without_capping_total_by_one_shot) ... ok
+test_catalog_lifecycle_uses_an_owned_database_and_is_in_ci (scripts.tests.test_upstream_pg_tests.UpstreamPostgresGateContractTests.test_catalog_lifecycle_uses_an_owned_database_and_is_in_ci) ... ok
+test_gate_refuses_to_overwrite_an_evidence_directory (scripts.tests.test_upstream_pg_tests.UpstreamPostgresGateContractTests.test_gate_refuses_to_overwrite_an_evidence_directory) ... ok
+test_gate_runs_both_suites_in_both_modes_and_seals_evidence (scripts.tests.test_upstream_pg_tests.UpstreamPostgresGateContractTests.test_gate_runs_both_suites_in_both_modes_and_seals_evidence) ... ok
+test_just_and_ci_wire_the_real_gate (scripts.tests.test_upstream_pg_tests.UpstreamPostgresGateContractTests.test_just_and_ci_wire_the_real_gate) ... ok
+test_shell_is_syntactically_valid (scripts.tests.test_upstream_pg_tests.UpstreamPostgresGateContractTests.test_shell_is_syntactically_valid) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 0.022s
+
+OK
+terminal=0

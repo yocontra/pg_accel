@@ -1,0 +1,177 @@
+=================Backend information===================
+Loaded backend 0: OpenMP
+  Found device: AdaptiveCpp OpenMP host device
+Loaded backend 1: Metal
+  Found device: Apple Paravirtual device
+
+=================Device information===================
+***************** Devices for backend OpenMP *****************
+Device 0:
+ General device information:
+  Name: AdaptiveCpp OpenMP host device
+  Backend: OpenMP
+  Platform: Backend 4 / Platform 0
+  Vendor: the AdaptiveCpp project
+  Arch: <native-cpu>
+  Driver version: 1.2
+  Is CPU: 1
+  Is GPU: 0
+ Default executor information:
+  Is in-order queue: 0
+  Is out-of-order queue: 1
+  Is task graph: 0
+ Device support queries:
+  images: 0
+  error_correction: 0
+  host_unified_memory: 1
+  little_endian: 1
+  global_mem_cache: 1
+  global_mem_cache_read_only: 0
+  global_mem_cache_read_write: 1
+  emulated_local_memory: 1
+  sub_group_independent_forward_progress: 0
+  usm_device_allocations: 1
+  usm_host_allocations: 1
+  usm_atomic_host_allocations: 1
+  usm_shared_allocations: 1
+  usm_atomic_shared_allocations: 1
+  usm_system_allocations: 1
+  execution_timestamps: 1
+  sscp_kernels: 1
+ Device properties:
+  max_compute_units: 3
+  max_work_group_range0: 18446744073709551615
+  max_work_group_range1: 18446744073709551615
+  max_work_group_range2: 18446744073709551615
+  max_work_group_range_size: 18446744073709551615
+  max_global_size0: 18446744073709551615
+  max_global_size1: 18446744073709551615
+  max_global_size2: 18446744073709551615
+  max_group_size: 1024
+  max_num_sub_groups: 18446744073709551615
+  preferred_vector_width_char: 4
+  preferred_vector_width_double: 1
+  preferred_vector_width_float: 1
+  preferred_vector_width_half: 2
+  preferred_vector_width_int: 1
+  preferred_vector_width_long: 1
+  preferred_vector_width_short: 2
+  native_vector_width_char: 4
+  native_vector_width_double: 1
+  native_vector_width_float: 1
+  native_vector_width_half: 2
+  native_vector_width_int: 1
+  native_vector_width_long: 1
+  native_vector_width_short: 2
+  max_clock_speed: 0
+  max_malloc_size: 18446744073709551615
+  address_bits: 64
+  max_read_image_args: 0
+  max_write_image_args: 0
+  image2d_max_width: 0
+  image2d_max_height: 0
+  image3d_max_width: 0
+  image3d_max_height: 0
+  image3d_max_depth: 0
+  image_max_buffer_size: 0
+  image_max_array_size: 0
+  max_samplers: 0
+  max_parameter_size: 18446744073709551615
+  mem_base_addr_align: 8
+  global_mem_cache_line_size: 64
+  global_mem_cache_size: 1
+  global_mem_size: 7516192768
+  max_constant_buffer_size: 18446744073709551615
+  max_constant_args: 18446744073709551615
+  local_mem_size: 18446744073709551615
+  printf_buffer_size: 18446744073709551615
+  partition_max_sub_devices: 0
+  vendor_id: 18446744073709551615
+  sub_group_sizes: 1 
+
+
+***************** Devices for backend Metal *****************
+Device 0:
+ General device information:
+  Name: Apple Paravirtual device
+  Backend: Metal
+  Platform: Backend 5 / Platform 0
+  Vendor: Apple
+  Arch: air64_v27
+  Driver version: Version 26.6.2 (Build 25G83), featuresets: iOS_GPUFamily1_v1,iOS_GPUFamily2_v1,iOS_GPUFamily1_v2,iOS_GPUFamily2_v2,iOS_GPUFamily3_v1,iOS_GPUFamily1_v3,iOS_GPUFamily2_v3,iOS_GPUFamily3_v2,iOS_GPUFamily1_v4,iOS_GPUFamily2_v4,iOS_GPUFamily3_v3,iOS_GPUFamily4_v1,iOS_GPUFamily1_v5,iOS_GPUFamily2_v5,iOS_GPUFamily3_v4,iOS_GPUFamily4_v2,iOS_GPUFamily5_v1,macOS_GPUFamily1_v1,macOS_GPUFamily1_v2,macOS_GPUFamily1_v3,macOS_GPUFamily1_v4,macOS_GPUFamily2_v1, gpufamilies: Apple1,Apple2,Apple3,Apple4,Apple5,Mac1,Mac2,Common1,Common2,Common3, argumentBuffersTier: ArgumentBuffersTier2
+  Is CPU: 0
+  Is GPU: 1
+ Default executor information:
+  Is in-order queue: 0
+  Is out-of-order queue: 1
+  Is task graph: 0
+ Device support queries:
+  images: 1
+  error_correction: 0
+  host_unified_memory: 1
+  little_endian: 1
+  global_mem_cache: 1
+  global_mem_cache_read_only: 1
+  global_mem_cache_read_write: 1
+  emulated_local_memory: 0
+  sub_group_independent_forward_progress: 0
+  usm_device_allocations: 1
+  usm_host_allocations: 1
+  usm_atomic_host_allocations: 0
+  usm_shared_allocations: 1
+  usm_atomic_shared_allocations: 0
+  usm_system_allocations: 0
+  execution_timestamps: 1
+  sscp_kernels: 1
+ Device properties:
+  max_compute_units: 1
+  max_work_group_range0: 65535
+  max_work_group_range1: 65535
+  max_work_group_range2: 65535
+  max_work_group_range_size: 4294836225
+  max_global_size0: 65535
+  max_global_size1: 65535
+  max_global_size2: 65535
+  max_group_size: 1024
+  max_num_sub_groups: 32
+  preferred_vector_width_char: 1
+  preferred_vector_width_double: 1
+  preferred_vector_width_float: 1
+  preferred_vector_width_half: 1
+  preferred_vector_width_int: 1
+  preferred_vector_width_long: 1
+  preferred_vector_width_short: 1
+  native_vector_width_char: 1
+  native_vector_width_double: 1
+  native_vector_width_float: 1
+  native_vector_width_half: 1
+  native_vector_width_int: 1
+  native_vector_width_long: 1
+  native_vector_width_short: 1
+  max_clock_speed: 0
+  max_malloc_size: 3758096384
+  address_bits: 64
+  max_read_image_args: 128
+  max_write_image_args: 128
+  image2d_max_width: 16384
+  image2d_max_height: 16384
+  image3d_max_width: 2048
+  image3d_max_height: 2048
+  image3d_max_depth: 2048
+  image_max_buffer_size: 3758096384
+  image_max_array_size: 2048
+  max_samplers: 16
+  max_parameter_size: 4096
+  mem_base_addr_align: 4096
+  global_mem_cache_line_size: 128
+  global_mem_cache_size: 0
+  global_mem_size: 4885315584
+  max_constant_buffer_size: 4096
+  max_constant_args: 16
+  local_mem_size: 32768
+  printf_buffer_size: 0
+  partition_max_sub_devices: 0
+  vendor_id: 16940800
+  sub_group_sizes: 32 
+
+

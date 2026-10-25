@@ -606,11 +606,196 @@ fn h3_protection_canonical_winning_names_registered() {
             "h3_cell_to_parent",
             "h3_parent_res4",
             "h3_parent_res9",
-            "h3_parent_res15"
+            "h3_parent_res15",
+            "h3_parent_count_int4_res0",
+            "h3_parent_count_int4_res1",
+            "h3_parent_count_bool_res0",
+            "h3_parent_count_bool_res1"
         ]
     );
     for name in h3_winning_lane_names() {
         assert!(find_workload(name).is_some());
+    }
+}
+
+#[test]
+fn typed_h3_count_lanes_register_exact_pins_oracles_and_winner_floor() {
+    for name in h3_winning_lane_names()
+        .into_iter()
+        .filter(|name| crate::workloads::h3_count_column_contract(name).is_some())
+    {
+        let workload = find_workload(name).expect("typed workload registered");
+        let metadata = crate::workloads::workload_metadata(name).expect("metadata");
+        assert_eq!(metadata.resident_pins.len(), 1);
+        assert_eq!(metadata.resident_pins[0].table, "bench_h3_count_column");
+        assert_eq!(metadata.resident_pins[0].columns, &["cell", "value"]);
+        assert_eq!(
+            h3_lane_class(name),
+            Some(H3LaneClass::Winning {
+                min_warm_speedup: 1.15
+            })
+        );
+        assert_eq!(
+            workload.query_sql(),
+            workload.baseline_query_sql().expect("native query")
+        );
+        assert!(workload.query_sql().contains("count(value)"));
+        assert!(!workload.query_sql().contains("count(*)"));
+        assert!(!workload.setup_sql(100).join("\n").contains("random()"));
+        for rows in [44, 97, 1_000_017] {
+            let oracle = workload.result_oracle(rows).expect("NULL oracle");
+            let expected = (1..=rows).filter(|i| i % 4 != 0 && i % 11 != 0).count();
+            assert_eq!(
+                oracle.expected_row,
+                vec![
+                    crate::workloads::ExpectedResultValue::I64(
+                        i64::try_from(expected).expect("count")
+                    ),
+                    crate::workloads::ExpectedResultValue::Bool(true),
+                    crate::workloads::ExpectedResultValue::Bool(true),
+                ]
+            );
+            assert!(expected < rows, "COUNT(*) must disagree with the oracle");
+        }
+    }
+}
+
+/// Ordinary installed-module execution, not the staged descriptor test API.
+/// The independent engine suite covers invalidation and failure lifecycle;
+/// this test additionally protects benchmark fixture semantics for every type.
+#[cfg(feature = "integration_tests")]
+#[test]
+fn typed_h3_count_all_fixed_types_default_planner_matches_native() {
+    let _live_pg_guard = live_pg_test_lock();
+    let mut c = connect();
+    let defaults = c
+        .query_one(
+            "SELECT current_setting('pg_accel.cost_multiplier')::float8, \
+         current_setting('pg_accel.min_batch_size')::int4, \
+         current_setting('pg_accel.gpu_enabled')::boolean",
+            &[],
+        )
+        .expect("default settings");
+    assert_eq!(defaults.get::<_, f64>(0), 1.0);
+    assert_eq!(defaults.get::<_, i32>(1), 65536);
+    assert!(defaults.get::<_, bool>(2));
+    let rows = usize::try_from(qualifying_device_rows(
+        &mut c,
+        "gpu_h3_group_min_rows",
+        1_000_017,
+    ))
+    .expect("device rows fit usize");
+    let fixture = crate::workloads::H3ParentCountColumn::<false, 0>;
+    for (sql_type, oid, expression) in [
+        ("boolean", 16, "value > 0"),
+        ("int2", 21, "value::int2"),
+        ("int4", 23, "value"),
+        ("int8", 20, "value::int8 * 1000000000"),
+        (
+            "float4",
+            700,
+            "CASE value % 3 WHEN 0 THEN 'NaN'::float4 WHEN 1 THEN 'Infinity'::float4 ELSE '-Infinity'::float4 END",
+        ),
+        (
+            "float8",
+            701,
+            "CASE value % 3 WHEN 0 THEN 'NaN'::float8 WHEN 1 THEN 'Infinity'::float8 ELSE '-Infinity'::float8 END",
+        ),
+        ("date", 1082, "DATE '2000-01-01' + value"),
+        (
+            "timestamp",
+            1114,
+            "TIMESTAMP '2000-01-01' + value * INTERVAL '1 second'",
+        ),
+        (
+            "timestamptz",
+            1184,
+            "TIMESTAMPTZ '2000-01-01 00:00:00+00' + value * INTERVAL '1 second'",
+        ),
+    ] {
+        c.batch_execute("SET pg_accel.enabled = off")
+            .expect("native setup");
+        apply_setup(&mut c, &fixture, rows);
+        c.batch_execute(&format!(
+            "ALTER TABLE bench_h3_count_column ALTER COLUMN value TYPE {sql_type} \
+             USING CASE WHEN value IS NULL THEN NULL::{sql_type} ELSE {expression} END; \
+             ANALYZE bench_h3_count_column"
+        ))
+        .expect("typed fixture");
+        // Complete DDL and capture native rows before materializing residency.
+        let mut expected = Vec::new();
+        for resolution in [0, 1] {
+            let sql = format!(
+                "SELECT public.h3_cell_to_parent(cell, {resolution}) AS parent_cell, \
+                               count(value) AS n FROM bench_h3_count_column GROUP BY 1"
+            );
+            let mut native = execute_to_rows(&mut c, &sql, rows);
+            native.sort_unstable();
+            assert!(
+                native.iter().any(|row| row.ends_with("|0")),
+                "dedicated zero-count group"
+            );
+            expected.push((resolution, sql, native));
+        }
+        c.batch_execute(
+            "SET pg_accel.enabled = on; \
+            SELECT pg_accel_pin('bench_h3_count_column'::regclass, ARRAY['cell', 'value']); \
+            SELECT pg_accel_refresh('bench_h3_count_column'::regclass)",
+        )
+        .expect("pin exact inputs");
+        for (resolution, sql, native) in expected {
+            let plan = explain_text(&mut c, &sql);
+            assert!(
+                crate::report::plan_contains_typed_h3_count(&plan, oid, resolution),
+                "{sql_type}/res{resolution}: {plan}"
+            );
+            let hash_calls = |client: &mut Client| {
+                client.query_one(
+                "SELECT calls FROM pg_accel_grouped_kernel_mode_stats() WHERE mode = 'parallel_hash'", &[])
+                .expect("hash calls").get::<_, i64>(0)
+            };
+            let before = (kernel_executions(&mut c), hash_calls(&mut c));
+            let mut actual = execute_to_rows(&mut c, &sql, rows);
+            let observed = crate::runner::capture_typed_h3_settings(
+                &mut c,
+                "measured",
+                0,
+                crate::bench_model::CacheState::Warm,
+            )
+            .expect("same-backend typed settings");
+            assert_eq!(observed.phase, "measured");
+            assert_eq!(observed.index, 0);
+            assert_eq!(observed.settings.settings.len(), 4);
+            let setting = |name: &str| {
+                observed
+                    .settings
+                    .settings
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value.as_str())
+                    .expect("captured setting")
+            };
+            assert_eq!(
+                setting("pg_accel.cost_multiplier")
+                    .parse::<f64>()
+                    .expect("cost"),
+                1.0
+            );
+            assert_eq!(setting("pg_accel.min_batch_size"), "65536");
+            assert_eq!(setting("pg_accel.enabled"), "on");
+            assert_eq!(setting("pg_accel.gpu_enabled"), "on");
+            let after = (kernel_executions(&mut c), hash_calls(&mut c));
+            actual.sort_unstable();
+            assert_eq!(
+                actual, native,
+                "{sql_type}/res{resolution} full tuple parity"
+            );
+            assert!(
+                after.0 > before.0 && after.1 > before.1,
+                "actual-producing query must dispatch hash"
+            );
+        }
+        apply_cleanup(&mut c, &fixture);
     }
 }
 

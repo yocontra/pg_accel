@@ -1,0 +1,29 @@
+2026-10-25 16:33:31.900 MST [62367] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-25 16:33:31.900 MST [62367] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-25 16:33:31.933 MST [62367] LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-25 16:33:31.934 MST [62367] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/h3pb18/.s.PGSQL.32818"
+2026-10-25 16:33:31.940 MST [62373] LOG:  database system was shut down at 2026-10-25 16:33:31 MST
+2026-10-25 16:33:31.942 MST [62367] LOG:  database system is ready to accept connections
+2026-10-25 16:33:32.077 MST [62367] LOG:  received SIGHUP, reloading configuration files
+2026-10-25 16:33:32.077 MST [62367] LOG:  parameter "work_mem" changed to "512MB"
+2026-10-25 16:33:32.077 MST [62367] LOG:  parameter "effective_cache_size" changed to "48GB"
+2026-10-25 16:33:32.078 MST [62367] LOG:  parameter "max_parallel_workers_per_gather" changed to "8"
+2026-10-25 16:33:32.078 MST [62367] LOG:  parameter "max_parallel_workers" changed to "12"
+2026-10-25 16:33:32.078 MST [62367] LOG:  parameter "maintenance_work_mem" changed to "2GB"
+2026-10-25 16:33:32.078 MST [62367] LOG:  parameter "jit" changed to "off"
+2026-10-25 16:33:32.078 MST [62367] LOG:  parameter "random_page_cost" changed to "1.1"
+2026-10-25 16:33:32.078 MST [62367] LOG:  parameter "effective_io_concurrency" changed to "256"
+2026-10-25 16:33:32.078 MST [62367] LOG:  parameter "track_io_timing" changed to "on"
+2026-10-25 16:33:32.323 MST [62526] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-25 16:33:33.602 MST [62371] LOG:  checkpoint starting: immediate force wait
+2026-10-25 16:33:33.649 MST [62371] LOG:  checkpoint complete: wrote 5007 buffers (0.2%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 4 recycled; write=0.042 s, sync=0.004 s, total=0.047 s; sync files=80, longest=0.002 s, average=0.001 s; distance=67408 kB, estimate=67408 kB; lsn=0/58E3F40, redo lsn=0/58E3EE8
+2026-10-25 16:33:34.928 MST [62598] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-25 16:33:37.099 MST [62371] LOG:  checkpoint starting: immediate force wait
+2026-10-25 16:33:37.161 MST [62371] LOG:  checkpoint complete: wrote 9733 buffers (0.5%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 8 recycled; write=0.059 s, sync=0.002 s, total=0.062 s; sync files=34, longest=0.001 s, average=0.001 s; distance=133051 kB, estimate=133051 kB; lsn=0/DAD2D58, redo lsn=0/DAD2D00
+2026-10-25 16:33:39.065 MST [62367] LOG:  received fast shutdown request
+2026-10-25 16:33:39.066 MST [62367] LOG:  aborting any active transactions
+2026-10-25 16:33:39.067 MST [62367] LOG:  background worker "logical replication launcher" (PID 62376) exited with exit code 1
+2026-10-25 16:33:39.067 MST [62371] LOG:  shutting down
+2026-10-25 16:33:39.067 MST [62371] LOG:  checkpoint starting: shutdown immediate
+2026-10-25 16:33:39.079 MST [62371] LOG:  checkpoint complete: wrote 7 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.011 s, sync=0.001 s, total=0.012 s; sync files=7, longest=0.001 s, average=0.001 s; distance=35 kB, estimate=119749 kB; lsn=0/DADB9D8, redo lsn=0/DADB9D8
+2026-10-25 16:33:39.097 MST [62367] LOG:  database system is shut down

@@ -60,6 +60,10 @@ pub use store::{
     with_derived_artifact, with_derived_artifact_inputs, with_ephemeral_artifact_inputs,
     with_resident_column, with_resolved_artifact,
 };
+pub use store::{
+    CurrentDerivedCapacity, DerivedCapacityInspection, DerivedCapacityScalars,
+    inspect_current_derived_capacity,
+};
 pub use store::{ResidentPlannerDependency, resident_planner_dependency};
 pub use store::{
     build_ephemeral_host_device_derived_artifact_with_report,

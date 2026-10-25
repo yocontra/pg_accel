@@ -16,8 +16,9 @@ use super::shape::{
 use super::{PlannerSubstageGuard, add_gpu_path_with_resident_proof, rel_rows_estimate};
 use crate::engine::cost::{self, PgCost, Rows, TypedCostModel};
 use crate::engine::executor::agg::{
-    DenseExecutionDecision, dense_descriptor_memory_requirements, descriptor_program_clone_bytes,
-    estimate_descriptor_artifact_bytes_upper_bound, is_weighted_global_count_descriptor,
+    DenseExecutionDecision, H3PlanningMemory, dense_descriptor_memory_requirements,
+    descriptor_program_clone_bytes, estimate_descriptor_artifact_bytes_upper_bound,
+    h3_planning_memory, is_weighted_global_count_descriptor,
     numeric_descriptor_memory_requirements, planned_descriptor_kernel_mode,
     scalar_metadata_peak_bytes, select_dense_execution, validate_normal_descriptor_capability,
     validate_normal_spatial_candidate_capability,
@@ -296,11 +297,34 @@ fn apply_exact_residency(
         .budget_snapshot
         .discount_idle_execution(idle)
         .ok_or(AdmissionDecline::ResidencyBudgetSnapshotUnavailable)?;
-    apply_exact_residency_with_scalar_memory(
+    let h3_memory = if let Some(estimate) = estimates
+        .iter()
+        .find(|estimate| u32::from(estimate.relid) == shape.spec.fact_rel)
+    {
+        let estimated_rows = shape
+            .residency
+            .relations
+            .iter()
+            .find(|relation| relation.relation_oid == shape.spec.fact_rel)
+            .map_or(0, |relation| relation.estimated_rows);
+        h3_planning_memory(
+            &shape.spec,
+            &AggOutputProjection {
+                slots: shape.projections.clone(),
+            },
+            estimate,
+            estimated_rows,
+        )
+        .map_err(|detail| AdmissionDecline::ScalarEstimateUnavailable { detail })?
+    } else {
+        None
+    };
+    apply_exact_residency_with_memory(
         shape,
         estimates,
         policy,
         model,
+        h3_memory,
         |shape, estimates, model, headroom| {
             let mut decision = None;
             let bytes = scalar_planning_memory_with(
@@ -330,11 +354,28 @@ fn apply_exact_residency(
     )
 }
 
+#[cfg(test)]
 fn apply_exact_residency_with_scalar_memory(
     shape: &mut ShapePlan,
     estimates: &[ResidentLoadEstimate],
     policy: AdmissionPolicy,
     model: &TypedCostModel,
+    scalar_memory: impl FnOnce(
+        &ShapePlan,
+        &[ResidentLoadEstimate],
+        &TypedCostModel,
+        u64,
+    ) -> Result<(u64, Option<DenseExecutionDecision>), AdmissionDecline>,
+) -> Result<(), AdmissionDecline> {
+    apply_exact_residency_with_memory(shape, estimates, policy, model, None, scalar_memory)
+}
+
+fn apply_exact_residency_with_memory(
+    shape: &mut ShapePlan,
+    estimates: &[ResidentLoadEstimate],
+    policy: AdmissionPolicy,
+    model: &TypedCostModel,
+    h3_memory: Option<H3PlanningMemory>,
     scalar_memory: impl FnOnce(
         &ShapePlan,
         &[ResidentLoadEstimate],
@@ -409,7 +450,20 @@ fn apply_exact_residency_with_scalar_memory(
         .residency
         .relations
         .iter()
-        .map(|relation| (relation.relation_oid, relation.estimated_rows))
+        .map(|relation| {
+            let rows = if h3_memory.is_some() {
+                estimates
+                    .iter()
+                    .find(|estimate| {
+                        estimate.loaded && u32::from(estimate.relid) == relation.relation_oid
+                    })
+                    .and_then(|estimate| estimate.resident_rows)
+                    .unwrap_or(relation.estimated_rows)
+            } else {
+                relation.estimated_rows
+            };
+            (relation.relation_oid, rows)
+        })
         .collect::<BTreeMap<_, _>>();
     let derived_artifact_bytes =
         estimate_descriptor_artifact_bytes_upper_bound(&shape.spec, &relation_rows)
@@ -427,8 +481,11 @@ fn apply_exact_residency_with_scalar_memory(
     // An already impossible fixed base still follows the exact decline path
     // below. It does not receive fake headroom through unsigned underflow.
     let headroom = policy.budget_bytes.saturating_sub(owner_bytes);
-    let (scalar_execution_bytes, dense_decision) =
-        scalar_memory(shape, estimates, model, headroom)?;
+    let (scalar_execution_bytes, dense_decision) = if let Some(memory) = h3_memory {
+        (memory.bytes, None)
+    } else {
+        scalar_memory(shape, estimates, model, headroom)?
+    };
     let prospective_execution_bytes = numeric_resources
         .as_ref()
         .map_or(0, |resources| resources.bytes)
@@ -513,8 +570,14 @@ fn apply_exact_residency_with_scalar_memory(
             _ => None,
         })
     {
-        let bound = super::shape::h3_group_bound(lifecycle_fact_rows, resolution)
-            .expect("validated H3 resolution");
+        let bound = h3_memory.map_or_else(
+            || {
+                super::shape::h3_group_bound(lifecycle_fact_rows, resolution)
+                    .expect("validated H3 resolution")
+                    .max(1)
+            },
+            |memory| memory.capacity as u64,
+        );
         let estimated = Rows::new(usize::try_from(bound).unwrap_or(usize::MAX));
         let maximum = model.memory.gpu_h3_max_groups;
         if estimated > maximum {
@@ -585,7 +648,12 @@ fn apply_exact_residency_with_scalar_memory(
                 estimated: lifecycle_fact_rows,
                 required,
             }
-        } else if lifecycle_fact_rows > model.executor.gpu_grouped_agg_one_shot_max_rows {
+        } else if dense_decision.is_none()
+            && lifecycle_fact_rows > model.executor.gpu_grouped_agg_one_shot_max_rows
+        {
+            // A successful budget-selected bounded lifecycle already proves
+            // every call respects this cap. It is not a total-query row limit.
+            // Families without that proof retain the conservative guard.
             ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
                 fact_rows: lifecycle_fact_rows,
                 maximum: model.executor.gpu_grouped_agg_one_shot_max_rows,
@@ -3155,7 +3223,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_sum_count_caps_admission_but_costs_bounded_calls_above_one_shot() {
+    fn dense_sum_count_admits_proved_bounded_calls_above_one_shot() {
         let model = model();
         let maximum = model.executor.gpu_grouped_agg_one_shot_max_rows;
         let maximum_u64 = u64::try_from(maximum.get()).expect("test row limit fits u64");
@@ -3174,13 +3242,7 @@ mod tests {
         let above_u64 = maximum_u64 + 1;
         let mut above_maximum = dense_sum_count_shape(above_u64);
         apply_resident_evidence(&mut above_maximum, above_u64, true);
-        assert_eq!(
-            above_maximum.cost_gate,
-            ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
-                fact_rows: Rows::new(maximum.get() + 1),
-                maximum,
-            }
-        );
+        assert_eq!(above_maximum.cost_gate, ShapeCostGate::Eligible);
         assert_eq!(
             planned_dense_lifecycle_calls(&above_maximum, above_u64, &model),
             Some(3),
@@ -3203,13 +3265,7 @@ mod tests {
             &model,
         )
         .expect("first-use estimate fits the unbounded test budget");
-        assert_eq!(
-            first_use.cost_gate,
-            ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
-                fact_rows: Rows::new(maximum.get() + 1),
-                maximum,
-            }
-        );
+        assert_eq!(first_use.cost_gate, ShapeCostGate::Eligible);
         assert_eq!(
             first_use.cost.additional_aggregate_launches,
             above_maximum.cost.additional_aggregate_launches,
@@ -3240,6 +3296,90 @@ mod tests {
             &h3_parent_shape().spec,
             &h3_parent_shape().descriptor_resolution,
             &model
+        ));
+    }
+
+    #[test]
+    fn one_compute_unit_dense_admission_requires_a_budget_proved_bounded_lifecycle() {
+        let limits = DeviceLimits::from_profile(&cost::PlatformProfile {
+            cpu_cores: 8,
+            has_gpu: true,
+            estimated_gpu_gflops: 2.0,
+            compute_units: 1,
+            device_name: "one-compute-unit fixture".into(),
+            backend_name: "metal".into(),
+            gpu_max_alloc_bytes: 3_758_096_384,
+            has_native_fp64: false,
+        });
+        let model = TypedCostModel::from_limits(&limits);
+        let floor = model.planner.gpu_hash_agg_min_rows;
+        let cap = model.executor.gpu_grouped_agg_one_shot_max_rows;
+        assert!(floor > cap, "CI device has no one-shot admission interval");
+        let rows = (floor.get() as u64)
+            .checked_mul(2)
+            .expect("fixture row domain");
+        let policy = AdmissionPolicy {
+            auto_load: false,
+            budget_bytes: u64::MAX,
+            budget_snapshot: budget_snapshot(0, 0, 0),
+        };
+        let mut evidence = estimate(true, rows * 8);
+        evidence.resident_rows = Some(rows);
+        let mut shape = dense_sum_count_shape(rows);
+        apply_exact_residency(&mut shape, &[evidence.clone()], policy, &model)
+            .expect("native metadata selector proves bounded memory");
+        assert_eq!(shape.cost_gate, ShapeCostGate::Eligible);
+        let calls = dense_lifecycle_call_count(rows, cap, model.executor.gpu_reduce_max_chunk)
+            .expect("checked compute-derived call count");
+        assert!(calls > 1);
+        assert_eq!(
+            shape.cost.additional_aggregate_launches,
+            PgCost::new((calls - 1) as f64 * cost::GPU_LAUNCH_OVERHEAD)
+        );
+
+        let mut unproved = dense_sum_count_shape(rows);
+        apply_exact_residency_with_scalar_memory(
+            &mut unproved,
+            &[evidence.clone()],
+            policy,
+            &model,
+            |_, _, _, _| Ok((0, None)),
+        )
+        .expect("isolate unproved lifecycle guard");
+        assert_eq!(
+            unproved.cost_gate,
+            ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
+                fact_rows: Rows::new(rows as usize),
+                maximum: cap,
+            }
+        );
+
+        let below = floor.get() as u64 - 1;
+        let mut shape = dense_sum_count_shape(below);
+        evidence.resident_rows = Some(below);
+        apply_exact_residency(&mut shape, &[evidence.clone()], policy, &model)
+            .expect("bounded memory does not bypass row floor");
+        assert_eq!(
+            shape.cost_gate,
+            ShapeCostGate::FactRowsBelowDeviceMinimum {
+                estimated: Rows::new(below as usize),
+                required: floor,
+            }
+        );
+
+        let mut shape = dense_sum_count_shape(rows);
+        evidence.resident_rows = Some(rows);
+        assert!(matches!(
+            apply_exact_residency(
+                &mut shape,
+                &[evidence],
+                AdmissionPolicy {
+                    budget_bytes: 0,
+                    ..policy
+                },
+                &model
+            ),
+            Err(AdmissionDecline::ResidencyBudgetExceeded { .. })
         ));
     }
 
@@ -3509,6 +3649,49 @@ mod tests {
     }
 
     #[test]
+    fn h3_parent_forecast_uses_loaded_rows_and_exact_execution_budget() {
+        for catalog_rows in [1, 1_000_000_000] {
+            for short in [false, true] {
+                let mut shape = h3_parent_shape();
+                shape.residency.relations[0].estimated_rows = catalog_rows;
+                shape.cost_gate = ShapeCostGate::Eligible;
+                let mut evidence = estimate(true, 4_096);
+                evidence.resident_rows = Some(1_000);
+                let total = 4_096 + 8_000 + 71;
+                let result = apply_exact_residency_with_memory(
+                    &mut shape,
+                    &[evidence],
+                    AdmissionPolicy {
+                        auto_load: false,
+                        budget_bytes: total - u64::from(short),
+                        budget_snapshot: budget_snapshot(0, 0, 0),
+                    },
+                    &model(),
+                    Some(H3PlanningMemory {
+                        bytes: 71,
+                        capacity: 4,
+                    }),
+                    |_, _, _, _| panic!("hash must use its exact memory quote"),
+                );
+                if short {
+                    assert!(matches!(
+                        result,
+                        Err(AdmissionDecline::ResidencyBudgetExceeded {
+                            selected_raw_bytes: 4_096,
+                            derived_artifact_bytes: 8_000,
+                            prospective_execution_bytes: 71,
+                            projected_final_bytes: 12_167,
+                            ..
+                        })
+                    ));
+                } else {
+                    assert_eq!(result, Ok(()), "catalog row estimate {catalog_rows}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn h3_capacity_uses_exact_resident_rows_before_selecting_a_path() {
         for (exact_rows, fits) in [(499_999, true), (500_000, true), (500_001, false)] {
             let mut shape = h3_parent_shape();
@@ -3530,7 +3713,10 @@ mod tests {
             );
             let mut evidence = estimate(true, 4_096);
             evidence.resident_rows = Some(exact_rows);
-            let result = apply_exact_residency(
+            // This unit isolates the group-limit consumer from the live
+            // catalog/current-artifact resolver. The latter is covered by
+            // backend tests; invoking SPI from an ordinary Rust test is invalid.
+            let result = apply_exact_residency_with_memory(
                 &mut shape,
                 &[evidence],
                 AdmissionPolicy {
@@ -3539,6 +3725,11 @@ mod tests {
                     budget_snapshot: budget_snapshot(0, 0, 0),
                 },
                 &model,
+                Some(H3PlanningMemory {
+                    bytes: 0,
+                    capacity: usize::try_from(exact_rows).expect("fixture rows"),
+                }),
+                |_, _, _, _| panic!("hash quote must bypass dense memory"),
             );
             if fits {
                 assert_eq!(result, Ok(()));

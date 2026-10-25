@@ -165,7 +165,7 @@ pub use grouped_integer_sum_avg_candidate::{
 pub use grouped_multikey_integer::GroupedMultikeyInteger;
 pub use grouped_multimeasure_integer::GroupedMultimeasureInteger;
 pub use h3_bulk::H3Bulk;
-pub use h3_cell_to_parent::{H3CellToParent, H3ParentResolution};
+pub use h3_cell_to_parent::{H3CellToParent, H3ParentCountColumn, H3ParentResolution};
 pub use h3_grid_distance::H3GridDistance;
 pub use h3_resolution_sweep::H3ResolutionSweep;
 pub use h3_srf_grid_disk::H3SrfGridDisk;
@@ -618,6 +618,10 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(H3ParentResolution::<4>),
         Box::new(H3ParentResolution::<9>),
         Box::new(H3ParentResolution::<15>),
+        Box::new(H3ParentCountColumn::<false, 0>),
+        Box::new(H3ParentCountColumn::<false, 1>),
+        Box::new(H3ParentCountColumn::<true, 0>),
+        Box::new(H3ParentCountColumn::<true, 1>),
         Box::new(H3GridDistance),
         Box::new(H3ResolutionSweep),
         Box::new(H3SrfGridDisk),
@@ -1302,6 +1306,30 @@ const RELEASED_ENVELOPE_CONTRACTS: &[ReleasedEnvelopeContract] = &[
         workload: "h3_parent_res15",
         min_rows: H3_GROUPED_WINNER_MIN_ROWS,
         max_rows: 1_000_000,
+        family: ReleasedPathFamily::H3Parent,
+    },
+    ReleasedEnvelopeContract {
+        workload: "h3_parent_count_int4_res0",
+        min_rows: H3_COUNT_COLUMN_MIN_ROWS,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::H3Parent,
+    },
+    ReleasedEnvelopeContract {
+        workload: "h3_parent_count_int4_res1",
+        min_rows: H3_COUNT_COLUMN_MIN_ROWS,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::H3Parent,
+    },
+    ReleasedEnvelopeContract {
+        workload: "h3_parent_count_bool_res0",
+        min_rows: H3_COUNT_COLUMN_MIN_ROWS,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::H3Parent,
+    },
+    ReleasedEnvelopeContract {
+        workload: "h3_parent_count_bool_res1",
+        min_rows: H3_COUNT_COLUMN_MIN_ROWS,
+        max_rows: 2_000_017,
         family: ReleasedPathFamily::H3Parent,
     },
     ReleasedEnvelopeContract {
@@ -2457,7 +2485,27 @@ fn ssbm_matrix_profile(name: &str) -> Option<SsbmMatrixProfile> {
     })
 }
 
+/// Released benchmark envelope, not the hardware's planner row threshold.
+pub const H3_COUNT_COLUMN_MIN_ROWS: usize = 1_000_017;
+
+pub fn h3_count_column_contract(name: &str) -> Option<(u32, i32)> {
+    match name {
+        "h3_parent_count_int4_res0" => Some((23, 0)),
+        "h3_parent_count_int4_res1" => Some((23, 1)),
+        "h3_parent_count_bool_res0" => Some((16, 0)),
+        "h3_parent_count_bool_res1" => Some((16, 1)),
+        _ => None,
+    }
+}
+
 fn h3_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThresholdMatrixEntry> {
+    // Outside the measured typed-COUNT envelope we make no static claim about
+    // the device-derived planner floor or its cost decision.
+    if h3_count_column_contract(name).is_some()
+        && !(H3_COUNT_COLUMN_MIN_ROWS..=2_000_017).contains(&rows)
+    {
+        return None;
+    }
     let profile = h3_matrix_profile(name)?;
     let class = h3_lane_class(name)?;
     let resident_rollup = h3_resident_rollup_required(name);
@@ -2558,6 +2606,27 @@ struct H3MatrixProfile {
 fn h3_matrix_profile(name: &str) -> Option<H3MatrixProfile> {
     let grouped_result =
         |_rows: usize| "grouped h3index buckets plus one count per populated bucket".to_owned();
+    let typed_lane = match name {
+        "h3_parent_count_int4_res0" => Some("h3_parent_count_int4_res0"),
+        "h3_parent_count_int4_res1" => Some("h3_parent_count_int4_res1"),
+        "h3_parent_count_bool_res0" => Some("h3_parent_count_bool_res0"),
+        "h3_parent_count_bool_res1" => Some("h3_parent_count_bool_res1"),
+        _ => None,
+    };
+    if let Some(lane) = typed_lane {
+        return Some(H3MatrixProfile {
+            lane,
+            data_type: "nullable h3index and nullable fixed-width COUNT value",
+            cardinality: "three deterministic world sites plus a NULL key",
+            selectivity: "all rows grouped; NULL values excluded from COUNT, zero-count groups retained",
+            result_count: grouped_result,
+            batch_count: "one-shot parallel_hash; no dense chunking",
+            row_width: "8-byte H3 cell plus typed value and NULL sidecars",
+            output_size: "parent h3index and COUNT(column), including zero-count groups",
+            threshold_basis: "typed COUNT default-planner winner: >=5 warmups and >=10 paired samples; preload/first-use separate; >=1.15x warm median",
+            decline_reason: "h3_parent_count_column_unexpected_native_decline",
+        });
+    }
     let aggregate_result =
         |_rows: usize| "one aggregate row after consuming all function outputs".to_owned();
     let srf_result = |rows: usize| {
@@ -3851,6 +3920,10 @@ fn static_workload_name(name: &str) -> &'static str {
         "h3_parent_res4" => "h3_parent_res4",
         "h3_parent_res9" => "h3_parent_res9",
         "h3_parent_res15" => "h3_parent_res15",
+        "h3_parent_count_int4_res0" => "h3_parent_count_int4_res0",
+        "h3_parent_count_int4_res1" => "h3_parent_count_int4_res1",
+        "h3_parent_count_bool_res0" => "h3_parent_count_bool_res0",
+        "h3_parent_count_bool_res1" => "h3_parent_count_bool_res1",
         "h3_grid_distance" => "h3_grid_distance",
         "h3_dist_near" => "h3_dist_near",
         "h3_dist_far" => "h3_dist_far",
@@ -4070,6 +4143,9 @@ mod tests {
     }
 
     fn supported_default_suite_probe(name: &str, rows: usize) -> bool {
+        if h3_count_column_contract(name).is_some() {
+            return matches!(rows, 1_000_017 | 2_000_017);
+        }
         matches!(
             (name, rows),
             (
@@ -4631,6 +4707,22 @@ mod tests {
         ));
         assert!(supported_default_suite_probe("raster_reclass", 100));
         assert!(!supported_default_suite_probe("raster_reclass", 101));
+        for name in [
+            "h3_parent_count_int4_res0",
+            "h3_parent_count_int4_res1",
+            "h3_parent_count_bool_res0",
+            "h3_parent_count_bool_res1",
+        ] {
+            for rows in [1_000_017, 2_000_017] {
+                assert!(supported_default_suite_probe(name, rows));
+                assert!(!supported_default_suite_probe(name, rows - 1));
+                assert!(!supported_default_suite_probe(name, rows + 1));
+            }
+        }
+        assert!(!supported_default_suite_probe(
+            "h3_cell_to_parent",
+            1_000_017
+        ));
     }
 
     #[test]
@@ -5933,9 +6025,42 @@ mod tests {
                 "h3_cell_to_parent",
                 "h3_parent_res4",
                 "h3_parent_res9",
-                "h3_parent_res15"
+                "h3_parent_res15",
+                "h3_parent_count_int4_res0",
+                "h3_parent_count_int4_res1",
+                "h3_parent_count_bool_res0",
+                "h3_parent_count_bool_res1"
             ]
         );
+    }
+
+    #[test]
+    fn typed_h3_count_envelope_does_not_invent_device_floor_declines() {
+        for name in h3_winning_lane_names()
+            .into_iter()
+            .filter(|name| h3_count_column_contract(name).is_some())
+        {
+            for rows in [100_000, H3_COUNT_COLUMN_MIN_ROWS - 1, 2_000_018] {
+                assert!(benchmark_threshold_matrix_entry(name, rows).is_none());
+            }
+            for rows in [
+                H3_COUNT_COLUMN_MIN_ROWS,
+                H3_COUNT_COLUMN_MIN_ROWS + 1,
+                2_000_017,
+            ] {
+                let entry =
+                    benchmark_threshold_matrix_entry(name, rows).expect("qualified envelope");
+                assert_eq!(entry.workload, name);
+                assert_eq!(entry.released_path(), Some(ReleasedPathFamily::H3Parent));
+                assert_eq!(
+                    entry.expectation,
+                    BenchmarkLaneExpectation::GpuWinner {
+                        min_warm_speedup: 1.15
+                    }
+                );
+                assert!(entry.threshold_basis.contains("10 paired"));
+            }
+        }
     }
 
     /// Structurally unsupported H3 query shapes remain fail-closed parity lanes.

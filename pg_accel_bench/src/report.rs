@@ -349,6 +349,17 @@ impl PhysicalKernelModeCounts {
     }
 }
 
+/// Per-execution settings from the accelerated typed H3 benchmark backend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TypedH3SettingsCapture {
+    /// `warmup`, `measured`, or `lifecycle`; index is local to this cache/phase.
+    pub phase: String,
+    pub index: usize,
+    pub cache_state: CacheState,
+    /// Observed on the actual accelerated backend after execution, before DISCARD ALL.
+    pub settings: GucSettings,
+}
+
 /// Aggregated results for one workload at one row scale (two-way: accel vs PG parallel).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)]
@@ -366,6 +377,8 @@ pub struct WorkloadResult {
     /// Row count this result was measured at.
     pub rows: usize,
     pub iterations: Vec<IterationResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub typed_h3_settings: Vec<TypedH3SettingsCapture>,
     /// Per-pair, off-clock planner-stage deltas for native-decline benchmark
     /// cells. Entries index `iterations`; absent for non-native cells.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1344,6 +1357,7 @@ impl WorkloadResult {
             cold_summary,
             cold_shared_buffers_resident: None,
             iterations,
+            typed_h3_settings: Vec::new(),
             planner_stage_captures: Vec::new(),
             native_parity_pair_captures: Vec::new(),
             artifact_lifecycle_probe: None,
@@ -1426,6 +1440,7 @@ impl GucSettings {
             "pg_accel.enabled",
             "pg_accel.gpu_enabled",
             "pg_accel.min_batch_size",
+            "pg_accel.cost_multiplier",
             "pg_accel.kernel_timeout_ms",
             "max_parallel_workers_per_gather",
             "max_parallel_workers",
@@ -1933,6 +1948,7 @@ fn threshold_lane_requires_resident_groupagg_logical_spec(lane: &str) -> bool {
         || lane.starts_with("ssbm_q")
         || lane.starts_with("h3_latlng_to_cell_grouped_")
         || lane.starts_with("h3_cell_to_parent_grouped_count_")
+        || crate::workloads::h3_count_column_contract(lane).is_some()
         || lane == "hashjoin_filter_groupagg"
         || lane == "hashjoin_groupagg_exact_sum_count"
         || lane == "ssbm_resident_int4_year_size_revenue"
@@ -2026,11 +2042,121 @@ fn plan_contains_resident_groupagg_logical_evidence(plan: &str) -> bool {
 }
 
 fn plan_contains_required_groupagg_logical_evidence(plan: &str, lane: &str) -> bool {
-    if lane == "ssbm_resident_int4_year_size_revenue" {
+    if let Some((type_oid, resolution)) = crate::workloads::h3_count_column_contract(lane) {
+        plan_contains_typed_h3_count(plan, type_oid, resolution)
+    } else if lane == "ssbm_resident_int4_year_size_revenue" {
         plan_contains_exact_ssbm_two_dimension_descriptor(plan)
     } else {
         plan_contains_resident_groupagg_logical_evidence(plan)
     }
+}
+
+/// Require one ordinary planner CustomScan and bind every descriptor property
+/// to that node. A staged SELECT, COUNT(*), or a sibling node is not proof.
+pub fn plan_contains_typed_h3_count(plan: &str, type_oid: u32, resolution: i32) -> bool {
+    let blocks = pg_accel_custom_scan_blocks(plan);
+    let [block] = blocks.as_slice() else {
+        return false;
+    };
+    let direct = direct_custom_scan_property_lines(block).join("\n");
+    if !plan_contains_resident_groupagg_logical_evidence(&direct) {
+        return false;
+    }
+    let Some(aggregate) = plan_text_property(&direct, &["gpu descriptor aggregates"]) else {
+        return false;
+    };
+    let Some(column) = aggregate
+        .strip_prefix("m0:column(")
+        .and_then(|s| s.strip_suffix(") -> value.count"))
+        .and_then(parse_descriptor_column)
+    else {
+        return false;
+    };
+    if column.type_oid != type_oid || column.attno != 2 || column.relation_oid == 0 {
+        return false;
+    }
+    let Some(key) = plan_text_property(&direct, &["gpu descriptor group keys"]) else {
+        return false;
+    };
+    let Some((cell, tail)) = key
+        .strip_prefix("k0:h3_cell_to_parent(")
+        .and_then(|s| s.split_once(", resolution="))
+    else {
+        return false;
+    };
+    let Some(cell) = parse_descriptor_column(cell) else {
+        return false;
+    };
+    cell.relation_oid == column.relation_oid
+        && cell.attno == 1
+        && cell.type_oid != 0
+        && tail
+            == format!(
+                "{resolution}) type={} collation=0 encoding=hash",
+                cell.type_oid
+            )
+        && plan_text_property(&direct, &["gpu descriptor filter"]).as_deref()
+            == Some("fact=none; measures=[m0=none]; dimensions=[none]")
+        && plan_text_property(&direct, &["gpu descriptor output"])
+            == Some(format!(
+                "slot0:group[k0] source_type={} result_type={} typmod=-1 collation=0 nullable=true; \
+             slot1:aggregate[m0].value.count source_type={type_oid} result_type=20 typmod=-1 collation=0 nullable=false",
+                cell.type_oid, cell.type_oid
+            ))
+}
+
+fn typed_h3_default_settings(gucs: Option<&GucSettings>) -> bool {
+    let Some(gucs) = gucs else {
+        return false;
+    };
+    let setting = |name: &str| {
+        gucs.settings
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    };
+    setting("pg_accel.cost_multiplier").and_then(|v| v.parse::<f64>().ok()) == Some(1.0)
+        && setting("pg_accel.min_batch_size") == Some("65536")
+        && setting("pg_accel.enabled") == Some("on")
+        && setting("pg_accel.gpu_enabled") == Some("on")
+}
+
+fn typed_h3_settings_verified(workload: &WorkloadResult) -> bool {
+    let mut expected = Vec::new();
+    for cache in [CacheState::Warm, CacheState::Cold] {
+        for (phase, samples) in [
+            ("warmup", &workload.warmup_iterations),
+            ("measured", &workload.iterations),
+        ] {
+            for index in 0..samples
+                .iter()
+                .filter(|sample| sample.cache_state == cache)
+                .count()
+            {
+                expected.push((phase, index, cache));
+            }
+        }
+    }
+    if workload.artifact_lifecycle_probe.is_some() {
+        expected.push(("lifecycle", 0, CacheState::Warm));
+    }
+    workload.typed_h3_settings.len() == expected.len()
+        && workload
+            .typed_h3_settings
+            .iter()
+            .all(|capture| typed_h3_default_settings(Some(&capture.settings)))
+        && expected.iter().all(|(phase, index, cache)| {
+            workload
+                .typed_h3_settings
+                .iter()
+                .filter(|capture| {
+                    capture.phase == *phase
+                        && capture.index == *index
+                        && capture.cache_state == *cache
+                })
+                .count()
+                == 1
+        })
 }
 
 fn plan_contains_exact_ssbm_two_dimension_descriptor(plan: &str) -> bool {
@@ -5071,6 +5197,63 @@ impl BenchReport {
             let Some(class) = crate::workloads::h3_lane_class(&w.name) else {
                 continue;
             };
+            if let Some((type_oid, resolution)) =
+                crate::workloads::h3_count_column_contract(&w.name)
+            {
+                let speedup = warm_speedup_for_gate(w);
+                let warm_pairs = w
+                    .iterations
+                    .iter()
+                    .filter(|pair| pair.cache_state == CacheState::Warm)
+                    .collect::<Vec<_>>();
+                let accel_first = warm_pairs.iter().filter(|pair| pair.accel_first).count();
+                let verified = typed_h3_settings_verified(w)
+                    && (crate::workloads::H3_COUNT_COLUMN_MIN_ROWS..=2_000_017).contains(&w.rows)
+                    && report.methodology.warmup >= 5
+                    && report.methodology.iterations >= 10
+                    && report.methodology.timing_mode == "raw-wallclock"
+                    && w.warmup_iterations
+                        .iter()
+                        .filter(|pair| pair.cache_state == CacheState::Warm)
+                        .count()
+                        >= 5
+                    && warm_pairs.len() >= 10
+                    && accel_first.abs_diff(warm_pairs.len() - accel_first) <= 1
+                    && warm_pairs.iter().all(|pair| {
+                        pair.accel_ms.is_finite()
+                            && pair.accel_ms > 0.0
+                            && pair.parallel_ms.is_finite()
+                            && pair.parallel_ms > 0.0
+                    })
+                    && w.plan_selected
+                    && w.gpu_kernel_dispatched
+                    && w.dispatch_counter_captured
+                    && w.accel_output_rows_consumed > 0
+                    && w.pg_accel_stock_exec_delta == 0
+                    && w.gpu_kernel_execution_delta > 0
+                    && w.physical_kernel_mode_verified
+                    && w.physical_kernel_mode.as_deref() == Some("parallel_hash")
+                    && w.physical_kernel_mode_counts.parallel_hash > 0
+                    && w.physical_kernel_mode_counts.serial_generic == 0
+                    && w.plan_snippet.as_deref().is_some_and(|plan| {
+                        plan_contains_typed_h3_count(plan, type_oid, resolution)
+                    });
+                if !verified || !speedup.is_finite() || speedup < 1.15 {
+                    failures.push(H3LaneGateFailure {
+                        workload: w.name.clone(),
+                        rows: w.rows,
+                        kind: if verified {
+                            H3LaneGateFailureKind::WinnerBelowFloor
+                        } else {
+                            H3LaneGateFailureKind::WinnerInvalidTypedCountEvidence
+                        },
+                        speedup_median: speedup,
+                        gate_floor: 1.15,
+                        advisory_min_warm_speedup: 1.15,
+                    });
+                }
+                continue;
+            }
             let matrix_expectation =
                 crate::workloads::benchmark_threshold_matrix_entry(&w.name, w.rows)
                     .map(|entry| entry.expectation);
@@ -5941,6 +6124,9 @@ pub struct BenchmarkShipGateFailure {
 /// Kind of failure observed by [`BenchReport::evaluate_h3_lane_gate`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum H3LaneGateFailureKind {
+    /// Typed COUNT requires its exact planner descriptor, default admission
+    /// settings, parallel-hash counters and the paired sampling contract.
+    WinnerInvalidTypedCountEvidence,
     /// An H3 Winner dispatched a GPU kernel but its median speedup is below
     /// the gate floor (or non-finite).
     WinnerBelowFloor,
@@ -5955,6 +6141,7 @@ impl H3LaneGateFailureKind {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
+            Self::WinnerInvalidTypedCountEvidence => "winner_invalid_typed_count_evidence",
             Self::WinnerBelowFloor => "winner_below_floor",
             Self::WinnerMissedDispatch => "winner_missed_dispatch",
             Self::ParityUnexpectedlyDispatched => "parity_unexpectedly_dispatched",
@@ -8210,6 +8397,218 @@ mod tests {
         ));
     }
 
+    fn typed_h3_plan(type_oid: u32, resolution: i32) -> String {
+        format!(
+            "Custom Scan (GpuAccelAgg)\n  \
+            GPU Resident Pipeline: true\n  \
+            GPU Resident Operator Class: resident_groupagg\n  \
+            GPU Descriptor Strategy: descriptor_grouped_aggregate\n  \
+            GPU Descriptor Group Keys: k0:h3_cell_to_parent(100.1:type=90001, resolution={resolution}) type=90001 collation=0 encoding=hash\n  \
+            GPU Descriptor Aggregates: m0:column(100.2:type={type_oid}) -> value.count\n  \
+            GPU Descriptor Filter: fact=none; measures=[m0=none]; dimensions=[none]\n  \
+            GPU Descriptor Output: slot0:group[k0] source_type=90001 result_type=90001 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type={type_oid} result_type=20 typmod=-1 collation=0 nullable=false"
+        )
+    }
+
+    fn typed_h3_workload(name: &str) -> WorkloadResult {
+        let (type_oid, resolution) =
+            crate::workloads::h3_count_column_contract(name).expect("typed lane");
+        let mut workload = mock_workload_result(name, 1_000_017, 10.0, 50.0);
+        workload.category = "gpu_h3".to_owned();
+        workload.kernel_class = "h3_cell_to_parent".to_owned();
+        workload.plan_selected = true;
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 10;
+        workload.accel_output_rows_consumed = 40;
+        workload.pg_accel_stock_exec_delta = 0;
+        workload.physical_kernel_mode = Some("parallel_hash".to_owned());
+        workload.physical_kernel_mode_verified = true;
+        workload.physical_kernel_mode_counts = PhysicalKernelModeCounts::default();
+        workload.physical_kernel_mode_counts.parallel_hash = 10;
+        workload.warmup_iterations = workload.iterations.iter().take(5).cloned().collect();
+        workload.warm_summary = None;
+        workload.plan_snippet = Some(typed_h3_plan(type_oid, resolution));
+        workload
+    }
+
+    fn add_typed_h3_defaults(report: &mut BenchReport) {
+        report.methodology.timing_mode = "raw-wallclock".to_owned();
+        report.gucs.as_mut().expect("mock GUCs").settings.extend([
+            ("pg_accel.cost_multiplier".to_owned(), "1".to_owned()),
+            ("pg_accel.min_batch_size".to_owned(), "65536".to_owned()),
+            ("pg_accel.enabled".to_owned(), "on".to_owned()),
+            ("pg_accel.gpu_enabled".to_owned(), "on".to_owned()),
+        ]);
+        let settings = report.gucs.as_ref().expect("mock GUCs").clone();
+        for workload in &mut report.workloads {
+            if crate::workloads::h3_count_column_contract(&workload.name).is_none() {
+                continue;
+            }
+            for (phase, samples) in [
+                ("warmup", &workload.warmup_iterations),
+                ("measured", &workload.iterations),
+            ] {
+                for (index, sample) in samples.iter().enumerate() {
+                    workload.typed_h3_settings.push(TypedH3SettingsCapture {
+                        phase: phase.to_owned(),
+                        index,
+                        cache_state: sample.cache_state,
+                        settings: settings.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typed_h3_proof_rejects_star_wrong_type_and_cross_node_evidence() {
+        for (type_oid, resolution) in [(16, 0), (16, 1), (23, 0), (23, 1)] {
+            let valid = typed_h3_plan(type_oid, resolution);
+            assert!(plan_contains_typed_h3_count(&valid, type_oid, resolution));
+            for invalid in [
+                valid.replace(
+                    &format!("m0:column(100.2:type={type_oid})"),
+                    "m0:count_star",
+                ),
+                valid.replace("100.2:type=", "101.2:type="),
+                valid.replace("100.2:type=", "100.3:type="),
+                valid.replace("encoding=hash", "encoding=dense_i32"),
+                valid.replace("fact=none", "fact=bytecode(inputs=1, words=3)"),
+                valid.replace("value.count", "value.sum"),
+                valid.replace("Custom Scan (GpuAccelAgg)", "Result"),
+                valid.replace("GPU Descriptor Aggregates:", "  GPU Descriptor Aggregates:"),
+                format!("{valid}\n{valid}"),
+            ] {
+                assert!(
+                    !plan_contains_typed_h3_count(&invalid, type_oid, resolution),
+                    "{invalid}"
+                );
+            }
+            assert!(!plan_contains_typed_h3_count(&valid, 701, resolution));
+            assert!(!plan_contains_typed_h3_count(
+                &valid,
+                type_oid,
+                resolution + 1
+            ));
+        }
+    }
+
+    #[test]
+    fn typed_h3_release_gate_accepts_generated_raw_report() {
+        let mut fixture = mock_report(vec![typed_h3_workload("h3_parent_count_int4_res0")]);
+        add_typed_h3_defaults(&mut fixture);
+        let observed = crate::runner::ObservedGucs {
+            // A realistic profile captures PG settings, not extension defaults.
+            // Only same-backend per-execution captures can authorize the lane.
+            settings: vec![("work_mem".to_owned(), "512MB".to_owned())],
+            postmaster_start_time: None,
+        };
+        let report = generate_report(
+            fixture.workloads,
+            Vec::new(),
+            None,
+            10,
+            5,
+            Some(observed),
+            crate::runner::TimingMode::RawWallClock,
+            crate::runner::CacheMode::Warm,
+        );
+        assert_eq!(report.methodology.timing_mode, "raw-wallclock");
+        assert!(report.evaluate_h3_lane_gate().is_empty());
+    }
+
+    #[test]
+    fn typed_h3_release_gate_requires_default_hash_proof_samples_and_warm_floor() {
+        let name = "h3_parent_count_int4_res0";
+        let mut report = mock_report(vec![typed_h3_workload(name)]);
+        add_typed_h3_defaults(&mut report);
+        assert!(report.evaluate_h3_lane_gate().is_empty());
+        for mutation in 0..13 {
+            let mut changed = report.clone();
+            match mutation {
+                0 => {
+                    changed.workloads[0].plan_snippet = Some("SELECT staged_h3_count()".to_owned());
+                }
+                1 => changed.workloads[0].gpu_kernel_execution_delta = 0,
+                2 => {
+                    changed.workloads[0]
+                        .physical_kernel_mode_counts
+                        .parallel_hash = 0;
+                }
+                3 => changed.workloads[0].physical_kernel_mode = Some("serial_generic".to_owned()),
+                4 => changed.workloads[0].typed_h3_settings.clear(),
+                5 => {
+                    changed.workloads[0].typed_h3_settings[0]
+                        .settings
+                        .settings
+                        .iter_mut()
+                        .find(|(key, _)| key == "pg_accel.cost_multiplier")
+                        .expect("cost")
+                        .1 = "0.1".to_owned();
+                }
+                6 => changed.methodology.warmup = 4,
+                7 => changed.methodology.iterations = 9,
+                8 => changed.methodology.timing_mode = "explain".to_owned(),
+                9 => changed.workloads[0].iterations.truncate(9),
+                10 => changed.workloads[0].warmup_iterations.clear(),
+                11 => changed.workloads[0]
+                    .iterations
+                    .iter_mut()
+                    .for_each(|pair| pair.accel_first = true),
+                12 => changed.workloads[0].rows = 100_000,
+                _ => unreachable!(),
+            }
+            assert!(
+                !changed.evaluate_h3_lane_gate().is_empty(),
+                "mutation {mutation}"
+            );
+        }
+        for speedup in [1.149, f64::NAN, f64::INFINITY] {
+            let mut changed = report.clone();
+            changed.workloads[0].speedup_median_vs_parallel = speedup;
+            assert!(
+                changed
+                    .evaluate_h3_lane_gate()
+                    .iter()
+                    .any(
+                        |failure| failure.kind == H3LaneGateFailureKind::WinnerBelowFloor
+                            && failure.gate_floor.to_bits() == 1.15_f64.to_bits()
+                    )
+            );
+        }
+    }
+
+    #[test]
+    fn typed_h3_settings_require_each_cache_phase_and_reject_duplicates() {
+        let mut report = mock_report(vec![typed_h3_workload("h3_parent_count_int4_res0")]);
+        add_typed_h3_defaults(&mut report);
+        let workload = &report.workloads[0];
+        assert!(typed_h3_settings_verified(workload));
+        let mut duplicate = workload.clone();
+        duplicate.typed_h3_settings[1] = duplicate.typed_h3_settings[0].clone();
+        assert!(!typed_h3_settings_verified(&duplicate));
+        let mut missing = workload.clone();
+        missing.typed_h3_settings.pop();
+        assert!(!typed_h3_settings_verified(&missing));
+        let mut both = workload.clone();
+        let mut cold = both.iterations[0].clone();
+        cold.cache_state = CacheState::Cold;
+        both.iterations.insert(0, cold);
+        assert!(!typed_h3_settings_verified(&both));
+        both.typed_h3_settings.push(TypedH3SettingsCapture {
+            phase: "measured".to_owned(),
+            index: 0,
+            cache_state: CacheState::Cold,
+            settings: both.typed_h3_settings[0].settings.clone(),
+        });
+        assert!(typed_h3_settings_verified(&both));
+        both.typed_h3_settings
+            .last_mut()
+            .expect("cold capture")
+            .phase = "warmup".to_owned();
+        assert!(!typed_h3_settings_verified(&both));
+    }
+
     #[test]
     fn test_benchmark_ship_gate_requires_groupagg_logical_spec_for_winners() {
         let mut workload = mock_workload_result("grouped_agg_int4", 1_000_000, 10.0, 20.0);
@@ -9194,6 +9593,10 @@ mod tests {
         // per-Winner advisory threshold (1.5x).
         let mut workloads = Vec::new();
         for name in crate::workloads::h3_winning_lane_names() {
+            if crate::workloads::h3_count_column_contract(name).is_some() {
+                workloads.push(typed_h3_workload(name));
+                continue;
+            }
             let mut wl = mock_workload_result(name, 1_000_000, 10.0, 50.0);
             wl.category = if name == "h3_fp64_ops" {
                 "fp64_matrix".to_owned()
@@ -9235,7 +9638,8 @@ mod tests {
             Some("Aggregate\n  Output: avg(h3_grid_distance(cell_a, cell_b))\n".to_owned());
         workloads.push(parity);
 
-        let report = mock_report(workloads);
+        let mut report = mock_report(workloads);
+        add_typed_h3_defaults(&mut report);
         let failures = report.evaluate_h3_lane_gate();
         assert!(
             failures.is_empty(),

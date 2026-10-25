@@ -65,6 +65,33 @@ class UpstreamPostgresGateContractTests(unittest.TestCase):
         self.assertIn("extension-catalog-test", JUSTFILE.read_text(encoding="utf-8"))
         self.assertIn("just extension-catalog-test", WORKFLOW.read_text(encoding="utf-8"))
 
+    def test_catalog_fixture_uses_observed_floor_without_capping_total_by_one_shot(self) -> None:
+        fixture = (REPO_ROOT / "sql" / "extension_catalog_contract.sql").read_text(encoding="utf-8")
+        self.assertIn("FROM generate_series(1,500000)", fixture)
+        self.assertLess(fixture.index("PGACCEL_CATALOG_OK:preload_only"), fixture.index("\nCREATE EXTENSION pg_accel;"))
+        helper = fixture.split("CREATE FUNCTION pg_temp.catalog_fixture_rows", 1)[1].split("END $$;", 1)[0]
+        self.assertIn("fixture_ceiling bigint DEFAULT 4000000", helper)
+        self.assertIn("device_floor>fixture_ceiling/2", helper)
+        self.assertIn("fixture_ceiling>2147483647", helper)
+        self.assertIn("RETURN greatest(500000,2*device_floor)::integer", helper)
+        self.assertNotIn("one_shot", helper)
+        self.assertIn("pg_temp.catalog_fixture_rows(250000)<>500000", fixture)
+        self.assertIn("pg_temp.catalog_fixture_rows(2000000)<>4000000", fixture)
+        self.assertIn("EXCEPTION WHEN invalid_parameter_value", fixture)
+        self.assertIn("(9223372036854775807,4000000)", fixture)
+        selected = fixture.split("CREATE FUNCTION pg_temp.assert_selected", 1)[1].split("END $$;", 1)[0]
+        self.assertIn("SELECT value::bigint INTO STRICT row_floor FROM pg_accel_device_limits()", selected)
+        self.assertIn("WHERE name='gpu_hash_agg_min_rows'", selected)
+        self.assertIn("desired_rows := pg_temp.catalog_fixture_rows(row_floor)", selected)
+        self.assertNotIn("desired_rows := pg_temp.catalog_fixture_rows(one_shot", selected)
+        self.assertIn("WHERE name='gpu_grouped_agg_one_shot_max_rows'", selected)
+        self.assertLess(selected.index("ANALYZE _catalog_input"), selected.index("PERFORM pg_accel_pin"))
+        self.assertLess(selected.index("set_config('pg_accel.enabled','off',true)"), selected.index("TRUNCATE _catalog_expected"))
+        self.assertLess(selected.index("TRUNCATE _catalog_expected"), selected.index("set_config('pg_accel.enabled',prior_enabled,true)"))
+        self.assertIn("END LOOP;\n    rejection := pg_accel_last_planner_rejection_reason();", selected)
+        self.assertIn("rejection,before_count,after_count,device_limits,plan", selected)
+        self.assertNotIn("cost_multiplier", fixture)
+
 
 if __name__ == "__main__":
     unittest.main()

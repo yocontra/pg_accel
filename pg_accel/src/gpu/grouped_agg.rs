@@ -2965,6 +2965,51 @@ pub unsafe fn query_dense_grouped_layout_and_mode(
     ))
 }
 
+/// Query exact one-shot compact HASH bytes without constructing an executable
+/// plan, allocating charged metadata, checking out pools or reading input rows.
+///
+/// # Safety
+/// All descriptor metadata must be initialized and canonical. Row pointers may
+/// be non-dereferenceable markers: only pointer presence and metadata are read
+/// by native layout validation. No NUMERIC/scalar metadata pointers are allowed.
+pub unsafe fn query_hash_grouped_memory_layout(
+    desc: &abi::PgaccelGroupedAggDesc,
+) -> GpuResult<GroupedAggMemoryRequirements> {
+    validate_descriptor_shell(desc)?;
+    if desc.grouping_mode != abi::PGACCEL_GROUPED_AGG_GROUPING_HASH
+        || desc.output_mode != abi::PGACCEL_GROUPED_AGG_OUTPUT_COMPACT
+        || desc.dim_count != 0
+        || desc.execution_flags != 0
+        || desc.measure_count != 1
+        || desc.measures[0].agg_mask != abi::PGACCEL_GROUPED_AGG_LANE_COUNT
+        || !matches!(
+            desc.measures[0].op,
+            abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR | abi::PGACCEL_GROUPED_AGG_MEASURE_COLUMN
+        )
+    {
+        return Err(descriptor_error(
+            "hash layout forecast requires one compact COUNT state",
+        ));
+    }
+    let query = workspace_query_descriptor(desc);
+    if native_kernel_mode(&query)? != GroupedAggKernelMode::ParallelHash {
+        return Err(descriptor_error(
+            "hash layout forecast requires native parallel hash",
+        ));
+    }
+    let workspace = GroupedAggWorkspace::requirements_for_descriptor(&query)?;
+    let output_bytes = grouped_output_required_bytes(&query)?;
+    let total_bytes = workspace
+        .bytes
+        .checked_add(output_bytes)
+        .ok_or_else(|| capacity_error("hash layout forecast overflows usize"))?;
+    Ok(GroupedAggMemoryRequirements {
+        workspace_bytes: workspace.bytes,
+        output_bytes,
+        total_bytes,
+    })
+}
+
 fn bounded_workspace_descriptor(
     plan: &ResolvedGroupedAggPlan<'_>,
     max_chunk_rows: usize,
@@ -3321,6 +3366,13 @@ mod tests {
                 let plan =
                     unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.expect("hash metadata");
                 let required = plan.hash_memory_requirements().expect("native hash layout");
+                if kind != 2 {
+                    // SAFETY: the query-only API sees the same initialized
+                    // metadata as the real zero-row bound plan above.
+                    let quoted = unsafe { query_hash_grouped_memory_layout(&desc) }
+                        .expect("dedicated metadata-only hash query");
+                    assert_eq!(quoted, required);
+                }
                 assert_eq!(required.output_bytes, capacity * [17, 25, 33][kind]);
                 assert_eq!(
                     required.total_bytes,

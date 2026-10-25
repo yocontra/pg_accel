@@ -3668,6 +3668,124 @@ pub fn probe_derived_artifact<T: DerivedArtifact>(
     })
 }
 
+/// The only payload a planning inspector may return. No borrowed device data
+/// or executable descriptor can escape the immutable inspection lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DerivedCapacityScalars {
+    pub fact_rows: u64,
+    pub group_capacity: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrentDerivedCapacity {
+    pub identity: DerivedArtifactIdentity,
+    pub dependencies: Box<[ResidentDependencyStamp]>,
+    pub accounting: ResidentByteAccounting,
+    pub capacity: DerivedCapacityScalars,
+}
+
+pub struct DerivedCapacityInspection<'a> {
+    pub owner: pg_sys::Oid,
+    pub identity: &'a DerivedArtifactIdentity,
+    pub dependency_relids: &'a [pg_sys::Oid],
+    pub columns: &'a [ResidentColumnRef],
+    pub selected: &'a SelectedRelation,
+    pub loaded_estimate: &'a ResidentLoadEstimate,
+    pub expected_accounting: ResidentByteAccounting,
+}
+
+/// Inspect current scalar capacity without touching LRU state, learning,
+/// allocation pools or ledger charges. Normal invalidation processing occurs
+/// before the immutable lease; unlike probing, a stale lookup is not removed.
+/// `inspect` must be a pure scalar read and must not call PostgreSQL/residency.
+pub fn inspect_current_derived_capacity<T: DerivedArtifact>(
+    request: DerivedCapacityInspection<'_>,
+    inspect: fn(&T) -> Result<DerivedCapacityScalars, String>,
+) -> Result<Option<CurrentDerivedCapacity>, ResidentLoadError> {
+    STORE.with(|store| {
+        store
+            .try_borrow_mut()
+            .map(drop)
+            .map_err(|_| execution_borrow_error())
+    })?;
+    if request.identity.canonical_words().is_empty()
+        || !request.loaded_estimate.loaded
+        || request.selected.relid != request.owner
+    {
+        return Err(ResidentLoadError::InvalidArtifactDependencies(
+            "capacity inspection requires a canonical identity and loaded evidence".into(),
+        ));
+    }
+    let protected =
+        canonical_dependency_relids(request.owner, request.dependency_relids, request.columns)?;
+    process_invalidations();
+    STORE.with(|store| {
+        let store = store.try_borrow().map_err(|_| execution_borrow_error())?;
+        if !loaded_estimate_matches(&store, request.selected, request.loaded_estimate) {
+            return Err(ResidentLoadError::InvalidArtifactDependencies(
+                "capacity inspection loaded evidence changed".into(),
+            ));
+        }
+        let Some(entry) = store
+            .entries
+            .iter()
+            .find(|entry| entry.relid == request.owner)
+            .and_then(|owner| {
+                owner
+                    .derived
+                    .iter()
+                    .find(|entry| entry.has_identity(request.identity))
+            })
+        else {
+            return Ok(None);
+        };
+        if !dependency_relids_match(&entry.dependencies, &protected)
+            || first_dependency_mismatch(&store, &entry.dependencies).is_some()
+        {
+            return Ok(None);
+        }
+        // Coverage is checked even when an artifact's relation generations
+        // still match (e.g. retained-column replacement within a generation).
+        resolve_column_views(&store, request.columns)?;
+        let payload = entry.artifact.as_any().downcast_ref::<T>().ok_or(
+            ResidentLoadError::ArtifactTypeMismatch {
+                digest: request.identity.digest(),
+            },
+        )?;
+        let accounting = artifact_accounting(payload);
+        if accounting != request.expected_accounting {
+            return Err(ResidentLoadError::ArtifactAccountingMismatch {
+                declared: request.expected_accounting,
+                actual: accounting,
+            });
+        }
+        if accounting
+            .checked_total()
+            .map_err(|_| ResidentLoadError::ArtifactAccountingOverflow)?
+            != entry.charge.bytes()
+        {
+            return Err(ResidentLoadError::InvalidArtifactDependencies(
+                "capacity inspection artifact charge differs from its accounting".into(),
+            ));
+        }
+        let capacity = inspect(payload).map_err(ResidentLoadError::Loader)?;
+        if Some(capacity.fact_rows) != request.loaded_estimate.resident_rows
+            || capacity.group_capacity == 0
+            || capacity.group_capacity > capacity.fact_rows.max(1)
+        {
+            return Err(ResidentLoadError::InvalidArtifactDependencies(
+                "capacity inspection rows or group bound are inconsistent".into(),
+            ));
+        }
+        Ok(Some(CurrentDerivedCapacity {
+            identity: request.identity.clone(),
+            dependencies: entry.dependencies.clone(),
+            accounting,
+            capacity,
+        }))
+    })
+}
+
 fn publish_derived_artifact<T: DerivedArtifact>(
     owner_relid: pg_sys::Oid,
     identity: &DerivedArtifactIdentity,
@@ -3992,7 +4110,7 @@ pub fn ensure_device_derived_artifact_with_report<T: DerivedArtifact>(
         ExactArtifactLookup::Miss => {}
     }
 
-    let charge = reserve_with_local_eviction_excluding(&protected, declared_total)?;
+    let charge = reserve_artifact_with_local_eviction_excluding(&protected, declared_total)?;
     for raw_relid in &protected {
         STORE.with(|store| store.borrow_mut().touch(pg_sys::Oid::from(*raw_relid)));
     }
@@ -6668,6 +6786,185 @@ pub(super) mod tests {
             );
             assert!(selected_numeric_column_stats(&store.entries[0], &[2]).is_none());
         });
+    }
+
+    #[test]
+    fn current_capacity_inspection_is_read_only_exact_and_lease_checked() {
+        let relid = pg_sys::Oid::from(1_469_u32);
+        install_planner_evidence_relation(u32::from(relid), 100);
+        let selected = SelectedRelation {
+            relid,
+            columns: vec![1],
+        };
+        let columns = [ResidentColumnRef { relid, attno: 1 }];
+        let estimate = planner_evidence_estimate(&selected);
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![100, 1]);
+        let accounting = ResidentByteAccounting {
+            device_bytes: 8,
+            retained_host_exact_bytes: 0,
+        };
+        STORE.with(|store| {
+            let mut store = store.borrow_mut();
+            let dependencies =
+                vec![ResidentDependencyStamp::from_relation(&store.entries[0])].into_boxed_slice();
+            store.entries[0].derived.push(DerivedEntry {
+                digest: identity.digest(),
+                canonical_words: identity.canonical_words().into(),
+                dependencies,
+                artifact: Box::new(SizedArtifact(8)),
+                charge: LedgerCharge::reserve(8, u64::MAX).expect("artifact charge"),
+            });
+        });
+        let inspect = |key: &DerivedArtifactIdentity, expected: &ResidentLoadEstimate| {
+            inspect_current_derived_capacity::<SizedArtifact>(
+                DerivedCapacityInspection {
+                    owner: relid,
+                    identity: key,
+                    dependency_relids: &[relid],
+                    columns: &columns,
+                    selected: &selected,
+                    loaded_estimate: expected,
+                    expected_accounting: accounting,
+                },
+                |_| {
+                    Ok(DerivedCapacityScalars {
+                        fact_rows: 100,
+                        group_capacity: 17,
+                    })
+                },
+            )
+        };
+        let live = resident_live_bytes();
+        let tick = STORE.with(|store| store.borrow().entries[0].last_used_tick);
+        for _ in 0..2 {
+            let quote = inspect(&identity, &estimate)
+                .expect("current exact owner")
+                .expect("hit");
+            assert_eq!(
+                quote.capacity,
+                DerivedCapacityScalars {
+                    fact_rows: 100,
+                    group_capacity: 17
+                }
+            );
+            assert_eq!(quote.accounting, accounting);
+            assert_eq!(quote.identity, identity);
+        }
+        assert_eq!(resident_live_bytes(), live);
+        assert_eq!(
+            STORE.with(|store| store.borrow().entries[0].last_used_tick),
+            tick
+        );
+        let collision = DerivedArtifactIdentity {
+            digest: identity.digest(),
+            canonical_words: vec![100, 2].into_boxed_slice(),
+        };
+        assert_eq!(
+            inspect(&collision, &estimate).expect("canonical collision miss"),
+            None
+        );
+        STORE.with(|store| {
+            let _lease = store.borrow();
+            assert!(
+                inspect(&identity, &estimate).is_err(),
+                "active immutable lease fails before invalidation"
+            );
+        });
+        let mut drift = estimate.clone();
+        drift.estimated_bytes += 1;
+        assert!(inspect(&identity, &drift).is_err());
+        for drift in [
+            ResidentLoadEstimate {
+                resident_rows: Some(101),
+                ..estimate.clone()
+            },
+            ResidentLoadEstimate {
+                resident_nullable_columns: None,
+                ..estimate.clone()
+            },
+            ResidentLoadEstimate {
+                resident_required_columns: Some(vec![(1, pg_sys::INT4OID), (2, pg_sys::INT4OID)]),
+                ..estimate.clone()
+            },
+        ] {
+            assert!(inspect(&identity, &drift).is_err());
+        }
+        STORE.with(|store| {
+            store.borrow_mut().entries[0].derived[0].artifact = Box::new(EmptyArtifact);
+        });
+        assert!(matches!(
+            inspect(&identity, &estimate),
+            Err(ResidentLoadError::ArtifactTypeMismatch { .. })
+        ));
+        STORE.with(|store| {
+            store.borrow_mut().entries[0].derived[0].artifact = Box::new(SizedArtifact(9));
+        });
+        assert!(matches!(
+            inspect(&identity, &estimate),
+            Err(ResidentLoadError::ArtifactAccountingMismatch { .. })
+        ));
+        STORE.with(|store| {
+            let mut store = store.borrow_mut();
+            store.entries[0].derived[0].artifact = Box::new(SizedArtifact(8));
+            store.entries[0].derived[0].charge =
+                LedgerCharge::reserve(7, u64::MAX).expect("wrong ledger charge");
+        });
+        assert!(inspect(&identity, &estimate).is_err());
+        STORE.with(|store| {
+            store.borrow_mut().entries[0].derived[0].charge =
+                LedgerCharge::reserve(8, u64::MAX).expect("restored ledger charge");
+        });
+        type CapacityInspector = fn(&SizedArtifact) -> Result<DerivedCapacityScalars, String>;
+        let malformed: [CapacityInspector; 3] = [
+            |_| {
+                Ok(DerivedCapacityScalars {
+                    fact_rows: 100,
+                    group_capacity: 0,
+                })
+            },
+            |_| {
+                Ok(DerivedCapacityScalars {
+                    fact_rows: 100,
+                    group_capacity: 101,
+                })
+            },
+            |_| {
+                Ok(DerivedCapacityScalars {
+                    fact_rows: 100,
+                    group_capacity: u64::MAX,
+                })
+            },
+        ];
+        for inspector in malformed {
+            let result = inspect_current_derived_capacity::<SizedArtifact>(
+                DerivedCapacityInspection {
+                    owner: relid,
+                    identity: &identity,
+                    dependency_relids: &[relid],
+                    columns: &columns,
+                    selected: &selected,
+                    loaded_estimate: &estimate,
+                    expected_accounting: accounting,
+                },
+                inspector,
+            );
+            assert!(matches!(
+                result,
+                Err(ResidentLoadError::InvalidArtifactDependencies(_))
+            ));
+        }
+        STORE
+            .with(|store| store.borrow_mut().entries[0].derived[0].dependencies[0].generation += 1);
+        assert_eq!(
+            inspect(&identity, &estimate).expect("stale owner falls back"),
+            None
+        );
+        assert_eq!(
+            STORE.with(|store| store.borrow().entries[0].derived.len()),
+            1,
+            "inspection never prunes"
+        );
+        STORE.with(|store| store.borrow_mut().entries.clear());
     }
 
     #[test]

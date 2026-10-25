@@ -1,0 +1,15 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error[E0425]: cannot find value `COUNT_OUTPUT` in this scope
+     --> pg_accel/src/engine/executor/agg/descriptor.rs:13094:59
+      |
+13094 | ...                   && outputs.as_slice() == [COUNT_OUTPUT];
+      |                                                 ^^^^^^^^^^^^ not found in this scope
+      |
+note: constant `crate::engine::ffi::planner_hooks::shape::cost::COUNT_OUTPUT` exists but is inaccessible
+     --> pg_accel/src/engine/ffi/planner_hooks/shape/cost.rs:78:1
+      |
+   78 | const COUNT_OUTPUT: AggregateOutput = AggregateOutput {
+      | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not accessible
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `pg_accel` (lib test) due to 1 previous error

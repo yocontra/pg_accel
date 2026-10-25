@@ -149,6 +149,7 @@ pub(crate) use artifact::descriptor_program_clone_bytes;
 pub(crate) use artifact::estimate_descriptor_artifact_bytes_upper_bound;
 pub(crate) use descriptor::dense_descriptor_memory_requirements;
 pub(crate) use descriptor::{DenseExecutionDecision, select_dense_execution};
+pub(crate) use descriptor::{H3PlanningMemory, h3_planning_memory};
 // Keep the existing pg_test scalar-layout probes on the shared native quote.
 #[cfg(feature = "pg_test")]
 pub(crate) use descriptor::dense_descriptor_memory_requirements as scalar_descriptor_memory_requirements;

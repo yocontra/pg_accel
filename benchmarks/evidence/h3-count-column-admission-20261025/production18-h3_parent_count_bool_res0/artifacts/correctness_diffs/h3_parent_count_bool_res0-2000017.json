@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "workload": "h3_parent_count_bool_res0",
+  "rows": 2000017,
+  "status": "pass",
+  "order_sensitive": false,
+  "accel_rows": 4,
+  "baseline_rows": 4,
+  "accel_minus_baseline_count": 0,
+  "baseline_minus_accel_count": 0,
+  "sample_limit": 20,
+  "accel_minus_baseline_samples": [],
+  "baseline_minus_accel_samples": [],
+  "accel_query_sql": "SELECT public.h3_cell_to_parent(cell, 0) AS parent_cell, count(value) AS n FROM bench_h3_count_column GROUP BY 1",
+  "baseline_query_sql": "SELECT public.h3_cell_to_parent(cell, 0) AS parent_cell, count(value) AS n FROM bench_h3_count_column GROUP BY 1",
+  "error": null
+}

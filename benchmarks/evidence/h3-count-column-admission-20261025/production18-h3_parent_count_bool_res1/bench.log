@@ -1,0 +1,52 @@
+[artifacts] writing benchmark artifacts to /Users/contra/Projects/pg_accel/.codex/scratch/h3-count-column-20261022/production18-h3_parent_count_bool_res1/artifacts
+[diagnostics] RUST_BACKTRACE=1 (set-by-runner)
+[gucs] applying profile: GucProfile { shared_buffers: "16GB", work_mem: "512MB", effective_cache_size: "48GB", max_parallel_workers_per_gather: 8, max_worker_processes: 16, max_parallel_workers: 12, maintenance_work_mem: "2GB", jit: "off", jit_above_cost: "100000", random_page_cost: "1.1", effective_io_concurrency: 256, track_io_timing: "on", parallel_leader_participation: "on" }
+[gucs] observed snapshot captured (13 settings)
+[gucs] pg_postmaster_start_time = 2026-10-25 16:33:47.844629-07
+[setup] installing extensions: pg_accel, h3
+[setup] pg_accel: ok
+[setup] h3: ok
+[detect] installed extensions: plpgsql, pg_accel, h3
+[provenance] pg_accel extension provenance accepted
+
+[scale] h3_parent_count_bool_res1 @ 1000017 rows
+[setup] h3_parent_count_bool_res1 -- seed 42 (setseed=0.000042), 1000017 rows
+[quiescence] setup checkpoint completed at 2026-10-25 16:33:49.505477-07 (wal_lsn=0/53AC1A8)
+[h3_parent_count_bool_res1] warmup 1/5 [warm]: accel=18.21ms  parallel=69.00ms
+[h3_parent_count_bool_res1] warmup 2/5 [warm]: accel=6.43ms  parallel=57.83ms
+[h3_parent_count_bool_res1] warmup 3/5 [warm]: accel=7.18ms  parallel=57.60ms
+[h3_parent_count_bool_res1] warmup 4/5 [warm]: accel=7.29ms  parallel=58.02ms
+[h3_parent_count_bool_res1] warmup 5/5 [warm]: accel=6.92ms  parallel=57.10ms
+[h3_parent_count_bool_res1] bench 1/10 [warm]: accel=6.73ms  parallel=57.25ms
+[h3_parent_count_bool_res1] bench 2/10 [warm]: accel=4.77ms  parallel=57.27ms
+[h3_parent_count_bool_res1] bench 3/10 [warm]: accel=6.42ms  parallel=56.72ms
+[h3_parent_count_bool_res1] bench 4/10 [warm]: accel=7.11ms  parallel=57.23ms
+[h3_parent_count_bool_res1] bench 5/10 [warm]: accel=6.60ms  parallel=57.13ms
+[h3_parent_count_bool_res1] bench 6/10 [warm]: accel=6.60ms  parallel=59.05ms
+[h3_parent_count_bool_res1] bench 7/10 [warm]: accel=6.87ms  parallel=57.36ms
+[h3_parent_count_bool_res1] bench 8/10 [warm]: accel=7.22ms  parallel=57.51ms
+[h3_parent_count_bool_res1] bench 9/10 [warm]: accel=5.06ms  parallel=56.92ms
+[h3_parent_count_bool_res1] bench 10/10 [warm]: accel=5.89ms  parallel=57.70ms
+[quiescence] checkpointer counters remained unchanged through 2026-10-25 16:33:50.744189-07
+[cleanup] h3_parent_count_bool_res1 -- tables dropped
+
+[scale] h3_parent_count_bool_res1 @ 2000017 rows
+[setup] h3_parent_count_bool_res1 -- seed 42 (setseed=0.000042), 2000017 rows
+[quiescence] setup checkpoint completed at 2026-10-25 16:33:52.951124-07 (wal_lsn=0/CB23570)
+[h3_parent_count_bool_res1] warmup 1/5 [warm]: accel=26.99ms  parallel=96.98ms
+[h3_parent_count_bool_res1] warmup 2/5 [warm]: accel=12.65ms  parallel=84.53ms
+[h3_parent_count_bool_res1] warmup 3/5 [warm]: accel=6.41ms  parallel=82.80ms
+[h3_parent_count_bool_res1] warmup 4/5 [warm]: accel=11.89ms  parallel=82.68ms
+[h3_parent_count_bool_res1] warmup 5/5 [warm]: accel=10.62ms  parallel=87.41ms
+[h3_parent_count_bool_res1] bench 1/10 [warm]: accel=9.76ms  parallel=86.97ms
+[h3_parent_count_bool_res1] bench 2/10 [warm]: accel=6.39ms  parallel=84.54ms
+[h3_parent_count_bool_res1] bench 3/10 [warm]: accel=8.77ms  parallel=86.75ms
+[h3_parent_count_bool_res1] bench 4/10 [warm]: accel=10.49ms  parallel=83.29ms
+[h3_parent_count_bool_res1] bench 5/10 [warm]: accel=10.22ms  parallel=81.75ms
+[h3_parent_count_bool_res1] bench 6/10 [warm]: accel=6.04ms  parallel=81.82ms
+[h3_parent_count_bool_res1] bench 7/10 [warm]: accel=10.57ms  parallel=82.32ms
+[h3_parent_count_bool_res1] bench 8/10 [warm]: accel=10.85ms  parallel=83.82ms
+[h3_parent_count_bool_res1] bench 9/10 [warm]: accel=10.64ms  parallel=87.09ms
+[h3_parent_count_bool_res1] bench 10/10 [warm]: accel=11.70ms  parallel=87.88ms
+[quiescence] checkpointer counters remained unchanged through 2026-10-25 16:33:54.789209-07
+[cleanup] h3_parent_count_bool_res1 -- tables dropped

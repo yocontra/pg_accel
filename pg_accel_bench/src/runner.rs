@@ -1735,6 +1735,12 @@ fn run_with_timing_and_cache_internal(
         warmup_iterations.extend(warm.warmup_iterations.clone());
         result.set_warmup_iterations(warmup_iterations);
         result
+            .typed_h3_settings
+            .extend(cold.typed_h3_settings.clone());
+        result
+            .typed_h3_settings
+            .extend(warm.typed_h3_settings.clone());
+        result
             .planner_stage_captures
             .extend(cold.planner_stage_captures.clone());
         let cold_iteration_count = cold.iterations.len();
@@ -1873,6 +1879,8 @@ fn run_with_timing_and_cache_internal(
         && workload_is_resident_lane(workload.name());
     let mut artifact_lifecycle_probe = None;
     let mut artifact_steady_state_captures = Vec::with_capacity(iterations);
+    let capture_typed_h3 = crate::workloads::h3_count_column_contract(workload.name()).is_some();
+    let mut typed_h3_settings = Vec::new();
 
     for i in 0..total_runs {
         let is_warmup = i < effective_warmup;
@@ -1893,6 +1901,14 @@ fn run_with_timing_and_cache_internal(
                     native_parity_pairing,
                 },
             )?);
+            if capture_typed_h3 {
+                typed_h3_settings.push(capture_typed_h3_settings(
+                    &mut mode_clients[0],
+                    "lifecycle",
+                    0,
+                    CacheState::Warm,
+                )?);
+            }
         }
 
         // Warmups are randomized independently. Measured pairs use a
@@ -1979,6 +1995,14 @@ fn run_with_timing_and_cache_internal(
                 timing_mode,
                 capture_this_planner,
             )?;
+            if capture_typed_h3 && matches!(modes[idx], BenchMode::Accel) {
+                typed_h3_settings.push(capture_typed_h3_settings(
+                    &mut mode_clients[client_idx],
+                    if is_warmup { "warmup" } else { "measured" },
+                    if is_warmup { i } else { i - effective_warmup },
+                    CacheState::from(cache_mode),
+                )?);
+            }
             timings[idx].elapsed_ms += mode_outcome.measurement.elapsed_ms;
             timings[idx].output_rows = timings[idx]
                 .output_rows
@@ -2155,6 +2179,7 @@ fn run_with_timing_and_cache_internal(
         true,
     );
     result.set_warmup_iterations(warmup_results);
+    result.typed_h3_settings = typed_h3_settings;
     result.accel_output_rows_consumed = accel_output_rows_consumed;
     result.resident_load_ms = resident_load_ms;
     result.resident_lane = workload_is_resident_lane(workload.name());
@@ -2387,6 +2412,41 @@ fn prime_pg_accel_backend(client: &mut Client) -> Result<(), Box<dyn std::error:
     // `_PG_init` installs planner hooks before any timed iteration.
     client.simple_query("SELECT 1 FROM pg_accel_stats() LIMIT 1")?;
     Ok(())
+}
+
+/// Capture after the canonical typed-count query on its own backend, outside
+/// timing and before DISCARD ALL. Never substitute settings from a report or
+/// profile connection: those cannot prove the measured session's defaults.
+pub fn capture_typed_h3_settings(
+    client: &mut Client,
+    phase: &str,
+    index: usize,
+    cache_state: CacheState,
+) -> Result<report::TypedH3SettingsCapture, Box<dyn std::error::Error>> {
+    const NAMES: [&str; 4] = [
+        "pg_accel.cost_multiplier",
+        "pg_accel.min_batch_size",
+        "pg_accel.enabled",
+        "pg_accel.gpu_enabled",
+    ];
+    let row = client.query_one(
+        "SELECT current_setting('pg_accel.cost_multiplier'), \
+         current_setting('pg_accel.min_batch_size'), \
+         current_setting('pg_accel.enabled'), current_setting('pg_accel.gpu_enabled')",
+        &[],
+    )?;
+    Ok(report::TypedH3SettingsCapture {
+        phase: phase.to_owned(),
+        index,
+        cache_state,
+        settings: report::GucSettings {
+            settings: NAMES
+                .iter()
+                .enumerate()
+                .map(|(column, name)| ((*name).to_owned(), row.get::<_, String>(column)))
+                .collect(),
+        },
+    })
 }
 
 /// Prime the accel backend and pin every exact relation/column set required by

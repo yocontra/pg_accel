@@ -1,4 +1,4 @@
-//! Live qualification of staged nullable hash counts and INT4 sums. No planner path is added.
+//! Live qualification of normal H3 counts and staged hash aggregate families.
 //! These tests require a real GPU and H3 installation; neither absence is a pass.
 
 #[pgrx::pg_schema]
@@ -7,6 +7,7 @@ mod tests {
         DescriptorAggPlan, DescriptorArtifactPolicy, HashMeasureInput, INT8OID,
         validate_internal_runtime_capability, validate_normal_descriptor_capability,
     };
+    use super::super::{canonical_h3_count, planned_descriptor_kernel_mode};
     use crate::engine::spec::{
         AggOutputProjection, AggOutputSlot, AggOutputSource, AggQuerySpec, AggregateKind,
         AggregateOutput, AggregateSource, ColumnRef, FilterSpec, GroupKeyEncoding, GroupKeyRef,
@@ -15,6 +16,120 @@ mod tests {
     use crate::gpu::GroupedAggKernelMode;
     use pgrx::pg_sys;
     use pgrx::prelude::*;
+
+    #[pg_test]
+    fn pg_normal_h3_column_count_all_types_dispatch_and_match_native() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS h3; RESET pg_accel.cost_multiplier; RESET pg_accel.min_batch_size; SET pg_accel.enabled=on")
+            .expect("normal H3 setup");
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT gpu_available FROM pg_accel_device_info()")
+                .expect("device probe"),
+            Some(true),
+            "normal admission proof requires real GPU hardware"
+        );
+        let rows =
+            1_000_017_usize.max(crate::engine::cost::device_limits().gpu_hash_agg_min_rows + 1);
+        for (sql_type, value) in [
+            ("boolean", "false"),
+            ("smallint", "-32768"),
+            ("integer", "-2147483648"),
+            ("bigint", "-9223372036854775808"),
+            ("real", "'NaN'"),
+            ("double precision", "'Infinity'"),
+            ("date", "'-infinity'"),
+            ("timestamp", "'infinity'"),
+            ("timestamptz", "'-infinity'"),
+        ] {
+            Spi::run(&format!(
+                "CREATE TEMP TABLE normal_h3_count_rows(cell h3index, v {sql_type}); \
+                 INSERT INTO normal_h3_count_rows \
+                 WITH seeds AS (SELECT array_agg(h3_cell_to_center_child(cell,15) ORDER BY cell) cells FROM h3_get_res_0_cells() c(cell)) \
+                 SELECT CASE WHEN i%5=0 THEN NULL ELSE cells[1+i%3] END, \
+                 CASE WHEN i%3=0 OR i%7=0 THEN NULL ELSE ({value})::{sql_type} END \
+                 FROM generate_series(1,{rows}) s(i) CROSS JOIN seeds; \
+                 ANALYZE normal_h3_count_rows; \
+                 SELECT pg_accel_pin('normal_h3_count_rows'::regclass, ARRAY['cell','v'])"
+            )).expect("normal typed fixture");
+            let query = "SELECT public.h3_cell_to_parent(cell,0) AS parent, count(v) AS n FROM normal_h3_count_rows GROUP BY 1";
+            let result = || {
+                Spi::get_one::<String>(&format!(
+                    "SELECT json_agg(result_row ORDER BY parent NULLS FIRST)::text FROM ({query}) result_row"
+                )).expect("complete sorted output").expect("nonempty groups")
+            };
+            Spi::run("SET pg_accel.enabled=off").expect("native baseline");
+            let expected = result();
+            assert!(expected.contains("\"n\":0"), "dedicated zero-count group");
+            Spi::run("SET pg_accel.enabled=on").expect("normal acceleration");
+            let before = crate::gpu::gpu_exec_count();
+            let explain = Spi::connect(|client| {
+                client
+                    .select(
+                        &format!("EXPLAIN (ANALYZE, FORMAT TEXT) {query}"),
+                        None,
+                        &[],
+                    )
+                    .expect("normal EXPLAIN ANALYZE")
+                    .map(|row| {
+                        row.get::<String>(1)
+                            .expect("plan line")
+                            .expect("nonNULL line")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            });
+            for required in [
+                "Custom Scan (GpuAccelAgg)",
+                "GPU Kernel Dispatched: true",
+                "GPU Dispatched Physical Kernel Mode: parallel_hash",
+                "GPU Physical Kernel Mode Verified: true",
+            ] {
+                assert!(
+                    explain.contains(required),
+                    "{sql_type}: missing {required}: {explain}"
+                );
+            }
+            assert!(crate::gpu::gpu_exec_count() > before, "actual dispatch");
+            let before = crate::gpu::gpu_exec_count();
+            assert_eq!(result(), expected, "{sql_type} full tuple parity");
+            assert!(
+                crate::gpu::gpu_exec_count() > before,
+                "parity query dispatch"
+            );
+            if sql_type == "integer" {
+                Spi::run(&format!(
+                    "SET plan_cache_mode=force_generic_plan; PREPARE normal_h3_prepared AS {query}"
+                ))
+                .expect("prepare normal typed count");
+                for mutation in [
+                    "UPDATE normal_h3_count_rows SET v=NULL",
+                    "UPDATE normal_h3_count_rows SET v=7",
+                    "UPDATE normal_h3_count_rows SET cell=NULL",
+                ] {
+                    Spi::run(mutation).expect("value/key-only mutation");
+                    Spi::run("SET pg_accel.enabled=off").expect("native mutation oracle");
+                    let expected = result();
+                    Spi::run("SET pg_accel.enabled=on").expect("prepared mutation execution");
+                    let before = crate::gpu::gpu_exec_count();
+                    Spi::run(
+                        "CREATE TEMP TABLE normal_h3_prepared_actual AS EXECUTE normal_h3_prepared",
+                    )
+                    .expect("execute retained generic plan after DML");
+                    let actual = Spi::get_one::<String>("SELECT json_agg(result_row ORDER BY parent NULLS FIRST)::text FROM normal_h3_prepared_actual result_row")
+                        .expect("prepared full output").expect("grouped rows");
+                    assert_eq!(actual, expected, "prepared count after {mutation}");
+                    assert!(
+                        crate::gpu::gpu_exec_count() > before,
+                        "prepared mutation dispatch"
+                    );
+                    Spi::run("DROP TABLE normal_h3_prepared_actual").expect("drop owned output");
+                }
+                Spi::run("DEALLOCATE normal_h3_prepared; RESET plan_cache_mode")
+                    .expect("release prepared plan");
+            }
+            Spi::run("SELECT pg_accel_unpin('normal_h3_count_rows'::regclass); SELECT pg_accel_evict('normal_h3_count_rows'::regclass); DROP TABLE normal_h3_count_rows")
+                .expect("release owned fixture");
+        }
+    }
 
     fn fresh_snapshot<T>(operation: impl FnOnce() -> T) -> T {
         struct Guard;
@@ -251,6 +366,13 @@ mod tests {
                 GroupedAggKernelMode::ParallelHash,
                 "normal SQL still selects its established dictionary route"
             );
+        } else if canonical_h3_count(&spec) {
+            validate_normal_descriptor_capability(&spec, &projection)
+                .expect("released narrow unfiltered H3 COUNT shape");
+            assert_eq!(
+                planned_descriptor_kernel_mode(&spec, true),
+                GroupedAggKernelMode::ParallelHash
+            );
         } else {
             assert!(DescriptorAggPlan::new(spec.clone(), projection.clone()).is_err());
             assert!(validate_normal_descriptor_capability(&spec, &projection).is_err());
@@ -465,6 +587,126 @@ mod tests {
             rows.sort();
             rows
         })
+    }
+
+    #[pg_test]
+    fn pg_h3_cached_capacity_and_exact_protected_budget() {
+        use super::super::h3_planning_memory;
+        use crate::engine::residency::{
+            ExecutionMemoryCharge, ExecutionMemoryProtection, estimate_selected_relation,
+            quote_execution_memory, resident_live_bytes,
+        };
+        Spi::run("CREATE EXTENSION IF NOT EXISTS h3; SET pg_accel.enabled=on; SET pg_accel.auto_load=on; \
+            CREATE TEMP TABLE hash_count_rows(cell h3index,v integer); \
+            INSERT INTO hash_count_rows WITH seeds AS \
+            (SELECT array_agg(h3_cell_to_center_child(cell,15) ORDER BY cell) cells FROM h3_get_res_0_cells() c(cell)) \
+            SELECT CASE WHEN i%5=0 THEN NULL ELSE cells[1+i%3] END,CASE WHEN i%3=0 THEN NULL ELSE i END \
+            FROM generate_series(1,10000) s(i) CROSS JOIN seeds; ANALYZE hash_count_rows")
+            .expect("capacity fixture");
+        let cached = plan(DescriptorArtifactPolicy::CachedReusable);
+        let forecast = |plan: &DescriptorAggPlan| {
+            let evidence = estimate_selected_relation(&plan.selected[0]).expect("loaded evidence");
+            h3_planning_memory(&plan.spec, &plan.projection, &evidence, 1)
+                .expect("current capacity quote")
+                .expect("H3 quote")
+        };
+        assert_eq!(
+            forecast(&cached).capacity,
+            123,
+            "unlearned theoretical bound"
+        );
+        let expected = native();
+        for short in [true, false] {
+            crate::gpu::cleanup_grouped_allocation_pools();
+            let baseline = resident_live_bytes();
+            let protection = ExecutionMemoryProtection::cached(
+                cached.spec.fact_rel.into(),
+                &cached.identity,
+                &cached.dispatch_columns,
+            )
+            .expect("exact cached protection");
+            let quote = quote_execution_memory(&protection).expect("protected ownership quote");
+            assert_eq!(
+                quote.reclaimable_derived_bytes, 0,
+                "cached owner never credited"
+            );
+            assert_eq!(
+                quote.surviving_bytes, baseline,
+                "raw and parent counted exactly once"
+            );
+            let (_, required) =
+                super::super::with_derived_artifact_inputs::<super::super::H3ParentArtifact, _>(
+                    cached.spec.fact_rel.into(),
+                    &cached.identity,
+                    &cached.dispatch_columns,
+                    |inputs| {
+                        let (cell, _, _) =
+                            super::super::h3_parent_group(&cached.spec).expect("H3 key");
+                        let bound = super::super::build_h3_descriptor(
+                            inputs.artifact,
+                            &cached.dispatch_columns,
+                            &inputs.columns,
+                            cell,
+                        )
+                        .expect("real descriptor");
+                        super::super::hash_execution_snapshot(
+                            &bound.desc,
+                            &cached.spec,
+                            &inputs.evidence,
+                        )
+                        .expect("native execution bytes")
+                    },
+                )
+                .expect("cached borrow");
+            let budget = crate::engine::gucs::resident_memory_budget_bytes();
+            let held = ExecutionMemoryCharge::reserve(
+                budget - baseline - required + u64::from(short),
+                budget,
+            )
+            .expect("bookkeeping charge leaving exact/one-short headroom");
+            let before = crate::gpu::gpu_exec_count();
+            if short {
+                assert!(fresh_snapshot(|| cached.execute_prepared()).is_err());
+                assert_eq!(
+                    crate::gpu::gpu_exec_count(),
+                    before,
+                    "reject before dispatch"
+                );
+                assert_eq!(
+                    forecast(&cached).capacity,
+                    123,
+                    "failed execution never learns"
+                );
+            } else {
+                assert_eq!(execute(&cached, false), expected, "exact-fit execution");
+                assert!(crate::gpu::gpu_exec_count() > before);
+            }
+            drop(held);
+        }
+        assert_eq!(
+            forecast(&cached).capacity,
+            expected.len(),
+            "successful output learns"
+        );
+        Spi::run("SELECT pg_accel_evict('hash_count_rows'::regclass)")
+            .expect("remove exact cached owner");
+        let fused = plan(DescriptorArtifactPolicy::EphemeralFused);
+        assert_eq!(
+            forecast(&fused).capacity,
+            123,
+            "fused owner cannot borrow evicted learned bound"
+        );
+        assert_eq!(execute(&fused, false), expected);
+        assert_eq!(
+            forecast(&fused).capacity,
+            123,
+            "query-local learning cannot authorize a future owner"
+        );
+        drop(fused);
+        drop(cached);
+        crate::gpu::cleanup_grouped_allocation_pools();
+        Spi::run("SELECT pg_accel_evict('hash_count_rows'::regclass); DROP TABLE hash_count_rows")
+            .expect("release capacity fixture");
     }
 
     #[pg_test]
@@ -1577,6 +1819,80 @@ mod tests {
         assert_eq!(execute(plan, false), expected);
     }
 
+    fn assert_h3_native_memory_quote(plan: &DescriptorAggPlan) {
+        use super::super::{EphemeralDescriptorArtifact, H3ParentArtifact};
+        use crate::engine::residency::{
+            with_derived_artifact_inputs, with_ephemeral_artifact_inputs,
+        };
+        let (cell, _, _) = super::super::h3_parent_group(&plan.spec).expect("H3 fixture");
+        let baseline = crate::engine::residency::resident_live_bytes();
+        let check = |desc: crate::engine::spec::abi::PgaccelGroupedAggDesc, fused| {
+            let quoted = super::super::h3_count_memory_requirements(
+                &plan.spec,
+                &[1, 2],
+                desc.row_count,
+                desc.group_capacity,
+                fused,
+            )
+            .expect("nonzero typed metadata-only quote");
+            // SAFETY: this descriptor borrows real live resident buffers inside
+            // the owner callback; the resolved plan does not escape the lease.
+            let native = unsafe { crate::gpu::ResolvedGroupedAggPlan::from_abi(desc) }
+                .expect("real native bound descriptor");
+            assert_eq!(
+                quoted,
+                native
+                    .hash_memory_requirements()
+                    .expect("real native bytes")
+            );
+        };
+        if plan.artifact_policy.get() == DescriptorArtifactPolicy::CachedReusable {
+            with_derived_artifact_inputs::<H3ParentArtifact, _>(
+                plan.spec.fact_rel.into(),
+                &plan.identity,
+                &plan.dispatch_columns,
+                |inputs| {
+                    let bound = super::super::build_h3_descriptor(
+                        inputs.artifact,
+                        &plan.dispatch_columns,
+                        &inputs.columns,
+                        cell,
+                    )
+                    .expect("real cached binding");
+                    check(bound.desc, false);
+                },
+            )
+            .expect("cached owner borrow");
+        } else {
+            let owner = plan.ephemeral_artifact.borrow();
+            let Some(EphemeralDescriptorArtifact::Hash(owner)) = owner.as_ref() else {
+                panic!("fused owner")
+            };
+            with_ephemeral_artifact_inputs(
+                plan.spec.fact_rel.into(),
+                owner,
+                &plan.dispatch_columns,
+                |inputs| {
+                    let bound = super::super::build_fused_hash_descriptor(
+                        inputs.artifact,
+                        &plan.dispatch_columns,
+                        &inputs.columns,
+                        cell,
+                        &mut || false,
+                    )
+                    .expect("real fused binding");
+                    check(bound.desc, true);
+                },
+            )
+            .expect("fused owner borrow");
+        }
+        assert_eq!(
+            crate::engine::residency::resident_live_bytes(),
+            baseline,
+            "query is uncharged"
+        );
+    }
+
     #[pg_test]
     fn pg_h3_nullable_hash_count_resident_currentness_and_materialization() {
         Spi::run(
@@ -1623,6 +1939,7 @@ mod tests {
                      FROM generate_series(1,4097) s(i) CROSS JOIN seeds"
                 )).expect("typed nullable fixture");
                 let plan = plan(policy);
+                assert_h3_native_memory_quote(&plan);
                 let expected = native();
                 assert_eq!(expected.len(), 4, "three base cells plus NULL key");
                 assert!(expected.iter().any(|(key, n)| key.is_some() && *n == 0));

@@ -1,0 +1,12 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error[E0308]: mismatched types
+    --> pg_accel/src/engine/residency/store.rs:6879:73
+     |
+6879 |             ResidentLoadEstimate { resident_required_columns: Some(vec![1, 2]), ..estimate.clone() },
+     |                                                                         ^ expected `(i16, Oid)`, found integer
+     |
+     = note: expected tuple `(i16, Oid)`
+                 found type `{integer}`
+
+For more information about this error, try `rustc --explain E0308`.
+error: could not compile `pg_accel` (lib test) due to 1 previous error

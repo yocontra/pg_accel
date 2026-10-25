@@ -1,0 +1,44 @@
+    Checking pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error: consider adding a `;` to the last statement for consistent formatting
+    --> pg_accel/src/engine/residency/store.rs:6893:13
+     |
+6893 |             store.borrow_mut().entries[0].derived[0].artifact = Box::new(EmptyArtifact)
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: add a `;` here: `store.borrow_mut().entries[0].derived[0].artifact = Box::new(EmptyArtifact);`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#semicolon_if_nothing_returned
+     = note: `-D clippy::semicolon-if-nothing-returned` implied by `-D clippy::pedantic`
+     = help: to override `-D clippy::pedantic` add `#[allow(clippy::semicolon_if_nothing_returned)]`
+
+error: consider adding a `;` to the last statement for consistent formatting
+    --> pg_accel/src/engine/residency/store.rs:6900:13
+     |
+6900 |             store.borrow_mut().entries[0].derived[0].artifact = Box::new(SizedArtifact(9))
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: add a `;` here: `store.borrow_mut().entries[0].derived[0].artifact = Box::new(SizedArtifact(9));`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#semicolon_if_nothing_returned
+
+error: consider adding a `;` to the last statement for consistent formatting
+    --> pg_accel/src/engine/residency/store.rs:6914:13
+     |
+6914 | /             store.borrow_mut().entries[0].derived[0].charge =
+6915 | |                 LedgerCharge::reserve(8, u64::MAX).expect("restored ledger charge")
+     | |___________________________________________________________________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#semicolon_if_nothing_returned
+help: add a `;` here
+     |
+6914 |             store.borrow_mut().entries[0].derived[0].charge =
+6915 ~                 LedgerCharge::reserve(8, u64::MAX).expect("restored ledger charge");
+     |
+
+error: very complex type used. Consider factoring parts into `type` definitions
+    --> pg_accel/src/engine/residency/store.rs:6917:24
+     |
+6917 |         let malformed: [fn(&SizedArtifact) -> Result<DerivedCapacityScalars, String>; 3] = [
+     |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#type_complexity
+     = note: `-D clippy::type-complexity` implied by `-D clippy::all`
+     = help: to override `-D clippy::all` add `#[allow(clippy::type_complexity)]`
+
+error: could not compile `pg_accel` (lib test) due to 4 previous errors

@@ -2096,7 +2096,7 @@ complete objective is implemented and verified.
     reload. It requires actual device availability rather than passing a
     no-GPU skip, and asserts prepared-plan rebuilds after invalidation. These
     tests still require live execution; compilation is not parity evidence.
-    Rust admission remains closed until GPU/live PG18/19 output equivalence,
+    At that stage, Rust admission remained closed until GPU/live PG18/19 output equivalence,
     nonempty resident binding/currentness and performance qualification pass.
     This does not complete general high-
     cardinality aggregation, DISTINCT or multi-measure hash support. Evidence:
@@ -2105,6 +2105,38 @@ complete objective is implemented and verified.
     `benchmarks/evidence/hash-count-binding-20261010/README.md`.
     Live-test implementation and compile evidence:
     `benchmarks/evidence/hash-count-live-tests-20261010/README.md`.
+    - [x] Normally admit and qualify one unfiltered H3-parent COUNT(column)
+      over BOOLEAN, INT2/4/8, FLOAT4/8, DATE, TIMESTAMP and TIMESTAMPTZ.
+      Production PG18/19 now prove default-planner GPU dispatch and complete
+      native parity, including zero-count/NULL-key groups, prepared DML,
+      loaded-row rollback, truncate/reload, budget rejection/recovery and
+      actual device-floor boundaries. Exact native memory forecasting and
+      current cached-capacity inspection preserve full identity and protected
+      ownership; eviction/fused policy restores theoretical capacity. Live
+      exact-fit/byte-under and cached/fused native-quote tests pass both majors.
+      Eight PG18/M2 Max warm resident benchmark cells (INT4/BOOLEAN, parent
+      resolutions 0/1, 1M/2M rows) measure 7.81–12.07x median gains against
+      parallel PostgreSQL with five warmups/ten paired raw samples per cell.
+      Refresh-inclusive losses, preload and three high-variance cells remain
+      explicit; this is not a cold-cache or first-use speedup claim. Final
+      checks: 1,338 ordinary engine tests, 596 benchmark tests, 12 focused live
+      H3 tests per major, six fixture tests, strict feature/benchmark lint and
+      formatting. The final PG18 production module and benchmark executable
+      match the measured binaries. General raw-key hash COUNT, FILTER and multi-measure admission
+      remain open. Evidence:
+      `benchmarks/evidence/h3-count-column-admission-20261025/README.md`.
+    - [x] Honor validated bounded dense execution above the one-call row cap.
+      The old total-row rejection now remains only without a valid exact
+      budget-selected decision; other capability, floor and cost gates stay.
+      A real 1-CU-profile/native-layout regression checks legal chunking and
+      no-decision rejection; a default production 4M-row query passes full
+      parity in five M2 Max calls. Catalog lifecycle fixtures use their actual
+      backend floor with a checked 4M test-only ceiling and retain initial
+      preload/spoof checks. Both production majors pass the exact lifecycle
+      fixture. Hosted 1-CU confirmation is still pending CI; its earlier
+      catalog failure and six-hour Metal timeout are not called resolved by
+      local results. The seven separate static release-proof findings remain
+      open. Evidence is in the same bundle.
   - [ ] Integrate and qualify hash count FILTER for conditional H3 rollups.
     Native COUNT(*) and COUNT(column) now accept a canonical exact SQL measure
     mask with dedicated filtered launch variants. FALSE/UNKNOWN suppress the

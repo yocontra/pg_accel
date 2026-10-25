@@ -1,0 +1,37 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error[E0277]: the trait bound `u64: From<i32>` is not satisfied
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:5986:17
+     |
+5986 |                 u64::from(measure.op),
+     |                 ^^^ the trait `From<i32>` is not implemented for `u64`
+     |
+     = help: `u64` implements trait `From<T>`:
+               From<bool>
+               From<char>
+               From<std::ascii::Char>
+               From<u16>
+               From<u32>
+               From<u8>
+               From<units::Micros>
+               From<units::WorkProduct>
+             and 3 others
+
+error[E0277]: the trait bound `u64: From<i32>` is not satisfied
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:5987:17
+     |
+5987 |                 u64::from(measure.value.physical_type),
+     |                 ^^^ the trait `From<i32>` is not implemented for `u64`
+     |
+     = help: `u64` implements trait `From<T>`:
+               From<bool>
+               From<char>
+               From<std::ascii::Char>
+               From<u16>
+               From<u32>
+               From<u8>
+               From<units::Micros>
+               From<units::WorkProduct>
+             and 3 others
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `pg_accel` (lib test) due to 2 previous errors
