@@ -1,0 +1,20 @@
+[  6%] Built target pgaccel_metadata
+[ 93%] Built target pgaccel_kernels_shared
+[100%] Building CXX object CMakeFiles/test_grouped_agg.dir/test/test_grouped_agg.cpp.o
+[100%] Linking CXX executable test_grouped_agg
+[100%] Built target test_grouped_agg
+[  6%] Built target pgaccel_metadata
+[ 93%] Built target pgaccel_kernels_shared
+[100%] Building CXX object CMakeFiles/test_grouped_agg_workspace.dir/test/test_grouped_agg_workspace.cpp.o
+[100%] Linking CXX executable test_grouped_agg_workspace
+[100%] Built target test_grouped_agg_workspace
+[  6%] Built target pgaccel_metadata
+[ 87%] Built target pgaccel_kernels_shared
+[ 93%] Building CXX object CMakeFiles/test_host_api_contract.dir/test/test_host_api_contract.cpp.o
+[100%] Linking CXX executable test_host_api_contract
+[100%] Built target test_host_api_contract
+[  6%] Built target pgaccel_metadata
+[ 87%] Built target pgaccel_kernels_shared
+[ 93%] Building CXX object CMakeFiles/test_oom_invariant.dir/test/test_oom_invariant.cpp.o
+[100%] Linking CXX executable test_oom_invariant
+[100%] Built target test_oom_invariant

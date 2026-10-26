@@ -314,6 +314,7 @@ fn apply_exact_residency(
             },
             estimate,
             estimated_rows,
+            model.memory.gpu_h3_max_groups.get(),
         )
         .map_err(|detail| AdmissionDecline::ScalarEstimateUnavailable { detail })?
     } else {
@@ -559,6 +560,13 @@ fn apply_exact_residency_with_memory(
         shape.cost.replace_aggregate(aggregate);
     }
     let lifecycle_fact_rows = resident_fact_rows.unwrap_or(estimated_fact_rows);
+    if let Some(memory) = h3_memory
+        && !memory.cached_owner
+    {
+        shape
+            .cost
+            .charge_h3_filter_conversion(&shape.spec, lifecycle_fact_rows, model);
+    }
     if let Some(resolution) = shape
         .spec
         .group_keys
@@ -578,8 +586,13 @@ fn apply_exact_residency_with_memory(
             },
             |memory| memory.capacity as u64,
         );
-        let estimated = Rows::new(usize::try_from(bound).unwrap_or(usize::MAX));
         let maximum = model.memory.gpu_h3_max_groups;
+        let bound = if crate::engine::executor::agg::canonical_h3_count(&shape.spec) {
+            bound.min(maximum.get() as u64)
+        } else {
+            bound
+        };
+        let estimated = Rows::new(usize::try_from(bound).unwrap_or(usize::MAX));
         if estimated > maximum {
             return Err(AdmissionDecline::DeviceCostGate(
                 ShapeCostGate::GroupsExceedDeviceMaximum { estimated, maximum },
@@ -3668,6 +3681,7 @@ mod tests {
                     },
                     &model(),
                     Some(H3PlanningMemory {
+                        cached_owner: false,
                         bytes: 71,
                         capacity: 4,
                     }),
@@ -3692,8 +3706,8 @@ mod tests {
     }
 
     #[test]
-    fn h3_capacity_uses_exact_resident_rows_before_selecting_a_path() {
-        for (exact_rows, fits) in [(499_999, true), (500_000, true), (500_001, false)] {
+    fn h3_adaptive_capacity_bounds_the_seed_without_rejecting_larger_inputs() {
+        for exact_rows in [499_999, 500_000, 500_001] {
             let mut shape = h3_parent_shape();
             let GroupKeySource::H3CellToParent { resolution, .. } =
                 &mut shape.spec.group_keys[0].source
@@ -3713,7 +3727,7 @@ mod tests {
             );
             let mut evidence = estimate(true, 4_096);
             evidence.resident_rows = Some(exact_rows);
-            // This unit isolates the group-limit consumer from the live
+            // This unit isolates the adaptive initial-capacity consumer from the live
             // catalog/current-artifact resolver. The latter is covered by
             // backend tests; invoking SPI from an ordinary Rust test is invalid.
             let result = apply_exact_residency_with_memory(
@@ -3726,22 +3740,15 @@ mod tests {
                 },
                 &model,
                 Some(H3PlanningMemory {
+                    cached_owner: false,
                     bytes: 0,
-                    capacity: usize::try_from(exact_rows).expect("fixture rows"),
+                    capacity: usize::try_from(exact_rows.min(500_000))
+                        .expect("bounded fixture capacity"),
                 }),
                 |_, _, _, _| panic!("hash quote must bypass dense memory"),
             );
-            if fits {
-                assert_eq!(result, Ok(()));
-                assert_eq!(shape.cost_gate, ShapeCostGate::Eligible);
-            } else {
-                assert!(matches!(
-                    result,
-                    Err(AdmissionDecline::DeviceCostGate(
-                        ShapeCostGate::GroupsExceedDeviceMaximum { .. }
-                    ))
-                ));
-            }
+            assert_eq!(result, Ok(()));
+            assert_eq!(shape.cost_gate, ShapeCostGate::Eligible);
         }
     }
 

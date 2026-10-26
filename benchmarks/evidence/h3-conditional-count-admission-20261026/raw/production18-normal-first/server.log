@@ -1,0 +1,63 @@
+2026-10-25 18:07:59.181 MST [60439] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-25 18:07:59.182 MST [60439] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-25 18:07:59.322 MST [60439] LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-25 18:07:59.322 MST [60439] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/h3fn18/.s.PGSQL.33118"
+2026-10-25 18:07:59.336 MST [60445] LOG:  database system was shut down at 2026-10-25 18:07:58 MST
+2026-10-25 18:07:59.341 MST [60439] LOG:  database system is ready to accept connections
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production18/apps/global/jit-cache/13703469713683254680.15838927696693884544.metalar.60465.7057522113900566847.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production18/apps/global/jit-cache/11021296638318145172.13938743479207491959.metalar.60465.18182812325973181272.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production18/apps/global/jit-cache/2547108356729863326.5072347386540936869.metalar.60465.14930531280412031598.tmp (kernels_added=1 skipped=0)
+2026-10-25 18:08:04.381 MST [60443] LOG:  checkpoint starting: immediate force wait
+2026-10-25 18:08:04.419 MST [60443] LOG:  checkpoint complete: wrote 126 buffers (0.0%), wrote 3 SLRU buffers; 1 WAL file(s) added, 0 removed, 0 recycled; write=0.029 s, sync=0.003 s, total=0.039 s; sync files=54, longest=0.001 s, average=0.001 s; distance=5242 kB, estimate=5242 kB; lsn=0/1C2E618, redo lsn=0/1C2E5C0
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production18/apps/global/jit-cache/13759382080697358030.10146278079495725895.metalar.60625.11657433544883823540.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production18/apps/global/jit-cache/14168457728969595034.18172618811436184833.metalar.60625.17426554748496915357.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production18/apps/global/jit-cache/8588106914278024786.13488318957453097810.metalar.60625.10218759074599798120.tmp (kernels_added=1 skipped=0)
+2026-10-25 18:08:29.626 MST [60625] ERROR:  invalid H3 key unexpectedly succeeded
+2026-10-25 18:08:29.626 MST [60625] CONTEXT:  PL/pgSQL function pg_temp_5.h3_invalid_key_state(text,boolean) line 6 at RAISE
+	PL/pgSQL function inline_code_block line 15 at assignment
+2026-10-25 18:08:29.626 MST [60625] STATEMENT:  DO $$
+	DECLARE predicate text; native_state text; accel_state text; q text; plan text; line record;
+	BEGIN
+	 CREATE TEMP TABLE h3_invalid_qualified(cell h3index,v integer,p boolean);
+	 INSERT INTO h3_invalid_qualified SELECT '0'::h3index,i,false FROM generate_series(1,1000017) s(i);
+	 ANALYZE h3_invalid_qualified;
+	 PERFORM pg_accel_pin('h3_invalid_qualified'::regclass,ARRAY['cell','v','p']);
+	 q:='SELECT public.h3_cell_to_parent(cell,0),count(v) FILTER (WHERE p) FROM h3_invalid_qualified GROUP BY 1';
+	 FOREACH predicate IN ARRAY ARRAY['false','NULL'] LOOP
+	  EXECUTE 'UPDATE h3_invalid_qualified SET p='||predicate;
+	  PERFORM set_config('pg_accel.enabled','on',false);
+	  plan:='';
+	  FOR line IN EXECUTE 'EXPLAIN (VERBOSE,COSTS OFF) '||q LOOP plan:=plan||line."QUERY PLAN"||E'\n'; END LOOP;
+	  IF position('Custom Scan (GpuAccelAgg)' IN plan)=0 THEN RAISE EXCEPTION 'invalid-key test not normally selected: %',plan; END IF;
+	  native_state:=pg_temp.h3_invalid_key_state(q,false);
+	  accel_state:=pg_temp.h3_invalid_key_state(q,true);
+	  IF accel_state IS DISTINCT FROM native_state THEN
+	   RAISE EXCEPTION 'invalid key SQLSTATE differs native=% accel=%',native_state,accel_state;
+	  END IF;
+	  RAISE NOTICE 'H3_FILTER_INVALID_KEY_PASS predicate=% state=%',predicate,accel_state;
+	 END LOOP;
+	 PERFORM pg_accel_unpin('h3_invalid_qualified'::regclass);
+	 PERFORM pg_accel_evict('h3_invalid_qualified'::regclass);
+	 DROP TABLE h3_invalid_qualified;
+	END $$;
+2026-10-25 18:08:29.656 MST [60439] LOG:  received fast shutdown request
+2026-10-25 18:08:29.668 MST [60439] LOG:  aborting any active transactions
+2026-10-25 18:08:29.670 MST [60439] LOG:  background worker "logical replication launcher" (PID 60448) exited with exit code 1
+2026-10-25 18:08:29.674 MST [60443] LOG:  shutting down
+2026-10-25 18:08:29.674 MST [60443] LOG:  checkpoint starting: shutdown immediate
+2026-10-25 18:08:29.706 MST [60443] LOG:  checkpoint complete: wrote 114 buffers (0.0%), wrote 2 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.030 s, sync=0.002 s, total=0.033 s; sync files=42, longest=0.001 s, average=0.001 s; distance=942 kB, estimate=4812 kB; lsn=0/1D19E50, redo lsn=0/1D19E50
+2026-10-25 18:08:29.719 MST [60439] LOG:  database system is shut down

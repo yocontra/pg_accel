@@ -1,0 +1,20 @@
+2026-10-25 18:14:18.000 MST [66202] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-25 18:14:18.001 MST [66202] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-25 18:14:18.133 MST [66202] LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-25 18:14:18.134 MST [66202] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/h3nc18/.s.PGSQL.33218"
+2026-10-25 18:14:18.144 MST [66208] LOG:  database system was shut down at 2026-10-25 18:14:17 MST
+2026-10-25 18:14:18.149 MST [66202] LOG:  database system is ready to accept connections
+2026-10-26T01:14:19.094294Z ERROR GPU kernel dispatch failed func="pgaccel_h3_cell_to_parent_resident_ex" status=InvalidArgument raw=-6 domain="h3"
+2026-10-26T01:14:19.842741Z ERROR GPU kernel dispatch failed func="pgaccel_h3_cell_to_parent_resident_ex" status=InvalidArgument raw=-6 domain="h3"
+2026-10-26T01:14:20.589742Z ERROR GPU kernel dispatch failed func="pgaccel_h3_cell_to_parent_resident_ex" status=InvalidArgument raw=-6 domain="h3"
+2026-10-26T01:14:20.724333Z ERROR GPU kernel dispatch failed func="pgaccel_h3_cell_to_parent_resident_ex" status=InvalidArgument raw=-6 domain="h3"
+2026-10-26T01:14:20.736924Z ERROR GPU kernel dispatch failed func="pgaccel_h3_cell_to_parent_resident_ex" status=InvalidArgument raw=-6 domain="h3"
+2026-10-26T01:14:21.862926Z ERROR GPU kernel dispatch failed func="pgaccel_h3_cell_to_parent_resident_ex" status=InvalidArgument raw=-6 domain="h3"
+2026-10-26T01:14:22.860992Z ERROR GPU kernel dispatch failed func="pgaccel_h3_cell_to_parent_resident_ex" status=InvalidArgument raw=-6 domain="h3"
+2026-10-25 18:14:22.870 MST [66202] LOG:  received fast shutdown request
+2026-10-25 18:14:22.870 MST [66202] LOG:  aborting any active transactions
+2026-10-25 18:14:22.872 MST [66202] LOG:  background worker "logical replication launcher" (PID 66211) exited with exit code 1
+2026-10-25 18:14:22.909 MST [66206] LOG:  shutting down
+2026-10-25 18:14:22.909 MST [66206] LOG:  checkpoint starting: shutdown immediate
+2026-10-25 18:14:22.934 MST [66206] LOG:  checkpoint complete: wrote 160 buffers (0.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.021 s, sync=0.004 s, total=0.026 s; sync files=73, longest=0.001 s, average=0.001 s; distance=1007 kB, estimate=1007 kB; lsn=0/180B9E8, redo lsn=0/180B9E8
+2026-10-25 18:14:22.953 MST [66202] LOG:  database system is shut down

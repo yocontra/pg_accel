@@ -1555,6 +1555,19 @@ complete objective is implemented and verified.
 - [ ] Implement streaming/overlap, partitioned operators, spill and 64-bit
   bookkeeping. Verify pooled 1/4/8-client and 10M/100M/narrow-1B-row execution,
   including working sets beyond the device budget.
+  - [x] Qualify bounded GPU partitioning and output spill for single-key H3
+    COUNT rollups. Native-compatible raw H3 keys can exceed the canonical
+    universe; typed capacity exhaustion now drives bounded growth and disjoint
+    GPU prefix/NULL partitions without partial output or CPU aggregation.
+    Production PG18/19 each pass 16,776,706 groups above the actual 16,776,704
+    single-call cap: three completed leaves, actual disk spill and full native
+    multiset parity. Real cancellation preserves SQLSTATE 57014, exact
+    idle-normalized ownership and same-session recovery. Both majors also
+    pass exact eight-backend ownership, ninth-backend budget rejection,
+    one-worker release and final shared-ledger-zero checks. This does not
+    complete generic partitioned operators, asynchronous overlap, shared GPU
+    ownership or the 100M/1B-row qualification. Evidence:
+    `benchmarks/evidence/h3-conditional-count-admission-20261026/README.md`.
 - [ ] Add row-producing inner/left/semi/anti joins, composite keys, aliases,
   duplicate multiplicity, and fused join/filter/aggregate pipelines.
   - [x] Add a native resident row-mapping producer plus a budgeted Rust owner:
@@ -2138,6 +2151,25 @@ complete objective is implemented and verified.
       local results. The seven separate static release-proof findings remain
       open. Evidence is in the same bundle.
   - [ ] Integrate and qualify hash count FILTER for conditional H3 rollups.
+    - [x] Normally admit one COUNT(*) or fixed-width COUNT(column) with a
+      direct same-fact Boolean FILTER. All nine supported column types pass
+      production PG18/19 parity, including zero-count/NULL groups,
+      noncanonical H3 keys, prepared mutations, rollback, cold loading and
+      native errors. Cached masks retain exact dependency identity; fused
+      masks retain charged query-local ownership. Actual fault, rescan and
+      cancellation tests pass both majors. Final checks include 1,344 engine
+      tests, 613 benchmark tests, 19 focused H3 tests and eight production
+      integration filters per major, native regressions, strict lint and
+      formatting. Twenty PG18/M2 Max warm-resident cells retain five warmups
+      and ten balanced raw pairs each: median gains are 6.00–16.75x against
+      parallel PostgreSQL. Six accelerator cells exceed 15% CV; refresh-inclusive
+      execution loses in 19/20 cells. No OS-cold, general first-use or controlled
+      old-versus-new performance claim is made. General FILTER expressions,
+      multi-measure hash admission and static release proofs remain open.
+      Evidence: `benchmarks/evidence/h3-conditional-count-admission-20261026/README.md`.
+    Historical foundation milestones below describe their qualification at
+    the time; the narrow completed subitem above supersedes their pending
+    runtime status only for its stated scope.
     Native COUNT(*) and COUNT(column) now accept a canonical exact SQL measure
     mask with dedicated filtered launch variants. FALSE/UNKNOWN suppress the
     measure, not group creation; zero-count groups and selected row totals are

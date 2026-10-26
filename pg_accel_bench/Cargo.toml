@@ -19,6 +19,10 @@ rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "time", "net", "io-util"] }
+tokio-postgres = "0.7"
+
 [features]
 # Live-PG stress + plan-shape tests — opt in explicitly so `cargo test
 # -p pg_accel_bench` stays hermetic on a clean checkout.

@@ -1,0 +1,19 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/main.rs (target/debug/deps/pg_accel_bench-55e77d1a663b8eeb)
+
+running 1 test
+test resident_concurrency_test::resident_eight_backend_grouped_soak_enforces_budget_and_ownership ... 
+thread 'resident_concurrency_test::resident_eight_backend_grouped_soak_enforces_budget_and_ownership' (42942112) panicked at pg_accel_bench/src/resident_concurrency_test.rs:3465:9:
+resident concurrency gate failed; artifacts=benchmarks/artifacts/resident-concurrency-1792994490-10602-866967000:
+resident concurrency proof: cluster ledger is 3169340 bytes, expected 3157884
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    resident_concurrency_test::resident_eight_backend_grouped_soak_enforces_budget_and_ownership
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 658 filtered out; finished in 0.67s
+
+error: test failed, to rerun pass `-p pg_accel_bench --bin pg_accel_bench`

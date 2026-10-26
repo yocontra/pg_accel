@@ -1,0 +1,10 @@
+/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/run-repair-cap18.sh: OK
+pg_accel/src/engine/executor/agg/descriptor.rs: OK
+pg_accel/src/engine/executor/agg/execute.rs: OK
+pg_accel/src/engine/executor/agg/hash_partition.rs: OK
+pg_accel/src/engine/executor/agg/spool.rs: OK
+pg_accel/src/engine/executor/agg/h3_count_test.rs: OK
+pg_accel/src/gpu/grouped_agg.rs: OK
+pgaccel-kernels/src/grouped_agg.cpp: OK
+pgaccel-kernels/src/h3_ops.cpp: OK
+pgaccel-kernels/src/h3_exact_device.hpp: OK

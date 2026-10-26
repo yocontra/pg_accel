@@ -1,0 +1,3938 @@
+{
+  "postmaster_started_at": "2026-10-25 23:51:14.805739-07",
+  "fixture_rows": 263157,
+  "backend_count": 8,
+  "soak_iterations_per_backend": 20,
+  "native_expected_rows": [
+    {
+      "group_key": 0,
+      "sum": 6149824,
+      "min": 1000,
+      "max": 1992,
+      "count": 4111
+    },
+    {
+      "group_key": 1,
+      "sum": 6154936,
+      "min": 1001,
+      "max": 1993,
+      "count": 4112
+    },
+    {
+      "group_key": 2,
+      "sum": 6159048,
+      "min": 1002,
+      "max": 1994,
+      "count": 4112
+    },
+    {
+      "group_key": 3,
+      "sum": 6163160,
+      "min": 1003,
+      "max": 1995,
+      "count": 4112
+    },
+    {
+      "group_key": 4,
+      "sum": 6167272,
+      "min": 1004,
+      "max": 1996,
+      "count": 4112
+    },
+    {
+      "group_key": 5,
+      "sum": 6171384,
+      "min": 1005,
+      "max": 1997,
+      "count": 4112
+    },
+    {
+      "group_key": 6,
+      "sum": 6175496,
+      "min": 1006,
+      "max": 1998,
+      "count": 4112
+    },
+    {
+      "group_key": 7,
+      "sum": 6179608,
+      "min": 1007,
+      "max": 1999,
+      "count": 4112
+    },
+    {
+      "group_key": 8,
+      "sum": 6150720,
+      "min": 1000,
+      "max": 1992,
+      "count": 4112
+    },
+    {
+      "group_key": 9,
+      "sum": 6154832,
+      "min": 1001,
+      "max": 1993,
+      "count": 4112
+    },
+    {
+      "group_key": 10,
+      "sum": 6158944,
+      "min": 1002,
+      "max": 1994,
+      "count": 4112
+    },
+    {
+      "group_key": 11,
+      "sum": 6163056,
+      "min": 1003,
+      "max": 1995,
+      "count": 4112
+    },
+    {
+      "group_key": 12,
+      "sum": 6167168,
+      "min": 1004,
+      "max": 1996,
+      "count": 4112
+    },
+    {
+      "group_key": 13,
+      "sum": 6171280,
+      "min": 1005,
+      "max": 1997,
+      "count": 4112
+    },
+    {
+      "group_key": 14,
+      "sum": 6175392,
+      "min": 1006,
+      "max": 1998,
+      "count": 4112
+    },
+    {
+      "group_key": 15,
+      "sum": 6179504,
+      "min": 1007,
+      "max": 1999,
+      "count": 4112
+    },
+    {
+      "group_key": 16,
+      "sum": 6150616,
+      "min": 1000,
+      "max": 1992,
+      "count": 4112
+    },
+    {
+      "group_key": 17,
+      "sum": 6154728,
+      "min": 1001,
+      "max": 1993,
+      "count": 4112
+    },
+    {
+      "group_key": 18,
+      "sum": 6158840,
+      "min": 1002,
+      "max": 1994,
+      "count": 4112
+    },
+    {
+      "group_key": 19,
+      "sum": 6162952,
+      "min": 1003,
+      "max": 1995,
+      "count": 4112
+    },
+    {
+      "group_key": 20,
+      "sum": 6167064,
+      "min": 1004,
+      "max": 1996,
+      "count": 4112
+    },
+    {
+      "group_key": 21,
+      "sum": 6171176,
+      "min": 1005,
+      "max": 1997,
+      "count": 4112
+    },
+    {
+      "group_key": 22,
+      "sum": 6175288,
+      "min": 1006,
+      "max": 1998,
+      "count": 4112
+    },
+    {
+      "group_key": 23,
+      "sum": 6179400,
+      "min": 1007,
+      "max": 1999,
+      "count": 4112
+    },
+    {
+      "group_key": 24,
+      "sum": 6150512,
+      "min": 1000,
+      "max": 1992,
+      "count": 4112
+    },
+    {
+      "group_key": 25,
+      "sum": 6154624,
+      "min": 1001,
+      "max": 1993,
+      "count": 4112
+    },
+    {
+      "group_key": 26,
+      "sum": 6158736,
+      "min": 1002,
+      "max": 1994,
+      "count": 4112
+    },
+    {
+      "group_key": 27,
+      "sum": 6162848,
+      "min": 1003,
+      "max": 1995,
+      "count": 4112
+    },
+    {
+      "group_key": 28,
+      "sum": 6166960,
+      "min": 1004,
+      "max": 1996,
+      "count": 4112
+    },
+    {
+      "group_key": 29,
+      "sum": 6171072,
+      "min": 1005,
+      "max": 1997,
+      "count": 4112
+    },
+    {
+      "group_key": 30,
+      "sum": 6175184,
+      "min": 1006,
+      "max": 1998,
+      "count": 4112
+    },
+    {
+      "group_key": 31,
+      "sum": 6179296,
+      "min": 1007,
+      "max": 1999,
+      "count": 4112
+    },
+    {
+      "group_key": 32,
+      "sum": 6150408,
+      "min": 1000,
+      "max": 1992,
+      "count": 4112
+    },
+    {
+      "group_key": 33,
+      "sum": 6154520,
+      "min": 1001,
+      "max": 1993,
+      "count": 4112
+    },
+    {
+      "group_key": 34,
+      "sum": 6158632,
+      "min": 1002,
+      "max": 1994,
+      "count": 4112
+    },
+    {
+      "group_key": 35,
+      "sum": 6162744,
+      "min": 1003,
+      "max": 1995,
+      "count": 4112
+    },
+    {
+      "group_key": 36,
+      "sum": 6166856,
+      "min": 1004,
+      "max": 1996,
+      "count": 4112
+    },
+    {
+      "group_key": 37,
+      "sum": 6170968,
+      "min": 1005,
+      "max": 1997,
+      "count": 4112
+    },
+    {
+      "group_key": 38,
+      "sum": 6175080,
+      "min": 1006,
+      "max": 1998,
+      "count": 4112
+    },
+    {
+      "group_key": 39,
+      "sum": 6179192,
+      "min": 1007,
+      "max": 1999,
+      "count": 4112
+    },
+    {
+      "group_key": 40,
+      "sum": 6150304,
+      "min": 1000,
+      "max": 1992,
+      "count": 4112
+    },
+    {
+      "group_key": 41,
+      "sum": 6154416,
+      "min": 1001,
+      "max": 1993,
+      "count": 4112
+    },
+    {
+      "group_key": 42,
+      "sum": 6158528,
+      "min": 1002,
+      "max": 1994,
+      "count": 4112
+    },
+    {
+      "group_key": 43,
+      "sum": 6162640,
+      "min": 1003,
+      "max": 1995,
+      "count": 4112
+    },
+    {
+      "group_key": 44,
+      "sum": 6166752,
+      "min": 1004,
+      "max": 1996,
+      "count": 4112
+    },
+    {
+      "group_key": 45,
+      "sum": 6170864,
+      "min": 1005,
+      "max": 1997,
+      "count": 4112
+    },
+    {
+      "group_key": 46,
+      "sum": 6174976,
+      "min": 1006,
+      "max": 1998,
+      "count": 4112
+    },
+    {
+      "group_key": 47,
+      "sum": 6179088,
+      "min": 1007,
+      "max": 1999,
+      "count": 4112
+    },
+    {
+      "group_key": 48,
+      "sum": 6150200,
+      "min": 1000,
+      "max": 1992,
+      "count": 4112
+    },
+    {
+      "group_key": 49,
+      "sum": 6154312,
+      "min": 1001,
+      "max": 1993,
+      "count": 4112
+    },
+    {
+      "group_key": 50,
+      "sum": 6158424,
+      "min": 1002,
+      "max": 1994,
+      "count": 4112
+    },
+    {
+      "group_key": 51,
+      "sum": 6162536,
+      "min": 1003,
+      "max": 1995,
+      "count": 4112
+    },
+    {
+      "group_key": 52,
+      "sum": 6166648,
+      "min": 1004,
+      "max": 1996,
+      "count": 4112
+    },
+    {
+      "group_key": 53,
+      "sum": 6170760,
+      "min": 1005,
+      "max": 1997,
+      "count": 4112
+    },
+    {
+      "group_key": 54,
+      "sum": 6173714,
+      "min": 1006,
+      "max": 1998,
+      "count": 4111
+    },
+    {
+      "group_key": 55,
+      "sum": 6177825,
+      "min": 1007,
+      "max": 1999,
+      "count": 4111
+    },
+    {
+      "group_key": 56,
+      "sum": 6148936,
+      "min": 1000,
+      "max": 1992,
+      "count": 4111
+    },
+    {
+      "group_key": 57,
+      "sum": 6153047,
+      "min": 1001,
+      "max": 1993,
+      "count": 4111
+    },
+    {
+      "group_key": 58,
+      "sum": 6157158,
+      "min": 1002,
+      "max": 1994,
+      "count": 4111
+    },
+    {
+      "group_key": 59,
+      "sum": 6161269,
+      "min": 1003,
+      "max": 1995,
+      "count": 4111
+    },
+    {
+      "group_key": 60,
+      "sum": 6165380,
+      "min": 1004,
+      "max": 1996,
+      "count": 4111
+    },
+    {
+      "group_key": 61,
+      "sum": 6169491,
+      "min": 1005,
+      "max": 1997,
+      "count": 4111
+    },
+    {
+      "group_key": 62,
+      "sum": 6173602,
+      "min": 1006,
+      "max": 1998,
+      "count": 4111
+    },
+    {
+      "group_key": 63,
+      "sum": 6177713,
+      "min": 1007,
+      "max": 1999,
+      "count": 4111
+    }
+  ],
+  "budget_mib": 25,
+  "budget_bytes": 26214400,
+  "required_bytes": 25354720,
+  "rounding_spare_bytes": 859680,
+  "calibration": {
+    "slot": 8,
+    "pid": 88587,
+    "raw_bytes": 2105256,
+    "derived_bytes": 1052628,
+    "workspace_idle_bytes": 8832,
+    "output_idle_bytes": 2624,
+    "local_bytes": 3169340,
+    "observed_cluster_bytes": 3169340,
+    "kernel_executions": 21,
+    "queries_accelerated": 22,
+    "stock_exec_count": 0,
+    "generation": 1,
+    "phase_iterations": 20,
+    "phase_interval": {
+      "start_us": 0,
+      "end_us": 48890
+    },
+    "representation": {
+      "row_count": 263157,
+      "source_logical_bytes": 2105256,
+      "encoded_device_bytes": 2105256,
+      "retained_exact_bytes": 0,
+      "transient_staging_bytes": 2105256,
+      "construction_peak_bytes": 4210512,
+      "null_sidecar_bytes": 0,
+      "projected_null_bitmap_bytes": 0,
+      "bool_value_bytes": 0,
+      "projected_bool_bitmap_bytes": 0,
+      "integer_value_bytes": 2105256,
+      "projected_integer_bitpack_bytes": 526323,
+      "dictionary_code_bytes": 0,
+      "projected_dictionary_bitpack_bytes": 0,
+      "projected_block_minmax_bytes": 660
+    },
+    "ingestion": {
+      "scan_batches": 33,
+      "preflight_ms": 0.5112500000000002,
+      "scan_ms": 17.183958,
+      "encode_ms": 0.008875000000000001,
+      "copy_ms": 1.204792,
+      "total_load_ms": 18.908875000000002,
+      "scan_strategy": "table_am_single_deform_batches_8192",
+      "staging_strategy": "single_buffered_host_to_shared_usm",
+      "publication_strategy": "synchronous_exact_after_copy"
+    },
+    "artifact_lifecycle": {
+      "hits": 20,
+      "builds": 1,
+      "rebuilds": 0,
+      "artifact_bytes_observed": 22105188,
+      "construction_bytes": 1052628,
+      "construction_us": 2172,
+      "preparation_us": 2201,
+      "raw_load_us": 0,
+      "selected_policy": "cached_reusable"
+    }
+  },
+  "single_backend_warm_performance": {
+    "phase": "Soak",
+    "backend_count": 1,
+    "query_count": 20,
+    "input_rows_processed": 5263140,
+    "wall_elapsed_us": 48890,
+    "aggregate_backend_elapsed_us": 48890,
+    "mean_query_latency_ms": 2.4445,
+    "throughput_queries_per_second": 409.0816117815504,
+    "throughput_input_rows_per_second": 107652689.71159746
+  },
+  "ready": [
+    {
+      "slot": 0,
+      "pid": 88589,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 13718532,
+      "kernel_executions": 1,
+      "queries_accelerated": 2,
+      "stock_exec_count": 0,
+      "generation": 1,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 66580,
+        "end_us": 77584
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.5151249999999961,
+        "scan_ms": 18.805583000000002,
+        "encode_ms": 0.004958,
+        "copy_ms": 1.275875,
+        "total_load_ms": 20.601540999999997,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 0,
+        "builds": 1,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 1052628,
+        "construction_bytes": 1052628,
+        "construction_us": 1971,
+        "preparation_us": 1971,
+        "raw_load_us": 0,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 1,
+      "pid": 88590,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 13718532,
+      "kernel_executions": 1,
+      "queries_accelerated": 2,
+      "stock_exec_count": 0,
+      "generation": 1,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 66274,
+        "end_us": 77115
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.4657920000000031,
+        "scan_ms": 16.997041,
+        "encode_ms": 0.009417,
+        "copy_ms": 0.882625,
+        "total_load_ms": 18.354875000000003,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 0,
+        "builds": 1,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 1052628,
+        "construction_bytes": 1052628,
+        "construction_us": 2002,
+        "preparation_us": 2002,
+        "raw_load_us": 0,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 2,
+      "pid": 88591,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 15823788,
+      "kernel_executions": 1,
+      "queries_accelerated": 2,
+      "stock_exec_count": 0,
+      "generation": 1,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 69774,
+        "end_us": 80695
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.681668000000001,
+        "scan_ms": 18.856708,
+        "encode_ms": 0.005915999999999999,
+        "copy_ms": 1.1421249999999998,
+        "total_load_ms": 20.686417000000002,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 0,
+        "builds": 1,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 1052628,
+        "construction_bytes": 1052628,
+        "construction_us": 1984,
+        "preparation_us": 1984,
+        "raw_load_us": 0,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 3,
+      "pid": 88592,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 23226552,
+      "kernel_executions": 1,
+      "queries_accelerated": 2,
+      "stock_exec_count": 0,
+      "generation": 1,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 80896,
+        "end_us": 90071
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.4909580000000022,
+        "scan_ms": 19.062124999999998,
+        "encode_ms": 0.005791999999999999,
+        "copy_ms": 1.007958,
+        "total_load_ms": 20.566833,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 0,
+        "builds": 1,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 1052628,
+        "construction_bytes": 1052628,
+        "construction_us": 1919,
+        "preparation_us": 1919,
+        "raw_load_us": 0,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 4,
+      "pid": 88593,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 23226552,
+      "kernel_executions": 1,
+      "queries_accelerated": 2,
+      "stock_exec_count": 0,
+      "generation": 1,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 81590,
+        "end_us": 90296
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 1.2939169999999989,
+        "scan_ms": 19.060625,
+        "encode_ms": 0.007208,
+        "copy_ms": 1.131291,
+        "total_load_ms": 21.493041,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 0,
+        "builds": 1,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 1052628,
+        "construction_bytes": 1052628,
+        "construction_us": 2226,
+        "preparation_us": 2226,
+        "raw_load_us": 0,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 5,
+      "pid": 88594,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 25343264,
+      "kernel_executions": 1,
+      "queries_accelerated": 2,
+      "stock_exec_count": 0,
+      "generation": 1,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 83731,
+        "end_us": 92103
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.4710410000000045,
+        "scan_ms": 17.607208999999997,
+        "encode_ms": 0.004667,
+        "copy_ms": 0.784417,
+        "total_load_ms": 18.867334000000003,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 0,
+        "builds": 1,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 1052628,
+        "construction_bytes": 1052628,
+        "construction_us": 1959,
+        "preparation_us": 1959,
+        "raw_load_us": 0,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 6,
+      "pid": 88595,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 25354720,
+      "kernel_executions": 1,
+      "queries_accelerated": 2,
+      "stock_exec_count": 0,
+      "generation": 1,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 91315,
+        "end_us": 99858
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.49849899999999925,
+        "scan_ms": 19.407334,
+        "encode_ms": 0.007583,
+        "copy_ms": 1.000417,
+        "total_load_ms": 20.913832999999997,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 0,
+        "builds": 1,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 1052628,
+        "construction_bytes": 1052628,
+        "construction_us": 1993,
+        "preparation_us": 1993,
+        "raw_load_us": 0,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 7,
+      "pid": 88596,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 25354720,
+      "kernel_executions": 1,
+      "queries_accelerated": 2,
+      "stock_exec_count": 0,
+      "generation": 1,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 91526,
+        "end_us": 99923
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.45604099999999925,
+        "scan_ms": 18.362334,
+        "encode_ms": 0.0052499999999999995,
+        "copy_ms": 1.275417,
+        "total_load_ms": 20.099042,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 0,
+        "builds": 1,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 1052628,
+        "construction_bytes": 1052628,
+        "construction_us": 1932,
+        "preparation_us": 1932,
+        "raw_load_us": 0,
+        "selected_policy": "cached_reusable"
+      }
+    }
+  ],
+  "soak": [
+    {
+      "slot": 0,
+      "pid": 88589,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 25354720,
+      "kernel_executions": 21,
+      "queries_accelerated": 22,
+      "stock_exec_count": 0,
+      "generation": 1,
+      "phase_iterations": 20,
+      "phase_interval": {
+        "start_us": 279056,
+        "end_us": 365387
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.5151249999999961,
+        "scan_ms": 18.805583000000002,
+        "encode_ms": 0.004958,
+        "copy_ms": 1.275875,
+        "total_load_ms": 20.601540999999997,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 20,
+        "builds": 1,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 22105188,
+        "construction_bytes": 1052628,
+        "construction_us": 1971,
+        "preparation_us": 2016,
+        "raw_load_us": 0,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 1,
+      "pid": 88590,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 25354720,
+      "kernel_executions": 21,
+      "queries_accelerated": 22,
+      "stock_exec_count": 0,
+      "generation": 1,
+      "phase_iterations": 20,
+      "phase_interval": {
+        "start_us": 279056,
+        "end_us": 360824
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.4657920000000031,
+        "scan_ms": 16.997041,
+        "encode_ms": 0.009417,
+        "copy_ms": 0.882625,
+        "total_load_ms": 18.354875000000003,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 20,
+        "builds": 1,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 22105188,
+        "construction_bytes": 1052628,
+        "construction_us": 2002,
+        "preparation_us": 2027,
+        "raw_load_us": 0,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 2,
+      "pid": 88591,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 25354720,
+      "kernel_executions": 21,
+      "queries_accelerated": 22,
+      "stock_exec_count": 0,
+      "generation": 1,
+      "phase_iterations": 20,
+      "phase_interval": {
+        "start_us": 279049,
+        "end_us": 361114
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.681668000000001,
+        "scan_ms": 18.856708,
+        "encode_ms": 0.005915999999999999,
+        "copy_ms": 1.1421249999999998,
+        "total_load_ms": 20.686417000000002,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 20,
+        "builds": 1,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 22105188,
+        "construction_bytes": 1052628,
+        "construction_us": 1984,
+        "preparation_us": 2011,
+        "raw_load_us": 0,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 3,
+      "pid": 88592,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 25354720,
+      "kernel_executions": 21,
+      "queries_accelerated": 22,
+      "stock_exec_count": 0,
+      "generation": 1,
+      "phase_iterations": 20,
+      "phase_interval": {
+        "start_us": 279071,
+        "end_us": 359995
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.4909580000000022,
+        "scan_ms": 19.062124999999998,
+        "encode_ms": 0.005791999999999999,
+        "copy_ms": 1.007958,
+        "total_load_ms": 20.566833,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 20,
+        "builds": 1,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 22105188,
+        "construction_bytes": 1052628,
+        "construction_us": 1919,
+        "preparation_us": 1942,
+        "raw_load_us": 0,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 4,
+      "pid": 88593,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 25354720,
+      "kernel_executions": 21,
+      "queries_accelerated": 22,
+      "stock_exec_count": 0,
+      "generation": 1,
+      "phase_iterations": 20,
+      "phase_interval": {
+        "start_us": 279056,
+        "end_us": 362790
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 1.2939169999999989,
+        "scan_ms": 19.060625,
+        "encode_ms": 0.007208,
+        "copy_ms": 1.131291,
+        "total_load_ms": 21.493041,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 20,
+        "builds": 1,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 22105188,
+        "construction_bytes": 1052628,
+        "construction_us": 2226,
+        "preparation_us": 2260,
+        "raw_load_us": 0,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 5,
+      "pid": 88594,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 25354720,
+      "kernel_executions": 21,
+      "queries_accelerated": 22,
+      "stock_exec_count": 0,
+      "generation": 1,
+      "phase_iterations": 20,
+      "phase_interval": {
+        "start_us": 279125,
+        "end_us": 365732
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.4710410000000045,
+        "scan_ms": 17.607208999999997,
+        "encode_ms": 0.004667,
+        "copy_ms": 0.784417,
+        "total_load_ms": 18.867334000000003,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 20,
+        "builds": 1,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 22105188,
+        "construction_bytes": 1052628,
+        "construction_us": 1959,
+        "preparation_us": 1983,
+        "raw_load_us": 0,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 6,
+      "pid": 88595,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 25354720,
+      "kernel_executions": 21,
+      "queries_accelerated": 22,
+      "stock_exec_count": 0,
+      "generation": 1,
+      "phase_iterations": 20,
+      "phase_interval": {
+        "start_us": 279089,
+        "end_us": 362523
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.49849899999999925,
+        "scan_ms": 19.407334,
+        "encode_ms": 0.007583,
+        "copy_ms": 1.000417,
+        "total_load_ms": 20.913832999999997,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 20,
+        "builds": 1,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 22105188,
+        "construction_bytes": 1052628,
+        "construction_us": 1993,
+        "preparation_us": 2019,
+        "raw_load_us": 0,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 7,
+      "pid": 88596,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 25354720,
+      "kernel_executions": 21,
+      "queries_accelerated": 22,
+      "stock_exec_count": 0,
+      "generation": 1,
+      "phase_iterations": 20,
+      "phase_interval": {
+        "start_us": 279077,
+        "end_us": 363358
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.45604099999999925,
+        "scan_ms": 18.362334,
+        "encode_ms": 0.0052499999999999995,
+        "copy_ms": 1.275417,
+        "total_load_ms": 20.099042,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 20,
+        "builds": 1,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 22105188,
+        "construction_bytes": 1052628,
+        "construction_us": 1932,
+        "preparation_us": 1961,
+        "raw_load_us": 0,
+        "selected_policy": "cached_reusable"
+      }
+    }
+  ],
+  "soak_performance": {
+    "phase": "Soak",
+    "backend_count": 8,
+    "query_count": 160,
+    "input_rows_processed": 42105120,
+    "wall_elapsed_us": 86683,
+    "aggregate_backend_elapsed_us": 669144,
+    "mean_query_latency_ms": 4.18215,
+    "throughput_queries_per_second": 1845.8059827186416,
+    "throughput_input_rows_per_second": 485736764.9942896
+  },
+  "soak_overlap": {
+    "barrier_key": 5784663925901448754,
+    "barrier_wait": {
+      "observed_us": 278712,
+      "pids": [
+        88589,
+        88590,
+        88591,
+        88592,
+        88593,
+        88594,
+        88595,
+        88596
+      ]
+    },
+    "aggregate_active": {
+      "observed_us": 281780,
+      "pids": [
+        88589,
+        88590,
+        88591,
+        88592,
+        88593,
+        88594,
+        88595,
+        88596
+      ]
+    },
+    "strict_common_interval": {
+      "start_us": 279125,
+      "end_us": 359995
+    }
+  },
+  "invalidation_statement": "UPDATE pg_accel_resident_concurrency SET measure = measure WHERE id = 1",
+  "invalidation_reload": [
+    {
+      "slot": 0,
+      "pid": 88589,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 25354720,
+      "kernel_executions": 22,
+      "queries_accelerated": 23,
+      "stock_exec_count": 0,
+      "generation": 3,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 472849,
+        "end_us": 498251
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.3907070000000049,
+        "scan_ms": 16.726499999999998,
+        "encode_ms": 0.001834,
+        "copy_ms": 0.8496670000000001,
+        "total_load_ms": 17.968708000000003,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 20,
+        "builds": 2,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 23157816,
+        "construction_bytes": 2105256,
+        "construction_us": 23136,
+        "preparation_us": 23181,
+        "raw_load_us": 17968,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 1,
+      "pid": 88590,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 25354720,
+      "kernel_executions": 22,
+      "queries_accelerated": 23,
+      "stock_exec_count": 0,
+      "generation": 3,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 472840,
+        "end_us": 498178
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.34412499999999774,
+        "scan_ms": 17.553,
+        "encode_ms": 0.004292,
+        "copy_ms": 0.417416,
+        "total_load_ms": 18.318832999999998,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 20,
+        "builds": 2,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 23157816,
+        "construction_bytes": 2105256,
+        "construction_us": 23152,
+        "preparation_us": 23177,
+        "raw_load_us": 18318,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 2,
+      "pid": 88591,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 25354720,
+      "kernel_executions": 22,
+      "queries_accelerated": 23,
+      "stock_exec_count": 0,
+      "generation": 3,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 473214,
+        "end_us": 498298
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.5232500000000003,
+        "scan_ms": 17.0615,
+        "encode_ms": 0.002042,
+        "copy_ms": 0.377875,
+        "total_load_ms": 17.964667,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 20,
+        "builds": 2,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 23157816,
+        "construction_bytes": 2105256,
+        "construction_us": 22783,
+        "preparation_us": 22810,
+        "raw_load_us": 17964,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 3,
+      "pid": 88592,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 25354720,
+      "kernel_executions": 22,
+      "queries_accelerated": 23,
+      "stock_exec_count": 0,
+      "generation": 3,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 472899,
+        "end_us": 500102
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.7293750000000011,
+        "scan_ms": 18.833125,
+        "encode_ms": 0.0029170000000000003,
+        "copy_ms": 0.568959,
+        "total_load_ms": 20.134376,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 20,
+        "builds": 2,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 23157816,
+        "construction_bytes": 2105256,
+        "construction_us": 25118,
+        "preparation_us": 25141,
+        "raw_load_us": 20134,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 4,
+      "pid": 88593,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 25354720,
+      "kernel_executions": 22,
+      "queries_accelerated": 23,
+      "stock_exec_count": 0,
+      "generation": 3,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 472842,
+        "end_us": 499351
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.3539169999999987,
+        "scan_ms": 19.05925,
+        "encode_ms": 0.0050420000000000005,
+        "copy_ms": 0.43762500000000004,
+        "total_load_ms": 19.855833999999998,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 20,
+        "builds": 2,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 23157816,
+        "construction_bytes": 2105256,
+        "construction_us": 24951,
+        "preparation_us": 24985,
+        "raw_load_us": 19855,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 5,
+      "pid": 88594,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 25354720,
+      "kernel_executions": 22,
+      "queries_accelerated": 23,
+      "stock_exec_count": 0,
+      "generation": 3,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 471931,
+        "end_us": 498205
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.4217079999999973,
+        "scan_ms": 17.125042,
+        "encode_ms": 0.003541,
+        "copy_ms": 0.869041,
+        "total_load_ms": 18.419331999999997,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 20,
+        "builds": 2,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 23157816,
+        "construction_bytes": 2105256,
+        "construction_us": 23275,
+        "preparation_us": 23299,
+        "raw_load_us": 18419,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 6,
+      "pid": 88595,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 25354720,
+      "kernel_executions": 22,
+      "queries_accelerated": 23,
+      "stock_exec_count": 0,
+      "generation": 3,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 473205,
+        "end_us": 498568
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.4749159999999981,
+        "scan_ms": 16.077916000000002,
+        "encode_ms": 0.006084,
+        "copy_ms": 0.724708,
+        "total_load_ms": 17.283624,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 20,
+        "builds": 2,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 23157816,
+        "construction_bytes": 2105256,
+        "construction_us": 23322,
+        "preparation_us": 23348,
+        "raw_load_us": 17283,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 7,
+      "pid": 88596,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 25354720,
+      "kernel_executions": 22,
+      "queries_accelerated": 23,
+      "stock_exec_count": 0,
+      "generation": 3,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 472849,
+        "end_us": 499764
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.5535409999999964,
+        "scan_ms": 18.813375,
+        "encode_ms": 0.005292000000000001,
+        "copy_ms": 0.499917,
+        "total_load_ms": 19.872124999999997,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 20,
+        "builds": 2,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 23157816,
+        "construction_bytes": 2105256,
+        "construction_us": 24935,
+        "preparation_us": 24964,
+        "raw_load_us": 19872,
+        "selected_policy": "cached_reusable"
+      }
+    }
+  ],
+  "invalidation_reload_performance": {
+    "phase": "InvalidationReload",
+    "backend_count": 8,
+    "query_count": 8,
+    "input_rows_processed": 2105256,
+    "wall_elapsed_us": 28171,
+    "aggregate_backend_elapsed_us": 208088,
+    "mean_query_latency_ms": 26.011,
+    "throughput_queries_per_second": 283.9799794114515,
+    "throughput_input_rows_per_second": 74731319.44197933
+  },
+  "eviction_reload": [
+    {
+      "slot": 0,
+      "pid": 88589,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 21144208,
+      "kernel_executions": 23,
+      "queries_accelerated": 24,
+      "stock_exec_count": 0,
+      "generation": 3,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 603061,
+        "end_us": 635605
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.42304200000000064,
+        "scan_ms": 22.24175,
+        "encode_ms": 0.002542,
+        "copy_ms": 0.848875,
+        "total_load_ms": 23.516209,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 20,
+        "builds": 3,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 24210444,
+        "construction_bytes": 3157884,
+        "construction_us": 49766,
+        "preparation_us": 49811,
+        "raw_load_us": 41484,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 1,
+      "pid": 88590,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 19038952,
+      "kernel_executions": 23,
+      "queries_accelerated": 24,
+      "stock_exec_count": 0,
+      "generation": 3,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 602575,
+        "end_us": 634157
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.48529199999999834,
+        "scan_ms": 19.791667,
+        "encode_ms": 0.003125,
+        "copy_ms": 0.49950000000000006,
+        "total_load_ms": 20.779584,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 20,
+        "builds": 3,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 24210444,
+        "construction_bytes": 3157884,
+        "construction_us": 48247,
+        "preparation_us": 48272,
+        "raw_load_us": 39097,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 2,
+      "pid": 88591,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 22196836,
+      "kernel_executions": 23,
+      "queries_accelerated": 24,
+      "stock_exec_count": 0,
+      "generation": 3,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 603046,
+        "end_us": 637274
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.7654170000000001,
+        "scan_ms": 22.2745,
+        "encode_ms": 0.003291,
+        "copy_ms": 0.5595,
+        "total_load_ms": 23.602708,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 20,
+        "builds": 3,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 24210444,
+        "construction_bytes": 3157884,
+        "construction_us": 49733,
+        "preparation_us": 49760,
+        "raw_load_us": 41566,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 3,
+      "pid": 88592,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 25354720,
+      "kernel_executions": 23,
+      "queries_accelerated": 24,
+      "stock_exec_count": 0,
+      "generation": 3,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 608159,
+        "end_us": 643842
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.6484169999999987,
+        "scan_ms": 21.368542,
+        "encode_ms": 0.005332999999999999,
+        "copy_ms": 0.46745800000000004,
+        "total_load_ms": 22.48975,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 20,
+        "builds": 3,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 24210444,
+        "construction_bytes": 3157884,
+        "construction_us": 52463,
+        "preparation_us": 52486,
+        "raw_load_us": 42623,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 4,
+      "pid": 88593,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 25354720,
+      "kernel_executions": 23,
+      "queries_accelerated": 24,
+      "stock_exec_count": 0,
+      "generation": 3,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 609810,
+        "end_us": 641592
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.45320900000000125,
+        "scan_ms": 19.855999999999998,
+        "encode_ms": 0.0045000000000000005,
+        "copy_ms": 0.48950000000000005,
+        "total_load_ms": 20.803209,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 20,
+        "builds": 3,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 24210444,
+        "construction_bytes": 3157884,
+        "construction_us": 49029,
+        "preparation_us": 49063,
+        "raw_load_us": 40658,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 5,
+      "pid": 88594,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 22196836,
+      "kernel_executions": 23,
+      "queries_accelerated": 24,
+      "stock_exec_count": 0,
+      "generation": 3,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 603054,
+        "end_us": 637253
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.41670799999999775,
+        "scan_ms": 22.997084,
+        "encode_ms": 0.005582999999999999,
+        "copy_ms": 0.464208,
+        "total_load_ms": 23.883582999999998,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 20,
+        "builds": 3,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 24210444,
+        "construction_bytes": 3157884,
+        "construction_us": 50254,
+        "preparation_us": 50278,
+        "raw_load_us": 42302,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 6,
+      "pid": 88595,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 24302092,
+      "kernel_executions": 23,
+      "queries_accelerated": 24,
+      "stock_exec_count": 0,
+      "generation": 3,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 602575,
+        "end_us": 638564
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.717875000000002,
+        "scan_ms": 25.592541999999998,
+        "encode_ms": 0.0065,
+        "copy_ms": 0.507083,
+        "total_load_ms": 26.824,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 20,
+        "builds": 3,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 24210444,
+        "construction_bytes": 3157884,
+        "construction_us": 53411,
+        "preparation_us": 53437,
+        "raw_load_us": 44107,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 7,
+      "pid": 88596,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 24302092,
+      "kernel_executions": 23,
+      "queries_accelerated": 24,
+      "stock_exec_count": 0,
+      "generation": 3,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 603744,
+        "end_us": 638718
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.44345899999999905,
+        "scan_ms": 25.277333,
+        "encode_ms": 0.001958,
+        "copy_ms": 0.499042,
+        "total_load_ms": 26.221791999999997,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 20,
+        "builds": 3,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 24210444,
+        "construction_bytes": 3157884,
+        "construction_us": 54488,
+        "preparation_us": 54517,
+        "raw_load_us": 46093,
+        "selected_policy": "cached_reusable"
+      }
+    }
+  ],
+  "eviction_reload_performance": {
+    "phase": "EvictionReload",
+    "backend_count": 8,
+    "query_count": 8,
+    "input_rows_processed": 2105256,
+    "wall_elapsed_us": 41267,
+    "aggregate_backend_elapsed_us": 270981,
+    "mean_query_latency_ms": 33.872625,
+    "throughput_queries_per_second": 193.8595003271379,
+    "throughput_input_rows_per_second": 51015484.527588636
+  },
+  "device_artifact_warmup": {
+    "before_calibration": {
+      "root": "/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production-repair18",
+      "records": [
+        {
+          "path": "apps/global/jit-cache/12742463291825261128.9628444747223097921.jit",
+          "bytes": 17131,
+          "fnv1a64": 4930241641404382726
+        },
+        {
+          "path": "apps/global/jit-cache/12742463291825261128.9628444747223097921.metalar",
+          "bytes": 17968,
+          "fnv1a64": 14762909833516459154
+        },
+        {
+          "path": "apps/global/jit-cache/12742463291825261128.9628444747223097921.metallib",
+          "bytes": 4954,
+          "fnv1a64": 16203139852646997106
+        },
+        {
+          "path": "apps/global/jit-cache/14171431133706346120.10679861981671940392.jit",
+          "bytes": 120955,
+          "fnv1a64": 9123453494819959560
+        },
+        {
+          "path": "apps/global/jit-cache/14171431133706346120.10679861981671940392.metalar",
+          "bytes": 40800,
+          "fnv1a64": 8610949617567822489
+        },
+        {
+          "path": "apps/global/jit-cache/14171431133706346120.10679861981671940392.metallib",
+          "bytes": 11307,
+          "fnv1a64": 3666287118668955743
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.14211611095228352041.jit",
+          "bytes": 128999,
+          "fnv1a64": 2490997856114630032
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.14211611095228352041.metalar",
+          "bytes": 41952,
+          "fnv1a64": 200618357447580352
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.14211611095228352041.metallib",
+          "bytes": 11611,
+          "fnv1a64": 4915894150669843360
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.18442340650087989043.jit",
+          "bytes": 43729,
+          "fnv1a64": 6210543192466004514
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.18442340650087989043.metalar",
+          "bytes": 25232,
+          "fnv1a64": 12272623211900280995
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.18442340650087989043.metallib",
+          "bytes": 6795,
+          "fnv1a64": 7209771034756887697
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.7365760609753380003.jit",
+          "bytes": 115156,
+          "fnv1a64": 15521073700792937608
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.7365760609753380003.metalar",
+          "bytes": 39952,
+          "fnv1a64": 9727088622429101916
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.7365760609753380003.metallib",
+          "bytes": 11083,
+          "fnv1a64": 6662974880371009826
+        },
+        {
+          "path": "apps/global/jit-cache/14698056579597285764.3579585920436312592.jit",
+          "bytes": 15703,
+          "fnv1a64": 1503580502675212401
+        },
+        {
+          "path": "apps/global/jit-cache/14698056579597285764.3579585920436312592.metalar",
+          "bytes": 17696,
+          "fnv1a64": 5132663218651577585
+        },
+        {
+          "path": "apps/global/jit-cache/14698056579597285764.3579585920436312592.metallib",
+          "bytes": 4938,
+          "fnv1a64": 6369945566157982573
+        },
+        {
+          "path": "apps/global/jit-cache/15638379143336172420.18172618811436184833.jit",
+          "bytes": 15685,
+          "fnv1a64": 15446869826563202668
+        },
+        {
+          "path": "apps/global/jit-cache/15638379143336172420.18172618811436184833.metalar",
+          "bytes": 17696,
+          "fnv1a64": 16221706063201577358
+        },
+        {
+          "path": "apps/global/jit-cache/15638379143336172420.18172618811436184833.metallib",
+          "bytes": 4938,
+          "fnv1a64": 6369945566157982573
+        },
+        {
+          "path": "apps/global/jit-cache/15645957498266366212.15675045217815886616.jit",
+          "bytes": 17112,
+          "fnv1a64": 810664664183326146
+        },
+        {
+          "path": "apps/global/jit-cache/15645957498266366212.15675045217815886616.metalar",
+          "bytes": 17968,
+          "fnv1a64": 14192590793785512896
+        },
+        {
+          "path": "apps/global/jit-cache/15645957498266366212.15675045217815886616.metallib",
+          "bytes": 4954,
+          "fnv1a64": 16203139852646997106
+        },
+        {
+          "path": "apps/global/jit-cache/1568825256363117468.10679861981671940392.jit",
+          "bytes": 811986,
+          "fnv1a64": 2704109049749724902
+        },
+        {
+          "path": "apps/global/jit-cache/1568825256363117468.10679861981671940392.metalar",
+          "bytes": 122848,
+          "fnv1a64": 15002174235310336465
+        },
+        {
+          "path": "apps/global/jit-cache/1568825256363117468.10679861981671940392.metallib",
+          "bytes": 35156,
+          "fnv1a64": 5213890165914429685
+        },
+        {
+          "path": "apps/global/jit-cache/15708062306988190290.10270754060747271903.jit",
+          "bytes": 63152,
+          "fnv1a64": 1137222972356693350
+        },
+        {
+          "path": "apps/global/jit-cache/15708062306988190290.10270754060747271903.metalar",
+          "bytes": 28480,
+          "fnv1a64": 9116413497360279115
+        },
+        {
+          "path": "apps/global/jit-cache/15708062306988190290.10270754060747271903.metallib",
+          "bytes": 7632,
+          "fnv1a64": 11565152420528003511
+        },
+        {
+          "path": "apps/global/jit-cache/17075605042627645658.8959692158553657888.jit",
+          "bytes": 13439,
+          "fnv1a64": 4915038379878826449
+        },
+        {
+          "path": "apps/global/jit-cache/17075605042627645658.8959692158553657888.metalar",
+          "bytes": 16096,
+          "fnv1a64": 2839099626909173858
+        },
+        {
+          "path": "apps/global/jit-cache/17075605042627645658.8959692158553657888.metallib",
+          "bytes": 4442,
+          "fnv1a64": 2389279848713437623
+        },
+        {
+          "path": "apps/global/jit-cache/17128233800462945510.10679861981671940392.jit",
+          "bytes": 39794,
+          "fnv1a64": 10806215980887670298
+        },
+        {
+          "path": "apps/global/jit-cache/17128233800462945510.10679861981671940392.metalar",
+          "bytes": 26896,
+          "fnv1a64": 10636183817108494195
+        },
+        {
+          "path": "apps/global/jit-cache/17128233800462945510.10679861981671940392.metallib",
+          "bytes": 6843,
+          "fnv1a64": 2941155659492150516
+        },
+        {
+          "path": "apps/global/jit-cache/18304861154564092634.8959692158553657888.jit",
+          "bytes": 13439,
+          "fnv1a64": 4915038379878826449
+        },
+        {
+          "path": "apps/global/jit-cache/18304861154564092634.8959692158553657888.metalar",
+          "bytes": 16096,
+          "fnv1a64": 16782988606060997724
+        },
+        {
+          "path": "apps/global/jit-cache/18304861154564092634.8959692158553657888.metallib",
+          "bytes": 4442,
+          "fnv1a64": 2389279848713437623
+        },
+        {
+          "path": "apps/global/jit-cache/18384041738596059486.10679861981671940392.jit",
+          "bytes": 81517,
+          "fnv1a64": 2920950696905045453
+        },
+        {
+          "path": "apps/global/jit-cache/18384041738596059486.10679861981671940392.metalar",
+          "bytes": 30928,
+          "fnv1a64": 2909037779099903269
+        },
+        {
+          "path": "apps/global/jit-cache/18384041738596059486.10679861981671940392.metallib",
+          "bytes": 8708,
+          "fnv1a64": 13157815031051508450
+        },
+        {
+          "path": "apps/global/jit-cache/2574708908066720270.10270754060747271903.jit",
+          "bytes": 163678,
+          "fnv1a64": 11191066472149821719
+        },
+        {
+          "path": "apps/global/jit-cache/2574708908066720270.10270754060747271903.metalar",
+          "bytes": 37296,
+          "fnv1a64": 9375675919844643617
+        },
+        {
+          "path": "apps/global/jit-cache/2574708908066720270.10270754060747271903.metallib",
+          "bytes": 10176,
+          "fnv1a64": 2864783664381854921
+        },
+        {
+          "path": "apps/global/jit-cache/4939212832255122260.1378868560533804794.jit",
+          "bytes": 79764,
+          "fnv1a64": 13822624680480180354
+        },
+        {
+          "path": "apps/global/jit-cache/4939212832255122260.1378868560533804794.metalar",
+          "bytes": 32000,
+          "fnv1a64": 11733479551285569519
+        },
+        {
+          "path": "apps/global/jit-cache/4939212832255122260.1378868560533804794.metallib",
+          "bytes": 8368,
+          "fnv1a64": 5686900439571557386
+        },
+        {
+          "path": "apps/global/jit-cache/4939212832255122260.6237939138979752382.jit",
+          "bytes": 14096,
+          "fnv1a64": 8514662689469917972
+        },
+        {
+          "path": "apps/global/jit-cache/4939212832255122260.6237939138979752382.metalar",
+          "bytes": 17584,
+          "fnv1a64": 11597313535431638627
+        },
+        {
+          "path": "apps/global/jit-cache/4939212832255122260.6237939138979752382.metallib",
+          "bytes": 4703,
+          "fnv1a64": 16662234783409165590
+        },
+        {
+          "path": "apps/global/jit-cache/71121235393808374.2234286127181060247.jit",
+          "bytes": 58852,
+          "fnv1a64": 13652461077378184372
+        },
+        {
+          "path": "apps/global/jit-cache/71121235393808374.2234286127181060247.metalar",
+          "bytes": 33920,
+          "fnv1a64": 12047503352012910654
+        },
+        {
+          "path": "apps/global/jit-cache/71121235393808374.2234286127181060247.metallib",
+          "bytes": 8710,
+          "fnv1a64": 849641126744446904
+        },
+        {
+          "path": "apps/global/jit-cache/7676880867556255052.13488318957453097810.jit",
+          "bytes": 17104,
+          "fnv1a64": 12920263376226117948
+        },
+        {
+          "path": "apps/global/jit-cache/7676880867556255052.13488318957453097810.metalar",
+          "bytes": 18080,
+          "fnv1a64": 4010281777075690688
+        },
+        {
+          "path": "apps/global/jit-cache/7676880867556255052.13488318957453097810.metallib",
+          "bytes": 4922,
+          "fnv1a64": 18395760104110348335
+        },
+        {
+          "path": "apps/global/jit-cache/7819755321666386692.10679861981671940392.jit",
+          "bytes": 122844,
+          "fnv1a64": 888897609624921692
+        },
+        {
+          "path": "apps/global/jit-cache/7819755321666386692.10679861981671940392.metalar",
+          "bytes": 41088,
+          "fnv1a64": 8396919158881011311
+        },
+        {
+          "path": "apps/global/jit-cache/7819755321666386692.10679861981671940392.metallib",
+          "bytes": 11387,
+          "fnv1a64": 14707087225492422272
+        },
+        {
+          "path": "apps/global/jit-cache/8425344857425537224.10679861981671940392.jit",
+          "bytes": 49695,
+          "fnv1a64": 7434431885245511864
+        },
+        {
+          "path": "apps/global/jit-cache/8425344857425537224.10679861981671940392.metalar",
+          "bytes": 25936,
+          "fnv1a64": 4613080744755981164
+        },
+        {
+          "path": "apps/global/jit-cache/8425344857425537224.10679861981671940392.metallib",
+          "bytes": 7179,
+          "fnv1a64": 11015548817865471060
+        },
+        {
+          "path": "apps/global/jit-cache/8680283755492788044.8552054542954140739.jit",
+          "bytes": 17122,
+          "fnv1a64": 11693189064683569459
+        },
+        {
+          "path": "apps/global/jit-cache/8680283755492788044.8552054542954140739.metalar",
+          "bytes": 18080,
+          "fnv1a64": 4664782362984538317
+        },
+        {
+          "path": "apps/global/jit-cache/8680283755492788044.8552054542954140739.metallib",
+          "bytes": 4922,
+          "fnv1a64": 18395760104110348335
+        },
+        {
+          "path": "apps/global/jit-cache/9605769421955569320.10270754060747271903.jit",
+          "bytes": 168813,
+          "fnv1a64": 11293730463112517461
+        },
+        {
+          "path": "apps/global/jit-cache/9605769421955569320.10270754060747271903.metalar",
+          "bytes": 38320,
+          "fnv1a64": 17748020719688705446
+        },
+        {
+          "path": "apps/global/jit-cache/9605769421955569320.10270754060747271903.metallib",
+          "bytes": 10336,
+          "fnv1a64": 4162169618522342289
+        }
+      ]
+    },
+    "after_calibration": {
+      "root": "/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production-repair18",
+      "records": [
+        {
+          "path": "apps/global/jit-cache/12742463291825261128.9628444747223097921.jit",
+          "bytes": 17131,
+          "fnv1a64": 4930241641404382726
+        },
+        {
+          "path": "apps/global/jit-cache/12742463291825261128.9628444747223097921.metalar",
+          "bytes": 17968,
+          "fnv1a64": 14762909833516459154
+        },
+        {
+          "path": "apps/global/jit-cache/12742463291825261128.9628444747223097921.metallib",
+          "bytes": 4954,
+          "fnv1a64": 16203139852646997106
+        },
+        {
+          "path": "apps/global/jit-cache/14171431133706346120.10679861981671940392.jit",
+          "bytes": 120955,
+          "fnv1a64": 9123453494819959560
+        },
+        {
+          "path": "apps/global/jit-cache/14171431133706346120.10679861981671940392.metalar",
+          "bytes": 40800,
+          "fnv1a64": 8610949617567822489
+        },
+        {
+          "path": "apps/global/jit-cache/14171431133706346120.10679861981671940392.metallib",
+          "bytes": 11307,
+          "fnv1a64": 3666287118668955743
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.14211611095228352041.jit",
+          "bytes": 128999,
+          "fnv1a64": 2490997856114630032
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.14211611095228352041.metalar",
+          "bytes": 41952,
+          "fnv1a64": 200618357447580352
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.14211611095228352041.metallib",
+          "bytes": 11611,
+          "fnv1a64": 4915894150669843360
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.18442340650087989043.jit",
+          "bytes": 43729,
+          "fnv1a64": 6210543192466004514
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.18442340650087989043.metalar",
+          "bytes": 25232,
+          "fnv1a64": 12272623211900280995
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.18442340650087989043.metallib",
+          "bytes": 6795,
+          "fnv1a64": 7209771034756887697
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.7365760609753380003.jit",
+          "bytes": 115156,
+          "fnv1a64": 15521073700792937608
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.7365760609753380003.metalar",
+          "bytes": 39952,
+          "fnv1a64": 9727088622429101916
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.7365760609753380003.metallib",
+          "bytes": 11083,
+          "fnv1a64": 6662974880371009826
+        },
+        {
+          "path": "apps/global/jit-cache/14698056579597285764.3579585920436312592.jit",
+          "bytes": 15703,
+          "fnv1a64": 1503580502675212401
+        },
+        {
+          "path": "apps/global/jit-cache/14698056579597285764.3579585920436312592.metalar",
+          "bytes": 17696,
+          "fnv1a64": 5132663218651577585
+        },
+        {
+          "path": "apps/global/jit-cache/14698056579597285764.3579585920436312592.metallib",
+          "bytes": 4938,
+          "fnv1a64": 6369945566157982573
+        },
+        {
+          "path": "apps/global/jit-cache/15638379143336172420.18172618811436184833.jit",
+          "bytes": 15685,
+          "fnv1a64": 15446869826563202668
+        },
+        {
+          "path": "apps/global/jit-cache/15638379143336172420.18172618811436184833.metalar",
+          "bytes": 17696,
+          "fnv1a64": 16221706063201577358
+        },
+        {
+          "path": "apps/global/jit-cache/15638379143336172420.18172618811436184833.metallib",
+          "bytes": 4938,
+          "fnv1a64": 6369945566157982573
+        },
+        {
+          "path": "apps/global/jit-cache/15645957498266366212.15675045217815886616.jit",
+          "bytes": 17112,
+          "fnv1a64": 810664664183326146
+        },
+        {
+          "path": "apps/global/jit-cache/15645957498266366212.15675045217815886616.metalar",
+          "bytes": 17968,
+          "fnv1a64": 14192590793785512896
+        },
+        {
+          "path": "apps/global/jit-cache/15645957498266366212.15675045217815886616.metallib",
+          "bytes": 4954,
+          "fnv1a64": 16203139852646997106
+        },
+        {
+          "path": "apps/global/jit-cache/1568825256363117468.10679861981671940392.jit",
+          "bytes": 811986,
+          "fnv1a64": 2704109049749724902
+        },
+        {
+          "path": "apps/global/jit-cache/1568825256363117468.10679861981671940392.metalar",
+          "bytes": 122848,
+          "fnv1a64": 15002174235310336465
+        },
+        {
+          "path": "apps/global/jit-cache/1568825256363117468.10679861981671940392.metallib",
+          "bytes": 35156,
+          "fnv1a64": 5213890165914429685
+        },
+        {
+          "path": "apps/global/jit-cache/15708062306988190290.10270754060747271903.jit",
+          "bytes": 63152,
+          "fnv1a64": 1137222972356693350
+        },
+        {
+          "path": "apps/global/jit-cache/15708062306988190290.10270754060747271903.metalar",
+          "bytes": 28480,
+          "fnv1a64": 9116413497360279115
+        },
+        {
+          "path": "apps/global/jit-cache/15708062306988190290.10270754060747271903.metallib",
+          "bytes": 7632,
+          "fnv1a64": 11565152420528003511
+        },
+        {
+          "path": "apps/global/jit-cache/17075605042627645658.8959692158553657888.jit",
+          "bytes": 13439,
+          "fnv1a64": 4915038379878826449
+        },
+        {
+          "path": "apps/global/jit-cache/17075605042627645658.8959692158553657888.metalar",
+          "bytes": 16096,
+          "fnv1a64": 2839099626909173858
+        },
+        {
+          "path": "apps/global/jit-cache/17075605042627645658.8959692158553657888.metallib",
+          "bytes": 4442,
+          "fnv1a64": 2389279848713437623
+        },
+        {
+          "path": "apps/global/jit-cache/17128233800462945510.10679861981671940392.jit",
+          "bytes": 39794,
+          "fnv1a64": 10806215980887670298
+        },
+        {
+          "path": "apps/global/jit-cache/17128233800462945510.10679861981671940392.metalar",
+          "bytes": 26896,
+          "fnv1a64": 10636183817108494195
+        },
+        {
+          "path": "apps/global/jit-cache/17128233800462945510.10679861981671940392.metallib",
+          "bytes": 6843,
+          "fnv1a64": 2941155659492150516
+        },
+        {
+          "path": "apps/global/jit-cache/18304861154564092634.8959692158553657888.jit",
+          "bytes": 13439,
+          "fnv1a64": 4915038379878826449
+        },
+        {
+          "path": "apps/global/jit-cache/18304861154564092634.8959692158553657888.metalar",
+          "bytes": 16096,
+          "fnv1a64": 16782988606060997724
+        },
+        {
+          "path": "apps/global/jit-cache/18304861154564092634.8959692158553657888.metallib",
+          "bytes": 4442,
+          "fnv1a64": 2389279848713437623
+        },
+        {
+          "path": "apps/global/jit-cache/18384041738596059486.10679861981671940392.jit",
+          "bytes": 81517,
+          "fnv1a64": 2920950696905045453
+        },
+        {
+          "path": "apps/global/jit-cache/18384041738596059486.10679861981671940392.metalar",
+          "bytes": 30928,
+          "fnv1a64": 2909037779099903269
+        },
+        {
+          "path": "apps/global/jit-cache/18384041738596059486.10679861981671940392.metallib",
+          "bytes": 8708,
+          "fnv1a64": 13157815031051508450
+        },
+        {
+          "path": "apps/global/jit-cache/2574708908066720270.10270754060747271903.jit",
+          "bytes": 163678,
+          "fnv1a64": 11191066472149821719
+        },
+        {
+          "path": "apps/global/jit-cache/2574708908066720270.10270754060747271903.metalar",
+          "bytes": 37296,
+          "fnv1a64": 9375675919844643617
+        },
+        {
+          "path": "apps/global/jit-cache/2574708908066720270.10270754060747271903.metallib",
+          "bytes": 10176,
+          "fnv1a64": 2864783664381854921
+        },
+        {
+          "path": "apps/global/jit-cache/4939212832255122260.1378868560533804794.jit",
+          "bytes": 79764,
+          "fnv1a64": 13822624680480180354
+        },
+        {
+          "path": "apps/global/jit-cache/4939212832255122260.1378868560533804794.metalar",
+          "bytes": 32000,
+          "fnv1a64": 11733479551285569519
+        },
+        {
+          "path": "apps/global/jit-cache/4939212832255122260.1378868560533804794.metallib",
+          "bytes": 8368,
+          "fnv1a64": 5686900439571557386
+        },
+        {
+          "path": "apps/global/jit-cache/4939212832255122260.6237939138979752382.jit",
+          "bytes": 14096,
+          "fnv1a64": 8514662689469917972
+        },
+        {
+          "path": "apps/global/jit-cache/4939212832255122260.6237939138979752382.metalar",
+          "bytes": 17584,
+          "fnv1a64": 11597313535431638627
+        },
+        {
+          "path": "apps/global/jit-cache/4939212832255122260.6237939138979752382.metallib",
+          "bytes": 4703,
+          "fnv1a64": 16662234783409165590
+        },
+        {
+          "path": "apps/global/jit-cache/71121235393808374.2234286127181060247.jit",
+          "bytes": 58852,
+          "fnv1a64": 13652461077378184372
+        },
+        {
+          "path": "apps/global/jit-cache/71121235393808374.2234286127181060247.metalar",
+          "bytes": 33920,
+          "fnv1a64": 12047503352012910654
+        },
+        {
+          "path": "apps/global/jit-cache/71121235393808374.2234286127181060247.metallib",
+          "bytes": 8710,
+          "fnv1a64": 849641126744446904
+        },
+        {
+          "path": "apps/global/jit-cache/7676880867556255052.13488318957453097810.jit",
+          "bytes": 17104,
+          "fnv1a64": 12920263376226117948
+        },
+        {
+          "path": "apps/global/jit-cache/7676880867556255052.13488318957453097810.metalar",
+          "bytes": 18080,
+          "fnv1a64": 4010281777075690688
+        },
+        {
+          "path": "apps/global/jit-cache/7676880867556255052.13488318957453097810.metallib",
+          "bytes": 4922,
+          "fnv1a64": 18395760104110348335
+        },
+        {
+          "path": "apps/global/jit-cache/7819755321666386692.10679861981671940392.jit",
+          "bytes": 122844,
+          "fnv1a64": 888897609624921692
+        },
+        {
+          "path": "apps/global/jit-cache/7819755321666386692.10679861981671940392.metalar",
+          "bytes": 41088,
+          "fnv1a64": 8396919158881011311
+        },
+        {
+          "path": "apps/global/jit-cache/7819755321666386692.10679861981671940392.metallib",
+          "bytes": 11387,
+          "fnv1a64": 14707087225492422272
+        },
+        {
+          "path": "apps/global/jit-cache/8425344857425537224.10679861981671940392.jit",
+          "bytes": 49695,
+          "fnv1a64": 7434431885245511864
+        },
+        {
+          "path": "apps/global/jit-cache/8425344857425537224.10679861981671940392.metalar",
+          "bytes": 25936,
+          "fnv1a64": 4613080744755981164
+        },
+        {
+          "path": "apps/global/jit-cache/8425344857425537224.10679861981671940392.metallib",
+          "bytes": 7179,
+          "fnv1a64": 11015548817865471060
+        },
+        {
+          "path": "apps/global/jit-cache/8680283755492788044.8552054542954140739.jit",
+          "bytes": 17122,
+          "fnv1a64": 11693189064683569459
+        },
+        {
+          "path": "apps/global/jit-cache/8680283755492788044.8552054542954140739.metalar",
+          "bytes": 18080,
+          "fnv1a64": 4664782362984538317
+        },
+        {
+          "path": "apps/global/jit-cache/8680283755492788044.8552054542954140739.metallib",
+          "bytes": 4922,
+          "fnv1a64": 18395760104110348335
+        },
+        {
+          "path": "apps/global/jit-cache/9605769421955569320.10270754060747271903.jit",
+          "bytes": 168813,
+          "fnv1a64": 11293730463112517461
+        },
+        {
+          "path": "apps/global/jit-cache/9605769421955569320.10270754060747271903.metalar",
+          "bytes": 38320,
+          "fnv1a64": 17748020719688705446
+        },
+        {
+          "path": "apps/global/jit-cache/9605769421955569320.10270754060747271903.metallib",
+          "bytes": 10336,
+          "fnv1a64": 4162169618522342289
+        }
+      ]
+    },
+    "after_concurrent_reload": {
+      "root": "/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production-repair18",
+      "records": [
+        {
+          "path": "apps/global/jit-cache/12742463291825261128.9628444747223097921.jit",
+          "bytes": 17131,
+          "fnv1a64": 4930241641404382726
+        },
+        {
+          "path": "apps/global/jit-cache/12742463291825261128.9628444747223097921.metalar",
+          "bytes": 17968,
+          "fnv1a64": 14762909833516459154
+        },
+        {
+          "path": "apps/global/jit-cache/12742463291825261128.9628444747223097921.metallib",
+          "bytes": 4954,
+          "fnv1a64": 16203139852646997106
+        },
+        {
+          "path": "apps/global/jit-cache/14171431133706346120.10679861981671940392.jit",
+          "bytes": 120955,
+          "fnv1a64": 9123453494819959560
+        },
+        {
+          "path": "apps/global/jit-cache/14171431133706346120.10679861981671940392.metalar",
+          "bytes": 40800,
+          "fnv1a64": 8610949617567822489
+        },
+        {
+          "path": "apps/global/jit-cache/14171431133706346120.10679861981671940392.metallib",
+          "bytes": 11307,
+          "fnv1a64": 3666287118668955743
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.14211611095228352041.jit",
+          "bytes": 128999,
+          "fnv1a64": 2490997856114630032
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.14211611095228352041.metalar",
+          "bytes": 41952,
+          "fnv1a64": 200618357447580352
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.14211611095228352041.metallib",
+          "bytes": 11611,
+          "fnv1a64": 4915894150669843360
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.18442340650087989043.jit",
+          "bytes": 43729,
+          "fnv1a64": 6210543192466004514
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.18442340650087989043.metalar",
+          "bytes": 25232,
+          "fnv1a64": 12272623211900280995
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.18442340650087989043.metallib",
+          "bytes": 6795,
+          "fnv1a64": 7209771034756887697
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.7365760609753380003.jit",
+          "bytes": 115156,
+          "fnv1a64": 15521073700792937608
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.7365760609753380003.metalar",
+          "bytes": 39952,
+          "fnv1a64": 9727088622429101916
+        },
+        {
+          "path": "apps/global/jit-cache/14690400167917884164.7365760609753380003.metallib",
+          "bytes": 11083,
+          "fnv1a64": 6662974880371009826
+        },
+        {
+          "path": "apps/global/jit-cache/14698056579597285764.3579585920436312592.jit",
+          "bytes": 15703,
+          "fnv1a64": 1503580502675212401
+        },
+        {
+          "path": "apps/global/jit-cache/14698056579597285764.3579585920436312592.metalar",
+          "bytes": 17696,
+          "fnv1a64": 5132663218651577585
+        },
+        {
+          "path": "apps/global/jit-cache/14698056579597285764.3579585920436312592.metallib",
+          "bytes": 4938,
+          "fnv1a64": 6369945566157982573
+        },
+        {
+          "path": "apps/global/jit-cache/15638379143336172420.18172618811436184833.jit",
+          "bytes": 15685,
+          "fnv1a64": 15446869826563202668
+        },
+        {
+          "path": "apps/global/jit-cache/15638379143336172420.18172618811436184833.metalar",
+          "bytes": 17696,
+          "fnv1a64": 16221706063201577358
+        },
+        {
+          "path": "apps/global/jit-cache/15638379143336172420.18172618811436184833.metallib",
+          "bytes": 4938,
+          "fnv1a64": 6369945566157982573
+        },
+        {
+          "path": "apps/global/jit-cache/15645957498266366212.15675045217815886616.jit",
+          "bytes": 17112,
+          "fnv1a64": 810664664183326146
+        },
+        {
+          "path": "apps/global/jit-cache/15645957498266366212.15675045217815886616.metalar",
+          "bytes": 17968,
+          "fnv1a64": 14192590793785512896
+        },
+        {
+          "path": "apps/global/jit-cache/15645957498266366212.15675045217815886616.metallib",
+          "bytes": 4954,
+          "fnv1a64": 16203139852646997106
+        },
+        {
+          "path": "apps/global/jit-cache/1568825256363117468.10679861981671940392.jit",
+          "bytes": 811986,
+          "fnv1a64": 2704109049749724902
+        },
+        {
+          "path": "apps/global/jit-cache/1568825256363117468.10679861981671940392.metalar",
+          "bytes": 122848,
+          "fnv1a64": 15002174235310336465
+        },
+        {
+          "path": "apps/global/jit-cache/1568825256363117468.10679861981671940392.metallib",
+          "bytes": 35156,
+          "fnv1a64": 5213890165914429685
+        },
+        {
+          "path": "apps/global/jit-cache/15708062306988190290.10270754060747271903.jit",
+          "bytes": 63152,
+          "fnv1a64": 1137222972356693350
+        },
+        {
+          "path": "apps/global/jit-cache/15708062306988190290.10270754060747271903.metalar",
+          "bytes": 28480,
+          "fnv1a64": 9116413497360279115
+        },
+        {
+          "path": "apps/global/jit-cache/15708062306988190290.10270754060747271903.metallib",
+          "bytes": 7632,
+          "fnv1a64": 11565152420528003511
+        },
+        {
+          "path": "apps/global/jit-cache/17075605042627645658.8959692158553657888.jit",
+          "bytes": 13439,
+          "fnv1a64": 4915038379878826449
+        },
+        {
+          "path": "apps/global/jit-cache/17075605042627645658.8959692158553657888.metalar",
+          "bytes": 16096,
+          "fnv1a64": 2839099626909173858
+        },
+        {
+          "path": "apps/global/jit-cache/17075605042627645658.8959692158553657888.metallib",
+          "bytes": 4442,
+          "fnv1a64": 2389279848713437623
+        },
+        {
+          "path": "apps/global/jit-cache/17128233800462945510.10679861981671940392.jit",
+          "bytes": 39794,
+          "fnv1a64": 10806215980887670298
+        },
+        {
+          "path": "apps/global/jit-cache/17128233800462945510.10679861981671940392.metalar",
+          "bytes": 26896,
+          "fnv1a64": 10636183817108494195
+        },
+        {
+          "path": "apps/global/jit-cache/17128233800462945510.10679861981671940392.metallib",
+          "bytes": 6843,
+          "fnv1a64": 2941155659492150516
+        },
+        {
+          "path": "apps/global/jit-cache/18304861154564092634.8959692158553657888.jit",
+          "bytes": 13439,
+          "fnv1a64": 4915038379878826449
+        },
+        {
+          "path": "apps/global/jit-cache/18304861154564092634.8959692158553657888.metalar",
+          "bytes": 16096,
+          "fnv1a64": 16782988606060997724
+        },
+        {
+          "path": "apps/global/jit-cache/18304861154564092634.8959692158553657888.metallib",
+          "bytes": 4442,
+          "fnv1a64": 2389279848713437623
+        },
+        {
+          "path": "apps/global/jit-cache/18384041738596059486.10679861981671940392.jit",
+          "bytes": 81517,
+          "fnv1a64": 2920950696905045453
+        },
+        {
+          "path": "apps/global/jit-cache/18384041738596059486.10679861981671940392.metalar",
+          "bytes": 30928,
+          "fnv1a64": 2909037779099903269
+        },
+        {
+          "path": "apps/global/jit-cache/18384041738596059486.10679861981671940392.metallib",
+          "bytes": 8708,
+          "fnv1a64": 13157815031051508450
+        },
+        {
+          "path": "apps/global/jit-cache/2574708908066720270.10270754060747271903.jit",
+          "bytes": 163678,
+          "fnv1a64": 11191066472149821719
+        },
+        {
+          "path": "apps/global/jit-cache/2574708908066720270.10270754060747271903.metalar",
+          "bytes": 37296,
+          "fnv1a64": 9375675919844643617
+        },
+        {
+          "path": "apps/global/jit-cache/2574708908066720270.10270754060747271903.metallib",
+          "bytes": 10176,
+          "fnv1a64": 2864783664381854921
+        },
+        {
+          "path": "apps/global/jit-cache/4939212832255122260.1378868560533804794.jit",
+          "bytes": 79764,
+          "fnv1a64": 13822624680480180354
+        },
+        {
+          "path": "apps/global/jit-cache/4939212832255122260.1378868560533804794.metalar",
+          "bytes": 32000,
+          "fnv1a64": 11733479551285569519
+        },
+        {
+          "path": "apps/global/jit-cache/4939212832255122260.1378868560533804794.metallib",
+          "bytes": 8368,
+          "fnv1a64": 5686900439571557386
+        },
+        {
+          "path": "apps/global/jit-cache/4939212832255122260.6237939138979752382.jit",
+          "bytes": 14096,
+          "fnv1a64": 8514662689469917972
+        },
+        {
+          "path": "apps/global/jit-cache/4939212832255122260.6237939138979752382.metalar",
+          "bytes": 17584,
+          "fnv1a64": 11597313535431638627
+        },
+        {
+          "path": "apps/global/jit-cache/4939212832255122260.6237939138979752382.metallib",
+          "bytes": 4703,
+          "fnv1a64": 16662234783409165590
+        },
+        {
+          "path": "apps/global/jit-cache/71121235393808374.2234286127181060247.jit",
+          "bytes": 58852,
+          "fnv1a64": 13652461077378184372
+        },
+        {
+          "path": "apps/global/jit-cache/71121235393808374.2234286127181060247.metalar",
+          "bytes": 33920,
+          "fnv1a64": 12047503352012910654
+        },
+        {
+          "path": "apps/global/jit-cache/71121235393808374.2234286127181060247.metallib",
+          "bytes": 8710,
+          "fnv1a64": 849641126744446904
+        },
+        {
+          "path": "apps/global/jit-cache/7676880867556255052.13488318957453097810.jit",
+          "bytes": 17104,
+          "fnv1a64": 12920263376226117948
+        },
+        {
+          "path": "apps/global/jit-cache/7676880867556255052.13488318957453097810.metalar",
+          "bytes": 18080,
+          "fnv1a64": 4010281777075690688
+        },
+        {
+          "path": "apps/global/jit-cache/7676880867556255052.13488318957453097810.metallib",
+          "bytes": 4922,
+          "fnv1a64": 18395760104110348335
+        },
+        {
+          "path": "apps/global/jit-cache/7819755321666386692.10679861981671940392.jit",
+          "bytes": 122844,
+          "fnv1a64": 888897609624921692
+        },
+        {
+          "path": "apps/global/jit-cache/7819755321666386692.10679861981671940392.metalar",
+          "bytes": 41088,
+          "fnv1a64": 8396919158881011311
+        },
+        {
+          "path": "apps/global/jit-cache/7819755321666386692.10679861981671940392.metallib",
+          "bytes": 11387,
+          "fnv1a64": 14707087225492422272
+        },
+        {
+          "path": "apps/global/jit-cache/8425344857425537224.10679861981671940392.jit",
+          "bytes": 49695,
+          "fnv1a64": 7434431885245511864
+        },
+        {
+          "path": "apps/global/jit-cache/8425344857425537224.10679861981671940392.metalar",
+          "bytes": 25936,
+          "fnv1a64": 4613080744755981164
+        },
+        {
+          "path": "apps/global/jit-cache/8425344857425537224.10679861981671940392.metallib",
+          "bytes": 7179,
+          "fnv1a64": 11015548817865471060
+        },
+        {
+          "path": "apps/global/jit-cache/8680283755492788044.8552054542954140739.jit",
+          "bytes": 17122,
+          "fnv1a64": 11693189064683569459
+        },
+        {
+          "path": "apps/global/jit-cache/8680283755492788044.8552054542954140739.metalar",
+          "bytes": 18080,
+          "fnv1a64": 4664782362984538317
+        },
+        {
+          "path": "apps/global/jit-cache/8680283755492788044.8552054542954140739.metallib",
+          "bytes": 4922,
+          "fnv1a64": 18395760104110348335
+        },
+        {
+          "path": "apps/global/jit-cache/9605769421955569320.10270754060747271903.jit",
+          "bytes": 168813,
+          "fnv1a64": 11293730463112517461
+        },
+        {
+          "path": "apps/global/jit-cache/9605769421955569320.10270754060747271903.metalar",
+          "bytes": 38320,
+          "fnv1a64": 17748020719688705446
+        },
+        {
+          "path": "apps/global/jit-cache/9605769421955569320.10270754060747271903.metallib",
+          "bytes": 10336,
+          "fnv1a64": 4162169618522342289
+        }
+      ]
+    },
+    "calibration_changed_cache": false,
+    "concurrent_phases_reused_stable_cache": true
+  },
+  "resident_service_decision": {
+    "decision": "retain_backend_local_residency",
+    "backend_local_copy_count": 8,
+    "backend_local_bytes": 3169340,
+    "duplicated_bytes_above_one_copy": 22185380,
+    "maximum_shared_copy_savings_bytes": 22185380,
+    "concurrent_to_single_latency_ratio": 1.710840662712211,
+    "concurrent_throughput_scaling": 4.512072724755719,
+    "rationale": "A background owner would save duplicated bytes, but the current ABI owns process-local USM pointers, queues, cancellation state, and PostgreSQL error scopes. The measured gate proves bounded backend-local ownership and cleanup; replacing it without an IPC-safe command/result protocol would weaken those guarantees.",
+    "revisit_trigger": "Revisit when measured resident duplication exceeds the configured cluster budget on representative concurrency, or after an IPC-safe GPU service prototype proves exact cancellation, owner-failure recovery, and no cross-process raw device pointers."
+  },
+  "released_slot": 0,
+  "released_pid": 88589,
+  "post_release_cluster_bytes": 22185380,
+  "post_release": [
+    {
+      "slot": 1,
+      "pid": 88590,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 22185380,
+      "kernel_executions": 24,
+      "queries_accelerated": 25,
+      "stock_exec_count": 0,
+      "generation": 3,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 831632,
+        "end_us": 835994
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.48529199999999834,
+        "scan_ms": 19.791667,
+        "encode_ms": 0.003125,
+        "copy_ms": 0.49950000000000006,
+        "total_load_ms": 20.779584,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 21,
+        "builds": 3,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 25263072,
+        "construction_bytes": 3157884,
+        "construction_us": 48247,
+        "preparation_us": 48276,
+        "raw_load_us": 39097,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 2,
+      "pid": 88591,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 22185380,
+      "kernel_executions": 24,
+      "queries_accelerated": 25,
+      "stock_exec_count": 0,
+      "generation": 3,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 833695,
+        "end_us": 836912
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.7654170000000001,
+        "scan_ms": 22.2745,
+        "encode_ms": 0.003291,
+        "copy_ms": 0.5595,
+        "total_load_ms": 23.602708,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 21,
+        "builds": 3,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 25263072,
+        "construction_bytes": 3157884,
+        "construction_us": 49733,
+        "preparation_us": 49762,
+        "raw_load_us": 41566,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 3,
+      "pid": 88592,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 22185380,
+      "kernel_executions": 24,
+      "queries_accelerated": 25,
+      "stock_exec_count": 0,
+      "generation": 3,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 829769,
+        "end_us": 833431
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.6484169999999987,
+        "scan_ms": 21.368542,
+        "encode_ms": 0.005332999999999999,
+        "copy_ms": 0.46745800000000004,
+        "total_load_ms": 22.48975,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 21,
+        "builds": 3,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 25263072,
+        "construction_bytes": 3157884,
+        "construction_us": 52463,
+        "preparation_us": 52490,
+        "raw_load_us": 42623,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 4,
+      "pid": 88593,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 22185380,
+      "kernel_executions": 24,
+      "queries_accelerated": 25,
+      "stock_exec_count": 0,
+      "generation": 3,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 831636,
+        "end_us": 835732
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.45320900000000125,
+        "scan_ms": 19.855999999999998,
+        "encode_ms": 0.0045000000000000005,
+        "copy_ms": 0.48950000000000005,
+        "total_load_ms": 20.803209,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 21,
+        "builds": 3,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 25263072,
+        "construction_bytes": 3157884,
+        "construction_us": 49029,
+        "preparation_us": 49065,
+        "raw_load_us": 40658,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 5,
+      "pid": 88594,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 22185380,
+      "kernel_executions": 24,
+      "queries_accelerated": 25,
+      "stock_exec_count": 0,
+      "generation": 3,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 829985,
+        "end_us": 834080
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.41670799999999775,
+        "scan_ms": 22.997084,
+        "encode_ms": 0.005582999999999999,
+        "copy_ms": 0.464208,
+        "total_load_ms": 23.883582999999998,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 21,
+        "builds": 3,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 25263072,
+        "construction_bytes": 3157884,
+        "construction_us": 50254,
+        "preparation_us": 50280,
+        "raw_load_us": 42302,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 6,
+      "pid": 88595,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 22185380,
+      "kernel_executions": 24,
+      "queries_accelerated": 25,
+      "stock_exec_count": 0,
+      "generation": 3,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 831632,
+        "end_us": 836020
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.717875000000002,
+        "scan_ms": 25.592541999999998,
+        "encode_ms": 0.0065,
+        "copy_ms": 0.507083,
+        "total_load_ms": 26.824,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 21,
+        "builds": 3,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 25263072,
+        "construction_bytes": 3157884,
+        "construction_us": 53411,
+        "preparation_us": 53439,
+        "raw_load_us": 44107,
+        "selected_policy": "cached_reusable"
+      }
+    },
+    {
+      "slot": 7,
+      "pid": 88596,
+      "raw_bytes": 2105256,
+      "derived_bytes": 1052628,
+      "workspace_idle_bytes": 8832,
+      "output_idle_bytes": 2624,
+      "local_bytes": 3169340,
+      "observed_cluster_bytes": 22185380,
+      "kernel_executions": 24,
+      "queries_accelerated": 25,
+      "stock_exec_count": 0,
+      "generation": 3,
+      "phase_iterations": 1,
+      "phase_interval": {
+        "start_us": 831632,
+        "end_us": 835850
+      },
+      "representation": {
+        "row_count": 263157,
+        "source_logical_bytes": 2105256,
+        "encoded_device_bytes": 2105256,
+        "retained_exact_bytes": 0,
+        "transient_staging_bytes": 2105256,
+        "construction_peak_bytes": 4210512,
+        "null_sidecar_bytes": 0,
+        "projected_null_bitmap_bytes": 0,
+        "bool_value_bytes": 0,
+        "projected_bool_bitmap_bytes": 0,
+        "integer_value_bytes": 2105256,
+        "projected_integer_bitpack_bytes": 526323,
+        "dictionary_code_bytes": 0,
+        "projected_dictionary_bitpack_bytes": 0,
+        "projected_block_minmax_bytes": 660
+      },
+      "ingestion": {
+        "scan_batches": 33,
+        "preflight_ms": 0.44345899999999905,
+        "scan_ms": 25.277333,
+        "encode_ms": 0.001958,
+        "copy_ms": 0.499042,
+        "total_load_ms": 26.221791999999997,
+        "scan_strategy": "table_am_single_deform_batches_8192",
+        "staging_strategy": "single_buffered_host_to_shared_usm",
+        "publication_strategy": "synchronous_exact_after_copy"
+      },
+      "artifact_lifecycle": {
+        "hits": 21,
+        "builds": 3,
+        "rebuilds": 0,
+        "artifact_bytes_observed": 25263072,
+        "construction_bytes": 3157884,
+        "construction_us": 54488,
+        "preparation_us": 54519,
+        "raw_load_us": 46093,
+        "selected_policy": "cached_reusable"
+      }
+    }
+  ],
+  "ninth_backend_rejection": "pg_accel_pin: resident allocation of 2105256 bytes exceeds cluster budget 26214400 bytes (25354720 bytes live); evict/unpin entries or raise pg_accel.resident_memory_budget_mb [XX000]",
+  "final_cluster_bytes": 0
+}

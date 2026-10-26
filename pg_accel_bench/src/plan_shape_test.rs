@@ -790,9 +790,21 @@ fn plan_shape_tests_do_not_expect_superseded_generic_rejection_codes() {
 fn connect() -> Client {
     let connection = test_connection();
     let mut client = Client::connect(&connection, NoTls).expect("connect to bench PG");
+    #[cfg(test)]
+    crate::integration_connection::register_live_pg_client(
+        &mut client,
+        &connection,
+        crate::integration_connection::live_pg_scope().expect("owning live-test scope"),
+    )
+    .expect("register plan-shape backend");
     client
         .simple_query("SELECT 1 FROM pg_accel_stats() LIMIT 1")
         .expect("load pg_accel extension in backend");
+    #[cfg(test)]
+    crate::integration_connection::activate_live_pg_ledger(
+        crate::integration_connection::live_pg_scope().expect("owning live-test scope"),
+    )
+    .expect("activate plan-shape ledger proof");
     client
 }
 
@@ -1732,6 +1744,10 @@ fn resident_descriptor_backend_exit_releases_ledger_without_postmaster_restart()
         .expect("read postmaster start time")
         .get::<_, String>(0);
     let mut worker = connect();
+    let worker_pid = worker
+        .query_one("SELECT pg_backend_pid()", &[])
+        .expect("backend-exit worker identity")
+        .get::<_, i32>(0);
     let rows = descriptor_groupagg_fixture_rows(&mut worker);
     worker
         .batch_execute(
@@ -1792,7 +1808,9 @@ fn resident_descriptor_backend_exit_releases_ledger_without_postmaster_restart()
         .query_one(
             "SELECT COUNT(*)::bigint,
                     COALESCE(SUM(raw_bytes), 0)::bigint,
-                    COALESCE(SUM(derived_bytes), 0)::bigint
+                    COALESCE(SUM(derived_bytes), 0)::bigint,
+                    (SELECT retained_bytes FROM pg_accel_grouped_workspace_pool_stats()),
+                    (SELECT retained_bytes FROM pg_accel_grouped_output_pool_stats())
              FROM pg_accel_resident_status()",
             &[],
         )
@@ -1800,9 +1818,18 @@ fn resident_descriptor_backend_exit_releases_ledger_without_postmaster_restart()
     let status_rows = status.get::<_, i64>(0);
     let raw_bytes = status.get::<_, i64>(1);
     let derived_bytes = status.get::<_, i64>(2);
-    let worker_bytes = raw_bytes
-        .checked_add(derived_bytes)
-        .expect("worker resident bytes fit bigint");
+    let workspace_idle_bytes = status.get::<_, i64>(3);
+    let output_idle_bytes = status.get::<_, i64>(4);
+    let worker_bytes = crate::resident_concurrency_test::checked_backend_owned_bytes(
+        raw_bytes,
+        derived_bytes,
+        workspace_idle_bytes,
+        output_idle_bytes,
+    )
+    .expect("worker-owned current bytes are nonnegative and fit bigint");
+    eprintln!(
+        "backend-exit ownership raw={raw_bytes} derived={derived_bytes} workspace_idle={workspace_idle_bytes} output_idle={output_idle_bytes} total={worker_bytes}"
+    );
     assert_eq!(status_rows, 1);
     assert!(raw_bytes > 0, "pinned fixture must own raw resident bytes");
     assert!(
@@ -1814,14 +1841,22 @@ fn resident_descriptor_backend_exit_releases_ledger_without_postmaster_restart()
         .query_one("SELECT pg_accel_resident_live_bytes()", &[])
         .expect("read live resident ledger")
         .get::<_, i64>(0);
-    let other_backend_bytes = cluster_live
-        .checked_sub(worker_bytes)
-        .expect("worker status cannot exceed cluster ledger");
+    assert_eq!(
+        cluster_live, worker_bytes,
+        "isolated worker must own every ledger byte"
+    );
+    let other_backend_bytes = 0;
 
     // Closing libpq makes PostgreSQL run before_shmem_exit. The monitor is a
     // separate backend: a postmaster crash would terminate it, while a missed
     // cleanup would leave worker_bytes in the shared ledger.
-    drop(worker);
+    worker.close().expect("close backend-exit worker protocol");
+    crate::integration_connection::wait_for_owned_live_pg_exit(
+        &[worker_pid],
+        0,
+        "backend-exit resident worker",
+    )
+    .expect("worker identity disappeared and exact zero ledger restored");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let state = monitor.query_one(
@@ -1895,6 +1930,72 @@ fn resident_descriptor_backend_exit_releases_ledger_without_postmaster_restart()
             .expect("watchdog remains connected after monitor teardown");
         assert_eq!(row.get::<_, String>(0), postmaster_started_at);
         assert!(!row.get::<_, bool>(1), "server entered crash recovery");
+    }
+}
+
+#[cfg(feature = "integration_tests")]
+#[test]
+fn live_test_guard_restores_exact_ledger_after_normal_and_assertion_exit() {
+    for assertion_exit in [false, true] {
+        let result = std::panic::catch_unwind(|| {
+            let _guard = live_pg_test_lock();
+            let mut monitor = connect();
+            monitor
+                .batch_execute(
+                    "SET pg_accel.gpu_enabled=off;
+                DROP TABLE IF EXISTS pg_accel_guard_exit_fixture;
+                CREATE UNLOGGED TABLE pg_accel_guard_exit_fixture(v int4 NOT NULL);
+                INSERT INTO pg_accel_guard_exit_fixture SELECT g FROM generate_series(1,65536) g;
+                ANALYZE pg_accel_guard_exit_fixture",
+                )
+                .expect("guard exit fixture");
+            let mut worker = connect();
+            let pid = worker
+                .query_one("SELECT pg_backend_pid()", &[])
+                .expect("owned PID")
+                .get::<_, i32>(0);
+            worker
+                .simple_query(
+                    "SELECT pg_accel_pin('pg_accel_guard_exit_fixture'::regclass, ARRAY['v'])",
+                )
+                .expect("owned resident bytes");
+            assert!(
+                worker
+                    .query_one("SELECT pg_accel_resident_live_bytes()", &[])
+                    .expect("ledger")
+                    .get::<_, i64>(0)
+                    > 0
+            );
+            assert!(!assertion_exit, "controlled guard assertion exit");
+            worker.close().expect("normal worker protocol close");
+            crate::integration_connection::wait_for_owned_live_pg_exit(
+                &[pid],
+                0,
+                "normal guard qualification",
+            )
+            .expect("normal worker exit and ledger");
+        });
+        if assertion_exit {
+            let panic = result.expect_err("controlled assertion must remain observable");
+            assert_eq!(
+                panic.downcast_ref::<&str>(),
+                Some(&"controlled guard assertion exit")
+            );
+        } else {
+            assert!(result.is_ok(), "normal owned cleanup must succeed");
+        }
+        // Acquiring a new guard would fail if cleanup latched any error; activation
+        // independently requires exact zero instead of adopting a changed baseline.
+        let _next_guard = live_pg_test_lock();
+        let mut next = connect();
+        assert_eq!(
+            next.query_one("SELECT pg_accel_resident_live_bytes()", &[])
+                .expect("next scope ledger")
+                .get::<_, i64>(0),
+            0
+        );
+        next.batch_execute("SET pg_accel.gpu_enabled=off; DROP TABLE pg_accel_guard_exit_fixture")
+            .expect("remove guard qualification fixture");
     }
 }
 
@@ -1992,7 +2093,7 @@ fn planner_only_gpu_init_backend_exit_does_not_restart_postmaster() {
 
 #[cfg(feature = "integration_tests")]
 #[test]
-fn plan_shape_aggregate_filter_has_precise_structural_decline() {
+fn plan_shape_aggregate_filter_dense_scalar_matches_native() {
     let _live_pg_guard = live_pg_test_lock();
     let mut c = connect();
     ensure_aggregate_filter_decline_fixture(&mut c);
@@ -2013,19 +2114,103 @@ fn plan_shape_aggregate_filter_has_precise_structural_decline() {
         c.simple_query(stmt).expect(stmt);
     }
 
-    let plan = explain_query(&mut c, "EXPLAIN (VERBOSE, COSTS OFF)", sql);
+    let plan = explain_analyze(&mut c, sql);
+    assert_descriptor_groupagg_plan(&plan, "lazy scalar aggregate FILTER");
+    let lines: Vec<_> = plan.lines().collect();
+    let nodes: Vec<_> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains("custom scan ("))
+        .collect();
+    assert_eq!(nodes.len(), 1, "expected one descriptor node: {plan}");
+    let (node_index, node) = nodes[0];
+    let indent = |line: &str| {
+        line.chars()
+            .take_while(|ch| matches!(ch, ' ' | '-' | '>'))
+            .count()
+    };
+    let node_depth = indent(node);
+    let block: Vec<_> = lines
+        .iter()
+        .skip(node_index + 1)
+        .take_while(|line| indent(line) > node_depth)
+        .collect();
+    let property_depth = block
+        .iter()
+        .map(|line| indent(line))
+        .min()
+        .expect("descriptor properties");
+    let properties: Vec<_> = block
+        .iter()
+        .filter(|line| indent(line) == property_depth)
+        .map(|line| line.trim())
+        .collect();
+    for property in [
+        "plan selected: true",
+        "gpu resident pipeline: true",
+        "gpu resident operator class: resident_groupagg",
+        "gpu descriptor strategy: descriptor_grouped_aggregate",
+        "gpu descriptor specialization: dense_scalar_programs_plain",
+        "gpu physical kernel mode: parallel_dense_integer",
+        "gpu dispatched physical kernel mode: parallel_dense_integer",
+        "gpu physical kernel mode verified: true",
+        "gpu kernel dispatched: true",
+        "gpu descriptor filter: fact=none; measures=[m0=none; m1=none]; dimensions=[none]",
+    ] {
+        assert!(
+            properties.contains(&property),
+            "missing same-node `{property}`: {plan}"
+        );
+    }
+    assert!(
+        properties.iter().any(|line| line
+            .starts_with("gpu descriptor aggregates: m0:bytecode(inputs=3, words=")
+            && line.ends_with(", result_type=23) -> value.sum; m1:count_star -> value.count")),
+        "expected lazy FILTER scalar plus independent COUNT: {plan}"
+    );
+    let relation_oid = c
+        .query_one("SELECT 'bench_rg_filter_decline'::regclass::oid", &[])
+        .expect("FILTER fixture identity")
+        .get::<_, u32>(0);
+    let group_key = format!(
+        "gpu descriptor group keys: k0:fact({relation_oid}.2:type=23) type=23 collation=0 encoding=hash"
+    );
+    assert!(
+        properties.contains(&group_key.as_str()),
+        "wrong FILTER group identity: {plan}"
+    );
+    assert!(properties.contains(&"gpu descriptor output: slot0:group[k0] source_type=23 result_type=23 typmod=-1 collation=0 nullable=false; slot1:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot2:aggregate[m1].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false"), "wrong FILTER result projection: {plan}");
+    let dense_calls = |client: &mut Client| {
+        client.query_one("SELECT calls FROM pg_accel_grouped_kernel_mode_stats() WHERE mode='parallel_dense_integer'", &[]).expect("dense kernel mode").get::<_, i64>(0)
+    };
+    let before_dense = dense_calls(&mut c);
+    let before = kernel_executions(&mut c);
+    let enabled = expression_groupagg_rows(&mut c, sql);
+    assert!(kernel_executions(&mut c) > before);
+    assert!(dense_calls(&mut c) > before_dense);
+    assert_eq!(enabled, native);
+    assert_eq!(pg_accel_stat_i64(&mut c, "stock_exec_count"), 0);
+
+    // DISTINCT remains unsupported; FILTER itself is no longer a decline.
+    let unsupported = sql.replace("SUM(price * discount)", "SUM(DISTINCT price * discount)");
+    c.simple_query("SET pg_accel.enabled = off")
+        .expect("native DISTINCT FILTER");
+    let native = expression_groupagg_rows(&mut c, &unsupported);
+    c.simple_query("SET pg_accel.enabled = on; SELECT pg_accel_reset_stats()")
+        .expect("enable DISTINCT FILTER probe");
+    let plan = explain_query(&mut c, "EXPLAIN (VERBOSE, COSTS OFF)", &unsupported);
     assert!(
         !plan.contains("custom scan"),
-        "aggregate FILTER must stay native until descriptor FILTER execution exists:\n{plan}"
+        "DISTINCT FILTER must remain native: {plan}"
     );
     assert_rejection_reason_observed(
         &mut c,
         &["shape_aggregate_modifier"],
-        "aggregate FILTER descriptor decline",
+        "DISTINCT aggregate FILTER descriptor decline",
     );
 
     let before = kernel_executions(&mut c);
-    let enabled = expression_groupagg_rows(&mut c, sql);
+    let enabled = expression_groupagg_rows(&mut c, &unsupported);
     let after = kernel_executions(&mut c);
     assert_eq!(
         after, before,

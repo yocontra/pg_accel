@@ -1,0 +1,52 @@
+[artifacts] writing benchmark artifacts to /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/production18-h3_parent_count_int4_filter_res1/artifacts
+[diagnostics] RUST_BACKTRACE=1 (set-by-runner)
+[gucs] applying profile: GucProfile { shared_buffers: "16GB", work_mem: "512MB", effective_cache_size: "48GB", max_parallel_workers_per_gather: 8, max_worker_processes: 16, max_parallel_workers: 12, maintenance_work_mem: "2GB", jit: "off", jit_above_cost: "100000", random_page_cost: "1.1", effective_io_concurrency: 256, track_io_timing: "on", parallel_leader_participation: "on" }
+[gucs] observed snapshot captured (13 settings)
+[gucs] pg_postmaster_start_time = 2026-10-25 17:59:32.26097-07
+[setup] installing extensions: pg_accel, h3
+[setup] pg_accel: ok
+[setup] h3: ok
+[detect] installed extensions: plpgsql, pg_accel, h3
+[provenance] pg_accel extension provenance accepted
+
+[scale] h3_parent_count_int4_filter_res1 @ 1000017 rows
+[setup] h3_parent_count_int4_filter_res1 -- seed 42 (setseed=0.000042), 1000017 rows
+[quiescence] setup checkpoint completed at 2026-10-25 17:59:34.293473-07 (wal_lsn=0/589B978)
+[h3_parent_count_int4_filter_res1] warmup 1/5 [warm]: accel=34.70ms  parallel=79.82ms
+[h3_parent_count_int4_filter_res1] warmup 2/5 [warm]: accel=8.25ms  parallel=68.01ms
+[h3_parent_count_int4_filter_res1] warmup 3/5 [warm]: accel=8.72ms  parallel=70.93ms
+[h3_parent_count_int4_filter_res1] warmup 4/5 [warm]: accel=6.49ms  parallel=68.39ms
+[h3_parent_count_int4_filter_res1] warmup 5/5 [warm]: accel=4.29ms  parallel=91.50ms
+[h3_parent_count_int4_filter_res1] bench 1/10 [warm]: accel=6.43ms  parallel=70.15ms
+[h3_parent_count_int4_filter_res1] bench 2/10 [warm]: accel=6.40ms  parallel=66.00ms
+[h3_parent_count_int4_filter_res1] bench 3/10 [warm]: accel=5.32ms  parallel=64.46ms
+[h3_parent_count_int4_filter_res1] bench 4/10 [warm]: accel=4.27ms  parallel=63.90ms
+[h3_parent_count_int4_filter_res1] bench 5/10 [warm]: accel=7.29ms  parallel=100.29ms
+[h3_parent_count_int4_filter_res1] bench 6/10 [warm]: accel=6.04ms  parallel=106.91ms
+[h3_parent_count_int4_filter_res1] bench 7/10 [warm]: accel=4.65ms  parallel=67.33ms
+[h3_parent_count_int4_filter_res1] bench 8/10 [warm]: accel=6.38ms  parallel=63.35ms
+[h3_parent_count_int4_filter_res1] bench 9/10 [warm]: accel=7.14ms  parallel=97.30ms
+[h3_parent_count_int4_filter_res1] bench 10/10 [warm]: accel=13.39ms  parallel=123.28ms
+[quiescence] checkpointer counters remained unchanged through 2026-10-25 17:59:36.009348-07
+[cleanup] h3_parent_count_int4_filter_res1 -- tables dropped
+
+[scale] h3_parent_count_int4_filter_res1 @ 2000017 rows
+[setup] h3_parent_count_int4_filter_res1 -- seed 42 (setseed=0.000042), 2000017 rows
+[quiescence] setup checkpoint completed at 2026-10-25 17:59:38.453844-07 (wal_lsn=0/D9F9D38)
+[h3_parent_count_int4_filter_res1] warmup 1/5 [warm]: accel=33.93ms  parallel=126.13ms
+[h3_parent_count_int4_filter_res1] warmup 2/5 [warm]: accel=12.54ms  parallel=95.53ms
+[h3_parent_count_int4_filter_res1] warmup 3/5 [warm]: accel=9.26ms  parallel=92.67ms
+[h3_parent_count_int4_filter_res1] warmup 4/5 [warm]: accel=7.73ms  parallel=97.69ms
+[h3_parent_count_int4_filter_res1] warmup 5/5 [warm]: accel=11.69ms  parallel=95.49ms
+[h3_parent_count_int4_filter_res1] bench 1/10 [warm]: accel=8.09ms  parallel=88.00ms
+[h3_parent_count_int4_filter_res1] bench 2/10 [warm]: accel=5.00ms  parallel=89.12ms
+[h3_parent_count_int4_filter_res1] bench 3/10 [warm]: accel=6.86ms  parallel=90.33ms
+[h3_parent_count_int4_filter_res1] bench 4/10 [warm]: accel=8.25ms  parallel=89.23ms
+[h3_parent_count_int4_filter_res1] bench 5/10 [warm]: accel=9.77ms  parallel=88.85ms
+[h3_parent_count_int4_filter_res1] bench 6/10 [warm]: accel=8.78ms  parallel=89.67ms
+[h3_parent_count_int4_filter_res1] bench 7/10 [warm]: accel=9.16ms  parallel=88.51ms
+[h3_parent_count_int4_filter_res1] bench 8/10 [warm]: accel=7.34ms  parallel=87.16ms
+[h3_parent_count_int4_filter_res1] bench 9/10 [warm]: accel=10.95ms  parallel=92.06ms
+[h3_parent_count_int4_filter_res1] bench 10/10 [warm]: accel=9.60ms  parallel=91.62ms
+[quiescence] checkpointer counters remained unchanged through 2026-10-25 17:59:40.489922-07
+[cleanup] h3_parent_count_int4_filter_res1 -- tables dropped

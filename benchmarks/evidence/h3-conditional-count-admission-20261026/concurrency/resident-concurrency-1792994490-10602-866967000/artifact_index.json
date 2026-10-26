@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "generated_unix_seconds": 1792994491,
+  "root": "benchmarks/artifacts/resident-concurrency-1792994490-10602-866967000",
+  "entry_count": 18,
+  "total_size_bytes": 140225,
+  "entries": [
+    {
+      "path": "README.md",
+      "size_bytes": 2167,
+      "modified_unix_seconds": 1792994490
+    },
+    {
+      "path": "crashes.json",
+      "size_bytes": 2,
+      "modified_unix_seconds": 1792994490
+    },
+    {
+      "path": "crashes.md",
+      "size_bytes": 45,
+      "modified_unix_seconds": 1792994490
+    },
+    {
+      "path": "failure-resident-concurrency.txt",
+      "size_bytes": 78,
+      "modified_unix_seconds": 1792994491
+    },
+    {
+      "path": "log_tails/resident-concurrency/00-18.log.delta",
+      "size_bytes": 201,
+      "modified_unix_seconds": 1792994491
+    },
+    {
+      "path": "log_tails/resident-concurrency/00-18.log.tail",
+      "size_bytes": 63485,
+      "modified_unix_seconds": 1792994491
+    },
+    {
+      "path": "log_tails/resident-concurrency/01-pg_accel_panic.log.delta",
+      "size_bytes": 203,
+      "modified_unix_seconds": 1792994491
+    },
+    {
+      "path": "log_tails/resident-concurrency/01-pg_accel_panic.log.tail",
+      "size_bytes": 78,
+      "modified_unix_seconds": 1792994491
+    },
+    {
+      "path": "log_tails/resident-concurrency/02-pg_accel_traces.jsonl.delta",
+      "size_bytes": 221,
+      "modified_unix_seconds": 1792994491
+    },
+    {
+      "path": "log_tails/resident-concurrency/02-pg_accel_traces.jsonl.tail",
+      "size_bytes": 65588,
+      "modified_unix_seconds": 1792994491
+    },
+    {
+      "path": "log_tails/resident-concurrency/03-pg_accel_otel.jsonl.delta",
+      "size_bytes": 204,
+      "modified_unix_seconds": 1792994491
+    },
+    {
+      "path": "log_tails/resident-concurrency/03-pg_accel_otel.jsonl.tail",
+      "size_bytes": 79,
+      "modified_unix_seconds": 1792994491
+    },
+    {
+      "path": "log_tails/resident-concurrency/06-pg_accel_traces.jsonl.delta",
+      "size_bytes": 305,
+      "modified_unix_seconds": 1792994491
+    },
+    {
+      "path": "log_tails/resident-concurrency/06-pg_accel_traces.jsonl.tail",
+      "size_bytes": 180,
+      "modified_unix_seconds": 1792994491
+    },
+    {
+      "path": "log_tails/resident-concurrency/07-pg_accel_otel.jsonl.delta",
+      "size_bytes": 303,
+      "modified_unix_seconds": 1792994491
+    },
+    {
+      "path": "log_tails/resident-concurrency/07-pg_accel_otel.jsonl.tail",
+      "size_bytes": 178,
+      "modified_unix_seconds": 1792994491
+    },
+    {
+      "path": "manifest.json",
+      "size_bytes": 2728,
+      "modified_unix_seconds": 1792994490
+    },
+    {
+      "path": "resume_audit_manifest.json",
+      "size_bytes": 4180,
+      "modified_unix_seconds": 1792994491
+    }
+  ]
+}

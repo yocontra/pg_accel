@@ -3647,8 +3647,8 @@ mod tests {
                 contract.verification_rows.len()
             })
             .sum::<usize>();
-        // Existing 53 cells plus four typed H3 COUNT lanes at two scales each.
-        assert_eq!(cell_count, 61);
+        // Existing 61 cells plus six conditional H3 COUNT lanes at two scales each.
+        assert_eq!(cell_count, 73);
     }
 
     #[test]

@@ -1,0 +1,32 @@
+acpp [AdaptiveCpp compilation driver], Copyright (C) 2018-2025 Aksel Alpay and the AdaptiveCpp project
+  AdaptiveCpp version: 25.10.0+git.456ae691.20260704.branch.HEAD.dirty
+  Installation root: /Users/contra/Projects/pg_accel/.pgaccel/acpp/metal
+  Plugin LLVM version: 20, can accelerate CPU: True
+  Available runtime backends:
+     librt-backend-omp.dylib
+     librt-backend-metal.dylib
+
+
+Full configuration [can be overridden using environment variables or command line arguments]:
+    version-major: 25
+    version-minor: 10
+    version-patch: 0
+    version-suffix: +git.456ae691.20260704.branch.HEAD.dirty
+    plugin-linked-into-llvm: false
+    plugin-llvm-version-major: 20
+    plugin-with-cpu-acceleration: true
+    plugin-with-sscp-compiler: true
+    default-clang: /opt/homebrew/opt/llvm@20/bin/clang++
+    default-targets: generic
+    default-cpu-cxx: /opt/homebrew/opt/llvm@20/bin/clang++
+    default-rocm-path: /opt/rocm
+    default-use-bootstrap-mode: false
+    default-is-dryrun: false
+    default-use-accelerated-cpu: true
+    default-clang-include-path: /opt/homebrew/opt/llvm@20/lib/clang/20/include/..
+    default-sequential-link-line: /opt/homebrew/Cellar/libomp/22.1.8/lib/libomp.dylib
+    default-sequential-cxx-flags: -D_ENABLE_EXTENDED_ALIGNED_STORAGE
+    default-omp-link-line: -fopenmp /opt/homebrew/Cellar/libomp/22.1.8/lib/libomp.dylib
+    default-omp-cxx-flags: -fopenmp -D_ENABLE_EXTENDED_ALIGNED_STORAGE
+    default-is-explicit-multipass: false
+    default-save-temps: false

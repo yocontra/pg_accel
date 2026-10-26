@@ -19,6 +19,111 @@ pub struct H3ParentResolution<const RESOLUTION: i32>;
 /// A COUNT(*) substitution therefore cannot satisfy even the summary oracle.
 pub struct H3ParentCountColumn<const BOOLEAN: bool, const RESOLUTION: i32>;
 
+/// Conditional rollups over three world sites and a NULL key. TYPE=0 is star;
+/// otherwise TYPE is the built-in INT4 or BOOL OID. FILTER never removes groups.
+pub struct H3ParentFilteredCount<const TYPE: u32, const RESOLUTION: i32>;
+
+impl<const TYPE: u32, const RESOLUTION: i32> Workload for H3ParentFilteredCount<TYPE, RESOLUTION> {
+    fn name(&self) -> &'static str {
+        match (TYPE, RESOLUTION) {
+            (0, 0) => "h3_parent_count_star_filter_res0",
+            (0, 1) => "h3_parent_count_star_filter_res1",
+            (23, 0) => "h3_parent_count_int4_filter_res0",
+            (23, 1) => "h3_parent_count_int4_filter_res1",
+            (16, 0) => "h3_parent_count_bool_filter_res0",
+            (16, 1) => "h3_parent_count_bool_filter_res1",
+            _ => panic!("unregistered conditional H3 count benchmark"),
+        }
+    }
+
+    fn description(&self) -> &'static str {
+        "H3 conditional count with direct nullable BOOL FILTER, retained zero groups and independent value NULLs"
+    }
+
+    fn setup_sql(&self, rows: usize) -> Vec<String> {
+        let (sql_type, value) = if TYPE == 16 {
+            ("boolean", "i % 2 = 0")
+        } else {
+            ("int4", "(i % 2001 - 1000)::int4")
+        };
+        vec![
+            "DROP TABLE IF EXISTS bench_h3_count_filter".to_owned(),
+            format!(
+                "CREATE TABLE bench_h3_count_filter (cell h3index, value {sql_type}, qualifies boolean)"
+            ),
+            format!(
+                "INSERT INTO bench_h3_count_filter \
+                 SELECT CASE i % 4 \
+                   WHEN 0 THEN public.h3_lat_lng_to_cell(point(40.7484, -73.9857), 15) \
+                   WHEN 1 THEN public.h3_lat_lng_to_cell(point(35.6895, 139.6917), 15) \
+                   WHEN 2 THEN public.h3_lat_lng_to_cell(point(-33.8688, 151.2093), 15) \
+                   ELSE NULL::h3index END, \
+                 CASE WHEN i % 4 = 2 OR i % 7 = 0 THEN NULL::{sql_type} ELSE {value} END, \
+                 CASE WHEN i % 4 = 0 THEN CASE WHEN i % 8 = 0 THEN false ELSE NULL::boolean END \
+                      WHEN i % 5 = 0 THEN NULL::boolean ELSE i % 3 <> 0 END \
+                 FROM generate_series(1, {rows}) AS fixture(i)"
+            ),
+            "ANALYZE bench_h3_count_filter".to_owned(),
+        ]
+    }
+
+    fn query_sql(&self) -> String {
+        let input = if TYPE == 0 { "*" } else { "value" };
+        format!(
+            "SELECT public.h3_cell_to_parent(cell, {RESOLUTION}) AS parent_cell, \
+                 count({input}) FILTER (WHERE qualifies) AS n FROM bench_h3_count_filter GROUP BY 1"
+        )
+    }
+
+    fn baseline_query_sql(&self) -> Option<String> {
+        Some(self.query_sql())
+    }
+
+    fn row_scales(&self) -> &'static [usize] {
+        &[1_000_017, 2_000_017]
+    }
+
+    fn result_oracle(&self, rows: usize) -> Option<ResultOracle> {
+        // The fixture repeats its membership/NULL decisions every lcm(8,5,3,7).
+        // Count complete periods plus the remainder, not a database expression.
+        let mut groups = [0_usize; 4];
+        let mut present = [false; 4];
+        for residue in 1..=840 {
+            let occurrences = rows / 840 + usize::from(residue <= rows % 840);
+            let group = residue % 4;
+            present[group] |= occurrences > 0;
+            let accepted = group != 0 && residue % 5 != 0 && residue % 3 != 0;
+            let non_null = group != 2 && residue % 7 != 0;
+            if accepted && (TYPE == 0 || non_null) {
+                groups[group] += occurrences;
+            }
+        }
+        let zeros = groups
+            .iter()
+            .zip(present)
+            .filter(|(count, exists)| **count == 0 && *exists)
+            .count();
+        Some(ResultOracle::one_row(
+            format!(
+                "SELECT COALESCE(sum(n),0)::int8, count(*) FILTER (WHERE n=0), \
+                     COALESCE(bool_or(parent_cell IS NULL),false) FROM ({}) AS actual",
+                self.query_sql()
+            ),
+            vec![
+                ExpectedResultValue::I64(
+                    i64::try_from(groups.iter().sum::<usize>()).expect("fixture count fits int8"),
+                ),
+                ExpectedResultValue::I64(i64::try_from(zeros).expect("four groups")),
+                ExpectedResultValue::Bool(present[3]),
+            ],
+        ))
+    }
+
+    fn cleanup_sql(&self) -> Vec<String> {
+        vec!["DROP TABLE IF EXISTS bench_h3_count_filter".to_owned()]
+    }
+}
+
 impl<const BOOLEAN: bool, const RESOLUTION: i32> Workload
     for H3ParentCountColumn<BOOLEAN, RESOLUTION>
 {

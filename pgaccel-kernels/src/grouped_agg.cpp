@@ -64,6 +64,7 @@ constexpr uint32_t kFailureNumericOverflow = 1u << 1;
 constexpr uint32_t kFailureCapacity = 1u << 2;
 constexpr uint32_t kFailureDivisionByZero = 1u << 3;
 constexpr uint32_t kFailureDateOutOfRange = 1u << 4;
+constexpr uint32_t kFailureH3Resolution = 1u << 5;
 constexpr uint64_t kLifecycleCookie = UINT64_C(0x7067616363656c32);
 constexpr uint32_t kLifecycleActive = 1;
 constexpr uint32_t kLifecycleFinalized = 2;
@@ -373,6 +374,7 @@ struct DeviceSourceOffsets {
 };
 
 struct DevicePublishParams {
+  bool typed_hash_capacity;
   size_t group_capacity;
   uint32_t execution_flags;
   uint32_t key_count;
@@ -406,6 +408,7 @@ const pgaccel_scalar_view& scalar_view(const pgaccel_grouped_agg_measure& measur
 }
 
 struct KernelParams {
+  pgaccel_hash_count_partition_v1 partition;
   size_t row_count;
   size_t group_capacity;
   uint64_t shape_fingerprint;
@@ -971,7 +974,8 @@ bool parallel_dense_numeric_shape(const pgaccel_grouped_agg_desc& desc) {
   return has_numeric;
 }
 
-bool make_layout(const pgaccel_grouped_agg_desc& desc, WorkspaceLayout* layout) {
+bool make_layout(const pgaccel_grouped_agg_desc& desc, WorkspaceLayout* layout,
+                 bool partitioned = false) {
   ArenaSizer arena;
   // Completion stays at the exact typed workspace base. Besides making its
   // device lineage explicit, this keeps the lifecycle result independent of
@@ -1071,7 +1075,7 @@ bool make_layout(const pgaccel_grouped_agg_desc& desc, WorkspaceLayout* layout) 
     if (!hash_slot_capacity(desc.group_capacity, &layout->hash_slot_count) ||
         !arena.add<uint32_t>(layout->hash_slot_count, &layout->hash_owners) ||
         !arena.add<uint32_t>(layout->hash_slot_count, &layout->hash_counts) ||
-        !arena.add<uint32_t>(desc.where_filter.kind == PGACCEL_GROUPED_AGG_FILTER_SQL
+        !arena.add<uint32_t>(partitioned || desc.where_filter.kind == PGACCEL_GROUPED_AGG_FILTER_SQL
                                 ? 1 + kHashSelectedShards
                                 : 1,
                             &layout->hash_group_count))
@@ -1653,7 +1657,7 @@ uint64_t descriptor_shape_fingerprint(const pgaccel_grouped_agg_desc& desc) {
 }
 
 pgaccel_status validate_desc(const pgaccel_grouped_agg_desc* desc, Validation* validation,
-                             WorkspaceLayout* layout) {
+                             WorkspaceLayout* layout, bool partitioned = false) {
   if (desc == nullptr || desc->abi_version != PGACCEL_OLAP_ABI_VERSION ||
       desc->size_bytes != sizeof(*desc) || desc->flags != 0 || desc->_pad0 != 0 ||
       desc->_pad1 != 0 || desc->_pad2 != 0 || desc->key_count > PGACCEL_GROUPED_AGG_MAX_KEYS ||
@@ -1814,7 +1818,7 @@ pgaccel_status validate_desc(const pgaccel_grouped_agg_desc* desc, Validation* v
   }
   if (!validation->supported)
     return PGACCEL_UNSUPPORTED;
-  if (!make_layout(*desc, layout))
+  if (!make_layout(*desc, layout, partitioned))
     return PGACCEL_ERROR;
   for (size_t slot = 0; slot < desc->measure_count; ++slot)
     if (desc->measures[slot].op == PGACCEL_GROUPED_AGG_MEASURE_SCALAR &&
@@ -2657,13 +2661,13 @@ inline uint64_t hash_u64_key(uint64_t value, bool is_null) {
   return mixed ^ (mixed >> 31);
 }
 
-inline bool load_hash_key(const pgaccel_grouped_agg_key& key, size_t row, bool* is_null,
+inline uint32_t load_hash_key(const pgaccel_grouped_agg_key& key, size_t row, bool* is_null,
                           uint64_t* value) {
   if (!null_at(key.values.nulls, row, is_null))
-    return false;
+    return kFailureInvalid;
   if (*is_null) {
     *value = 0;
-    return true;
+    return 0;
   }
   // Canonical sign extension preserves SQL integer equality without a widened
   // input lane. Compact sorting/output use the same 64-bit representation.
@@ -2673,16 +2677,34 @@ inline bool load_hash_key(const pgaccel_grouped_agg_key& key, size_t row, bool* 
                            : static_cast<const uint64_t*>(key.values.values)[row];
   if ((key.flags & PGACCEL_GROUPED_AGG_KEY_FLAG_H3_PARENT) == 0) {
     *value = raw;
-    return true;
+    return 0;
   }
-  if (!pgaccel_h3_exact::h3_is_valid_cell(raw))
-    return false;
-  *value = pgaccel_h3_exact::h3_cell_to_parent(raw, static_cast<int>(key._pad0));
-  return *value != 0;
+  return pgaccel_h3_exact::h3_cell_to_parent_exact(raw, static_cast<int>(key._pad0), value)
+             ? 0 : kFailureH3Resolution;
 }
 
 inline void atomic_add_u64(AtomicU64Words& target, uint64_t increment);
 inline uint64_t atomic_u64_value(const AtomicU64Words& value);
+
+// Keep claiming and its capacity publication in one non-inlined operation.
+// Otherwise loop-exit optimization can move publication after the probe loop,
+// leaving successful SIMD lanes waiting for probing peers before publishing the
+// capacity flag those peers need. The helper also runs on failed claims, so it
+// cannot be sunk onto the caller's successful loop-exit edge.
+[[gnu::noinline]] uint32_t claim_adaptive_hash_slot(KernelParams* params, size_t slot,
+                                                 uint32_t row) {
+  DeviceAtomic<uint32_t> owner(params->hash_owners[slot]);
+  uint32_t expected = kHashEmptyOwner;
+  if (owner.compare_exchange_strong(expected, row)) {
+    DeviceAtomic<uint32_t> emitted(*params->hash_group_count);
+    const uint32_t ordinal = emitted.fetch_add(1);
+    if (ordinal >= params->group_capacity)
+      record_failure(*params->meta, kFailureCapacity);
+    else
+      params->staged_group_codes[ordinal] = slot;
+  }
+  return expected;
+}
 
 template <bool CountColumn, bool Filtered = false, bool ValueColumn = false, bool Where = false>
 inline void run_hash_row(KernelParams* params_ptr, size_t row) {
@@ -2714,9 +2736,27 @@ inline void run_hash_row(KernelParams* params_ptr, size_t row) {
   const pgaccel_grouped_agg_key& key = params.keys[0];
   bool row_null = false;
   uint64_t row_key = 0;
-  if (!load_hash_key(key, row, &row_null, &row_key)) {
-    record_failure(meta, kFailureInvalid);
+  const uint32_t key_failure = load_hash_key(key, row, &row_null, &row_key);
+  if (key_failure != 0) {
+    record_failure(meta, key_failure);
     return;
+  }
+  if (params.partition.kind != PGACCEL_HASH_COUNT_PARTITION_ALL) {
+    const auto& partition = params.partition;
+    bool member = row_null;
+    if (partition.kind == PGACCEL_HASH_COUNT_PARTITION_NONNULL_PREFIX) {
+      const uint64_t mask = partition.prefix_bits == 0
+                                ? uint64_t{0}
+                                : (~uint64_t{0} << (64 - partition.prefix_bits));
+      member = !row_null && (row_key & mask) == partition.prefix;
+    }
+    if (!member)
+      return;
+    const size_t shard = 1 + (row & (kHashSelectedShards - 1));
+    if (!atomic_increment_u32(&params.hash_group_count[shard])) {
+      record_failure(meta, kFailureNumericOverflow);
+      return;
+    }
   }
   // FILTER changes this measure's contribution, not group existence. Validate
   // the key even for rejected rows and retain their occupied hash slots.
@@ -2749,18 +2789,27 @@ inline void run_hash_row(KernelParams* params_ptr, size_t row) {
   size_t count_slot = params.hash_slot_count;
   for (size_t probe = 0; probe < params.hash_slot_count; ++probe) {
     const size_t slot = (start + probe) & mask;
-    DeviceAtomic<uint32_t> owner(params.hash_owners[slot]);
     uint32_t expected = kHashEmptyOwner;
-    if (owner.compare_exchange_strong(expected, static_cast<uint32_t>(row))) {
-      DeviceAtomic<uint32_t> emitted(*params.hash_group_count);
-      const uint32_t ordinal = emitted.fetch_add(1);
-      if (ordinal >= params.group_capacity)
-        record_failure(meta, kFailureCapacity);
-      else
-        // Each successful owner CAS has one unique ordinal. Reuse the
-        // otherwise-unused compact HASH group-code lane as an occupied-slot
-        // directory; the following kernel sees it only after all rows finish.
-        params.staged_group_codes[ordinal] = slot;
+    bool claimed;
+    if (params.partition.version == PGACCEL_HASH_COUNT_PARTITION_VERSION) {
+      expected = claim_adaptive_hash_slot(params_ptr, slot, static_cast<uint32_t>(row));
+      claimed = expected == kHashEmptyOwner;
+    } else {
+      DeviceAtomic<uint32_t> owner(params.hash_owners[slot]);
+      claimed = owner.compare_exchange_strong(expected, static_cast<uint32_t>(row));
+    }
+    if (claimed) {
+      if (params.partition.version != PGACCEL_HASH_COUNT_PARTITION_VERSION) {
+        DeviceAtomic<uint32_t> emitted(*params.hash_group_count);
+        const uint32_t ordinal = emitted.fetch_add(1);
+        if (ordinal >= params.group_capacity)
+          record_failure(meta, kFailureCapacity);
+        else
+          // Each successful owner CAS has one unique ordinal. Reuse the
+          // otherwise-unused compact HASH group-code lane as an occupied-slot
+          // directory; the following kernel sees it only after all rows finish.
+          params.staged_group_codes[ordinal] = slot;
+      }
       count_slot = slot;
       break;
     }
@@ -2772,16 +2821,24 @@ inline void run_hash_row(KernelParams* params_ptr, size_t row) {
     }
     bool owner_null = false;
     uint64_t owner_key = 0;
-    if (!load_hash_key(key, static_cast<size_t>(owner_row), &owner_null, &owner_key)) {
-      record_failure(meta, kFailureInvalid);
+    const uint32_t owner_failure = load_hash_key(key, static_cast<size_t>(owner_row), &owner_null, &owner_key);
+    if (owner_failure != 0) {
+      record_failure(meta, owner_failure);
       return;
     }
-    if (row_null != owner_null)
-      continue;
-    if (row_null || owner_key == row_key) {
+    if (row_null == owner_null && (row_null || owner_key == row_key)) {
       count_slot = slot;
       break;
     }
+    // Only adaptive v1 COUNT retries typed capacity. After a collision, a
+    // saturated table cannot produce publishable output; further probes could
+    // otherwise cost N*slots and trigger a GPU watchdog. Matching-key fast
+    // paths do not pay this extra read. Every row already validated its key,
+    // membership, FILTER and contributing-value NULL metadata above, preserving
+    // semantic-error priority. Atomic read pairs with concurrent record_failure.
+    if (params.partition.version == PGACCEL_HASH_COUNT_PARTITION_VERSION &&
+        (DeviceAtomic<uint32_t>(meta.failure_flags).load() & kFailureCapacity) != 0)
+      return;
   }
 
   if (count_slot == params.hash_slot_count) {
@@ -2883,9 +2940,10 @@ inline void run_hash_compact_row(KernelParams* params_ptr, size_t output, bool p
   }
   bool is_null = false;
   uint64_t output_key = 0;
-  if (!load_hash_key(key, static_cast<size_t>(owner), &is_null, &output_key) ||
+  const uint32_t key_failure = load_hash_key(key, static_cast<size_t>(owner), &is_null, &output_key);
+  if (key_failure != 0 ||
       (is_null && staged_nulls == nullptr)) {
-    record_failure(meta, kFailureInvalid);
+    record_failure(meta, key_failure != 0 ? key_failure : kFailureInvalid);
     return;
   }
   staged_keys[output] = is_null ? 0 : output_key;
@@ -2909,7 +2967,8 @@ inline void run_hash_compact_row(KernelParams* params_ptr, size_t output, bool p
 
 inline void run_hash_compact_prepare(KernelParams* params_ptr) {
   params_ptr->meta->selected = params_ptr->row_count;
-  if (params_ptr->where_filter.kind == PGACCEL_GROUPED_AGG_FILTER_SQL) {
+  if (params_ptr->where_filter.kind == PGACCEL_GROUPED_AGG_FILTER_SQL ||
+      params_ptr->partition.kind != PGACCEL_HASH_COUNT_PARTITION_ALL) {
     uint64_t selected = 0;
     for (size_t shard = 0; shard < kHashSelectedShards; ++shard)
       selected += params_ptr->hash_group_count[1 + shard];
@@ -4430,7 +4489,7 @@ inline DeviceCompletion build_completion(DevicePublishParams* params_ptr) {
   DeviceCompletion completion{};
 
   const uint32_t known_failures = kFailureInvalid | kFailureNumericOverflow | kFailureCapacity |
-                                  kFailureDivisionByZero | kFailureDateOutOfRange;
+                                  kFailureDivisionByZero | kFailureDateOutOfRange | kFailureH3Resolution;
   if ((meta.failure_flags & ~known_failures) != 0 || (meta.failure_flags & kFailureInvalid) != 0) {
     completion.status = PGACCEL_ERROR;
     completion.detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
@@ -4443,9 +4502,14 @@ inline DeviceCompletion build_completion(DevicePublishParams* params_ptr) {
   } else if ((meta.failure_flags & kFailureNumericOverflow) != 0) {
     completion.status = PGACCEL_ERROR;
     completion.detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW;
+  } else if ((meta.failure_flags & kFailureH3Resolution) != 0) {
+    completion.status = PGACCEL_ERROR;
+    completion.detail = params.typed_hash_capacity ? PGACCEL_GROUPED_AGG_DEVICE_ERROR_H3_RESOLUTION
+                                                  : PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
   } else if ((meta.failure_flags & kFailureCapacity) != 0) {
-    completion.status = PGACCEL_UNSUPPORTED;
-    completion.detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+    completion.status = params.typed_hash_capacity ? PGACCEL_ERROR : PGACCEL_UNSUPPORTED;
+    completion.detail = params.typed_hash_capacity ? PGACCEL_GROUPED_AGG_DEVICE_ERROR_HASH_CAPACITY
+                                                  : PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
   } else {
     completion.status = PGACCEL_OK;
     completion.detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
@@ -4840,7 +4904,8 @@ bool add_control_bytes(SpanList* spans, const void* control, size_t begin, size_
 
 bool validate_aliases(const pgaccel_grouped_agg_desc& desc, const pgaccel_grouped_agg_out& out,
                       const pgaccel_grouped_agg_desc* const descriptor_control,
-                      pgaccel_grouped_agg_out* const output_control, int32_t* const detail) {
+                      pgaccel_grouped_agg_out* const output_control, int32_t* const detail,
+                      const pgaccel_hash_count_partition_v1* partition = nullptr) {
   SpanList inputs;
   SpanList outputs;
   constexpr size_t emitted_begin = offsetof(pgaccel_grouped_agg_out, emitted_group_count);
@@ -4851,6 +4916,7 @@ bool validate_aliases(const pgaccel_grouped_agg_desc& desc, const pgaccel_groupe
   constexpr size_t uncertain_end = uncertain_begin + sizeof(output_control->uncertain_count);
   if (descriptor_control == nullptr || output_control == nullptr || detail == nullptr ||
       !collect_input_spans(desc, &inputs) ||
+      !add_span(&inputs, partition, partition == nullptr ? 0 : 1, sizeof(*partition)) ||
       !add_span(&inputs, descriptor_control, 1, sizeof(*descriptor_control)) ||
       !add_control_bytes(&inputs, output_control, 0, emitted_begin) ||
       !add_control_bytes(&inputs, output_control, emitted_end, selected_begin) ||
@@ -5373,7 +5439,8 @@ void submit_grouped_agg_mode(sycl::queue& queue, const pgaccel_grouped_agg_desc&
     if (host_params.hash_maxs != nullptr)
       queue.fill(host_params.hash_maxs, INT32_MIN, layout.hash_slot_count);
     queue.fill(host_params.hash_group_count, uint32_t{0},
-               desc.where_filter.kind == PGACCEL_GROUPED_AGG_FILTER_SQL
+               host_params.partition.kind != PGACCEL_HASH_COUNT_PARTITION_ALL ||
+                       desc.where_filter.kind == PGACCEL_GROUPED_AGG_FILTER_SQL
                    ? 1 + kHashSelectedShards
                    : size_t{1});
     for (size_t offset = 0; offset < desc.row_count; offset += kHashRowLaunchRows) {
@@ -5569,9 +5636,12 @@ int32_t grouped_agg_kernel_mode(const pgaccel_grouped_agg_desc& desc,
 pgaccel_status launch_grouped_agg_device(sycl::queue& queue, const pgaccel_grouped_agg_desc& desc,
                                          uint64_t output_mask, void* const device_workspace,
                                          const WorkspaceLayout& layout,
-                                         DeviceCompletion* const device_completion) {
+                                         DeviceCompletion* const device_completion,
+                                         const pgaccel_hash_count_partition_v1* partition = nullptr) {
   KernelParams host_params;
   bind_params(desc, layout, device_workspace, &host_params);
+  if (partition != nullptr)
+    host_params.partition = *partition;
   for (size_t slot = 0; slot < desc.measure_count; ++slot) {
     if (desc.measures[slot].op != PGACCEL_GROUPED_AGG_MEASURE_SCALAR)
       continue;
@@ -5597,6 +5667,7 @@ pgaccel_status launch_grouped_agg_device(sycl::queue& queue, const pgaccel_group
   }
   DevicePublishParams host_publish_params;
   bind_publish_params(desc, layout, device_workspace, output_mask, &host_publish_params);
+  host_publish_params.typed_hash_capacity = partition != nullptr;
   auto* const device_params =
       reinterpret_cast<KernelParams*>(static_cast<uint8_t*>(device_workspace) + layout.params);
   auto* const device_publish_params = reinterpret_cast<DevicePublishParams*>(
@@ -5686,7 +5757,8 @@ pgaccel_status execute_grouped_agg_finalize(sycl::queue& device_queue,
                                             const pgaccel_grouped_agg_desc& desc,
                                             pgaccel_grouped_agg_out* out, int32_t* detail,
                                             void* const device_workspace,
-                                            const WorkspaceLayout& layout) {
+                                            const WorkspaceLayout& layout,
+                                            const pgaccel_hash_count_partition_v1* partition = nullptr) {
   size_t* const group_codes_output = out->group_codes;
   uint8_t* const active_groups_output = out->active_groups;
   void* const key0_values_output = out->keys[0].values;
@@ -5816,7 +5888,7 @@ pgaccel_status execute_grouped_agg_finalize(sycl::queue& device_queue,
           static_cast<uint64_t>(measure3_rhs_nonnull_output != nullptr);
   auto* const device_completion = static_cast<DeviceCompletion*>(device_workspace);
   const pgaccel_status launch_status = launch_grouped_agg_device(
-      device_queue, desc, output_mask, device_workspace, layout, device_completion);
+      device_queue, desc, output_mask, device_workspace, layout, device_completion, partition);
   if (launch_status != PGACCEL_OK)
     return launch_status;
 
@@ -6339,44 +6411,130 @@ extern "C" pgaccel_status pgaccel_grouped_agg_kernel_mode(const pgaccel_grouped_
   return PGACCEL_OK;
 }
 
-extern "C" pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_agg_desc* desc,
-                                                         pgaccel_grouped_agg_out* out,
-                                                         int32_t* detail) {
-  if (detail == nullptr)
+static bool valid_hash_count_partition(const pgaccel_grouped_agg_desc* desc,
+                                       const pgaccel_hash_count_partition_v1* partition) {
+  if (partition == nullptr ||
+      reinterpret_cast<uintptr_t>(partition) % alignof(pgaccel_hash_count_partition_v1) != 0 ||
+      partition->version != PGACCEL_HASH_COUNT_PARTITION_VERSION ||
+      partition->struct_size != sizeof(*partition) || partition->flags != 0 ||
+      partition->reserved != 0 || partition->kind > PGACCEL_HASH_COUNT_PARTITION_NULL_ONLY ||
+      partition->prefix_bits > 64)
+    return false;
+  if (partition->kind != PGACCEL_HASH_COUNT_PARTITION_NONNULL_PREFIX) {
+    if (partition->prefix_bits != 0 || partition->prefix != 0)
+      return false;
+  } else if (partition->prefix_bits == 0 ? partition->prefix != 0
+             : partition->prefix_bits < 64 &&
+                   (partition->prefix << partition->prefix_bits) != 0) {
+    return false;
+  }
+  return desc != nullptr &&
+         reinterpret_cast<uintptr_t>(desc) % alignof(pgaccel_grouped_agg_desc) == 0 &&
+         desc->grouping_mode == PGACCEL_GROUPED_AGG_GROUPING_HASH &&
+         desc->output_mode == PGACCEL_GROUPED_AGG_OUTPUT_COMPACT && desc->key_count == 1 &&
+         desc->keys[0].values.type == PGACCEL_VAL_INT64 && desc->measure_count == 1 &&
+         desc->dim_count == 0 && desc->where_filter.kind == PGACCEL_GROUPED_AGG_FILTER_NONE &&
+         (desc->measure_filters[0].kind == PGACCEL_GROUPED_AGG_FILTER_NONE ||
+          desc->measure_filters[0].kind == PGACCEL_GROUPED_AGG_FILTER_SQL) &&
+         desc->measures[0].agg_mask == PGACCEL_GROUPED_AGG_LANE_COUNT &&
+         (desc->measures[0].op == PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR ||
+          desc->measures[0].op == PGACCEL_GROUPED_AGG_MEASURE_COLUMN) &&
+         desc->execution_flags == (PGACCEL_GROUPED_AGG_EXEC_RESET |
+                                    PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE |
+                                    PGACCEL_GROUPED_AGG_EXEC_FINALIZE);
+}
+
+extern "C" pgaccel_status pgaccel_hash_count_partition_workspace_requirements_v1(
+    const pgaccel_grouped_agg_desc* desc, const pgaccel_hash_count_partition_v1* partition,
+    pgaccel_grouped_agg_workspace_req* out) {
+  if (!valid_hash_count_partition(desc, partition) || out == nullptr ||
+      reinterpret_cast<uintptr_t>(out) % alignof(pgaccel_grouped_agg_workspace_req) != 0 ||
+      out->abi_version != PGACCEL_OLAP_ABI_VERSION || out->size_bytes != sizeof(*out) ||
+      out->bytes != 0 || out->alignment != 0 || out->space != 0 || out->flags != 0)
     return PGACCEL_ERROR;
   Validation validation;
   WorkspaceLayout layout;
-  const pgaccel_status descriptor_status = validate_desc(desc, &validation, &layout);
+  const pgaccel_status status = validate_desc(
+      desc, &validation, &layout, partition->kind != PGACCEL_HASH_COUNT_PARTITION_ALL);
+  if (status != PGACCEL_OK)
+    return status;
+  if (grouped_agg_kernel_mode(*desc, layout) != PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_HASH)
+    return PGACCEL_UNSUPPORTED;
+  SpanList inputs;
+  SpanList outputs;
+  if (!collect_input_spans(*desc, &inputs) || !add_span(&inputs, desc, 1, sizeof(*desc)) ||
+      !add_span(&inputs, partition, 1, sizeof(*partition)) ||
+      !add_span(&inputs, desc->scratch, desc->scratch == nullptr ? 0 : desc->scratch_bytes, 1) ||
+      !add_span(&outputs, out, 1, sizeof(*out)))
+    return PGACCEL_ERROR;
+  for (size_t i = 0; i < inputs.count; ++i)
+    if (spans_overlap(inputs.values[i], outputs.values[0]))
+      return PGACCEL_ERROR;
+  out->bytes = layout.bytes;
+  out->alignment = kWorkspaceAlignment;
+  out->space = PGACCEL_MEM_SPACE_SHARED_USM;
+  out->flags = 0;
+  return PGACCEL_OK;
+}
+
+static pgaccel_status execute_grouped_agg_impl(const pgaccel_grouped_agg_desc* desc,
+                                               pgaccel_grouped_agg_out* out, int32_t* detail,
+                                               const pgaccel_hash_count_partition_v1* partition) {
+  if (detail == nullptr)
+    return PGACCEL_ERROR;
+  if (partition != nullptr &&
+      (reinterpret_cast<uintptr_t>(detail) % alignof(int32_t) != 0 || out == nullptr ||
+       reinterpret_cast<uintptr_t>(out) % alignof(pgaccel_grouped_agg_out) != 0))
+    return PGACCEL_ERROR;
+  if (partition != nullptr && !valid_hash_count_partition(desc, partition))
+    return PGACCEL_ERROR;
+  const pgaccel_hash_count_partition_v1 partition_snapshot =
+      partition == nullptr ? pgaccel_hash_count_partition_v1{} : *partition;
+  Validation validation;
+  WorkspaceLayout layout;
+  const pgaccel_status descriptor_status = validate_desc(
+      desc, &validation, &layout,
+      partition != nullptr && partition_snapshot.kind != PGACCEL_HASH_COUNT_PARTITION_ALL);
   if (descriptor_status == PGACCEL_ERROR) {
-    *detail = PGACCEL_GROUPED_AGG_DETAIL_INVALID;
+    if (partition == nullptr)
+      *detail = PGACCEL_GROUPED_AGG_DETAIL_INVALID;
     return PGACCEL_ERROR;
   }
   if (descriptor_status == PGACCEL_UNSUPPORTED) {
-    *detail = 0;
+    if (partition == nullptr)
+      *detail = 0;
     return PGACCEL_UNSUPPORTED;
   }
   const pgaccel_grouped_agg_desc descriptor_contract = *desc;
+  if (partition != nullptr &&
+      (grouped_agg_kernel_mode(descriptor_contract, layout) !=
+           PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_HASH || desc->scratch == nullptr))
+    return PGACCEL_ERROR;
   void* const scratch_output = desc->scratch;
   if (scratch_output != descriptor_contract.scratch ||
       !validate_scratch_shape(descriptor_contract, layout)) {
-    *detail = PGACCEL_GROUPED_AGG_DETAIL_INVALID;
+    if (partition == nullptr)
+      *detail = PGACCEL_GROUPED_AGG_DETAIL_INVALID;
     return PGACCEL_ERROR;
   }
   const bool finalize =
       (descriptor_contract.execution_flags & PGACCEL_GROUPED_AGG_EXEC_FINALIZE) != 0;
   if (!finalize && scratch_output == nullptr) {
-    *detail = PGACCEL_GROUPED_AGG_DETAIL_INVALID;
+    if (partition == nullptr)
+      *detail = PGACCEL_GROUPED_AGG_DETAIL_INVALID;
     return PGACCEL_ERROR;
   }
   pgaccel_grouped_agg_out output_contract{};
   if (finalize) {
     if (!validate_out(descriptor_contract, out)) {
-      *detail = PGACCEL_GROUPED_AGG_DETAIL_INVALID;
+      if (partition == nullptr)
+        *detail = PGACCEL_GROUPED_AGG_DETAIL_INVALID;
       return PGACCEL_ERROR;
     }
     output_contract = snapshot_output_contract(*out);
-    if (!validate_aliases(descriptor_contract, output_contract, desc, out, detail)) {
-      *detail = PGACCEL_GROUPED_AGG_DETAIL_INVALID;
+    if (!validate_aliases(descriptor_contract, output_contract, desc, out, detail, partition)) {
+      if (partition == nullptr)
+        *detail = PGACCEL_GROUPED_AGG_DETAIL_INVALID;
       return PGACCEL_ERROR;
     }
   } else {
@@ -6401,7 +6559,8 @@ extern "C" pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_a
 
     if (descriptor_contract.scratch != nullptr)
       return execute_grouped_agg_finalize(queue, descriptor_contract, out, detail,
-                                          descriptor_contract.scratch, layout);
+                                          descriptor_contract.scratch, layout,
+                                          partition == nullptr ? nullptr : &partition_snapshot);
 
 #if defined(PGACCEL_TEST_HOOKS)
     test_fail_stage(kTestFailureOwnedAllocation);
@@ -6427,6 +6586,20 @@ extern "C" pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_a
     *detail = 0;
     return pgaccel_kernel_failure("pgaccel_grouped_agg_execute_ex", nullptr);
   }
+}
+
+extern "C" pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_agg_desc* desc,
+                                                         pgaccel_grouped_agg_out* out,
+                                                         int32_t* detail) {
+  return execute_grouped_agg_impl(desc, out, detail, nullptr);
+}
+
+extern "C" pgaccel_status pgaccel_hash_count_partition_execute_v1(
+    const pgaccel_grouped_agg_desc* desc, const pgaccel_hash_count_partition_v1* partition,
+    pgaccel_grouped_agg_out* out, int32_t* detail) {
+  if (partition == nullptr)
+    return PGACCEL_ERROR;
+  return execute_grouped_agg_impl(desc, out, detail, partition);
 }
 
 extern "C" pgaccel_status pgaccel_grouped_agg_execute(const pgaccel_grouped_agg_desc* desc,

@@ -33,7 +33,21 @@ const FP_TOLERANCE: f64 = 1e-3;
 /// Open a fresh libpq connection to the bench database.
 fn connect() -> Client {
     let connection = test_connection();
-    Client::connect(&connection, NoTls).expect("connect to local pgrx PG")
+    let client = Client::connect(&connection, NoTls).expect("connect to local pgrx PG");
+    #[cfg(test)]
+    let client = {
+        let mut client = client;
+        let scope = crate::integration_connection::live_pg_scope().expect("owning live-test scope");
+        crate::integration_connection::register_live_pg_client(&mut client, &connection, scope)
+            .expect("register stress backend");
+        client
+            .simple_query("SELECT 1 FROM pg_accel_stats() LIMIT 1")
+            .expect("confirm pg_accel before stress setup");
+        crate::integration_connection::activate_live_pg_ledger(scope)
+            .expect("activate stress ledger proof");
+        client
+    };
+    client
 }
 
 /// Run one workload 20 times and assert (a) no crash, (b) aggregate

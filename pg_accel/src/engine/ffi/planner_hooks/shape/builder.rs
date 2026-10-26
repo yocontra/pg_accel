@@ -273,6 +273,44 @@ fn validate_measure_descriptor_capability(
     }
 }
 
+/// Only the separately qualified H3 COUNT envelope may carry a direct SQL
+/// Boolean mask. All other callers retain the original measure validator.
+fn validate_h3_contextual_measure(
+    aggregate: &super::AggregateExpr,
+    groups: &[GroupKeyRef],
+    fact_rel: u32,
+    single_measure: bool,
+) -> Result<(), ShapeDecline> {
+    let h3_key = matches!(groups, [GroupKeyRef {
+        source: GroupKeySource::H3CellToParent { cell, resolution },
+        type_oid, collation_oid: 0, encoding: GroupKeyEncoding::Hash,
+    }] if cell.relation_oid == fact_rel && cell.type_oid == *type_oid
+        && cell.attno > 0 && i16::try_from(cell.attno).is_ok() && (0..=15).contains(resolution));
+    let count_input = aggregate.expression == MeasureExpr::CountStar
+        || matches!(aggregate.expression, MeasureExpr::Column(column)
+            if column.relation_oid == fact_rel && column.attno > 0
+                && i16::try_from(column.attno).is_ok()
+                && matches!(column.type_oid, 16 | 21 | 23 | 20 | 700 | 701 | 1082 | 1114 | 1184));
+    let predicate = matches!(aggregate.filter, FilterSpec::Mask { input, kind: MaskKind::Sql }
+        if input.relation_oid == fact_rel && input.type_oid == 16
+            && input.attno > 0 && i16::try_from(input.attno).is_ok());
+    if single_measure
+        && h3_key
+        && count_input
+        && predicate
+        && aggregate.output.kind == AggregateKind::Count
+        && aggregate.output.source == AggregateSource::Value
+    {
+        // Validate every remaining argument/output rule through the original
+        // validator, removing only the exact contextual mask restriction.
+        let mut unfiltered = aggregate.clone();
+        unfiltered.filter = FilterSpec::None;
+        validate_measure_descriptor_capability(&unfiltered)
+    } else {
+        validate_measure_descriptor_capability(aggregate)
+    }
+}
+
 fn aggregate_source_type(aggregate: &super::AggregateExpr) -> Result<u32, ShapeDecline> {
     let source = match (&aggregate.expression, aggregate.output.source) {
         (MeasureExpr::CountStar, AggregateSource::Value) => 0,
@@ -1059,7 +1097,12 @@ pub fn build_shape(input: ShapeInput, model: &TypedCostModel) -> Result<ShapePla
     let mut measures = Vec::<MeasureSpec>::new();
     let mut aggregate_locations = Vec::with_capacity(input.aggregates.len());
     for aggregate in &input.aggregates {
-        validate_measure_descriptor_capability(aggregate)?;
+        validate_h3_contextual_measure(
+            aggregate,
+            &group_keys,
+            fact.relation_oid,
+            input.aggregates.len() == 1,
+        )?;
         // COUNT(*) may consume an already-required scalar's COUNT lane when
         // that program is non-NULL on every successful path. Keep evaluation
         // (including errors), require identical FILTERs, and resolve this before

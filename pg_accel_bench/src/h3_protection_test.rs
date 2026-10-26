@@ -91,6 +91,13 @@ const WARM_GROUPED_FALLBACK_BUDGET: Duration = Duration::from_secs(16);
 fn connect() -> Client {
     let connection = test_connection();
     let mut client = Client::connect(&connection, NoTls).expect("connect to bench PG");
+    #[cfg(test)]
+    crate::integration_connection::register_live_pg_client(
+        &mut client,
+        &connection,
+        crate::integration_connection::live_pg_scope().expect("owning live-test scope"),
+    )
+    .expect("register H3 backend");
     client
         .simple_query(&format!(
             "SET statement_timeout = '{H3_TEST_STATEMENT_TIMEOUT}'; \
@@ -100,6 +107,11 @@ fn connect() -> Client {
     client
         .simple_query("SELECT 1 FROM pg_accel_stats() LIMIT 1")
         .expect("load pg_accel extension in backend");
+    #[cfg(test)]
+    crate::integration_connection::activate_live_pg_ledger(
+        crate::integration_connection::live_pg_scope().expect("owning live-test scope"),
+    )
+    .expect("activate H3 ledger proof before extension setup");
     client
         .simple_query("CREATE EXTENSION IF NOT EXISTS h3 CASCADE")
         .expect("install h3 extension");
@@ -218,6 +230,120 @@ fn assert_h3_latlng_rows_match_native(c: &mut Client, resolution: i32) {
 fn explain_text(c: &mut Client, sql: &str) -> String {
     let explain = format!("EXPLAIN (FORMAT TEXT) {sql}");
     execute_to_rows(c, &explain, H3_EXPLAIN_ROW_CAP).join("\n")
+}
+
+#[cfg(feature = "integration_tests")]
+fn explain_analyze_text(c: &mut Client, sql: &str) -> String {
+    let explain = format!("EXPLAIN (ANALYZE, FORMAT TEXT) {sql}");
+    execute_to_rows(c, &explain, H3_EXPLAIN_ROW_CAP).join("\n")
+}
+
+fn parent_count_star_plan_matches(
+    plan: &str,
+    relation: u32,
+    h3_type: u32,
+    resolution: i32,
+) -> bool {
+    let lines: Vec<_> = plan.lines().collect();
+    let nodes: Vec<_> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains("Custom Scan ("))
+        .collect();
+    let [(index, node)] = nodes.as_slice() else {
+        return false;
+    };
+    if !node.contains("Custom Scan (GpuAccelAgg)") {
+        return false;
+    }
+    let indent = |line: &str| {
+        line.chars()
+            .take_while(|ch| matches!(ch, ' ' | '-' | '>'))
+            .count()
+    };
+    let depth = indent(node);
+    let block: Vec<_> = lines
+        .iter()
+        .skip(index + 1)
+        .take_while(|line| indent(line) > depth)
+        .collect();
+    let Some(property_depth) = block.iter().map(|line| indent(line)).min() else {
+        return false;
+    };
+    let properties: Vec<_> = block
+        .iter()
+        .filter(|line| indent(line) == property_depth)
+        .map(|line| line.trim())
+        .collect();
+    [
+        "Plan Selected: true".to_owned(),
+        "GPU Resident Pipeline: true".to_owned(),
+        "GPU Resident Operator Class: resident_groupagg".to_owned(),
+        "GPU Descriptor Strategy: descriptor_grouped_aggregate".to_owned(),
+        "GPU Descriptor Specialization: hash_count".to_owned(),
+        "GPU Descriptor Aggregates: m0:count_star -> value.count".to_owned(),
+        "GPU Descriptor Filter: fact=none; measures=[m0=none]; dimensions=[none]".to_owned(),
+        format!("GPU Descriptor Group Keys: k0:h3_cell_to_parent({relation}.2:type={h3_type}, resolution={resolution}) type={h3_type} collation=0 encoding=hash"),
+        format!("GPU Descriptor Output: slot0:group[k0] source_type={h3_type} result_type={h3_type} typmod=-1 collation=0 nullable=false; slot1:aggregate[m0].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false"),
+        "GPU Physical Kernel Mode: parallel_hash".to_owned(),
+        "GPU Dispatched Physical Kernel Mode: parallel_hash".to_owned(),
+        "GPU Physical Kernel Mode Verified: true".to_owned(),
+        "GPU Kernel Dispatched: true".to_owned(),
+    ].iter().all(|expected| properties.iter().filter(|value| **value == expected.as_str()).count() == 1)
+}
+
+#[test]
+fn adaptive_parent_count_proof_rejects_wrong_measure_key_filter_and_execution() {
+    let plan = "Custom Scan (GpuAccelAgg)
+  Plan Selected: true
+  GPU Resident Pipeline: true
+  GPU Resident Operator Class: resident_groupagg
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Aggregates: m0:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none]; dimensions=[none]
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(10.2:type=16421, resolution=4) type=16421 collation=0 encoding=hash
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=false; slot1:aggregate[m0].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Kernel Dispatched: true";
+    assert!(parent_count_star_plan_matches(plan, 10, 16421, 4));
+    for invalid in [
+        plan.replace("m0:count_star", "m0:column(10.2:type=16421)"),
+        plan.replace("10.2:type", "10.1:type"),
+        plan.replace("nullable=false; slot1", "nullable=true; slot1"),
+        plan.replace("m0=none", "m0=sql_mask(input=10.3:type=16)"),
+        plan.replace(
+            "GPU Dispatched Physical Kernel Mode: parallel_hash",
+            "GPU Dispatched Physical Kernel Mode: not_dispatched",
+        ),
+        plan.replace(
+            "GPU Physical Kernel Mode Verified: true",
+            "GPU Physical Kernel Mode Verified: false",
+        ),
+        plan.replace(
+            "  GPU Descriptor Aggregates:",
+            "    GPU Descriptor Aggregates:",
+        ),
+        format!("{plan}\nCustom Scan (GpuAccelAgg)"),
+    ] {
+        assert!(
+            !parent_count_star_plan_matches(&invalid, 10, 16421, 4),
+            "{invalid}"
+        );
+    }
+    assert!(!parent_count_star_plan_matches(plan, 10, 16421, 5));
+}
+
+#[cfg(feature = "integration_tests")]
+fn parent_hash_calls(c: &mut Client) -> i64 {
+    c.query_one(
+        "SELECT calls FROM pg_accel_grouped_kernel_mode_stats() WHERE mode='parallel_hash'",
+        &[],
+    )
+    .expect("actual H3 hash calls")
+    .get(0)
 }
 
 #[cfg(feature = "integration_tests")]
@@ -341,6 +467,12 @@ fn assert_h3_parent_resident_selection_and_declines(rows: usize) {
         .baseline_query_sql()
         .expect("H3 parent workload has a native baseline");
     let mut setup = connect();
+    let rows = usize::try_from(qualifying_device_rows(
+        &mut setup,
+        "gpu_h3_group_min_rows",
+        i64::try_from(rows).expect("fixture rows"),
+    ))
+    .expect("device-qualified fixture rows");
     apply_setup(&mut setup, wl.as_ref(), rows);
 
     setup
@@ -382,6 +514,9 @@ fn assert_h3_parent_resident_selection_and_declines(rows: usize) {
     c.simple_query(
         "SET pg_accel.enabled = on; \
          SET pg_accel.gpu_enabled = on; \
+         SET pg_accel.cost_multiplier = DEFAULT; \
+         SET pg_accel.min_batch_size = DEFAULT; \
+         SET max_parallel_workers_per_gather = DEFAULT; \
          SET pg_accel.auto_load = off",
     )
     .expect("enable exact pinned H3 parent planning");
@@ -426,7 +561,14 @@ fn assert_h3_parent_resident_selection_and_declines(rows: usize) {
 
     c.simple_query("SELECT pg_accel_reset_stats()")
         .expect("reset H3 parent selection stats");
-    let selected_plan = explain_text(&mut c, &selected_query);
+    let identity = c.query_one("SELECT 'bench_h3_parent'::regclass::oid, atttypid FROM pg_attribute WHERE attrelid='bench_h3_parent'::regclass AND attname='cell'", &[]).expect("H3 fixture identity");
+    let relation = identity.get::<_, u32>(0);
+    let h3_type = identity.get::<_, u32>(1);
+    let selected_plan = explain_analyze_text(&mut c, &selected_query);
+    assert!(
+        parent_count_star_plan_matches(&selected_plan, relation, h3_type, 0),
+        "res0 exact same-node COUNTstar dispatch: {selected_plan}"
+    );
     let selected_plan_lc = selected_plan.to_lowercase();
     let selected_rejection = last_planner_rejection_reason(&mut c);
     for marker in [
@@ -452,9 +594,14 @@ fn assert_h3_parent_resident_selection_and_declines(rows: usize) {
     );
 
     let before = kernel_executions(&mut c);
+    let hash_before = parent_hash_calls(&mut c);
     let mut selected = execute_to_rows(&mut c, &selected_query, rows);
     let after = kernel_executions(&mut c);
     selected.sort_unstable();
+    assert!(
+        parent_hash_calls(&mut c) > hash_before,
+        "res0 must execute actual parallel_hash"
+    );
     assert!(
         after > before,
         "selected H3 parent/count must increment the GPU kernel counter: before={before}, after={after}"
@@ -467,6 +614,12 @@ fn assert_h3_parent_resident_selection_and_declines(rows: usize) {
         grouped_count_total(&selected),
         rows,
         "selected H3 parent/count must consume every input row"
+    );
+    assert_eq!(
+        c.query_one("SELECT stock_exec_count FROM pg_accel_stats()", &[])
+            .expect("res0 stock fallback count")
+            .get::<_, i64>(0),
+        0
     );
     let material = c
         .query_one(
@@ -484,39 +637,66 @@ fn assert_h3_parent_resident_selection_and_declines(rows: usize) {
 
     for (resolution, capacity_query, capacity_native) in capacity_cases {
         c.simple_query("SELECT pg_accel_reset_stats()")
-            .expect("reset H3 parent capacity-decline stats");
-        let capacity_plan = explain_text(&mut c, &capacity_query);
+            .expect("reset H3 parent adaptive-capacity stats");
+        let capacity_plan = explain_analyze_text(&mut c, &capacity_query);
         let capacity_plan_lc = capacity_plan.to_lowercase();
-        assert!(
-            !capacity_plan_lc.contains("custom scan") && !capacity_plan_lc.contains("gpuaccelagg"),
-            "res7-to-res{resolution} must respect the exact group-capacity gate:\n{capacity_plan}"
-        );
+        let selected = capacity_plan_lc.contains("custom scan");
         assert_eq!(
-            last_planner_rejection_reason(&mut c).as_deref(),
-            Some(H3_PARENT_CAPACITY_DECLINE),
-            "res7-to-res{resolution} must record the exact capacity decline; plan:\n{capacity_plan}"
+            planner_rejection_count(&mut c, H3_PARENT_CAPACITY_DECLINE),
+            0,
+            "adaptive COUNT workspace must not use stale universe-cap rejection: {capacity_plan}"
         );
-        assert!(
-            planner_rejection_count(&mut c, H3_PARENT_CAPACITY_DECLINE) > 0,
-            "res7-to-res{resolution} must increment the capacity-decline counter"
-        );
+        if selected {
+            assert!(
+                parent_count_star_plan_matches(&capacity_plan, relation, h3_type, resolution),
+                "res{resolution} exact COUNTstar dispatch: {capacity_plan}"
+            );
+        } else {
+            let reason =
+                last_planner_rejection_reason(&mut c).expect("precise native admission reason");
+            assert!(
+                matches!(
+                    reason.as_str(),
+                    "generic_cost_not_competitive" | "generic_residency_budget_exceeded"
+                ),
+                "res{resolution}: unexpected native reason {reason}: {capacity_plan}"
+            );
+            assert!(planner_rejection_count(&mut c, &reason) > 0);
+            assert_eq!(
+                kernel_executions(&mut c),
+                0,
+                "native EXPLAIN must not dispatch"
+            );
+        }
 
         let before = kernel_executions(&mut c);
+        let hash_before = parent_hash_calls(&mut c);
         let mut capacity = execute_to_rows(&mut c, &capacity_query, rows);
         let after = kernel_executions(&mut c);
         capacity.sort_unstable();
-        assert_eq!(
-            after, before,
-            "capacity-declined res7-to-res{resolution} must not dispatch"
-        );
+        if selected {
+            assert!(
+                after > before && parent_hash_calls(&mut c) > hash_before,
+                "selected res{resolution} must execute parallel_hash"
+            );
+        } else {
+            assert_eq!(after, before, "native res{resolution} must not dispatch");
+            assert_eq!(parent_hash_calls(&mut c), hash_before);
+        }
         assert_eq!(
             capacity, capacity_native,
-            "capacity-declined res7-to-res{resolution} output differs from stock h3-pg"
+            "adaptive res7-to-res{resolution} output differs from stock h3-pg"
         );
         assert_eq!(
             grouped_count_total(&capacity),
             rows,
-            "capacity-declined res7-to-res{resolution} must consume every input row"
+            "adaptive res7-to-res{resolution} must consume every input row"
+        );
+        assert_eq!(
+            c.query_one("SELECT stock_exec_count FROM pg_accel_stats()", &[])
+                .expect("adaptive stock fallback count")
+                .get::<_, i64>(0),
+            0
         );
     }
 
@@ -610,7 +790,13 @@ fn h3_protection_canonical_winning_names_registered() {
             "h3_parent_count_int4_res0",
             "h3_parent_count_int4_res1",
             "h3_parent_count_bool_res0",
-            "h3_parent_count_bool_res1"
+            "h3_parent_count_bool_res1",
+            "h3_parent_count_star_filter_res0",
+            "h3_parent_count_star_filter_res1",
+            "h3_parent_count_int4_filter_res0",
+            "h3_parent_count_int4_filter_res1",
+            "h3_parent_count_bool_filter_res0",
+            "h3_parent_count_bool_filter_res1"
         ]
     );
     for name in h3_winning_lane_names() {
@@ -660,6 +846,106 @@ fn typed_h3_count_lanes_register_exact_pins_oracles_and_winner_floor() {
     }
 }
 
+#[test]
+fn conditional_h3_lanes_pin_exact_inputs_and_have_independent_filter_oracles() {
+    use crate::workloads::{ExpectedResultValue, H3CountMeasure, h3_count_contract};
+    let mut lanes = 0;
+    for name in h3_winning_lane_names() {
+        let Some(contract) = h3_count_contract(name).filter(|c| c.predicate_attno.is_some()) else {
+            continue;
+        };
+        lanes += 1;
+        let star = contract.measure == H3CountMeasure::Star;
+        let workload = find_workload(name).expect("conditional workload");
+        let metadata = crate::workloads::workload_metadata(name).expect("conditional metadata");
+        assert_eq!(metadata.resident_pins.len(), 1);
+        assert_eq!(metadata.resident_pins[0].table, "bench_h3_count_filter");
+        assert_eq!(
+            metadata.resident_pins[0].columns,
+            if star {
+                &["cell", "qualifies"][..]
+            } else {
+                &["cell", "value", "qualifies"][..]
+            }
+        );
+        assert_eq!(
+            workload.query_sql(),
+            workload.baseline_query_sql().expect("native SQL")
+        );
+        assert!(workload.query_sql().contains("FILTER (WHERE qualifies)"));
+        assert_eq!(workload.row_scales(), &[1_000_017, 2_000_017]);
+        assert_eq!(
+            h3_lane_class(name),
+            Some(H3LaneClass::Winning {
+                min_warm_speedup: 1.15
+            })
+        );
+        assert!(!workload.setup_sql(100).join("\n").contains("random()"));
+        for rows in [0, 1, 3, 4, 8, 839, 840, 841, 1_000_017] {
+            let mut counts = [0_i64; 4];
+            let mut present = [false; 4];
+            for i in 1..=rows {
+                let group = i % 4;
+                present[group] = true;
+                if group != 0 && i % 5 != 0 && i % 3 != 0 && (star || (group != 2 && i % 7 != 0)) {
+                    counts[group] += 1;
+                }
+            }
+            let zero_groups = counts
+                .iter()
+                .zip(present)
+                .filter(|(count, exists)| **count == 0 && *exists)
+                .count();
+            assert_eq!(
+                workload
+                    .result_oracle(rows)
+                    .expect("periodic oracle")
+                    .expected_row,
+                vec![
+                    ExpectedResultValue::I64(counts.iter().sum()),
+                    ExpectedResultValue::I64(i64::try_from(zero_groups).expect("four groups")),
+                    ExpectedResultValue::Bool(present[3]),
+                ],
+                "{name}/{rows}"
+            );
+            if rows >= 840 {
+                assert!(counts.iter().sum::<i64>() < i64::try_from(rows).expect("rows"));
+                assert_eq!(zero_groups, if star { 1 } else { 2 });
+            }
+        }
+    }
+    assert_eq!(lanes, 6);
+}
+
+#[cfg(feature = "integration_tests")]
+const H3_COUNT_VALUE_TYPES: &[(&str, u32, &str)] = &[
+    ("boolean", 16, "value > 0"),
+    ("int2", 21, "value::int2"),
+    ("int4", 23, "value"),
+    ("int8", 20, "value::int8 * 1000000000"),
+    (
+        "float4",
+        700,
+        "CASE value % 3 WHEN 0 THEN 'NaN'::float4 WHEN 1 THEN 'Infinity'::float4 ELSE '-Infinity'::float4 END",
+    ),
+    (
+        "float8",
+        701,
+        "CASE value % 3 WHEN 0 THEN 'NaN'::float8 WHEN 1 THEN 'Infinity'::float8 ELSE '-Infinity'::float8 END",
+    ),
+    ("date", 1082, "DATE '2000-01-01' + value"),
+    (
+        "timestamp",
+        1114,
+        "TIMESTAMP '2000-01-01' + value * INTERVAL '1 second'",
+    ),
+    (
+        "timestamptz",
+        1184,
+        "TIMESTAMPTZ '2000-01-01 00:00:00+00' + value * INTERVAL '1 second'",
+    ),
+];
+
 /// Ordinary installed-module execution, not the staged descriptor test API.
 /// The independent engine suite covers invalidation and failure lifecycle;
 /// this test additionally protects benchmark fixture semantics for every type.
@@ -676,7 +962,7 @@ fn typed_h3_count_all_fixed_types_default_planner_matches_native() {
             &[],
         )
         .expect("default settings");
-    assert_eq!(defaults.get::<_, f64>(0), 1.0);
+    assert_eq!(defaults.get::<_, f64>(0).to_bits(), 1.0_f64.to_bits());
     assert_eq!(defaults.get::<_, i32>(1), 65536);
     assert!(defaults.get::<_, bool>(2));
     let rows = usize::try_from(qualifying_device_rows(
@@ -686,33 +972,7 @@ fn typed_h3_count_all_fixed_types_default_planner_matches_native() {
     ))
     .expect("device rows fit usize");
     let fixture = crate::workloads::H3ParentCountColumn::<false, 0>;
-    for (sql_type, oid, expression) in [
-        ("boolean", 16, "value > 0"),
-        ("int2", 21, "value::int2"),
-        ("int4", 23, "value"),
-        ("int8", 20, "value::int8 * 1000000000"),
-        (
-            "float4",
-            700,
-            "CASE value % 3 WHEN 0 THEN 'NaN'::float4 WHEN 1 THEN 'Infinity'::float4 ELSE '-Infinity'::float4 END",
-        ),
-        (
-            "float8",
-            701,
-            "CASE value % 3 WHEN 0 THEN 'NaN'::float8 WHEN 1 THEN 'Infinity'::float8 ELSE '-Infinity'::float8 END",
-        ),
-        ("date", 1082, "DATE '2000-01-01' + value"),
-        (
-            "timestamp",
-            1114,
-            "TIMESTAMP '2000-01-01' + value * INTERVAL '1 second'",
-        ),
-        (
-            "timestamptz",
-            1184,
-            "TIMESTAMPTZ '2000-01-01 00:00:00+00' + value * INTERVAL '1 second'",
-        ),
-    ] {
+    for &(sql_type, oid, expression) in H3_COUNT_VALUE_TYPES {
         c.batch_execute("SET pg_accel.enabled = off")
             .expect("native setup");
         apply_setup(&mut c, &fixture, rows);
@@ -778,8 +1038,9 @@ fn typed_h3_count_all_fixed_types_default_planner_matches_native() {
             assert_eq!(
                 setting("pg_accel.cost_multiplier")
                     .parse::<f64>()
-                    .expect("cost"),
-                1.0
+                    .expect("cost")
+                    .to_bits(),
+                1.0_f64.to_bits()
             );
             assert_eq!(setting("pg_accel.min_batch_size"), "65536");
             assert_eq!(setting("pg_accel.enabled"), "on");
@@ -793,6 +1054,188 @@ fn typed_h3_count_all_fixed_types_default_planner_matches_native() {
             assert!(
                 after.0 > before.0 && after.1 > before.1,
                 "actual-producing query must dispatch hash"
+            );
+        }
+        apply_cleanup(&mut c, &fixture);
+    }
+}
+
+#[cfg(feature = "integration_tests")]
+fn assert_conditional_h3_query(
+    c: &mut Client,
+    query: &str,
+    contract: crate::workloads::H3CountContract,
+) -> Vec<String> {
+    use crate::workloads::H3CountMeasure;
+    c.batch_execute("SET pg_accel.enabled=off")
+        .expect("native FILTER arm");
+    let mut native = execute_to_rows(c, query, 1_024);
+    native.sort_unstable();
+    let column_name = |attno| match attno {
+        1 => "cell",
+        2 => "value",
+        3 => "qualifies",
+        4 => "other_qualifies",
+        _ => panic!("unexpected fixture column"),
+    };
+    let mut columns = vec![
+        "cell",
+        column_name(contract.predicate_attno.expect("direct FILTER")),
+    ];
+    if let H3CountMeasure::Column { attno, .. } = contract.measure {
+        columns.push(column_name(attno));
+    }
+    columns.sort_unstable();
+    columns.dedup();
+    let columns = columns
+        .iter()
+        .map(|name| format!("'{name}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    c.batch_execute(&format!("SET pg_accel.enabled=on; SELECT pg_accel_pin('bench_h3_count_filter'::regclass, ARRAY[{columns}])"))
+        .expect("pin conditional inputs");
+    let before_explain = kernel_executions(c);
+    let explain = explain_analyze_text(c, query);
+    assert!(
+        crate::report::plan_contains_h3_count_contract(&explain, contract),
+        "{query}: {explain}"
+    );
+    assert!(
+        kernel_executions(c) > before_explain,
+        "EXPLAIN must execute GPU path"
+    );
+    let hash_calls = |client: &mut Client| {
+        client
+            .query_one(
+                "SELECT calls FROM pg_accel_grouped_kernel_mode_stats() WHERE mode='parallel_hash'",
+                &[],
+            )
+            .expect("hash calls")
+            .get::<_, i64>(0)
+    };
+    let before = (kernel_executions(c), hash_calls(c));
+    let mut actual = execute_to_rows(c, query, 1_024);
+    let after = (kernel_executions(c), hash_calls(c));
+    actual.sort_unstable();
+    assert_eq!(
+        actual, native,
+        "normal conditional full tuple parity: {query}"
+    );
+    assert!(
+        after.0 > before.0 && after.1 > before.1,
+        "result-producing query must dispatch hash"
+    );
+    let settings = crate::runner::capture_typed_h3_settings(
+        c,
+        "measured",
+        0,
+        crate::bench_model::CacheState::Warm,
+    )
+    .expect("same execution backend settings");
+    let value = |name| {
+        settings
+            .settings
+            .settings
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+            .expect("captured default")
+    };
+    assert_eq!(
+        value("pg_accel.cost_multiplier")
+            .parse::<f64>()
+            .expect("cost")
+            .to_bits(),
+        1.0_f64.to_bits()
+    );
+    assert_eq!(value("pg_accel.min_batch_size"), "65536");
+    assert_eq!(value("pg_accel.enabled"), "on");
+    assert_eq!(value("pg_accel.gpu_enabled"), "on");
+    actual
+}
+
+#[cfg(feature = "integration_tests")]
+#[test]
+fn conditional_h3_count_all_types_star_and_predicate_alias_match_native() {
+    use crate::workloads::{H3CountContract, H3CountMeasure};
+    let _live_pg_guard = live_pg_test_lock();
+    let mut c = connect();
+    let rows = usize::try_from(qualifying_device_rows(
+        &mut c,
+        "gpu_h3_group_min_rows",
+        1_000_017,
+    ))
+    .expect("device rows fit usize");
+    let fixture = crate::workloads::H3ParentFilteredCount::<23, 0>;
+    for &(sql_type, type_oid, expression) in H3_COUNT_VALUE_TYPES {
+        c.batch_execute("SET pg_accel.enabled=off")
+            .expect("native setup");
+        apply_setup(&mut c, &fixture, rows);
+        c.batch_execute(&format!(
+            "ALTER TABLE bench_h3_count_filter ALTER COLUMN value TYPE {sql_type} \
+             USING CASE WHEN value IS NULL THEN NULL::{sql_type} ELSE {expression} END; \
+             ALTER TABLE bench_h3_count_filter ADD COLUMN other_qualifies boolean; \
+             UPDATE bench_h3_count_filter SET other_qualifies=NOT qualifies; \
+             ANALYZE bench_h3_count_filter"
+        ))
+        .expect("typed conditional fixture");
+        for resolution in [0, 1] {
+            let mut measures = vec![("value", H3CountMeasure::Column { type_oid, attno: 2 })];
+            if type_oid == 23 {
+                measures.push(("*", H3CountMeasure::Star));
+            }
+            for (input, measure) in measures {
+                let query = format!(
+                    "SELECT public.h3_cell_to_parent(cell,{resolution}) AS parent_cell, count({input}) FILTER (WHERE qualifies) AS n FROM bench_h3_count_filter GROUP BY 1"
+                );
+                let actual = assert_conditional_h3_query(
+                    &mut c,
+                    &query,
+                    H3CountContract {
+                        measure,
+                        resolution,
+                        predicate_attno: Some(3),
+                    },
+                );
+                assert!(
+                    actual.iter().any(|row| row.ends_with("|0")),
+                    "FILTER must retain zero groups"
+                );
+            }
+        }
+        if type_oid == 16 {
+            // Alias value/predicate input and change only the predicate identity,
+            // then return to the original query. Neither type nor rows change.
+            for (predicate, attno) in [("qualifies", 3), ("other_qualifies", 4), ("qualifies", 3)] {
+                let query = format!(
+                    "SELECT public.h3_cell_to_parent(cell,1) AS parent_cell, count(qualifies) FILTER (WHERE {predicate}) AS n FROM bench_h3_count_filter GROUP BY 1"
+                );
+                assert_conditional_h3_query(
+                    &mut c,
+                    &query,
+                    H3CountContract {
+                        measure: H3CountMeasure::Column {
+                            type_oid: 16,
+                            attno: 3,
+                        },
+                        resolution: 1,
+                        predicate_attno: Some(attno),
+                    },
+                );
+            }
+            c.batch_execute("UPDATE bench_h3_count_filter SET qualifies=NOT qualifies")
+                .expect("predicate-only invalidation");
+            assert_conditional_h3_query(
+                &mut c,
+                "SELECT public.h3_cell_to_parent(cell,1) AS parent_cell, count(value) FILTER (WHERE qualifies) AS n FROM bench_h3_count_filter GROUP BY 1",
+                H3CountContract {
+                    measure: H3CountMeasure::Column {
+                        type_oid: 16,
+                        attno: 2,
+                    },
+                    resolution: 1,
+                    predicate_attno: Some(3),
+                },
             );
         }
         apply_cleanup(&mut c, &fixture);
@@ -826,13 +1269,14 @@ fn h3_explain_row_cap_is_reserved_for_explain_output() {
         .filter(|line| line.contains(&marker))
         .collect::<Vec<_>>();
 
-    assert_eq!(uses.len(), 2, "H3 EXPLAIN cap escaped into result evidence");
+    assert_eq!(uses.len(), 3, "H3 EXPLAIN cap escaped into result evidence");
     assert!(uses[0].trim_start().starts_with("const "));
-    assert!(
-        uses[1].contains("execute_to_rows(c, &explain"),
-        "H3 EXPLAIN cap may only bound EXPLAIN output: {}",
-        uses[1]
-    );
+    for usage in &uses[1..] {
+        assert!(
+            usage.contains("execute_to_rows(c, &explain"),
+            "H3 EXPLAIN cap may only bound EXPLAIN output: {usage}"
+        );
+    }
 }
 
 #[test]
@@ -887,10 +1331,11 @@ fn h3_high_resolution_grouped_shape_declines_and_matches_native() {
 }
 
 /// The exact resolution-zero parent/count shape dispatches through the resident
-/// descriptor, while res4/res5 capacity and expression impostors remain native.
+/// descriptor. Higher resolutions use adaptive capacity under ordinary cost and
+/// budget admission; expression impostors remain native.
 #[cfg(feature = "integration_tests")]
 #[test]
-fn h3_cell_to_parent_res0_dispatches_and_res4_res5_capacity_decline() {
+fn h3_cell_to_parent_res0_dispatches_and_res4_res5_use_adaptive_capacity() {
     let _live_pg_guard = live_pg_test_lock();
     assert_h3_parent_resident_selection_and_declines(H3_PARENT_RESIDENT_DISPATCH_ROWS);
 }

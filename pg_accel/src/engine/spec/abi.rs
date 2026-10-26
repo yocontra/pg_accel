@@ -36,6 +36,25 @@ pub const PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID: i32 = 1;
 pub const PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW: i32 = 2;
 pub const PGACCEL_GROUPED_AGG_DEVICE_ERROR_DIVISION_BY_ZERO: i32 = 3;
 pub const PGACCEL_GROUPED_AGG_DEVICE_ERROR_DATE_OUT_OF_RANGE: i32 = 4;
+pub const PGACCEL_GROUPED_AGG_DEVICE_ERROR_HASH_CAPACITY: i32 = 5;
+pub const PGACCEL_GROUPED_AGG_DEVICE_ERROR_H3_RESOLUTION: i32 = 6;
+pub const PGACCEL_HASH_COUNT_PARTITION_VERSION: u32 = 1;
+pub const PGACCEL_HASH_COUNT_PARTITION_ALL: u32 = 0;
+pub const PGACCEL_HASH_COUNT_PARTITION_NONNULL_PREFIX: u32 = 1;
+pub const PGACCEL_HASH_COUNT_PARTITION_NULL_ONLY: u32 = 2;
+
+/// Independently versioned, pointer-free hash COUNT routing control.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PgaccelHashCountPartitionV1 {
+    pub version: u32,
+    pub struct_size: u32,
+    pub flags: u32,
+    pub kind: u32,
+    pub prefix_bits: u32,
+    pub reserved: u32,
+    pub prefix: u64,
+}
 
 pub const PGACCEL_GROUPED_AGG_MEASURE_COLUMN: i32 = 0;
 pub const PGACCEL_GROUPED_AGG_MEASURE_MUL: i32 = 1;
@@ -487,6 +506,16 @@ mod tests {
 
     #[test]
     fn grouped_agg_discriminants_match_c_header() {
+        assert_eq!(size_of::<PgaccelHashCountPartitionV1>(), 32);
+        assert_eq!(std::mem::align_of::<PgaccelHashCountPartitionV1>(), 8);
+        assert_eq!(offset_of!(PgaccelHashCountPartitionV1, version), 0);
+        assert_eq!(offset_of!(PgaccelHashCountPartitionV1, struct_size), 4);
+        assert_eq!(offset_of!(PgaccelHashCountPartitionV1, flags), 8);
+        assert_eq!(offset_of!(PgaccelHashCountPartitionV1, kind), 12);
+        assert_eq!(offset_of!(PgaccelHashCountPartitionV1, prefix_bits), 16);
+        assert_eq!(offset_of!(PgaccelHashCountPartitionV1, reserved), 20);
+        assert_eq!(offset_of!(PgaccelHashCountPartitionV1, prefix), 24);
+        assert_eq!(PGACCEL_GROUPED_AGG_DEVICE_ERROR_HASH_CAPACITY, 5);
         assert_eq!(PGACCEL_OLAP_ABI_VERSION, 1);
         assert_eq!(PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR, 4);
         assert_eq!(PGACCEL_GROUPED_AGG_MEASURE_ADD, 5);

@@ -240,22 +240,51 @@ struct AccelCounters {
     stock: i64,
 }
 
-#[cfg(feature = "integration_tests")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "integration_tests", derive(Serialize))]
 struct LocalStatus {
     rows: i64,
     raw_bytes: i64,
     derived_bytes: i64,
+    workspace_idle_bytes: i64,
+    output_idle_bytes: i64,
     all_pinned: bool,
 }
 
-#[cfg(feature = "integration_tests")]
 impl LocalStatus {
     fn total_bytes(self) -> Result<i64, String> {
-        self.raw_bytes
-            .checked_add(self.derived_bytes)
-            .ok_or_else(|| "backend-local resident byte total overflow".to_owned())
+        checked_backend_owned_bytes(
+            self.raw_bytes,
+            self.derived_bytes,
+            self.workspace_idle_bytes,
+            self.output_idle_bytes,
+        )
     }
+}
+
+/// Current ownership only: pool counters are retained bytes, never cumulative
+/// allocation metrics. Relation fingerprints deliberately remain raw+derived.
+pub fn checked_backend_owned_bytes(
+    raw: i64,
+    derived: i64,
+    workspace_idle: i64,
+    output_idle: i64,
+) -> Result<i64, String> {
+    [
+        ("raw", raw),
+        ("derived", derived),
+        ("workspace_idle", workspace_idle),
+        ("output_idle", output_idle),
+    ]
+    .into_iter()
+    .try_fold(0_i64, |total, (name, bytes)| {
+        if bytes < 0 {
+            return Err(format!("negative backend-owned {name} bytes: {bytes}"));
+        }
+        total
+            .checked_add(bytes)
+            .ok_or_else(|| format!("backend-owned byte total overflow at {name}"))
+    })
 }
 
 #[cfg(feature = "integration_tests")]
@@ -381,6 +410,8 @@ struct WorkerSnapshot {
     pid: i32,
     raw_bytes: i64,
     derived_bytes: i64,
+    workspace_idle_bytes: i64,
+    output_idle_bytes: i64,
     local_bytes: i64,
     observed_cluster_bytes: i64,
     kernel_executions: i64,
@@ -1101,9 +1132,20 @@ fn open_client_with_application(
     if let Some(application_name) = application_name {
         config.application_name(application_name);
     }
-    config
+    let client = config
         .connect(NoTls)
-        .map_err(|error| format!("connect independent resident backend: {error}"))
+        .map_err(|error| format!("connect independent resident backend: {error}"))?;
+    #[cfg(test)]
+    let client = {
+        let mut client = client;
+        crate::integration_connection::register_live_pg_client(
+            &mut client,
+            connection,
+            crate::integration_connection::live_pg_scope()?,
+        )?;
+        client
+    };
+    Ok(client)
 }
 
 #[cfg(feature = "integration_tests")]
@@ -1112,6 +1154,8 @@ fn configure_accel_backend(
     slot: usize,
     budget_mib: i32,
 ) -> Result<(), String> {
+    #[cfg(test)]
+    crate::integration_connection::require_live_pg_ledger()?;
     client
         .batch_execute(&format!(
             "SET statement_timeout = '10min';
@@ -1594,12 +1638,14 @@ fn local_status(client: &mut Client) -> Result<LocalStatus, String> {
             "SELECT COUNT(*)::bigint,
                     COALESCE(SUM(raw_bytes), 0)::bigint,
                     COALESCE(SUM(derived_bytes), 0)::bigint,
-                    COALESCE(BOOL_AND(pinned), false)
+                    COALESCE(BOOL_AND(pinned), false),
+                    (SELECT retained_bytes FROM pg_accel_grouped_workspace_pool_stats()),
+                    (SELECT retained_bytes FROM pg_accel_grouped_output_pool_stats())
              FROM pg_accel_resident_status()",
             &[],
         )
         .map_err(|error| format!("read backend-local resident status: {error}"))?;
-    Ok(LocalStatus {
+    let status = LocalStatus {
         rows: row
             .try_get(0)
             .map_err(|error| format!("decode resident status row count: {error}"))?,
@@ -1612,7 +1658,15 @@ fn local_status(client: &mut Client) -> Result<LocalStatus, String> {
         all_pinned: row
             .try_get(3)
             .map_err(|error| format!("decode resident pin state: {error}"))?,
-    })
+        workspace_idle_bytes: row
+            .try_get(4)
+            .map_err(|error| format!("decode idle workspace bytes: {error}"))?,
+        output_idle_bytes: row
+            .try_get(5)
+            .map_err(|error| format!("decode idle output bytes: {error}"))?,
+    };
+    status.total_bytes()?;
+    Ok(status)
 }
 
 #[cfg(feature = "integration_tests")]
@@ -1795,12 +1849,18 @@ fn worker_snapshot(
              ingestion={ingestion:?}, lifecycle={artifact_lifecycle:?}"
         ));
     }
+    let local_bytes = status.total_bytes()?;
+    eprintln!(
+        "resident worker ownership slot={slot} pid={pid} status={status:?} total={local_bytes}"
+    );
     Ok(WorkerSnapshot {
         slot,
         pid,
         raw_bytes: status.raw_bytes,
         derived_bytes: status.derived_bytes,
-        local_bytes: status.total_bytes()?,
+        workspace_idle_bytes: status.workspace_idle_bytes,
+        output_idle_bytes: status.output_idle_bytes,
+        local_bytes,
         observed_cluster_bytes: cluster_bytes(client)?,
         kernel_executions: counters.kernels,
         queries_accelerated: counters.accelerated,
@@ -1884,18 +1944,41 @@ fn require_monitor_state(
 }
 
 #[cfg(feature = "integration_tests")]
+fn sql_literal(value: &str) -> String {
+    format!("E'{}'", value.replace('\\', "\\\\").replace('\'', "''"))
+}
+
+#[cfg(feature = "integration_tests")]
 fn active_pid_count(monitor: &mut Client, pids: &[i32]) -> Result<i64, String> {
     if pids.is_empty() {
         return Ok(0);
     }
-    let pid_list = pids
+    #[cfg(test)]
+    let pids = crate::integration_connection::owned_live_pg_identities(pids)?;
+    #[cfg(test)]
+    let predicate = pids
         .iter()
-        .map(i32::to_string)
+        .map(|identity| {
+            format!(
+                "(pid={} AND extract(epoch FROM backend_start)::text={} AND datname={})",
+                identity.pid,
+                sql_literal(&identity.started),
+                sql_literal(&identity.database),
+            )
+        })
         .collect::<Vec<_>>()
-        .join(",");
+        .join(" OR ");
+    #[cfg(not(test))]
+    let predicate = format!(
+        "pid IN ({})",
+        pids.iter()
+            .map(i32::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    );
     monitor
         .query_one(
-            &format!("SELECT COUNT(*)::bigint FROM pg_stat_activity WHERE pid IN ({pid_list})"),
+            &format!("SELECT COUNT(*)::bigint FROM pg_stat_activity WHERE {predicate}"),
             &[],
         )
         .map_err(|error| format!("read resident worker pg_stat_activity state: {error}"))?
@@ -1930,18 +2013,80 @@ fn signal_tagged_backends(monitor: &mut Client, terminate: bool) -> Result<(), S
     } else {
         "pg_cancel_backend"
     };
+    #[cfg(test)]
+    let ownership = {
+        let tagged = owned_tagged_backend_pids(monitor)?;
+        if tagged.is_empty() {
+            return Ok(());
+        }
+        // A colliding application-name prefix is not authorization to signal.
+        let owned = crate::integration_connection::owned_live_pg_identities(&tagged)?;
+        owned
+            .iter()
+            .map(|identity| {
+                format!(
+                    "(pid={} AND extract(epoch FROM backend_start)::text={} AND datname={})",
+                    identity.pid,
+                    sql_literal(&identity.started),
+                    sql_literal(&identity.database),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    };
+    #[cfg(not(test))]
+    let ownership = "false";
     monitor
         .query(
             &format!(
                 "SELECT {function}(pid)
                  FROM pg_stat_activity
                  WHERE strpos(application_name, $1) = 1
+                   AND ({ownership})
                    AND pid <> pg_backend_pid()"
             ),
             &[&APPLICATION_PREFIX],
         )
         .map_err(|error| format!("invoke {function} for resident test backends: {error}"))?;
     Ok(())
+}
+
+#[cfg(all(test, feature = "integration_tests"))]
+fn owned_tagged_backend_pids(monitor: &mut Client) -> Result<Vec<i32>, String> {
+    // One activity snapshot prevents an ordinary exit between separate PID and
+    // identity queries from being mistaken for an unowned session.
+    let rows = monitor
+        .query(
+            "SELECT pid, extract(epoch FROM backend_start)::text, datname
+         FROM pg_stat_activity WHERE strpos(application_name, $1)=1
+         AND pid<>pg_backend_pid()",
+            &[&APPLICATION_PREFIX],
+        )
+        .map_err(|error| format!("read exact tagged cleanup identities: {error}"))?;
+    let pids = rows
+        .iter()
+        .map(|row| {
+            row.try_get::<_, i32>(0)
+                .map_err(|error| format!("decode tagged PID: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let owned = crate::integration_connection::owned_live_pg_identities(&pids)?;
+    let mut matches = 0_i64;
+    for (row, identity) in rows.iter().zip(&owned) {
+        let started: Option<String> = row
+            .try_get(1)
+            .map_err(|error| format!("decode tagged start: {error}"))?;
+        let database: Option<String> = row
+            .try_get(2)
+            .map_err(|error| format!("decode tagged database: {error}"))?;
+        if started.as_deref() == Some(identity.started.as_str())
+            && database.as_deref() == Some(identity.database.as_str())
+        {
+            matches += 1;
+        }
+    }
+    validate_cleanup_ownership(pids.len(), matches)?;
+    Ok(pids)
 }
 
 #[cfg(feature = "integration_tests")]
@@ -1956,6 +2101,9 @@ fn wait_for_tagged_cleanup(
         if state.postmaster_started_at != postmaster_started_at || state.in_recovery {
             require_monitor_state(&state, postmaster_started_at, 0)?;
         }
+        #[cfg(test)]
+        let pids = owned_tagged_backend_pids(monitor)?;
+        #[cfg(not(test))]
         let pids = tagged_backend_pids(monitor)?;
         if pids.is_empty() && state.cluster_bytes == 0 {
             require_monitor_state(&state, postmaster_started_at, 0)?;
@@ -1966,6 +2114,24 @@ fn wait_for_tagged_cleanup(
         }
         thread::sleep(Duration::from_millis(25));
     }
+}
+
+#[cfg(any(test, feature = "integration_tests"))]
+fn validate_cleanup_ownership(tagged: usize, exact_owned: i64) -> Result<(), String> {
+    if i64::try_from(tagged).ok() != Some(exact_owned) {
+        return Err(format!(
+            "cleanup found unowned or reused tagged backend: tagged={tagged}, exact_owned={exact_owned}; refusing to wait or signal"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn tagged_cleanup_rejects_unowned_or_reused_identity_before_wait() {
+    assert!(validate_cleanup_ownership(0, 0).is_ok());
+    assert!(validate_cleanup_ownership(2, 2).is_ok());
+    assert!(validate_cleanup_ownership(2, 1).is_err());
+    assert!(validate_cleanup_ownership(1, 0).is_err());
 }
 
 #[cfg(feature = "integration_tests")]
@@ -1992,7 +2158,26 @@ fn cleanup_tagged_backends(
     ))
 }
 
-#[cfg(feature = "integration_tests")]
+#[cfg(all(test, feature = "integration_tests"))]
+fn wait_for_backend_exit(
+    monitor: &mut Client,
+    postmaster_started_at: &str,
+    exited_pids: &[i32],
+    expected_cluster_bytes: i64,
+) -> Result<(), String> {
+    crate::integration_connection::wait_for_owned_live_pg_exit(
+        exited_pids,
+        expected_cluster_bytes,
+        "resident concurrency phase exit",
+    )?;
+    require_monitor_state(
+        &monitor_state(monitor)?,
+        postmaster_started_at,
+        expected_cluster_bytes,
+    )
+}
+
+#[cfg(all(not(test), feature = "integration_tests"))]
 fn wait_for_backend_exit(
     monitor: &mut Client,
     postmaster_started_at: &str,
@@ -2264,17 +2449,30 @@ fn validate_worker_snapshots(
     for snapshot in snapshots {
         if snapshot.raw_bytes != calibration.raw_bytes
             || snapshot.derived_bytes != calibration.derived_bytes
+            || snapshot.workspace_idle_bytes != calibration.workspace_idle_bytes
+            || snapshot.output_idle_bytes != calibration.output_idle_bytes
             || snapshot.local_bytes != calibration.local_bytes
+            || snapshot.local_bytes
+                != checked_backend_owned_bytes(
+                    snapshot.raw_bytes,
+                    snapshot.derived_bytes,
+                    snapshot.workspace_idle_bytes,
+                    snapshot.output_idle_bytes,
+                )?
         {
             return Err(format!(
-                "worker {} PID {} owns raw/derived/total {}/{}/{}, calibrated {}/{}/{}",
+                "worker {} PID {} owns raw/derived/workspace_idle/output_idle/total {}/{}/{}/{}/{}, calibrated {}/{}/{}/{}/{}",
                 snapshot.slot,
                 snapshot.pid,
                 snapshot.raw_bytes,
                 snapshot.derived_bytes,
+                snapshot.workspace_idle_bytes,
+                snapshot.output_idle_bytes,
                 snapshot.local_bytes,
                 calibration.raw_bytes,
                 calibration.derived_bytes,
+                calibration.workspace_idle_bytes,
+                calibration.output_idle_bytes,
                 calibration.local_bytes
             ));
         }
@@ -2426,7 +2624,12 @@ fn reject_ninth_backend(
         ));
     }
     let status = local_status(&mut ninth)?;
-    if status.rows != 0 || status.raw_bytes != 0 || status.derived_bytes != 0 {
+    if status.rows != 0
+        || status.raw_bytes != 0
+        || status.derived_bytes != 0
+        || status.workspace_idle_bytes != 0
+        || status.output_idle_bytes != 0
+    {
         return Err(format!(
             "budget-rejected ninth backend retained local residency: {status:?}"
         ));
@@ -2498,6 +2701,10 @@ fn run_concurrency_proof(
              SELECT 1 FROM pg_accel_stats() LIMIT 1;",
         )
         .map_err(|error| format!("configure GPU-idle concurrency monitor: {error}"))?;
+    #[cfg(test)]
+    crate::integration_connection::activate_live_pg_ledger(
+        crate::integration_connection::live_pg_scope()?,
+    )?;
     let initial = monitor_state(monitor)?;
     if initial.in_recovery {
         return Err("PostgreSQL is already in recovery before concurrency proof".to_owned());
@@ -2962,6 +3169,10 @@ fn run_user_cancel_proof(
              SELECT 1 FROM pg_accel_stats() LIMIT 1;",
         )
         .map_err(|error| format!("configure GPU-idle cancellation monitor: {error}"))?;
+    #[cfg(test)]
+    crate::integration_connection::activate_live_pg_ledger(
+        crate::integration_connection::live_pg_scope()?,
+    )?;
     let initial = monitor_state(monitor)?;
     require_monitor_state(&initial, &initial.postmaster_started_at, 0)?;
     let stale_pids = tagged_backend_pids(monitor)?;
@@ -3327,6 +3538,76 @@ fn resident_eight_backend_grouped_soak_enforces_budget_and_ownership() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ownership_snapshot_includes_idle_pools_without_changing_relation_bytes() {
+        let loaded = LocalStatus {
+            rows: 1,
+            raw_bytes: 10,
+            derived_bytes: 20,
+            workspace_idle_bytes: 30,
+            output_idle_bytes: 40,
+            all_pinned: true,
+        };
+        assert_eq!(loaded.total_bytes(), Ok(100));
+        assert_eq!((loaded.raw_bytes, loaded.derived_bytes), (10, 20));
+        assert_eq!((loaded.rows, loaded.all_pinned), (1, true));
+        let evicted = LocalStatus {
+            raw_bytes: 0,
+            derived_bytes: 0,
+            ..loaded
+        };
+        assert_eq!(
+            evicted.total_bytes(),
+            Ok(70),
+            "eviction need not reclaim idle pools"
+        );
+        let rejected = LocalStatus {
+            rows: 0,
+            workspace_idle_bytes: 0,
+            output_idle_bytes: 0,
+            all_pinned: false,
+            ..evicted
+        };
+        assert_eq!(rejected.total_bytes(), Ok(0));
+    }
+
+    #[test]
+    fn ownership_sum_rejects_each_negative_component_and_overflow() {
+        for position in 0..4 {
+            let mut bytes = [0_i64; 4];
+            bytes[position] = -1;
+            assert!(checked_backend_owned_bytes(bytes[0], bytes[1], bytes[2], bytes[3]).is_err());
+        }
+        assert_eq!(checked_backend_owned_bytes(i64::MAX, 0, 0, 0), Ok(i64::MAX));
+        assert!(checked_backend_owned_bytes(i64::MAX, 1, 0, 0).is_err());
+        assert!(checked_backend_owned_bytes(0, i64::MAX, 1, 0).is_err());
+        assert!(checked_backend_owned_bytes(0, 0, i64::MAX, 1).is_err());
+    }
+
+    #[test]
+    fn ownership_calibration_budget_and_release_include_idle_pools() {
+        let raw = 2 * MIB;
+        let relation = 3 * MIB + 17;
+        let idle = 11_456_u64;
+        let owned = checked_backend_owned_bytes(
+            i64::try_from(raw).expect("raw"),
+            i64::try_from(relation - raw).expect("derived"),
+            8_000,
+            3_456,
+        )
+        .expect("synthetic snapshot");
+        let owned = u64::try_from(owned).expect("nonnegative ownership");
+        assert_eq!(owned, relation + idle);
+        let budget = exact_backend_budget(0, owned, raw, 8).expect("complete ownership budget");
+        assert_eq!(budget.required_bytes, 8 * (relation + idle));
+        assert!(
+            budget.spare_bytes < raw,
+            "ninth raw-only admission must still fail"
+        );
+        assert_eq!(budget.required_bytes.checked_sub(owned), Some(7 * owned));
+        assert_eq!(owned.checked_sub(owned), Some(0));
+    }
 
     #[test]
     fn exact_budget_admits_eight_complete_backends_but_not_ninth_raw_copy() {

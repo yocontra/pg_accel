@@ -18,6 +18,694 @@ mod tests {
     use pgrx::prelude::*;
 
     #[pg_test]
+    fn pg_normal_h3_adaptive_real_device_cap_plus_one_matches_native() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS h3; RESET pg_accel.cost_multiplier; RESET pg_accel.min_batch_size; SET pg_accel.enabled=on; SET statement_timeout='15min'; SET temp_file_limit='4GB'; SET max_parallel_workers_per_gather=2").expect("qualification fixture invariant");
+        // SAFETY: live backend main thread, using the same PostgreSQL timeout
+        // entrypoint as existing cancellation regressions. Arm the outer test
+        // statement too: SET inside SPI alone cannot start its original timer.
+        unsafe { super::super::enable_timeout_after(3, 900_000) };
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT gpu_available FROM pg_accel_device_info()")
+                .expect("qualification fixture invariant"),
+            Some(true)
+        );
+        let cap = crate::engine::cost::device_limits().gpu_h3_max_groups;
+        let nonnull = cap.checked_add(1).expect("qualification fixture invariant");
+        assert!(nonnull < u32::MAX as usize);
+        let input_rows =
+            (nonnull + 1).max(crate::engine::cost::device_limits().gpu_h3_group_min_rows + 1);
+        pgrx::notice!("adaptive real H3 cap={cap}, nonnull groups={nonnull}, plus one NULL group");
+        Spi::run("CREATE TEMP TABLE adaptive_real_cap(cell h3index)")
+            .expect("qualification fixture invariant");
+        let relid = Spi::get_one::<pg_sys::Oid>("SELECT 'adaptive_real_cap'::regclass::oid")
+            .expect("qualification fixture invariant")
+            .expect("qualification fixture invariant");
+        let type_oid = Spi::get_one::<pg_sys::Oid>("SELECT atttypid FROM pg_attribute WHERE attrelid='adaptive_real_cap'::regclass AND attnum=1").expect("qualification fixture invariant").expect("qualification fixture invariant");
+        let cell = ColumnRef {
+            relation_oid: relid.into(),
+            attno: 1,
+            type_oid: type_oid.into(),
+        };
+        let spec = AggQuerySpec {
+            fact_rel: relid.into(),
+            group_keys: vec![GroupKeyRef {
+                source: GroupKeySource::H3CellToParent {
+                    cell,
+                    resolution: 0,
+                },
+                type_oid: cell.type_oid,
+                collation_oid: 0,
+                encoding: GroupKeyEncoding::Hash,
+            }],
+            measures: vec![MeasureSpec {
+                expression: MeasureExpr::CountStar,
+                filter: FilterSpec::None,
+                outputs: vec![AggregateOutput {
+                    source: AggregateSource::Value,
+                    kind: AggregateKind::Count,
+                }],
+            }],
+            star_dims: vec![],
+            fact_filter: FilterSpec::None,
+            having: None,
+        };
+        for capacity in [123.min(cap), cap] {
+            for fused in [false, true] {
+                let quote = super::super::h3_count_memory_requirements(
+                    &spec,
+                    &[1],
+                    input_rows,
+                    capacity,
+                    fused,
+                )
+                .expect("qualification fixture invariant");
+                pgrx::notice!(
+                    "adaptive cap preflight capacity={capacity} fused={fused} workspace={} output={} total={} resident_budget={}",
+                    quote.workspace_bytes,
+                    quote.output_bytes,
+                    quote.total_bytes,
+                    crate::engine::gucs::resident_memory_budget_bytes()
+                );
+            }
+        }
+        // All resolution bits stay zero. High-bit distribution avoids a long
+        // shared-prefix artifact without changing the exact capacity crossing.
+        Spi::run(&format!("INSERT INTO adaptive_real_cap SELECT to_hex(((i%256)<<56)|(i/256))::h3index \
+            FROM (SELECT row%{nonnull} i FROM generate_series(0,{}::bigint)s(row))keys; INSERT INTO adaptive_real_cap VALUES(NULL); \
+            ANALYZE adaptive_real_cap; SELECT pg_accel_pin('adaptive_real_cap',ARRAY['cell'])", input_rows-2)).expect("qualification fixture invariant");
+        let query =
+            "SELECT h3_cell_to_parent(cell,0) k,count(*) n FROM adaptive_real_cap GROUP BY 1";
+        Spi::run("SET pg_accel.enabled=off").expect("qualification fixture invariant");
+        let before = crate::gpu::gpu_exec_count();
+        Spi::run(&format!(
+            "CREATE TEMP TABLE adaptive_real_expected AS {query}"
+        ))
+        .expect("qualification fixture invariant");
+        assert_eq!(crate::gpu::gpu_exec_count(), before);
+        Spi::run("SET pg_accel.enabled=on; SET work_mem='64kB'")
+            .expect("qualification fixture invariant");
+        let before = crate::gpu::gpu_exec_count();
+        let explain = Spi::connect(|client| {
+            client.select(&format!("EXPLAIN (ANALYZE,VERBOSE,COSTS OFF) CREATE TEMP TABLE adaptive_real_actual AS {query}"), None, &[]).expect("qualification fixture invariant")
+            .map(|row| row.get::<String>(1).expect("qualification fixture invariant").expect("qualification fixture invariant")).collect::<Vec<_>>().join("\n")
+        });
+        for required in [
+            "Custom Scan (GpuAccelAgg)",
+            "GPU Dispatched Physical Kernel Mode: parallel_hash",
+            "GPU Lifecycle Calls Verified: true",
+            "GPU Adaptive Final Tuples Spilled: true",
+        ] {
+            assert!(explain.contains(required), "missing {required}: {explain}");
+        }
+        let leaves = explain
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("GPU Adaptive Completed Leaves:"))
+            .expect("qualification fixture invariant")
+            .trim()
+            .parse::<u64>()
+            .expect("qualification fixture invariant");
+        assert!(
+            leaves > 1,
+            "real cap crossing must partition, not only grow: {explain}"
+        );
+        assert!(crate::gpu::gpu_exec_count() > before);
+        // Disk-backed PostgreSQL comparison, not an unbounded Rust map/JSON.
+        Spi::run("SET pg_accel.enabled=off; RESET work_mem")
+            .expect("qualification fixture invariant");
+        assert_eq!(Spi::get_one::<i64>("SELECT count(*) FROM ((TABLE adaptive_real_expected EXCEPT ALL TABLE adaptive_real_actual) UNION ALL (TABLE adaptive_real_actual EXCEPT ALL TABLE adaptive_real_expected))differences").expect("qualification fixture invariant"), Some(0));
+        assert_eq!(
+            Spi::get_one::<i64>("SELECT count(*) FROM adaptive_real_actual")
+                .expect("qualification fixture invariant"),
+            Some((nonnull + 1) as i64)
+        );
+        Spi::run("SET pg_accel.enabled=on; SELECT pg_accel_unpin('adaptive_real_cap'); DROP TABLE adaptive_real_actual,adaptive_real_expected,adaptive_real_cap; RESET statement_timeout; RESET temp_file_limit; RESET max_parallel_workers_per_gather").expect("qualification fixture invariant");
+    }
+
+    #[pg_test]
+    fn pg_normal_h3_adaptive_forced_cap_partitions_exact_keys() {
+        struct RestoreCap(Option<usize>);
+        impl Drop for RestoreCap {
+            fn drop(&mut self) {
+                super::super::set_adaptive_hash_test_cap(self.0);
+            }
+        }
+        let _restore = RestoreCap(super::super::set_adaptive_hash_test_cap(Some(3)));
+        Spi::run("CREATE EXTENSION IF NOT EXISTS h3; RESET pg_accel.cost_multiplier; RESET pg_accel.min_batch_size; SET pg_accel.enabled=on; SET work_mem='4MB'").expect("qualification fixture invariant");
+        let rows =
+            1_000_017_usize.max(crate::engine::cost::device_limits().gpu_h3_group_min_rows + 1);
+        Spi::run(&format!("CREATE TEMP TABLE adaptive_partition(cell h3index,v integer,p boolean); \
+            INSERT INTO adaptive_partition SELECT CASE WHEN i%31=0 THEN NULL ELSE to_hex((i%17)<<59)::h3index END, \
+            CASE WHEN i%7=0 THEN NULL ELSE i END,CASE WHEN i%11=0 THEN NULL ELSE i%17%3<>0 END \
+            FROM generate_series(1,{rows}::bigint)s(i); ANALYZE adaptive_partition; \
+            SELECT pg_accel_pin('adaptive_partition',ARRAY['cell','v','p'])")).expect("qualification fixture invariant");
+        for aggregate in ["count(*)", "count(v) FILTER (WHERE p)"] {
+            let query = format!(
+                "SELECT h3_cell_to_parent(cell,0) k,{aggregate} n FROM adaptive_partition GROUP BY 1"
+            );
+            let result = || {
+                Spi::get_one::<String>(&format!(
+                    "SELECT json_agg(r ORDER BY k NULLS FIRST)::text FROM ({query})r"
+                ))
+                .expect("qualification fixture invariant")
+                .expect("qualification fixture invariant")
+            };
+            Spi::run("SET pg_accel.enabled=off").expect("qualification fixture invariant");
+            let expected = result();
+            Spi::run("SET pg_accel.enabled=on").expect("qualification fixture invariant");
+            let before = crate::gpu::gpu_exec_count();
+            let explain = Spi::connect(|client| {
+                client
+                    .select(
+                        &format!("EXPLAIN (ANALYZE,VERBOSE,COSTS OFF) {query}"),
+                        None,
+                        &[],
+                    )
+                    .expect("qualification fixture invariant")
+                    .map(|row| {
+                        row.get::<String>(1)
+                            .expect("qualification fixture invariant")
+                            .expect("qualification fixture invariant")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            });
+            for required in [
+                "Custom Scan (GpuAccelAgg)",
+                "GPU Dispatched Physical Kernel Mode: parallel_hash",
+                "GPU Lifecycle Calls Verified: true",
+            ] {
+                assert!(explain.contains(required), "missing {required}: {explain}");
+            }
+            let field = |name: &str| {
+                explain
+                    .lines()
+                    .find_map(|line| line.trim().strip_prefix(name))
+                    .expect("qualification fixture invariant")
+                    .trim()
+                    .parse::<u64>()
+                    .expect("qualification fixture invariant")
+            };
+            assert!(field("GPU Adaptive Completed Leaves:") > 1, "{explain}");
+            assert!(
+                field("GPU Adaptive Attempted Scan Rows:") > rows as u64,
+                "{explain}"
+            );
+            assert_eq!(field("GPU Adaptive Unique Input Rows:"), rows as u64);
+            assert!(
+                explain.contains("GPU Adaptive Final Tuples Spilled: false"),
+                "in-memory spool: {explain}"
+            );
+            assert!(crate::gpu::gpu_exec_count() > before);
+            assert_eq!(result(), expected);
+        }
+        Spi::run("SELECT pg_accel_unpin('adaptive_partition'); DROP TABLE adaptive_partition; RESET work_mem")
+            .expect("qualification fixture invariant");
+    }
+
+    #[pg_test]
+    fn pg_normal_h3_adaptive_noncanonical_growth_spill_matches_native() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS h3; RESET pg_accel.cost_multiplier; RESET pg_accel.min_batch_size; SET pg_accel.enabled=on; SET work_mem='64kB'")
+            .expect("adaptive setup");
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT gpu_available FROM pg_accel_device_info()")
+                .expect("qualification fixture invariant"),
+            Some(true)
+        );
+        let rows =
+            1_000_017_usize.max(crate::engine::cost::device_limits().gpu_h3_group_min_rows + 1);
+        Spi::run(&format!("CREATE TEMP TABLE adaptive_h3(cell h3index,v integer,p boolean,q boolean); \
+            INSERT INTO adaptive_h3 SELECT CASE WHEN i%31=0 THEN NULL ELSE to_hex(i%4097)::h3index END, \
+            CASE WHEN i%7=0 THEN NULL ELSE i END,CASE WHEN i%11=0 THEN NULL ELSE i%4097%3<>0 END,i%4097%3=0 \
+            FROM generate_series(1,{rows})s(i); ANALYZE adaptive_h3; \
+            SELECT pg_accel_pin('adaptive_h3',ARRAY['cell','v','p','q'])")).expect("adaptive fixture");
+        for (measure, filter) in [
+            ("*", ""),
+            ("v", " FILTER (WHERE p)"),
+            ("p", " FILTER (WHERE p)"),
+            ("p", " FILTER (WHERE q)"),
+        ] {
+            let query = format!(
+                "SELECT h3_cell_to_parent(cell,0) k,count({measure}){filter} n FROM adaptive_h3 GROUP BY 1"
+            );
+            let result = || {
+                Spi::get_one::<String>(&format!(
+                    "SELECT json_agg(r ORDER BY k NULLS FIRST)::text FROM ({query})r"
+                ))
+                .expect("qualification fixture invariant")
+                .expect("qualification fixture invariant")
+            };
+            Spi::run("SET pg_accel.enabled=off").expect("qualification fixture invariant");
+            let expected = result();
+            Spi::run("SET pg_accel.enabled=on").expect("qualification fixture invariant");
+            let before = crate::gpu::gpu_exec_count();
+            let explain = Spi::connect(|client| {
+                client
+                    .select(
+                        &format!("EXPLAIN (ANALYZE,VERBOSE,COSTS OFF) {query}"),
+                        None,
+                        &[],
+                    )
+                    .expect("qualification fixture invariant")
+                    .map(|row| {
+                        row.get::<String>(1)
+                            .expect("qualification fixture invariant")
+                            .expect("qualification fixture invariant")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            });
+            for required in [
+                "Custom Scan (GpuAccelAgg)",
+                "GPU Dispatched Physical Kernel Mode: parallel_hash",
+                "GPU Lifecycle Calls Verified: true",
+                "GPU Adaptive Final Tuples Spilled: true",
+            ] {
+                assert!(explain.contains(required), "missing {required}: {explain}");
+            }
+            assert!(crate::gpu::gpu_exec_count() > before);
+            let before = crate::gpu::gpu_exec_count();
+            assert_eq!(result(), expected, "{measure}{filter}");
+            assert!(crate::gpu::gpu_exec_count() > before);
+            // ORDER/LIMIT consumes only a prefix, but the executor must already
+            // have validated and spooled every leaf before returning that prefix.
+            let limited =
+                format!("SELECT json_agg(r)::text FROM ({query} ORDER BY 1 NULLS FIRST LIMIT 3)r");
+            let actual = Spi::get_one::<String>(&limited).expect("qualification fixture invariant");
+            Spi::run("SET pg_accel.enabled=off").expect("qualification fixture invariant");
+            assert_eq!(
+                actual,
+                Spi::get_one::<String>(&limited).expect("qualification fixture invariant")
+            );
+            Spi::run("SET pg_accel.enabled=on").expect("qualification fixture invariant");
+        }
+        Spi::run("SELECT pg_accel_unpin('adaptive_h3'); DROP TABLE adaptive_h3; RESET work_mem")
+            .expect("qualification fixture invariant");
+    }
+
+    #[pg_test]
+    fn pg_normal_h3_adaptive_prepared_mutation_and_rollback() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS h3; RESET pg_accel.cost_multiplier; RESET pg_accel.min_batch_size; SET pg_accel.enabled=on; SET pg_accel.auto_load=on; SET plan_cache_mode=force_generic_plan").expect("qualification fixture invariant");
+        let rows =
+            1_000_017_usize.max(crate::engine::cost::device_limits().gpu_h3_group_min_rows + 1);
+        Spi::run(&format!("CREATE TEMP TABLE adaptive_prepared(i bigint,cell h3index,v integer,p boolean); \
+            INSERT INTO adaptive_prepared SELECT i,'8928308280fffff'::h3index,CASE WHEN i%7=0 THEN NULL ELSE 1 END, \
+            CASE WHEN i%11=0 THEN NULL ELSE i%3<>0 END FROM generate_series(1,{rows})s(i); ANALYZE adaptive_prepared")).expect("qualification fixture invariant");
+        let query = "SELECT h3_cell_to_parent(cell,0) k,count(v) FILTER (WHERE p) n FROM adaptive_prepared GROUP BY 1";
+        Spi::run(&format!("PREPARE adaptive_retained AS {query}"))
+            .expect("qualification fixture invariant");
+        let parity = |expect_gpu: bool| {
+            Spi::run("SET pg_accel.enabled=off").expect("qualification fixture invariant");
+            let expected = Spi::get_one::<String>(&format!(
+                "SELECT json_agg(r ORDER BY k NULLS FIRST)::text FROM ({query})r"
+            ))
+            .expect("qualification fixture invariant");
+            Spi::run("SET pg_accel.enabled=on").expect("qualification fixture invariant");
+            let before = crate::gpu::gpu_exec_count();
+            Spi::run("CREATE TEMP TABLE adaptive_prepared_actual AS EXECUTE adaptive_retained")
+                .expect("qualification fixture invariant");
+            if expect_gpu {
+                assert!(
+                    crate::gpu::gpu_exec_count() > before,
+                    "retained normal plan must dispatch"
+                );
+            }
+            let actual = Spi::get_one::<String>(
+                "SELECT json_agg(r ORDER BY k NULLS FIRST)::text FROM adaptive_prepared_actual r",
+            )
+            .expect("qualification fixture invariant");
+            assert_eq!(actual, expected);
+            Spi::run("DROP TABLE adaptive_prepared_actual")
+                .expect("qualification fixture invariant");
+        };
+        // No pin: the first retained normal plan must exercise cold auto-load.
+        parity(true);
+        for mutation in [
+            "UPDATE adaptive_prepared SET cell=CASE WHEN i%31=0 THEN NULL ELSE to_hex(i%4097)::h3index END",
+            "UPDATE adaptive_prepared SET cell=to_hex((1::bigint<<52)|(i%4097))::h3index",
+            "UPDATE adaptive_prepared SET cell='8928308280fffff'::h3index",
+        ] {
+            Spi::run(mutation).expect("qualification fixture invariant");
+            parity(true);
+        }
+        rolled_back(|| {
+            Spi::run("UPDATE adaptive_prepared SET cell=to_hex(i%4097)::h3index,p=NULL")
+                .expect("qualification fixture invariant");
+            parity(true);
+        });
+        parity(true);
+        rolled_back(|| {
+            Spi::run("TRUNCATE adaptive_prepared").expect("qualification fixture invariant");
+            parity(false);
+        });
+        parity(true);
+        Spi::run("DEALLOCATE adaptive_retained; DROP TABLE adaptive_prepared; RESET plan_cache_mode; RESET pg_accel.auto_load").expect("qualification fixture invariant");
+    }
+
+    #[pg_test]
+    fn pg_normal_h3_adaptive_spill_error_and_semantic_error_cleanup() {
+        use super::super::super::execute::set_test_cancel_after_adaptive_retry;
+        use super::super::super::spool::{TestSpoolFailure, set_test_spool_failure};
+        struct RestoreCap(Option<usize>);
+        impl Drop for RestoreCap {
+            fn drop(&mut self) {
+                super::super::set_adaptive_hash_test_cap(self.0);
+            }
+        }
+        struct RestoreHooks;
+        impl Drop for RestoreHooks {
+            fn drop(&mut self) {
+                set_test_spool_failure(None);
+                set_test_cancel_after_adaptive_retry(None);
+            }
+        }
+        let _hooks = RestoreHooks;
+        let _restore = RestoreCap(super::super::set_adaptive_hash_test_cap(Some(4096)));
+        Spi::run("CREATE EXTENSION IF NOT EXISTS h3; RESET pg_accel.cost_multiplier; RESET pg_accel.min_batch_size; SET pg_accel.enabled=on; SET work_mem='64kB'; \
+            CREATE FUNCTION pg_temp.adaptive_error(sql text) RETURNS text LANGUAGE plpgsql AS $$ BEGIN EXECUTE sql; RETURN '00000'; EXCEPTION WHEN OTHERS THEN RETURN SQLSTATE; END $$; \
+            CREATE FUNCTION pg_temp.adaptive_error_detail(sql text) RETURNS text LANGUAGE plpgsql AS $$ BEGIN EXECUTE sql; RETURN '00000'; EXCEPTION WHEN query_canceled THEN RETURN SQLSTATE||'|'||SQLERRM; WHEN OTHERS THEN RETURN SQLSTATE||'|'||SQLERRM; END $$").expect("qualification fixture invariant");
+        let rows =
+            1_000_017_usize.max(crate::engine::cost::device_limits().gpu_h3_group_min_rows + 1);
+        Spi::run(&format!("CREATE TEMP TABLE adaptive_errors(i bigint,cell h3index,v integer,p boolean); \
+            INSERT INTO adaptive_errors SELECT i,to_hex(((i%4097%256)<<56)|(i%4097/256))::h3index,CASE WHEN i%7=0 THEN NULL ELSE 1 END, \
+            CASE WHEN i%11=0 THEN NULL ELSE i%3<>0 END FROM generate_series(1,{rows})s(i); ANALYZE adaptive_errors; \
+            SELECT pg_accel_pin('adaptive_errors',ARRAY['cell','v','p'])")).expect("qualification fixture invariant");
+        let query = "SELECT h3_cell_to_parent(cell,0) k,count(v) FILTER (WHERE p) n FROM adaptive_errors GROUP BY 1";
+        let result = || {
+            Spi::get_one::<String>(&format!(
+                "SELECT json_agg(r ORDER BY k)::text FROM ({query})r"
+            ))
+            .expect("qualification fixture invariant")
+        };
+        Spi::run("SET pg_accel.enabled=off").expect("qualification fixture invariant");
+        let expected = result();
+        Spi::run("SET pg_accel.enabled=on").expect("qualification fixture invariant");
+        let before = crate::gpu::gpu_exec_count();
+        assert_eq!(result(), expected);
+        assert!(crate::gpu::gpu_exec_count() > before);
+        crate::gpu::cleanup_grouped_allocation_pools();
+        let baseline = crate::engine::residency::resident_live_bytes();
+        for point in [
+            TestSpoolFailure::Begin,
+            TestSpoolFailure::Put,
+            TestSpoolFailure::Read,
+            TestSpoolFailure::Close,
+        ] {
+            assert_eq!(set_test_spool_failure(Some(point)), None);
+            // SAFETY: the live test runs on the main backend thread; these
+            // entry owners remain live across SPI's caught subtransaction.
+            let (context, owner) =
+                unsafe { (pg_sys::CurrentMemoryContext, pg_sys::CurrentResourceOwner) };
+            let before = crate::gpu::gpu_exec_count();
+            let detail = Spi::get_one::<String>(&format!(
+                "SELECT pg_temp.adaptive_error_detail($q${query}$q$)"
+            ))
+            .expect("qualification fixture invariant")
+            .expect("qualification fixture invariant");
+            assert_eq!(
+                detail,
+                format!("XX000|pg_accel: injected final spool failure {point:?}")
+            );
+            assert!(crate::gpu::gpu_exec_count() > before);
+            assert_eq!(set_test_spool_failure(None), None, "one-shot hook consumed");
+            // SAFETY: inspect backend globals after the caught query failed.
+            unsafe {
+                let current_context = pg_sys::CurrentMemoryContext;
+                let current_owner = pg_sys::CurrentResourceOwner;
+                assert_eq!(current_context, context);
+                assert_eq!(current_owner, owner);
+            }
+            crate::gpu::cleanup_grouped_allocation_pools();
+            assert_eq!(
+                crate::engine::residency::resident_live_bytes(),
+                baseline,
+                "{point:?} releases query charges"
+            );
+            assert_eq!(result(), expected, "same backend recovers after {point:?}");
+            crate::gpu::cleanup_grouped_allocation_pools();
+        }
+        assert_eq!(set_test_cancel_after_adaptive_retry(Some(3)), None);
+        let before = crate::gpu::gpu_exec_count();
+        let canceled = Spi::get_one::<String>(&format!(
+            "SELECT pg_temp.adaptive_error_detail($q${query}$q$)"
+        ))
+        .expect("qualification fixture invariant")
+        .expect("qualification fixture invariant");
+        assert!(
+            canceled.starts_with("57014|canceling statement due to user request"),
+            "{canceled}"
+        );
+        assert!(crate::gpu::gpu_exec_count() >= before + 3);
+        assert_eq!(
+            set_test_cancel_after_adaptive_retry(None),
+            None,
+            "cancellation hook consumed"
+        );
+        crate::gpu::cleanup_grouped_allocation_pools();
+        assert_eq!(
+            crate::engine::residency::resident_live_bytes(),
+            baseline,
+            "canceled retry releases query charges"
+        );
+        assert_eq!(
+            result(),
+            expected,
+            "same backend recovers after adaptive cancellation"
+        );
+        crate::gpu::cleanup_grouped_allocation_pools();
+        Spi::run("SET temp_file_limit=0").expect("qualification fixture invariant");
+        let before = crate::gpu::gpu_exec_count();
+        assert_eq!(
+            Spi::get_one::<String>(&format!("SELECT pg_temp.adaptive_error($q${query}$q$)"))
+                .expect("qualification fixture invariant")
+                .as_deref(),
+            Some("53400")
+        );
+        assert!(
+            crate::gpu::gpu_exec_count() > before,
+            "spill failure follows actual GPU work"
+        );
+        Spi::run("RESET temp_file_limit").expect("qualification fixture invariant");
+        crate::gpu::cleanup_grouped_allocation_pools();
+        assert_eq!(
+            crate::engine::residency::resident_live_bytes(),
+            baseline,
+            "failed spool releases all query charges"
+        );
+        assert_eq!(
+            result(),
+            expected,
+            "same backend recovers after spill ERROR"
+        );
+        for predicate in ["false", "NULL", "true"] {
+            Spi::run(&format!(
+                "UPDATE adaptive_errors SET cell='0'::h3index,p={predicate}"
+            ))
+            .expect("qualification fixture invariant");
+            let error_query = "SELECT h3_cell_to_parent(cell,1),count(v) FILTER (WHERE p) FROM adaptive_errors GROUP BY 1 LIMIT 1";
+            Spi::run("SET pg_accel.enabled=off").expect("qualification fixture invariant");
+            let native = Spi::get_one::<String>(&format!(
+                "SELECT pg_temp.adaptive_error($q${error_query}$q$)"
+            ))
+            .expect("qualification fixture invariant");
+            assert_eq!(native.as_deref(), Some("38000"));
+            Spi::run("SET pg_accel.enabled=on").expect("qualification fixture invariant");
+            let explain = Spi::connect(|client| {
+                client
+                    .select(&format!("EXPLAIN (COSTS OFF) {error_query}"), None, &[])
+                    .expect("qualification fixture invariant")
+                    .map(|row| {
+                        row.get::<String>(1)
+                            .expect("qualification fixture invariant")
+                            .expect("qualification fixture invariant")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            });
+            assert!(explain.contains("Custom Scan (GpuAccelAgg)"), "{explain}");
+            assert_eq!(
+                Spi::get_one::<String>(&format!(
+                    "SELECT pg_temp.adaptive_error($q${error_query}$q$)"
+                ))
+                .expect("qualification fixture invariant"),
+                native,
+                "FILTER {predicate} cannot hide key errors"
+            );
+        }
+        Spi::run("UPDATE adaptive_errors SET cell=to_hex(((i%4097%256)<<56)|(i%4097/256))::h3index,p=i%3<>0").expect("qualification fixture invariant");
+        Spi::run("SET pg_accel.enabled=off").expect("qualification fixture invariant");
+        let expected = result();
+        Spi::run("SET pg_accel.enabled=on").expect("qualification fixture invariant");
+        assert_eq!(
+            result(),
+            expected,
+            "same backend recovers after semantic ERROR"
+        );
+        let rescanned = format!(
+            "SELECT outer_rows.i,g.* FROM generate_series(1,3)outer_rows(i) \
+            CROSS JOIN LATERAL ({query} OFFSET CASE WHEN outer_rows.i<0 THEN 1 ELSE 0 END)g"
+        );
+        Spi::run("SET pg_accel.enabled=off").expect("qualification fixture invariant");
+        Spi::run(&format!(
+            "CREATE TEMP TABLE adaptive_rescan_expected AS {rescanned}"
+        ))
+        .expect("qualification fixture invariant");
+        Spi::run("SET pg_accel.enabled=on").expect("qualification fixture invariant");
+        let before = crate::gpu::gpu_exec_count();
+        let aggregate_before = crate::gpu::grouped_agg_native_telemetry().transition_launches;
+        let explain = Spi::get_one::<pgrx::Json>(&format!("EXPLAIN (ANALYZE,FORMAT JSON,TIMING OFF) CREATE TEMP TABLE adaptive_rescan_actual AS {rescanned}")).expect("qualification fixture invariant").expect("qualification fixture invariant").0;
+        fn three_gpu_loops(value: &serde_json::Value) -> Option<&serde_json::Value> {
+            if value
+                .get("Custom Plan Provider")
+                .and_then(serde_json::Value::as_str)
+                == Some("GpuAccelAgg")
+                && value
+                    .get("Actual Loops")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(3)
+            {
+                return Some(value);
+            }
+            match value {
+                serde_json::Value::Array(values) => values.iter().find_map(three_gpu_loops),
+                serde_json::Value::Object(values) => values.values().find_map(three_gpu_loops),
+                _ => None,
+            }
+        }
+        let node = three_gpu_loops(&explain)
+            .unwrap_or_else(|| panic!("real custom-scan rescans required: {explain}"));
+        assert_eq!(
+            node["GPU Adaptive Counter Scope"].as_str(),
+            Some("last completed execution (rescan-local)")
+        );
+        let attempts = node["GPU Adaptive Aggregate Attempts"]
+            .as_u64()
+            .expect("qualification fixture invariant");
+        assert!(attempts > 1);
+        assert_eq!(
+            crate::gpu::grouped_agg_native_telemetry().transition_launches - aggregate_before,
+            3 * attempts
+        );
+        assert_eq!(
+            node["GPU Adaptive Attempted Scan Rows"]
+                .as_u64()
+                .expect("qualification fixture invariant"),
+            node["GPU Adaptive Unique Input Rows"]
+                .as_u64()
+                .expect("qualification fixture invariant")
+                * attempts
+        );
+        // This fixture is warmed before the three executions; aggregate attempts
+        // plus any once-per-execution mask conversions must explain every call.
+        assert_eq!(
+            crate::gpu::gpu_exec_count() - before,
+            3 * node["GPU Planned Lifecycle Calls"]
+                .as_u64()
+                .expect("qualification fixture invariant")
+        );
+        Spi::run("SET pg_accel.enabled=off").expect("qualification fixture invariant");
+        assert_eq!(Spi::get_one::<i64>("SELECT count(*) FROM ((TABLE adaptive_rescan_expected EXCEPT ALL TABLE adaptive_rescan_actual) UNION ALL (TABLE adaptive_rescan_actual EXCEPT ALL TABLE adaptive_rescan_expected))d").expect("qualification fixture invariant"), Some(0));
+        Spi::run(
+            "SET pg_accel.enabled=on; DROP TABLE adaptive_rescan_expected,adaptive_rescan_actual",
+        )
+        .expect("qualification fixture invariant");
+        Spi::run("SELECT pg_accel_unpin('adaptive_errors'); DROP TABLE adaptive_errors; DROP FUNCTION pg_temp.adaptive_error(text); DROP FUNCTION pg_temp.adaptive_error_detail(text); RESET work_mem").expect("qualification fixture invariant");
+    }
+
+    #[pg_test]
+    fn pg_normal_h3_boolean_filter_counts_dispatch_and_match_native() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS h3; RESET pg_accel.cost_multiplier; RESET pg_accel.min_batch_size; SET pg_accel.enabled=on")
+            .expect("normal filtered H3 setup");
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT gpu_available FROM pg_accel_device_info()")
+                .expect("device"),
+            Some(true)
+        );
+        let rows =
+            1_000_017_usize.max(crate::engine::cost::device_limits().gpu_h3_group_min_rows + 1);
+        for (sql_type, value) in [
+            ("boolean", "false"),
+            ("smallint", "-32768"),
+            ("integer", "-2147483648"),
+            ("bigint", "-9223372036854775808"),
+            ("real", "'NaN'"),
+            ("double precision", "'Infinity'"),
+            ("date", "'-infinity'"),
+            ("timestamp", "'infinity'"),
+            ("timestamptz", "'-infinity'"),
+        ] {
+            Spi::run(&format!("CREATE TEMP TABLE normal_h3_filtered(cell h3index,v {sql_type},p boolean,q boolean,i bigint); \
+            INSERT INTO normal_h3_filtered WITH seeds AS (SELECT array_agg(public.h3_cell_to_center_child(cell,15) ORDER BY cell) cells FROM public.h3_get_res_0_cells() c(cell)) \
+            SELECT CASE WHEN i%5=0 THEN NULL ELSE cells[1+i%3] END, \
+            CASE WHEN i%7=0 THEN NULL ELSE ({value})::{sql_type} END,CASE WHEN i%11=0 THEN NULL ELSE i%3<>0 END,i%3=0,i \
+            FROM generate_series(1,{rows}) s(i) CROSS JOIN seeds; ANALYZE normal_h3_filtered; \
+            SELECT pg_accel_pin('normal_h3_filtered'::regclass,ARRAY['cell','v','p','q'])"))
+            .expect("normal filtered fixture");
+            let cases: &[(&str, &str)] = if sql_type == "integer" {
+                &[("*", "p"), ("v", "p"), ("p", "p"), ("p", "q"), ("p", "p")]
+            } else {
+                &[("v", "p")]
+            };
+            for noncanonical in [false, true] {
+                if noncanonical {
+                    // 126 accepted raw outputs exceed the old res0 universe
+                    // bound. Odd keys also exercise lower-resolution rewriting
+                    // while preserving noncanonical trailing digits.
+                    Spi::run("UPDATE normal_h3_filtered SET cell=CASE WHEN i%5=0 THEN NULL ELSE to_hex((CASE WHEN i%2=0 THEN 0 ELSE 1::bigint<<52 END)|(i%126))::h3index END").expect("qualification fixture invariant");
+                }
+                for &(input, predicate) in cases {
+                    let query = format!(
+                        "SELECT public.h3_cell_to_parent(cell,0) parent,count({input}) FILTER (WHERE {predicate}) n FROM normal_h3_filtered GROUP BY 1"
+                    );
+                    let result = || {
+                        Spi::get_one::<String>(&format!(
+                            "SELECT json_agg(r ORDER BY parent NULLS FIRST)::text FROM ({query}) r"
+                        ))
+                        .expect("filtered result")
+                        .expect("groups")
+                    };
+                    Spi::run("SET pg_accel.enabled=off").expect("native");
+                    let expected = result();
+                    assert!(expected.contains("\"n\":0"));
+                    Spi::run("SET pg_accel.enabled=on").expect("enabled");
+                    let before = crate::gpu::gpu_exec_count();
+                    let explain = Spi::connect(|client| {
+                        client
+                            .select(
+                                &format!("EXPLAIN (ANALYZE,VERBOSE,COSTS OFF) {query}"),
+                                None,
+                                &[],
+                            )
+                            .expect("explain")
+                            .map(|row| row.get::<String>(1).expect("line").expect("nonnull"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    });
+                    let reason =
+                        Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+                            .expect("rejection reason");
+                    for required in [
+                        "Custom Scan (GpuAccelAgg)",
+                        "GPU Dispatched Physical Kernel Mode: parallel_hash",
+                        "GPU Physical Kernel Mode Verified: true",
+                        "measures=[m0=sql_mask(",
+                    ] {
+                        assert!(
+                            explain.contains(required),
+                            "{input}: missing {required}: reason={reason:?}: {explain}"
+                        );
+                    }
+                    assert!(crate::gpu::gpu_exec_count() > before);
+                    let before = crate::gpu::gpu_exec_count();
+                    assert_eq!(result(), expected);
+                    assert!(crate::gpu::gpu_exec_count() > before);
+                }
+            }
+            Spi::run("SELECT pg_accel_unpin('normal_h3_filtered'::regclass); SELECT pg_accel_evict('normal_h3_filtered'::regclass); DROP TABLE normal_h3_filtered")
+            .expect("cleanup");
+        }
+    }
+
+    #[pg_test]
     fn pg_normal_h3_column_count_all_types_dispatch_and_match_native() {
         Spi::run("CREATE EXTENSION IF NOT EXISTS h3; RESET pg_accel.cost_multiplier; RESET pg_accel.min_batch_size; SET pg_accel.enabled=on")
             .expect("normal H3 setup");
@@ -590,6 +1278,175 @@ mod tests {
     }
 
     #[pg_test]
+    fn pg_h3_filtered_preflight_protects_exact_mask_footprint() {
+        use super::super::{EphemeralDescriptorArtifact, h3_planning_memory};
+        use crate::engine::residency::{
+            ExecutionMemoryCharge, estimate_selected_relation, resident_live_bytes,
+            with_ephemeral_artifact_inputs,
+        };
+        for (sql_type, value) in [
+            ("boolean", "false"),
+            ("smallint", "-32768"),
+            ("integer", "-2147483648"),
+            ("bigint", "-9223372036854775808"),
+            ("real", "'NaN'"),
+            ("double precision", "'Infinity'"),
+            ("date", "'-infinity'"),
+            ("timestamp", "'infinity'"),
+            ("timestamptz", "'-infinity'"),
+        ] {
+            Spi::run(&format!("CREATE EXTENSION IF NOT EXISTS h3; SET pg_accel.enabled=on; SET pg_accel.auto_load=on; \
+            CREATE TEMP TABLE hash_count_rows(cell h3index,v {sql_type},p boolean,q boolean); \
+            INSERT INTO hash_count_rows WITH seeds AS \
+            (SELECT array_agg(h3_cell_to_center_child(cell,15) ORDER BY cell) cells FROM h3_get_res_0_cells() c(cell)) \
+            SELECT CASE WHEN i%5=0 THEN NULL ELSE cells[1+i%3] END,CASE WHEN i%7=0 THEN NULL ELSE ({value})::{sql_type} END, \
+            CASE WHEN i%11=0 THEN NULL ELSE i%3<>0 END, false FROM generate_series(1,65537) s(i) CROSS JOIN seeds; ANALYZE hash_count_rows; \
+            SELECT pg_accel_pin('hash_count_rows'::regclass,ARRAY['cell','v','p','q'])"))
+            .expect("filtered resource fixture");
+            for policy in [
+                DescriptorArtifactPolicy::CachedReusable,
+                DescriptorArtifactPolicy::EphemeralFused,
+            ] {
+                let plan = plan_for(policy, true, false);
+                assert_h3_native_memory_quote(&plan);
+                let expected = native_for(true, false);
+                crate::gpu::cleanup_grouped_allocation_pools();
+                let baseline = resident_live_bytes();
+                let calls = crate::gpu::gpu_exec_count();
+                let snapshot = fresh_snapshot(|| plan.prepare_h3_execution())
+                    .expect("protected quote")
+                    .expect("normal envelope");
+                assert_eq!(
+                    crate::gpu::gpu_exec_count(),
+                    calls,
+                    "metadata quote must not convert a mask"
+                );
+                assert_eq!(
+                    resident_live_bytes(),
+                    baseline,
+                    "quote must not charge or allocate a mask"
+                );
+                let native_bytes: u64 = snapshot.layout.iter().rev().take(2).sum();
+                let required = native_bytes
+                    + if policy == DescriptorArtifactPolicy::EphemeralFused {
+                        65_537
+                    } else {
+                        0
+                    };
+                if policy == DescriptorArtifactPolicy::EphemeralFused {
+                    let mut wrong = snapshot;
+                    wrong.spec.push(0);
+                    let owner = plan.ephemeral_artifact.borrow();
+                    let Some(EphemeralDescriptorArtifact::Hash(owner)) = owner.as_ref() else {
+                        panic!("fused owner")
+                    };
+                    let (cell, _, _) = super::super::h3_parent_group(&plan.spec).expect("H3 key");
+                    let rejected = with_ephemeral_artifact_inputs(
+                        plan.spec.fact_rel.into(),
+                        owner,
+                        &plan.dispatch_columns,
+                        |inputs| {
+                            super::super::build_and_execute_fused_hash_one_shot(
+                                inputs,
+                                &plan.dispatch_columns,
+                                cell,
+                                &plan.projection,
+                                GroupedAggKernelMode::ParallelHash,
+                                &mut || false,
+                                Some(&wrong),
+                            )
+                            .is_err()
+                        },
+                    )
+                    .expect("fused input lease");
+                    assert!(
+                        rejected,
+                        "changed fingerprint must fail before binding masks"
+                    );
+                    assert_eq!(crate::gpu::gpu_exec_count(), calls);
+                    assert_eq!(resident_live_bytes(), baseline);
+                }
+                for short in [true, false] {
+                    let budget = crate::engine::gucs::resident_memory_budget_bytes();
+                    let held = ExecutionMemoryCharge::reserve(
+                        budget - baseline - required + u64::from(short),
+                        budget,
+                    )
+                    .expect("foreign active bookkeeping owner");
+                    let before = crate::gpu::gpu_exec_count();
+                    if short {
+                        assert!(fresh_snapshot(|| plan.execute_prepared()).is_err());
+                        assert_eq!(
+                            crate::gpu::gpu_exec_count(),
+                            before,
+                            "no conversion or aggregate before failed combined preflight"
+                        );
+                    } else {
+                        assert_eq!(execute(&plan, false), expected);
+                        assert_eq!(
+                            crate::gpu::gpu_exec_count() - before,
+                            if policy == DescriptorArtifactPolicy::CachedReusable {
+                                1
+                            } else {
+                                3
+                            },
+                            "one conversion sequence only"
+                        );
+                    }
+                    drop(held);
+                }
+                let forecast = |candidate: &DescriptorAggPlan| {
+                    let estimate = estimate_selected_relation(&candidate.selected[0])
+                        .expect("loaded estimate");
+                    h3_planning_memory(
+                        &candidate.spec,
+                        &candidate.projection,
+                        &estimate,
+                        1,
+                        candidate.max_groups,
+                    )
+                    .expect("filtered forecast")
+                    .expect("H3")
+                };
+                let learned = forecast(&plan);
+                if policy == DescriptorArtifactPolicy::CachedReusable {
+                    assert!(
+                        learned.cached_owner,
+                        "exact9N inspector recognizes retained mask owner"
+                    );
+                    assert_eq!(learned.capacity, expected.len());
+                    let mut other_spec = plan.spec.clone();
+                    other_spec.measures[0].filter = FilterSpec::Mask {
+                        input: ColumnRef {
+                            relation_oid: plan.spec.fact_rel,
+                            attno: 4,
+                            type_oid: 16,
+                        },
+                        kind: MaskKind::Sql,
+                    };
+                    let other = DescriptorAggPlan::new(other_spec, plan.projection.clone())
+                        .expect("different predicate plan");
+                    assert_ne!(other.identity, plan.identity);
+                    assert!(!forecast(&other).cached_owner);
+                    assert_eq!(
+                        forecast(&other).capacity,
+                        123,
+                        "same BOOL type cannot lend another predicate's learned bound"
+                    );
+                } else {
+                    assert!(!learned.cached_owner);
+                    assert_eq!(learned.capacity, 123);
+                }
+                drop(plan);
+                crate::gpu::cleanup_grouped_allocation_pools();
+                Spi::run("SELECT pg_accel_evict('hash_count_rows'::regclass)")
+                    .expect("policy owner eviction");
+            }
+            Spi::run("DROP TABLE hash_count_rows").expect("cleanup");
+        }
+    }
+
+    #[pg_test]
     fn pg_h3_cached_capacity_and_exact_protected_budget() {
         use super::super::h3_planning_memory;
         use crate::engine::residency::{
@@ -606,7 +1463,7 @@ mod tests {
         let cached = plan(DescriptorArtifactPolicy::CachedReusable);
         let forecast = |plan: &DescriptorAggPlan| {
             let evidence = estimate_selected_relation(&plan.selected[0]).expect("loaded evidence");
-            h3_planning_memory(&plan.spec, &plan.projection, &evidence, 1)
+            h3_planning_memory(&plan.spec, &plan.projection, &evidence, 1, plan.max_groups)
                 .expect("current capacity quote")
                 .expect("H3 quote")
         };
@@ -653,6 +1510,7 @@ mod tests {
                             &bound.desc,
                             &cached.spec,
                             &inputs.evidence,
+                            0,
                         )
                         .expect("native execution bytes")
                     },

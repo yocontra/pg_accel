@@ -1,0 +1,4 @@
+b56cd84d84cb4b48799f66106b7c56154a897da84cc78628d25789cef16923bd  /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/run-production-normal.sh
+499c6992cdaecd6ef4ecdd40e530a6d544b5ac01ff9dd83ffc6f8cec588bdcc1  /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/normal-production.sql
+24259440069c165aa8e21a36daff326bbd03956d00b43e76633c84cfb2948c52  scripts/extension_catalog_integration.sh
+88a1c3cac5608012724a96a7134e8ea1d14eb366c6a1180fa3e8e733bd2041b2  sql/extension_catalog_contract.sql

@@ -3,13 +3,45 @@
 use pgrx::pg_sys;
 
 use super::descriptor::{
-    DescriptorAggExecutionError, DescriptorAggPlan, DescriptorResidencyReport,
+    AdaptiveHashExecution, AdaptiveHashStep, DescriptorAggExecutionError, DescriptorAggPlan,
+    DescriptorResidencyReport,
 };
 use super::output::DescriptorAggOutput;
+use super::spool::FinalTupleSpool;
 use crate::engine::residency::{ArtifactEnsureOutcome, ResidentRelationEvidence};
 use crate::engine::spec::{AggOutputProjection, AggQuerySpec};
 use crate::engine::stats;
 use crate::gpu::GroupedAggKernelMode;
+
+#[cfg(feature = "pg_test")]
+thread_local! {
+    static TEST_CANCEL_AFTER_ADAPTIVE_RETRY: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(feature = "pg_test")]
+pub(super) fn set_test_cancel_after_adaptive_retry(calls: Option<u64>) -> Option<u64> {
+    TEST_CANCEL_AFTER_ADAPTIVE_RETRY.with(|value| value.replace(calls))
+}
+
+#[cfg(feature = "pg_test")]
+fn test_cancel_after_adaptive_retry(calls: u64) {
+    if TEST_CANCEL_AFTER_ADAPTIVE_RETRY.with(|value| {
+        if value.get().is_some_and(|limit| calls >= limit) {
+            value.set(None);
+            true
+        } else {
+            false
+        }
+    }) {
+        // SAFETY: backend-thread test hook after a synchronous attempt returned
+        // and its STORE/native leases were released. The next ordinary executor
+        // interrupt boundary delivers cancellation, not this signal-only hook.
+        unsafe {
+            std::ptr::write_volatile(&raw mut pg_sys::QueryCancelPending, 1);
+            std::ptr::write_volatile(&raw mut pg_sys::InterruptPending, 1);
+        }
+    }
+}
 
 struct DescriptorAggExecState {
     plan: DescriptorAggPlan,
@@ -17,6 +49,10 @@ struct DescriptorAggExecState {
     explain_only: bool,
     preparation: DescriptorPreparationState,
     residency: Option<DescriptorResidencyReport>,
+    adaptive: Option<AdaptiveHashExecution>,
+    spool: Option<FinalTupleSpool>,
+    completed: bool,
+    query_context: pg_sys::MemoryContext,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +159,9 @@ impl AggExecState {
         let plan = stats::profile_descriptor_stage(stats::DescriptorExecStage::PlanBuild, || {
             DescriptorAggPlan::new(spec, projection)
         })?;
+        let adaptive = plan
+            .uses_adaptive_hash_count()
+            .then(AdaptiveHashExecution::default);
         Ok(Self {
             gpu_dispatched: false,
             rows_dispatched: 0,
@@ -136,6 +175,10 @@ impl AggExecState {
                 explain_only,
                 preparation: DescriptorPreparationState::Unprepared,
                 residency: None,
+                adaptive,
+                spool: None,
+                completed: false,
+                query_context: std::ptr::null_mut(),
             }),
         })
     }
@@ -207,6 +250,25 @@ impl AggExecState {
         self.planned_batches
     }
 
+    /// Logical input population is separate from repeated physical scans.
+    /// Return only dynamic executions so canonical one-shot EXPLAIN is stable.
+    pub fn descriptor_adaptive_evidence(&self) -> Option<(u64, u64, u64, u64, u64, bool)> {
+        let adaptive = self.descriptor.adaptive.as_ref()?;
+        (self.descriptor.completed && adaptive.overflow_attempts != 0).then(|| {
+            (
+                adaptive.fact_rows as u64,
+                adaptive.scanned_rows,
+                adaptive.aggregate_calls,
+                adaptive.overflow_attempts,
+                adaptive.completed_leaves(),
+                self.descriptor
+                    .spool
+                    .as_ref()
+                    .is_some_and(FinalTupleSpool::spilled),
+            )
+        })
+    }
+
     /// Exact dependency evidence captured while preparing a descriptor plan.
     #[must_use]
     pub fn descriptor_residency_evidence(&self) -> Option<&[ResidentRelationEvidence]> {
@@ -263,6 +325,16 @@ impl AggExecState {
 
     /// Reset cursor/device state for PostgreSQL ExecReScan.
     pub fn reset_for_rescan(&mut self) {
+        // SAFETY: ReScan is wrapped by the installed-owner PG error boundary;
+        // query context remains live until explicit close completes.
+        unsafe { self.close_transport() };
+        self.descriptor.spool = None;
+        self.descriptor.adaptive = self
+            .descriptor
+            .plan
+            .uses_adaptive_hash_count()
+            .then(AdaptiveHashExecution::default);
+        self.descriptor.completed = false;
         self.gpu_dispatched = false;
         self.rows_dispatched = 0;
         self.batches_executed = 0;
@@ -298,6 +370,11 @@ impl AggExecState {
             pgrx::error!(
                 "pg_accel: generic aggregate execution started without Begin-time artifact preparation"
             );
+        }
+        if self.descriptor.adaptive.is_some() {
+            // SAFETY: this installed state owns all batches/masks/spool across
+            // PG calls; caller provides the live result slot and error boundary.
+            return unsafe { self.next_adaptive(result_slot) };
         }
         if self.descriptor.output.is_none() {
             let dispatch = self
@@ -346,6 +423,157 @@ impl AggExecState {
                     .next(result_slot)
             },
         )
+    }
+
+    pub(crate) fn set_query_context(&mut self, context: pg_sys::MemoryContext) {
+        self.descriptor.query_context = context;
+    }
+
+    /// No PG call: safe both before and after child-context deletion.
+    pub(crate) fn abandon_transport(&mut self) {
+        if let Some(spool) = &mut self.descriptor.spool {
+            spool.abandon();
+        }
+        self.descriptor.query_context = std::ptr::null_mut();
+    }
+
+    /// Explicit fallible normal close while installed ownership remains live.
+    pub(crate) unsafe fn close_transport(&mut self) {
+        if let Some(spool) = &mut self.descriptor.spool {
+            // SAFETY: normal End/ReScan/EOF runs with live query context.
+            unsafe { spool.close() };
+        }
+    }
+
+    unsafe fn next_adaptive(
+        &mut self,
+        result_slot: *mut pg_sys::TupleTableSlot,
+    ) -> *mut pg_sys::TupleTableSlot {
+        if !self.descriptor.completed {
+            loop {
+                pgrx::check_for_interrupts!();
+                let step = self
+                    .descriptor
+                    .plan
+                    .next_adaptive_hash(
+                        self.descriptor
+                            .adaptive
+                            .as_mut()
+                            .expect("adaptive owner installed"),
+                    )
+                    .unwrap_or_else(|error| raise_descriptor_execution_error(error));
+                match step {
+                    AdaptiveHashStep::Retry => {
+                        #[cfg(feature = "pg_test")]
+                        test_cancel_after_adaptive_retry(
+                            self.descriptor
+                                .adaptive
+                                .as_ref()
+                                .expect("adaptive owner")
+                                .aggregate_calls,
+                        );
+                        continue;
+                    }
+                    AdaptiveHashStep::Leaf {
+                        output,
+                        needs_spool,
+                        done,
+                    } => {
+                        // Install the output before any fallible PostgreSQL call.
+                        self.descriptor.output = Some(output);
+                        if needs_spool {
+                            if self.descriptor.spool.is_none() {
+                                self.descriptor.spool = Some(FinalTupleSpool::default());
+                                // SAFETY: owner is installed before context/store
+                                // creation; no native frame or STORE lease survives.
+                                unsafe {
+                                    self.descriptor
+                                        .spool
+                                        .as_mut()
+                                        .expect("spool installed")
+                                        .begin(self.descriptor.query_context, result_slot);
+                                };
+                            }
+                            loop {
+                                // SAFETY: completed leaf output and supplied
+                                // slot remain installed/live through materialization.
+                                let tuple = unsafe {
+                                    self.descriptor
+                                        .output
+                                        .as_mut()
+                                        .expect("leaf installed")
+                                        .next(result_slot)
+                                };
+                                if tuple.is_null() {
+                                    break;
+                                }
+                                // SAFETY: copy final tuple only; no GPU/store borrow.
+                                unsafe {
+                                    self.descriptor
+                                        .spool
+                                        .as_mut()
+                                        .expect("spool installed")
+                                        .put(tuple);
+                                    pg_sys::ExecClearTuple(result_slot);
+                                }
+                                pgrx::check_for_interrupts!();
+                            }
+                            self.descriptor.output = None;
+                        }
+                        pgrx::check_for_interrupts!();
+                        if !done {
+                            continue;
+                        }
+                        if let Some(spool) = &mut self.descriptor.spool {
+                            // SAFETY: every disjoint leaf completed and population
+                            // totals were validated; rewind precedes Ready.
+                            unsafe { spool.finish() };
+                        }
+                        let adaptive = self.descriptor.adaptive.as_mut().expect("adaptive owner");
+                        self.descriptor
+                            .plan
+                            .finish_adaptive_hash(adaptive)
+                            .unwrap_or_else(|error| raise_descriptor_execution_error(error));
+                        self.rows_dispatched = adaptive.scanned_rows;
+                        self.batches_executed = adaptive.calls;
+                        self.planned_batches = adaptive.scheduled_calls;
+                        self.dispatch_time_us = adaptive.dispatch_time_us;
+                        self.physical_kernel_mode = Some(GroupedAggKernelMode::ParallelHash);
+                        stats::record_grouped_dispatch(
+                            GroupedAggKernelMode::ParallelHash,
+                            adaptive.calls,
+                            adaptive.aggregate_calls,
+                            adaptive.fact_rows as u64,
+                            adaptive.dispatch_time_us,
+                        );
+                        if let Some(report) = adaptive.residency.take() {
+                            merge_residency_report(&mut self.descriptor.residency, report);
+                        }
+                        self.gpu_dispatched = true;
+                        self.descriptor.completed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(spool) = &mut self.descriptor.spool {
+            // SAFETY: Ready is published only after complete output transport;
+            // copy=true reads independent slot tuples in the caller's context.
+            if unsafe { spool.next(result_slot) } {
+                return result_slot;
+            }
+            // SAFETY: EOF normal close remains inside installed error boundary.
+            unsafe { spool.close() };
+            return std::ptr::null_mut();
+        }
+        // SAFETY: one-shot success retains the original direct output transport.
+        unsafe {
+            self.descriptor
+                .output
+                .as_mut()
+                .expect("complete one-shot output")
+                .next(result_slot)
+        }
     }
 }
 

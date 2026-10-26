@@ -201,6 +201,68 @@ pub struct ResolvedGroupedAggPlan<'input> {
     _input_lifetime: PhantomData<&'input [u8]>,
 }
 
+/// Pointer-free routing for a complete hash COUNT attempt. Prefix bits are
+/// left-aligned; NULL has a distinct partition rather than a key sentinel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HashCountPartition(abi::PgaccelHashCountPartitionV1);
+
+impl HashCountPartition {
+    pub const ALL: Self = Self::new(abi::PGACCEL_HASH_COUNT_PARTITION_ALL, 0, 0);
+    pub const NULL: Self = Self::new(abi::PGACCEL_HASH_COUNT_PARTITION_NULL_ONLY, 0, 0);
+
+    #[must_use]
+    pub const fn is_all(self) -> bool {
+        self.0.kind == abi::PGACCEL_HASH_COUNT_PARTITION_ALL
+    }
+
+    const fn new(kind: u32, prefix_bits: u32, prefix: u64) -> Self {
+        Self(abi::PgaccelHashCountPartitionV1 {
+            version: abi::PGACCEL_HASH_COUNT_PARTITION_VERSION,
+            struct_size: 32,
+            flags: 0,
+            kind,
+            prefix_bits,
+            reserved: 0,
+            prefix,
+        })
+    }
+
+    pub fn prefix(bits: u32, prefix: u64) -> GpuResult<Self> {
+        if bits > 64
+            || (bits == 0 && prefix != 0)
+            || (bits < 64 && bits != 0 && prefix << bits != 0)
+        {
+            return Err(descriptor_error("noncanonical hash partition prefix"));
+        }
+        Ok(Self::new(
+            abi::PGACCEL_HASH_COUNT_PARTITION_NONNULL_PREFIX,
+            bits,
+            prefix,
+        ))
+    }
+}
+
+/// Query a partition layout from metadata, including non-executable markers.
+///
+/// # Safety
+/// All bounded descriptor/control metadata must be readable. Row pointers are
+/// opaque presence/span metadata; this function never reads or retains them.
+pub unsafe fn query_hash_partition_memory_layout(
+    desc: &abi::PgaccelGroupedAggDesc,
+    partition: HashCountPartition,
+) -> GpuResult<GroupedAggMemoryRequirements> {
+    let workspace = GroupedAggWorkspace::requirements_for_partition(desc, Some(partition))?;
+    let output_bytes = grouped_output_required_bytes(desc)?;
+    Ok(GroupedAggMemoryRequirements {
+        workspace_bytes: workspace.bytes,
+        output_bytes,
+        total_bytes: workspace
+            .bytes
+            .checked_add(output_bytes)
+            .ok_or_else(|| capacity_error("partition footprint overflow"))?,
+    })
+}
+
 impl<'input> ResolvedGroupedAggPlan<'input> {
     /// Adopt a fully resolved descriptor.
     ///
@@ -271,6 +333,24 @@ impl<'input> ResolvedGroupedAggPlan<'input> {
             ));
         }
         self.one_shot_memory_requirements()
+    }
+
+    /// Quote one adaptive COUNT attempt without allocation or payload reads.
+    pub fn hash_partition_memory_requirements(
+        &self,
+        partition: HashCountPartition,
+    ) -> GpuResult<GroupedAggMemoryRequirements> {
+        let workspace =
+            GroupedAggWorkspace::requirements_for_partition(&self.desc, Some(partition))?;
+        let output_bytes = grouped_output_required_bytes(&self.desc)?;
+        Ok(GroupedAggMemoryRequirements {
+            workspace_bytes: workspace.bytes,
+            output_bytes,
+            total_bytes: workspace
+                .bytes
+                .checked_add(output_bytes)
+                .ok_or_else(|| capacity_error("partition memory forecast overflow"))?,
+        })
     }
 
     /// Exact one-shot scratch and result footprint for any supported grouping
@@ -1253,6 +1333,13 @@ impl GroupedAggWorkspace {
     fn requirements_for_descriptor(
         desc: &abi::PgaccelGroupedAggDesc,
     ) -> GpuResult<abi::PgaccelGroupedAggWorkspaceReq> {
+        Self::requirements_for_partition(desc, None)
+    }
+
+    fn requirements_for_partition(
+        desc: &abi::PgaccelGroupedAggDesc,
+        partition: Option<HashCountPartition>,
+    ) -> GpuResult<abi::PgaccelGroupedAggWorkspaceReq> {
         let mut query_desc = workspace_query_descriptor(desc);
         let _numeric_views = pin_numeric_views(&mut query_desc, 0)?;
         let mut requirement = abi::PgaccelGroupedAggWorkspaceReq {
@@ -1266,10 +1353,18 @@ impl GroupedAggWorkspace {
         // SAFETY: both references point to correctly pinned ABI structs for
         // the duration of the synchronous call.
         let status = unsafe {
-            bridge::pgaccel_grouped_agg_workspace_requirements(
-                std::ptr::from_ref(&query_desc),
-                std::ptr::from_mut(&mut requirement),
-            )
+            if let Some(partition) = partition {
+                bridge::pgaccel_hash_count_partition_workspace_requirements_v1(
+                    std::ptr::from_ref(&query_desc),
+                    std::ptr::from_ref(&partition.0),
+                    std::ptr::from_mut(&mut requirement),
+                )
+            } else {
+                bridge::pgaccel_grouped_agg_workspace_requirements(
+                    std::ptr::from_ref(&query_desc),
+                    std::ptr::from_mut(&mut requirement),
+                )
+            }
         };
         super::status_to_result(
             status,
@@ -1298,9 +1393,16 @@ impl GroupedAggWorkspace {
     }
 
     fn allocate_for_descriptor(desc: &abi::PgaccelGroupedAggDesc) -> GpuResult<Self> {
+        Self::allocate_for_partition(desc, None)
+    }
+
+    fn allocate_for_partition(
+        desc: &abi::PgaccelGroupedAggDesc,
+        partition: Option<HashCountPartition>,
+    ) -> GpuResult<Self> {
         crate::ensure_backend_exit_callback();
         let query_desc = workspace_query_descriptor(desc);
-        let requirement = Self::requirements_for_descriptor(&query_desc)?;
+        let requirement = Self::requirements_for_partition(&query_desc, partition)?;
         let pool_key = grouped_workspace_pool_key(&query_desc, &requirement);
         if let Some(entry) = checkout_grouped_workspace(&pool_key) {
             let (pool_key, ptr, requirement, owner_pid, charge) = entry.into_parts();
@@ -2601,6 +2703,26 @@ fn execute_call(
     mut output: Option<&mut GroupedAggOutputStorage>,
     expected_data_mode: Option<GroupedAggKernelMode>,
 ) -> GpuResult<Option<GroupedAggOutcome>> {
+    execute_call_partition(
+        desc,
+        flags,
+        workspace,
+        output.take(),
+        expected_data_mode,
+        None,
+        None,
+    )
+}
+
+fn execute_call_partition(
+    desc: &abi::PgaccelGroupedAggDesc,
+    flags: u32,
+    workspace: &mut GroupedAggWorkspace,
+    mut output: Option<&mut GroupedAggOutputStorage>,
+    expected_data_mode: Option<GroupedAggKernelMode>,
+    partition: Option<HashCountPartition>,
+    mut counters: Option<&mut HashCountExecutionCounters>,
+) -> GpuResult<Option<GroupedAggOutcome>> {
     let mut desc = lifecycle_call_descriptor(desc, flags);
     let _numeric_views = pin_numeric_views(&mut desc, 0)?;
     workspace.apply_to(&mut desc)?;
@@ -2618,18 +2740,116 @@ fn execute_call(
     // SAFETY: descriptor, optional output, and workspace remain live through
     // the synchronous FFI call and were built from pinned ABI types.
     let mut detail = abi::PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+    let before = counters
+        .as_ref()
+        .map(|_| grouped_agg_native_telemetry().transition_launches);
+    if let Some(counters) = counters.as_deref_mut() {
+        counters.scheduled = counters
+            .scheduled
+            .checked_add(1)
+            .ok_or_else(|| descriptor_error("adaptive scheduled-call overflow"))?;
+    }
+    if partition.is_some() {
+        // SAFETY: only clears this backend thread's fixed native-error buffer.
+        unsafe { bridge::pgaccel_clear_last_error() };
+    }
     let status = unsafe {
         // SAFETY: `desc`, `raw_output`, workspace-applied buffers, and `detail`
         // remain live and exclusively accessible for this synchronous bridge call.
-        bridge::pgaccel_grouped_agg_execute_ex(
-            std::ptr::from_ref(&desc),
-            output_ptr,
-            std::ptr::from_mut(&mut detail),
-        )
+        if let Some(partition) = partition {
+            bridge::pgaccel_hash_count_partition_execute_v1(
+                std::ptr::from_ref(&desc),
+                std::ptr::from_ref(&partition.0),
+                output_ptr,
+                std::ptr::from_mut(&mut detail),
+            )
+        } else {
+            bridge::pgaccel_grouped_agg_execute_ex(
+                std::ptr::from_ref(&desc),
+                output_ptr,
+                std::ptr::from_mut(&mut detail),
+            )
+        }
     };
+    let mut native_error = [0_u8; 4096];
+    if partition.is_some()
+        && !status.is_ok()
+        && detail == abi::PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE
+    {
+        // SAFETY: capture this thread's bounded exception handoff immediately
+        // after execution, before any subsequent native telemetry getter.
+        unsafe {
+            bridge::pgaccel_copy_last_error(native_error.as_mut_ptr().cast(), native_error.len())
+        };
+    }
+    if let (Some(counters), Some(before)) = (counters, before) {
+        let observed = grouped_agg_native_telemetry()
+            .transition_launches
+            .checked_sub(before)
+            .ok_or_else(|| descriptor_error("adaptive native transition counter regressed"))?;
+        if observed != 1 {
+            workspace.poisoned = true;
+            return Err(descriptor_error(
+                "adaptive native transition count differs from schedule",
+            ));
+        }
+        counters.observed = counters
+            .observed
+            .checked_add(observed)
+            .ok_or_else(|| descriptor_error("adaptive observed-call overflow"))?;
+        counters.verified = counters
+            .verified
+            .checked_add(1)
+            .ok_or_else(|| descriptor_error("adaptive verified-mode overflow"))?;
+        counters.scanned_rows = counters
+            .scanned_rows
+            .checked_add(desc.row_count as u64)
+            .ok_or_else(|| descriptor_error("adaptive scanned-row overflow"))?;
+    }
     if !status.is_ok() {
         if status_poisons_workspace(status) {
             workspace.poisoned = true;
+        }
+        if partition.is_some()
+            && status == PgaccelStatus::Error
+            && detail == abi::PGACCEL_GROUPED_AGG_DEVICE_ERROR_HASH_CAPACITY
+        {
+            return Err(GpuError::new(
+                GpuErrorDomain::GroupedAgg,
+                GpuOperation::Kernel("hash_count_partition_execute_v1"),
+                GpuStatusDetail::CapacityOverflow,
+            ));
+        }
+        if partition.is_some()
+            && status == PgaccelStatus::Error
+            && detail == abi::PGACCEL_GROUPED_AGG_DEVICE_ERROR_H3_RESOLUTION
+        {
+            return Err(GpuError::new(
+                GpuErrorDomain::H3,
+                GpuOperation::Kernel("hash_count_partition_execute_v1"),
+                GpuStatusDetail::ShapeMismatch,
+            ));
+        }
+        if let Some(partition) = partition {
+            let error = grouped_agg_kernel_error(status, detail);
+            let length = native_error
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(native_error.len());
+            let native_error = String::from_utf8_lossy(&native_error[..length]);
+            return Err(GpuError::with_owned_detail(
+                error.domain,
+                GpuOperation::Kernel("hash_count_partition_execute_v1"),
+                error.status,
+                format!(
+                    "native_status={status:?} detail={detail} rows={} capacity={} partition_kind={} prefix_bits={} prefix={:#018x} mode={actual_mode:?} native_transition_before={before:?} native_exception={native_error}",
+                    desc.row_count,
+                    desc.group_capacity,
+                    partition.0.kind,
+                    partition.0.prefix_bits,
+                    partition.0.prefix
+                ),
+            ));
         }
         return Err(grouped_agg_kernel_error(status, detail));
     }
@@ -2701,6 +2921,37 @@ pub fn execute_grouped_agg_one_shot_with_workspace_and_mode(
     )?
     .ok_or_else(|| descriptor_error("finalized grouped call returned no outcome"))?;
     Ok((outcome, mode))
+}
+
+/// Execute one independently reset COUNT partition. Only the typed native
+/// capacity result is reported as GroupedAgg/CapacityOverflow; output is never
+/// valid on error. The caller retains input/output ownership across this call.
+#[derive(Debug, Default)]
+pub struct HashCountExecutionCounters {
+    pub scheduled: u64,
+    pub observed: u64,
+    pub verified: u64,
+    pub scanned_rows: u64,
+}
+
+pub fn execute_hash_count_partition(
+    plan: &ResolvedGroupedAggPlan<'_>,
+    partition: HashCountPartition,
+    output: &mut GroupedAggOutputStorage,
+    counters: &mut HashCountExecutionCounters,
+) -> GpuResult<GroupedAggOutcome> {
+    output.validate_for_plan(plan)?;
+    let mut workspace = GroupedAggWorkspace::allocate_for_partition(&plan.desc, Some(partition))?;
+    execute_call_partition(
+        &plan.desc,
+        abi::PGACCEL_GROUPED_AGG_EXEC_ALL_KNOWN,
+        &mut workspace,
+        Some(output),
+        Some(GroupedAggKernelMode::ParallelHash),
+        Some(partition),
+        Some(counters),
+    )?
+    .ok_or_else(|| descriptor_error("partition returned no finalized outcome"))
 }
 
 /// Stateful multi-call facade reserved by the frozen chunk lifecycle.

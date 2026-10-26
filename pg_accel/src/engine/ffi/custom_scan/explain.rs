@@ -826,6 +826,34 @@ unsafe fn explain_descriptor_agg(agg_state: &AggExecState, es: *mut pg_sys::Expl
                 agg_state.descriptor_planned_batches() == agg_state.batches_executed,
                 es,
             );
+            if let Some((input, scanned, attempts, overflows, leaves, spilled)) =
+                agg_state.descriptor_adaptive_evidence()
+            {
+                pg_sys::ExplainPropertyText(
+                    c"GPU Adaptive Counter Scope".as_ptr(),
+                    c"last completed execution (rescan-local)".as_ptr(),
+                    es,
+                );
+                for (name, value) in [
+                    (c"GPU Adaptive Unique Input Rows", input),
+                    (c"GPU Adaptive Attempted Scan Rows", scanned),
+                    (c"GPU Adaptive Aggregate Attempts", attempts),
+                    (c"GPU Adaptive Capacity Overflows", overflows),
+                    (c"GPU Adaptive Completed Leaves", leaves),
+                ] {
+                    pg_sys::ExplainPropertyInteger(
+                        name.as_ptr(),
+                        std::ptr::null(),
+                        i64::try_from(value).unwrap_or(i64::MAX),
+                        es,
+                    );
+                }
+                pg_sys::ExplainPropertyBool(
+                    c"GPU Adaptive Final Tuples Spilled".as_ptr(),
+                    spilled,
+                    es,
+                );
+            }
         }
     }
     for (name, value) in [
@@ -1376,6 +1404,8 @@ mod tests {
                 executor: std::ptr::dangling_mut::<u8>().cast(),
                 executor_drop: None,
                 executor_prepare_reset: None,
+                executor_abort: None,
+                executor_close: None,
             },
             executor_cleanup: pg_sys::MemoryContextCallback::default(),
         };

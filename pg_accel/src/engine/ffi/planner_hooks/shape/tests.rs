@@ -2076,6 +2076,121 @@ fn h3_parent_input(estimated_rows: u64, resolution: i32) -> ShapeInput {
 }
 
 #[test]
+fn h3_boolean_count_filter_builder_is_contextual_and_preserves_outputs() {
+    for type_oid in [0, 16, 21, 23, 20, 700, 701, 1082, 1114, 1184] {
+        let mut input = h3_parent_input(1_000_017, 0);
+        let expression = if type_oid == 0 {
+            MeasureExpr::CountStar
+        } else {
+            MeasureExpr::Column(ColumnRef {
+                relation_oid: 100,
+                attno: 2,
+                type_oid,
+            })
+        };
+        let (mut count, metadata) = aggregate(expression, AggregateKind::Count, 20);
+        count.filter = FilterSpec::Mask {
+            input: ColumnRef {
+                relation_oid: 100,
+                attno: 4,
+                type_oid: 16,
+            },
+            kind: crate::engine::spec::MaskKind::Sql,
+        };
+        input.aggregates = vec![count];
+        input.projections[1] = InputProjection::Aggregate {
+            aggregate_index: 0,
+            output: metadata,
+        };
+        let plan = build_shape(input.clone(), &model()).expect("exact H3 Boolean FILTER count");
+        assert_eq!(
+            planned_descriptor_kernel_mode(&plan.spec, true),
+            GroupedAggKernelMode::ParallelHash
+        );
+        assert!(plan.residency.relations[0].attnos.contains(&4));
+        if type_oid != 0 {
+            assert!(plan.residency.relations[0].attnos.contains(&2));
+        }
+        for invalid in 0..11 {
+            let mut bad = input.clone();
+            match invalid {
+                0 => {
+                    bad.aggregates[0].filter = FilterSpec::Mask {
+                        input: ColumnRef {
+                            relation_oid: 101,
+                            attno: 4,
+                            type_oid: 16,
+                        },
+                        kind: crate::engine::spec::MaskKind::Sql,
+                    }
+                }
+                1 => {
+                    bad.aggregates[0].filter = FilterSpec::Mask {
+                        input: ColumnRef {
+                            relation_oid: 100,
+                            attno: 4,
+                            type_oid: 23,
+                        },
+                        kind: crate::engine::spec::MaskKind::Sql,
+                    }
+                }
+                2 => {
+                    bad.aggregates[0].filter = FilterSpec::Mask {
+                        input: ColumnRef {
+                            relation_oid: 100,
+                            attno: 4,
+                            type_oid: 16,
+                        },
+                        kind: crate::engine::spec::MaskKind::Recheck,
+                    }
+                }
+                3 => {
+                    bad.aggregates[0].filter = FilterSpec::Mask {
+                        input: ColumnRef {
+                            relation_oid: 100,
+                            attno: 0,
+                            type_oid: 16,
+                        },
+                        kind: crate::engine::spec::MaskKind::Sql,
+                    }
+                }
+                4 => bad.aggregates[0].output.kind = AggregateKind::Sum,
+                5 => bad.aggregates[0].output.source = AggregateSource::Rhs,
+                6 => bad.aggregates.push(bad.aggregates[0].clone()),
+                7 => bad.group_keys.push(bad.group_keys[0].clone()),
+                8 => bad.group_keys = vec![PlannerGroupKey::Column(column(1, 100, 2, 23))],
+                9 => {
+                    bad.aggregates[0].expression = MeasureExpr::Column(ColumnRef {
+                        relation_oid: 100,
+                        attno: 2,
+                        type_oid: 1700,
+                    });
+                }
+                10 => {
+                    bad.projections[1] = InputProjection::Aggregate {
+                        aggregate_index: 0,
+                        output: output(23, true),
+                    }
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                build_shape(bad, &model()).is_err(),
+                "type={type_oid} invalid={invalid}"
+            );
+        }
+        let before = plan.cost.aggregate.get();
+        let mut cost = plan.cost;
+        cost.charge_h3_filter_conversion(&plan.spec, 65_537, &model());
+        let expected = 2.0_f64.mul_add(
+            crate::engine::cost::GPU_LAUNCH_OVERHEAD,
+            65_537.0 * model().coefficients.gpu_op_cost_filter.get(),
+        );
+        assert!((cost.aggregate.get() - before - expected).abs() < 1e-9);
+    }
+}
+
+#[test]
 fn h3_grouping_uses_its_device_floor_and_resident_transform_cost() {
     let mut limits = DeviceLimits::cpu_only();
     limits.gpu_h3_group_min_rows = 100;
@@ -2145,7 +2260,7 @@ fn h3_parent_cost_charges_each_transform_chunk_launch() {
 }
 
 #[test]
-fn h3_parent_group_capacity_uses_exact_resolution_universe_bound() {
+fn h3_parent_count_capacity_is_a_partitionable_seed_not_a_result_bound() {
     let mut limits = DeviceLimits::cpu_only();
     limits.gpu_h3_group_min_rows = 1;
     limits.gpu_hash_agg_min_rows = 1;
@@ -2155,14 +2270,11 @@ fn h3_parent_group_capacity_uses_exact_resolution_universe_bound() {
         h3_parent_input(1_000, 0),
         &TypedCostModel::from_limits(&limits),
     )
-    .expect("H3 shape should retain its device capacity decline");
+    .expect("adaptive H3 shape remains bounded per call");
     assert_eq!(
         plan.cost_gate,
-        ShapeCostGate::GroupsExceedDeviceMaximum {
-            estimated: crate::engine::cost::Rows::new(123),
-            maximum: crate::engine::cost::Rows::new(122),
-        },
-        "resolution zero has 122 H3 cells plus one NULL group",
+        ShapeCostGate::Eligible,
+        "capacity overflow partitions rather than exceeding the existing cap",
     );
 
     limits.gpu_h3_max_groups = 99;
@@ -2173,11 +2285,8 @@ fn h3_parent_group_capacity_uses_exact_resolution_universe_bound() {
     .expect("H3 shape should cap its group universe by fact rows");
     assert_eq!(
         plan.cost_gate,
-        ShapeCostGate::GroupsExceedDeviceMaximum {
-            estimated: crate::engine::cost::Rows::new(100),
-            maximum: crate::engine::cost::Rows::new(99),
-        },
-        "the exact bound is min(N, 120 * 7^r + 3)",
+        ShapeCostGate::Eligible,
+        "a high-resolution seed larger than the cap remains partitionable",
     );
 }
 
@@ -2205,15 +2314,12 @@ fn h3_all_resolutions_use_bounded_row_capacity_not_generic_group_limit() {
         h3_parent_input(500_000, 15),
         &TypedCostModel::from_limits(&limits),
     )
-    .expect("retain safe memory decline");
-    assert!(matches!(
-        plan.cost_gate,
-        ShapeCostGate::GroupsExceedDeviceMaximum { .. }
-    ));
+    .expect("bounded adaptive workspace");
+    assert_eq!(plan.cost_gate, ShapeCostGate::Eligible);
 }
 
 #[test]
-fn h3_parent_output_cost_caps_postgres_group_estimate_to_exact_universe() {
+fn h3_parent_output_cost_uses_canonical_universe_as_an_estimate_only() {
     let mut input = h3_parent_input(1_000_000, 0);
     input.estimated_output_rows = 1_000_000;
     input.relations[0].residency = RelationResidency::Resident;
@@ -2227,7 +2333,7 @@ fn h3_parent_output_cost_caps_postgres_group_estimate_to_exact_universe() {
     let bounded_output_cost = 123.0 * limits.preagg_yield_cost;
     assert!(
         (plan.cost.output_materialization.get() - bounded_output_cost).abs() < 1.0e-12,
-        "resolution zero has at most 122 H3 cells plus one NULL group",
+        "canonical resolution-zero estimate includes the NULL group, not a correctness bound",
     );
 
     // Reproduce the PG18 admission miss: the raw expression-group estimate
@@ -2240,7 +2346,7 @@ fn h3_parent_output_cost_caps_postgres_group_estimate_to_exact_universe() {
     assert!(unbounded_total > required_cost);
     assert!(
         crate::engine::cost::GPU_LAUNCH_OVERHEAD + plan.cost.total.get() <= required_cost,
-        "the exact H3 output bound restores the native-path cost margin",
+        "the canonical H3 output estimate preserves the native-path cost margin",
     );
 }
 

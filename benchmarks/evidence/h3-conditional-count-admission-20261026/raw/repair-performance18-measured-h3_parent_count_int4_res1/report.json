@@ -1,0 +1,2661 @@
+{
+  "hardware": {
+    "os": "macos",
+    "os_version": "27.0.1",
+    "arch": "aarch64",
+    "cpu": "Apple M2 Max",
+    "cpu_cores": 12,
+    "memory_gb": "64 GB"
+  },
+  "gucs": {
+    "settings": [
+      [
+        "shared_buffers",
+        "16GB"
+      ],
+      [
+        "work_mem",
+        "512MB"
+      ],
+      [
+        "effective_cache_size",
+        "48GB"
+      ],
+      [
+        "max_parallel_workers_per_gather",
+        "8"
+      ],
+      [
+        "max_worker_processes",
+        "16"
+      ],
+      [
+        "max_parallel_workers",
+        "12"
+      ],
+      [
+        "maintenance_work_mem",
+        "2GB"
+      ],
+      [
+        "jit",
+        "off"
+      ],
+      [
+        "jit_above_cost",
+        "100000"
+      ],
+      [
+        "random_page_cost",
+        "1.1"
+      ],
+      [
+        "effective_io_concurrency",
+        "256"
+      ],
+      [
+        "track_io_timing",
+        "on"
+      ],
+      [
+        "parallel_leader_participation",
+        "on"
+      ]
+    ]
+  },
+  "methodology": {
+    "iterations": 10,
+    "warmup": 5,
+    "row_scales": [
+      1000017,
+      2000017
+    ],
+    "ordering": "balanced randomized AB/BA crossover on distinct persistent PostgreSQL backends (`DISCARD ALL` before each arm)",
+    "statistical_tests": [
+      "Paired t-test (two-tailed, p < 0.05)",
+      "Bonferroni correction (family-wise alpha)",
+      "Cohen's d effect size (|d| >= 0.5 gate, action_items C9)",
+      "95% CI via t-distribution",
+      "Outlier detection (> 3 sigma)"
+    ],
+    "timing_mode": "raw-wallclock",
+    "cache_mode": "warm",
+    "harness_profile": "release",
+    "native_parity_pairing": false,
+    "native_parity_repetitions_per_arm": 1
+  },
+  "workloads": [
+    {
+      "name": "h3_parent_count_int4_res1",
+      "description": "Default-planner H3 COUNT(column): deterministic nullable values, zero-count groups and NULL keys",
+      "category": "gpu_h3",
+      "kernel_class": "h3_cell_to_parent",
+      "rows": 1000017,
+      "iterations": [
+        {
+          "accel_ms": 8.7355,
+          "parallel_ms": 61.352416,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 9.254375,
+          "parallel_ms": 64.343333,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 7.982,
+          "parallel_ms": 58.840625,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 7.240625,
+          "parallel_ms": 58.5135,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 7.9855,
+          "parallel_ms": 58.337625,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 7.546666,
+          "parallel_ms": 60.502792,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 7.966208,
+          "parallel_ms": 61.318417,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 8.835791,
+          "parallel_ms": 63.899208,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 7.328208,
+          "parallel_ms": 63.571542,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 7.783333,
+          "parallel_ms": 60.169708,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        }
+      ],
+      "typed_h3_settings": [
+        {
+          "phase": "warmup",
+          "index": 0,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "warmup",
+          "index": 1,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "warmup",
+          "index": 2,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "warmup",
+          "index": 3,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "warmup",
+          "index": 4,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "lifecycle",
+          "index": 0,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "measured",
+          "index": 0,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "measured",
+          "index": 1,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "measured",
+          "index": 2,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "measured",
+          "index": 3,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "measured",
+          "index": 4,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "measured",
+          "index": 5,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "measured",
+          "index": 6,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "measured",
+          "index": 7,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "measured",
+          "index": 8,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "measured",
+          "index": 9,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        }
+      ],
+      "artifact_lifecycle_probe": {
+        "phase": "lifecycle",
+        "iteration": {
+          "accel_ms": 63.418459,
+          "parallel_ms": 59.005375,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        "artifact": {
+          "hits": 0,
+          "builds": 1,
+          "rebuilds": 0,
+          "artifact_bytes_observed": 8000136,
+          "construction_bytes": 8000136,
+          "construction_us": 2879,
+          "preparation_us": 2879,
+          "raw_load_us": 0
+        },
+        "artifact_policy": "cached_reusable",
+        "refresh_us": 57189,
+        "refreshed_relations": 1,
+        "refreshed_rows": 1000017,
+        "dependencies_before": [
+          {
+            "relid": 16555,
+            "generation": 1,
+            "global_generation": 1,
+            "relfilenode": 16555,
+            "row_count": 1000017,
+            "raw_bytes": 14000238,
+            "derived_bytes": 8000136
+          }
+        ],
+        "dependencies_after": [
+          {
+            "relid": 16555,
+            "generation": 1,
+            "global_generation": 1,
+            "relfilenode": 16555,
+            "row_count": 1000017,
+            "raw_bytes": 14000238,
+            "derived_bytes": 8000136
+          }
+        ],
+        "queries_accelerated": 1,
+        "rows_dispatched": 1000017,
+        "batches_executed": 1,
+        "stock_exec_count": 0,
+        "gpu_rows_processed": 1000017,
+        "gpu_kernel_executions": 2,
+        "output_rows_consumed": 4
+      },
+      "artifact_steady_state_captures": [
+        {
+          "phase": "steady_state",
+          "pair_index": 0,
+          "iteration": {
+            "accel_ms": 8.7355,
+            "parallel_ms": 61.352416,
+            "accel_first": true,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 8000136,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 4,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 16555,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16555,
+              "row_count": 1000017,
+              "raw_bytes": 14000238,
+              "derived_bytes": 8000136
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 16555,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16555,
+              "row_count": 1000017,
+              "raw_bytes": 14000238,
+              "derived_bytes": 8000136
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 1000017,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 1000017,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 4
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 1,
+          "iteration": {
+            "accel_ms": 9.254375,
+            "parallel_ms": 64.343333,
+            "accel_first": true,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 8000136,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 5,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 16555,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16555,
+              "row_count": 1000017,
+              "raw_bytes": 14000238,
+              "derived_bytes": 8000136
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 16555,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16555,
+              "row_count": 1000017,
+              "raw_bytes": 14000238,
+              "derived_bytes": 8000136
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 1000017,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 1000017,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 4
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 2,
+          "iteration": {
+            "accel_ms": 7.982,
+            "parallel_ms": 58.840625,
+            "accel_first": true,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 8000136,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 5,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 16555,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16555,
+              "row_count": 1000017,
+              "raw_bytes": 14000238,
+              "derived_bytes": 8000136
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 16555,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16555,
+              "row_count": 1000017,
+              "raw_bytes": 14000238,
+              "derived_bytes": 8000136
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 1000017,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 1000017,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 4
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 3,
+          "iteration": {
+            "accel_ms": 7.240625,
+            "parallel_ms": 58.5135,
+            "accel_first": false,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 8000136,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 5,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 16555,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16555,
+              "row_count": 1000017,
+              "raw_bytes": 14000238,
+              "derived_bytes": 8000136
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 16555,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16555,
+              "row_count": 1000017,
+              "raw_bytes": 14000238,
+              "derived_bytes": 8000136
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 1000017,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 1000017,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 4
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 4,
+          "iteration": {
+            "accel_ms": 7.9855,
+            "parallel_ms": 58.337625,
+            "accel_first": false,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 8000136,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 4,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 16555,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16555,
+              "row_count": 1000017,
+              "raw_bytes": 14000238,
+              "derived_bytes": 8000136
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 16555,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16555,
+              "row_count": 1000017,
+              "raw_bytes": 14000238,
+              "derived_bytes": 8000136
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 1000017,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 1000017,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 4
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 5,
+          "iteration": {
+            "accel_ms": 7.546666,
+            "parallel_ms": 60.502792,
+            "accel_first": true,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 8000136,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 3,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 16555,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16555,
+              "row_count": 1000017,
+              "raw_bytes": 14000238,
+              "derived_bytes": 8000136
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 16555,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16555,
+              "row_count": 1000017,
+              "raw_bytes": 14000238,
+              "derived_bytes": 8000136
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 1000017,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 1000017,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 4
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 6,
+          "iteration": {
+            "accel_ms": 7.966208,
+            "parallel_ms": 61.318417,
+            "accel_first": true,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 8000136,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 20,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 16555,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16555,
+              "row_count": 1000017,
+              "raw_bytes": 14000238,
+              "derived_bytes": 8000136
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 16555,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16555,
+              "row_count": 1000017,
+              "raw_bytes": 14000238,
+              "derived_bytes": 8000136
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 1000017,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 1000017,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 4
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 7,
+          "iteration": {
+            "accel_ms": 8.835791,
+            "parallel_ms": 63.899208,
+            "accel_first": false,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 8000136,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 4,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 16555,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16555,
+              "row_count": 1000017,
+              "raw_bytes": 14000238,
+              "derived_bytes": 8000136
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 16555,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16555,
+              "row_count": 1000017,
+              "raw_bytes": 14000238,
+              "derived_bytes": 8000136
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 1000017,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 1000017,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 4
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 8,
+          "iteration": {
+            "accel_ms": 7.328208,
+            "parallel_ms": 63.571542,
+            "accel_first": false,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 8000136,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 4,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 16555,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16555,
+              "row_count": 1000017,
+              "raw_bytes": 14000238,
+              "derived_bytes": 8000136
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 16555,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16555,
+              "row_count": 1000017,
+              "raw_bytes": 14000238,
+              "derived_bytes": 8000136
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 1000017,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 1000017,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 4
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 9,
+          "iteration": {
+            "accel_ms": 7.783333,
+            "parallel_ms": 60.169708,
+            "accel_first": false,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 8000136,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 4,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 16555,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16555,
+              "row_count": 1000017,
+              "raw_bytes": 14000238,
+              "derived_bytes": 8000136
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 16555,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16555,
+              "row_count": 1000017,
+              "raw_bytes": 14000238,
+              "derived_bytes": 8000136
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 1000017,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 1000017,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 4
+        }
+      ],
+      "plan_selected": true,
+      "gpu_kernel_dispatched": true,
+      "function_srf_kernel_dispatched": false,
+      "planner_declined": false,
+      "custom_scan_selected_not_dispatched": false,
+      "function_kernel_count": 0,
+      "rows_returned_to_cpu": 40,
+      "gpu_resident_pipeline": "reported",
+      "warmup_iterations": [
+        {
+          "accel_ms": 17.146041,
+          "parallel_ms": 71.172583,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 8.772041,
+          "parallel_ms": 58.392667,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 9.302042,
+          "parallel_ms": 60.577166,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 8.208541,
+          "parallel_ms": 60.904917,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 7.296208,
+          "parallel_ms": 61.291291,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        }
+      ],
+      "warmup_accel_first_ms": 17.146041,
+      "warmup_accel_max_ms": 17.146041,
+      "warmup_accel_post_first_max_ms": 9.302042,
+      "warmup_parallel_first_ms": 71.172583,
+      "warmup_parallel_max_ms": 71.172583,
+      "dispatch_counter_captured": true,
+      "gpu_kernel_execution_delta": 10,
+      "pg_accel_queries_accelerated_delta": 10,
+      "pg_accel_rows_dispatched_delta": 10000170,
+      "pg_accel_batches_executed_delta": 10,
+      "pg_accel_gpu_rows_processed_delta": 10000170,
+      "pg_accel_stock_exec_delta": 0,
+      "physical_kernel_mode_counts": {
+        "parallel_hash": 10,
+        "parallel_dense_count": 0,
+        "parallel_dense_integer": 0,
+        "parallel_dense_numeric": 0,
+        "serial_generic": 0
+      },
+      "physical_kernel_mode": "parallel_hash",
+      "physical_kernel_mode_verified": true,
+      "accel_output_rows_consumed": 40,
+      "accel_mean_ms": 8.0658206,
+      "accel_stddev_ms": 0.6709634290464885,
+      "accel_median_ms": 7.9741040000000005,
+      "accel_p25_ms": 7.60583275,
+      "accel_p75_ms": 8.548,
+      "accel_p95_ms": 9.0660122,
+      "accel_cv_pct": 8.318600949870971,
+      "accel_ci_95": [
+        7.585875623750716,
+        8.545765576249286
+      ],
+      "accel_outliers": [],
+      "accel_min_ms": 7.240625,
+      "accel_max_ms": 9.254375,
+      "parallel_mean_ms": 61.08491660000001,
+      "parallel_stddev_ms": 2.2415275755877926,
+      "parallel_median_ms": 60.9106045,
+      "parallel_p25_ms": 59.17289575,
+      "parallel_p75_ms": 63.016760500000004,
+      "parallel_p95_ms": 64.14347675,
+      "parallel_cv_pct": 3.6695271113586037,
+      "parallel_ci_95": [
+        59.48153577109784,
+        62.688297428902175
+      ],
+      "parallel_outliers": [],
+      "parallel_min_ms": 58.337625,
+      "parallel_max_ms": 64.343333,
+      "speedup_vs_parallel": 7.573304643051446,
+      "speedup_median_vs_parallel": 7.638551553879909,
+      "p_value_vs_parallel": 2.0104627764299605e-14,
+      "cohens_d_vs_parallel": 32.04568952522423,
+      "effect_size_meaningful": true,
+      "cv_ratio": 2.2669408611593815,
+      "plan_snippet": "Custom Scan (GpuAccelAgg)\n  Output: (h3_cell_to_parent(cell, 1)), (count(value))\n  Strategy: GpuAgg\n  Plan Selected: true\n  Batch Size: 65536\n  Expected Threads: 1\n  GPU Resident Pipeline: true\n  GPU Resident Proof Version: 2\n  GPU Resident Operator Class: resident_groupagg\n  GPU Physical Kernel Mode: parallel_hash\n  GPU Descriptor Strategy: descriptor_grouped_aggregate\n  GPU Descriptor Specialization: hash_count\n  GPU Descriptor Specialization Cache: miss\n  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)\n  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16555.1:type=16421, resolution=1) type=16421 collation=0 encoding=hash\n  GPU Descriptor Aggregates: m0:column(16555.2:type=23) -> value.count\n  GPU Descriptor Filter: fact=none; measures=[m0=none]; dimensions=[none]\n  GPU Descriptor Star Dimensions: none\n  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false\n  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)\n  GPU Descriptor Artifact: not initialized\n  GPU Descriptor Generations: not inspected\n  GPU Descriptor Bytes: not inspected\n  GPU Resident Stage Mask: 17417\n  GPU Resident Device Columns: 2\n  GPU Resident Boundary: none: no CPU boundary\n",
+      "baseline_plan_snippet": "Finalize GroupAggregate\n  Output: (h3_cell_to_parent(cell, 1)), count(value)\n  Group Key: (h3_cell_to_parent(bench_h3_count_column.cell, 1))\n  ->  Gather Merge\n        Output: (h3_cell_to_parent(cell, 1)), (PARTIAL count(value))\n        Workers Planned: 2\n        ->  Sort\n              Output: (h3_cell_to_parent(cell, 1)), (PARTIAL count(value))\n              Sort Key: (h3_cell_to_parent(bench_h3_count_column.cell, 1))\n              ->  Partial HashAggregate\n                    Output: (h3_cell_to_parent(cell, 1)), PARTIAL count(value)\n                    Group Key: h3_cell_to_parent(bench_h3_count_column.cell, 1)\n                    ->  Parallel Seq Scan on public.bench_h3_count_column\n                          Output: h3_cell_to_parent(cell, 1), value\n",
+      "correctness_diff_artifact": "correctness_diffs/h3_parent_count_int4_res1-1000017.json",
+      "setup_quiescence": {
+        "schema_version": 1,
+        "checkpoint_completed": true,
+        "checkpoint_completed_at": "2026-10-25 22:58:47.720833-07",
+        "checkpoint_wal_lsn": "0/58E3FA8",
+        "measurement_completed_at": "2026-10-25 22:58:49.056926-07",
+        "measurement_completed_wal_lsn": "0/58EBAE8",
+        "checkpointer_before": {
+          "num_timed": 0,
+          "num_requested": 1,
+          "num_done": 1,
+          "restartpoints_timed": 0,
+          "restartpoints_requested": 0,
+          "restartpoints_done": 0,
+          "write_time_ms": 47.0,
+          "sync_time_ms": 5.0,
+          "buffers_written": 5007,
+          "slru_written": 3
+        },
+        "checkpointer_after": {
+          "num_timed": 0,
+          "num_requested": 1,
+          "num_done": 1,
+          "restartpoints_timed": 0,
+          "restartpoints_requested": 0,
+          "restartpoints_done": 0,
+          "write_time_ms": 47.0,
+          "sync_time_ms": 5.0,
+          "buffers_written": 5007,
+          "slru_written": 3
+        },
+        "checkpointer_unchanged": true
+      },
+      "thermal": {
+        "cpu_scheduler_limit": null,
+        "cpu_speed_limit": null,
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded\n",
+        "pressure": false
+      },
+      "table_stats": [
+        {
+          "relname": "bench_h3_count_column",
+          "relpages": 4839,
+          "reltuples": 1000017.0,
+          "max_n_distinct": 2001.0
+        }
+      ],
+      "sanity_checks": [],
+      "resident_load_ms": 103.91262499999999,
+      "resident_lane": true,
+      "warm_summary": {
+        "cache_state": "warm",
+        "n": 10,
+        "accel_mean_ms": 8.0658206,
+        "accel_median_ms": 7.9741040000000005,
+        "accel_stddev_ms": 0.6709634290464885,
+        "accel_p95_ms": 9.0660122,
+        "accel_cv_pct": 8.318600949870971,
+        "accel_ci_95": [
+          7.585875623750716,
+          8.545765576249286
+        ],
+        "parallel_mean_ms": 61.08491660000001,
+        "parallel_median_ms": 60.9106045,
+        "parallel_stddev_ms": 2.2415275755877926,
+        "parallel_p95_ms": 64.14347675,
+        "parallel_cv_pct": 3.6695271113586037,
+        "parallel_ci_95": [
+          59.48153577109784,
+          62.688297428902175
+        ],
+        "speedup_mean_vs_parallel": 7.573304643051446,
+        "speedup_median_vs_parallel": 7.638551553879909,
+        "p_value_vs_parallel": 2.0104627764299605e-14,
+        "cohens_d_vs_parallel": 32.04568952522423,
+        "effect_size_meaningful": true
+      },
+      "combined_warm_summary": {
+        "cache_state": "warm",
+        "n": 11,
+        "accel_mean_ms": 13.097878636363635,
+        "accel_median_ms": 7.982,
+        "accel_stddev_ms": 16.7015826084074,
+        "accel_p95_ms": 36.336417,
+        "accel_cv_pct": 127.51364608035686,
+        "accel_ci_95": [
+          1.8783019873136677,
+          24.3174552854136
+        ],
+        "parallel_mean_ms": 60.89586736363637,
+        "parallel_median_ms": 60.502792,
+        "parallel_stddev_ms": 2.2170108336169343,
+        "parallel_p95_ms": 64.12127050000001,
+        "parallel_cv_pct": 3.6406589307254205,
+        "parallel_ci_95": [
+          59.406552035697445,
+          62.385182691575295
+        ],
+        "speedup_mean_vs_parallel": 4.64929238194124,
+        "speedup_median_vs_parallel": 7.579903783512904,
+        "p_value_vs_parallel": 3.7361028809361857e-6,
+        "cohens_d_vs_parallel": 4.012121275583941,
+        "effect_size_meaningful": true
+      }
+    },
+    {
+      "name": "h3_parent_count_int4_res1",
+      "description": "Default-planner H3 COUNT(column): deterministic nullable values, zero-count groups and NULL keys",
+      "category": "gpu_h3",
+      "kernel_class": "h3_cell_to_parent",
+      "rows": 2000017,
+      "iterations": [
+        {
+          "accel_ms": 15.075458,
+          "parallel_ms": 91.911917,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 14.599167,
+          "parallel_ms": 87.183917,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 13.8765,
+          "parallel_ms": 91.442875,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 14.944292,
+          "parallel_ms": 89.214792,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 16.433042,
+          "parallel_ms": 90.465917,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 15.23475,
+          "parallel_ms": 91.254084,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 16.9555,
+          "parallel_ms": 96.205833,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 15.479791,
+          "parallel_ms": 83.230417,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 14.170125,
+          "parallel_ms": 91.637833,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 15.344542,
+          "parallel_ms": 88.2565,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        }
+      ],
+      "typed_h3_settings": [
+        {
+          "phase": "warmup",
+          "index": 0,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "warmup",
+          "index": 1,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "warmup",
+          "index": 2,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "warmup",
+          "index": 3,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "warmup",
+          "index": 4,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "lifecycle",
+          "index": 0,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "measured",
+          "index": 0,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "measured",
+          "index": 1,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "measured",
+          "index": 2,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "measured",
+          "index": 3,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "measured",
+          "index": 4,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "measured",
+          "index": 5,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "measured",
+          "index": 6,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "measured",
+          "index": 7,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "measured",
+          "index": 8,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        },
+        {
+          "phase": "measured",
+          "index": 9,
+          "cache_state": "warm",
+          "settings": {
+            "settings": [
+              [
+                "pg_accel.cost_multiplier",
+                "1"
+              ],
+              [
+                "pg_accel.min_batch_size",
+                "65536"
+              ],
+              [
+                "pg_accel.enabled",
+                "on"
+              ],
+              [
+                "pg_accel.gpu_enabled",
+                "on"
+              ]
+            ]
+          }
+        }
+      ],
+      "artifact_lifecycle_probe": {
+        "phase": "lifecycle",
+        "iteration": {
+          "accel_ms": 123.042084,
+          "parallel_ms": 92.839167,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        "artifact": {
+          "hits": 0,
+          "builds": 1,
+          "rebuilds": 0,
+          "artifact_bytes_observed": 16000136,
+          "construction_bytes": 16000136,
+          "construction_us": 3390,
+          "preparation_us": 3390,
+          "raw_load_us": 0
+        },
+        "artifact_policy": "cached_reusable",
+        "refresh_us": 114406,
+        "refreshed_relations": 1,
+        "refreshed_rows": 2000017,
+        "dependencies_before": [
+          {
+            "relid": 16571,
+            "generation": 1,
+            "global_generation": 1,
+            "relfilenode": 16571,
+            "row_count": 2000017,
+            "raw_bytes": 28000238,
+            "derived_bytes": 16000136
+          }
+        ],
+        "dependencies_after": [
+          {
+            "relid": 16571,
+            "generation": 1,
+            "global_generation": 1,
+            "relfilenode": 16571,
+            "row_count": 2000017,
+            "raw_bytes": 28000238,
+            "derived_bytes": 16000136
+          }
+        ],
+        "queries_accelerated": 1,
+        "rows_dispatched": 2000017,
+        "batches_executed": 1,
+        "stock_exec_count": 0,
+        "gpu_rows_processed": 2000017,
+        "gpu_kernel_executions": 2,
+        "output_rows_consumed": 4
+      },
+      "artifact_steady_state_captures": [
+        {
+          "phase": "steady_state",
+          "pair_index": 0,
+          "iteration": {
+            "accel_ms": 15.075458,
+            "parallel_ms": 91.911917,
+            "accel_first": true,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 16000136,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 5,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 16571,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16571,
+              "row_count": 2000017,
+              "raw_bytes": 28000238,
+              "derived_bytes": 16000136
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 16571,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16571,
+              "row_count": 2000017,
+              "raw_bytes": 28000238,
+              "derived_bytes": 16000136
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 2000017,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 2000017,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 4
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 1,
+          "iteration": {
+            "accel_ms": 14.599167,
+            "parallel_ms": 87.183917,
+            "accel_first": true,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 16000136,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 4,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 16571,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16571,
+              "row_count": 2000017,
+              "raw_bytes": 28000238,
+              "derived_bytes": 16000136
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 16571,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16571,
+              "row_count": 2000017,
+              "raw_bytes": 28000238,
+              "derived_bytes": 16000136
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 2000017,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 2000017,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 4
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 2,
+          "iteration": {
+            "accel_ms": 13.8765,
+            "parallel_ms": 91.442875,
+            "accel_first": false,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 16000136,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 4,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 16571,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16571,
+              "row_count": 2000017,
+              "raw_bytes": 28000238,
+              "derived_bytes": 16000136
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 16571,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16571,
+              "row_count": 2000017,
+              "raw_bytes": 28000238,
+              "derived_bytes": 16000136
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 2000017,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 2000017,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 4
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 3,
+          "iteration": {
+            "accel_ms": 14.944292,
+            "parallel_ms": 89.214792,
+            "accel_first": true,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 16000136,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 4,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 16571,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16571,
+              "row_count": 2000017,
+              "raw_bytes": 28000238,
+              "derived_bytes": 16000136
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 16571,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16571,
+              "row_count": 2000017,
+              "raw_bytes": 28000238,
+              "derived_bytes": 16000136
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 2000017,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 2000017,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 4
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 4,
+          "iteration": {
+            "accel_ms": 16.433042,
+            "parallel_ms": 90.465917,
+            "accel_first": true,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 16000136,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 5,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 16571,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16571,
+              "row_count": 2000017,
+              "raw_bytes": 28000238,
+              "derived_bytes": 16000136
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 16571,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16571,
+              "row_count": 2000017,
+              "raw_bytes": 28000238,
+              "derived_bytes": 16000136
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 2000017,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 2000017,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 4
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 5,
+          "iteration": {
+            "accel_ms": 15.23475,
+            "parallel_ms": 91.254084,
+            "accel_first": false,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 16000136,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 5,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 16571,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16571,
+              "row_count": 2000017,
+              "raw_bytes": 28000238,
+              "derived_bytes": 16000136
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 16571,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16571,
+              "row_count": 2000017,
+              "raw_bytes": 28000238,
+              "derived_bytes": 16000136
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 2000017,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 2000017,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 4
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 6,
+          "iteration": {
+            "accel_ms": 16.9555,
+            "parallel_ms": 96.205833,
+            "accel_first": false,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 16000136,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 5,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 16571,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16571,
+              "row_count": 2000017,
+              "raw_bytes": 28000238,
+              "derived_bytes": 16000136
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 16571,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16571,
+              "row_count": 2000017,
+              "raw_bytes": 28000238,
+              "derived_bytes": 16000136
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 2000017,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 2000017,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 4
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 7,
+          "iteration": {
+            "accel_ms": 15.479791,
+            "parallel_ms": 83.230417,
+            "accel_first": false,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 16000136,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 4,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 16571,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16571,
+              "row_count": 2000017,
+              "raw_bytes": 28000238,
+              "derived_bytes": 16000136
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 16571,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16571,
+              "row_count": 2000017,
+              "raw_bytes": 28000238,
+              "derived_bytes": 16000136
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 2000017,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 2000017,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 4
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 8,
+          "iteration": {
+            "accel_ms": 14.170125,
+            "parallel_ms": 91.637833,
+            "accel_first": true,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 16000136,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 4,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 16571,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16571,
+              "row_count": 2000017,
+              "raw_bytes": 28000238,
+              "derived_bytes": 16000136
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 16571,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16571,
+              "row_count": 2000017,
+              "raw_bytes": 28000238,
+              "derived_bytes": 16000136
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 2000017,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 2000017,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 4
+        },
+        {
+          "phase": "steady_state",
+          "pair_index": 9,
+          "iteration": {
+            "accel_ms": 15.344542,
+            "parallel_ms": 88.2565,
+            "accel_first": false,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+          },
+          "artifact": {
+            "hits": 1,
+            "builds": 0,
+            "rebuilds": 0,
+            "artifact_bytes_observed": 16000136,
+            "construction_bytes": 0,
+            "construction_us": 0,
+            "preparation_us": 4,
+            "raw_load_us": 0
+          },
+          "artifact_policy": "cached_reusable",
+          "refresh_us": 0,
+          "refreshed_relations": 0,
+          "refreshed_rows": 0,
+          "dependencies_before": [
+            {
+              "relid": 16571,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16571,
+              "row_count": 2000017,
+              "raw_bytes": 28000238,
+              "derived_bytes": 16000136
+            }
+          ],
+          "dependencies_after": [
+            {
+              "relid": 16571,
+              "generation": 1,
+              "global_generation": 1,
+              "relfilenode": 16571,
+              "row_count": 2000017,
+              "raw_bytes": 28000238,
+              "derived_bytes": 16000136
+            }
+          ],
+          "queries_accelerated": 1,
+          "rows_dispatched": 2000017,
+          "batches_executed": 1,
+          "stock_exec_count": 0,
+          "gpu_rows_processed": 2000017,
+          "gpu_kernel_executions": 1,
+          "output_rows_consumed": 4
+        }
+      ],
+      "plan_selected": true,
+      "gpu_kernel_dispatched": true,
+      "function_srf_kernel_dispatched": false,
+      "planner_declined": false,
+      "custom_scan_selected_not_dispatched": false,
+      "function_kernel_count": 0,
+      "rows_returned_to_cpu": 40,
+      "gpu_resident_pipeline": "reported",
+      "warmup_iterations": [
+        {
+          "accel_ms": 21.882875,
+          "parallel_ms": 102.285292,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 15.004792,
+          "parallel_ms": 92.881458,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 10.740541,
+          "parallel_ms": 96.991333,
+          "accel_first": true,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 15.337917,
+          "parallel_ms": 99.816708,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        },
+        {
+          "accel_ms": 15.140917,
+          "parallel_ms": 98.392083,
+          "accel_first": false,
+          "cache_purge": "not_requested",
+          "cache_state": "warm"
+        }
+      ],
+      "warmup_accel_first_ms": 21.882875,
+      "warmup_accel_max_ms": 21.882875,
+      "warmup_accel_post_first_max_ms": 15.337917,
+      "warmup_parallel_first_ms": 102.285292,
+      "warmup_parallel_max_ms": 102.285292,
+      "dispatch_counter_captured": true,
+      "gpu_kernel_execution_delta": 10,
+      "pg_accel_queries_accelerated_delta": 10,
+      "pg_accel_rows_dispatched_delta": 20000170,
+      "pg_accel_batches_executed_delta": 10,
+      "pg_accel_gpu_rows_processed_delta": 20000170,
+      "pg_accel_stock_exec_delta": 0,
+      "physical_kernel_mode_counts": {
+        "parallel_hash": 10,
+        "parallel_dense_count": 0,
+        "parallel_dense_integer": 0,
+        "parallel_dense_numeric": 0,
+        "serial_generic": 0
+      },
+      "physical_kernel_mode": "parallel_hash",
+      "physical_kernel_mode_verified": true,
+      "accel_output_rows_consumed": 40,
+      "accel_mean_ms": 15.211316700000001,
+      "accel_stddev_ms": 0.9401812740850743,
+      "accel_median_ms": 15.155104,
+      "accel_p25_ms": 14.68544825,
+      "accel_p75_ms": 15.44597875,
+      "accel_p95_ms": 16.7203939,
+      "accel_cv_pct": 6.18080139035613,
+      "accel_ci_95": [
+        14.538798259014271,
+        15.883835140985731
+      ],
+      "accel_outliers": [],
+      "accel_min_ms": 13.8765,
+      "accel_max_ms": 16.9555,
+      "parallel_mean_ms": 90.08040849999999,
+      "parallel_stddev_ms": 3.4330298637979397,
+      "parallel_median_ms": 90.86000050000001,
+      "parallel_p25_ms": 88.496073,
+      "parallel_p75_ms": 91.5890935,
+      "parallel_p95_ms": 94.2735708,
+      "parallel_cv_pct": 3.8110727082214995,
+      "parallel_ci_95": [
+        87.62473749750572,
+        92.53607950249426
+      ],
+      "parallel_outliers": [],
+      "parallel_min_ms": 83.230417,
+      "parallel_max_ms": 96.205833,
+      "speedup_vs_parallel": 5.921933667977604,
+      "speedup_median_vs_parallel": 5.995339952797422,
+      "p_value_vs_parallel": 1.0595791735085294e-13,
+      "cohens_d_vs_parallel": 29.746475316384977,
+      "effect_size_meaningful": true,
+      "cv_ratio": 1.6218009635508908,
+      "plan_snippet": "Custom Scan (GpuAccelAgg)\n  Output: (h3_cell_to_parent(cell, 1)), (count(value))\n  Strategy: GpuAgg\n  Plan Selected: true\n  Batch Size: 65536\n  Expected Threads: 1\n  GPU Resident Pipeline: true\n  GPU Resident Proof Version: 2\n  GPU Resident Operator Class: resident_groupagg\n  GPU Physical Kernel Mode: parallel_hash\n  GPU Descriptor Strategy: descriptor_grouped_aggregate\n  GPU Descriptor Specialization: hash_count\n  GPU Descriptor Specialization Cache: miss\n  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)\n  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16571.1:type=16421, resolution=1) type=16421 collation=0 encoding=hash\n  GPU Descriptor Aggregates: m0:column(16571.2:type=23) -> value.count\n  GPU Descriptor Filter: fact=none; measures=[m0=none]; dimensions=[none]\n  GPU Descriptor Star Dimensions: none\n  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false\n  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)\n  GPU Descriptor Artifact: not initialized\n  GPU Descriptor Generations: not inspected\n  GPU Descriptor Bytes: not inspected\n  GPU Resident Stage Mask: 17417\n  GPU Resident Device Columns: 2\n  GPU Resident Boundary: none: no CPU boundary\n",
+      "baseline_plan_snippet": "Finalize GroupAggregate\n  Output: (h3_cell_to_parent(cell, 1)), count(value)\n  Group Key: (h3_cell_to_parent(bench_h3_count_column.cell, 1))\n  ->  Gather Merge\n        Output: (h3_cell_to_parent(cell, 1)), (PARTIAL count(value))\n        Workers Planned: 3\n        ->  Sort\n              Output: (h3_cell_to_parent(cell, 1)), (PARTIAL count(value))\n              Sort Key: (h3_cell_to_parent(bench_h3_count_column.cell, 1))\n              ->  Partial HashAggregate\n                    Output: (h3_cell_to_parent(cell, 1)), PARTIAL count(value)\n                    Group Key: h3_cell_to_parent(bench_h3_count_column.cell, 1)\n                    ->  Parallel Seq Scan on public.bench_h3_count_column\n                          Output: h3_cell_to_parent(cell, 1), value\n",
+      "correctness_diff_artifact": "correctness_diffs/h3_parent_count_int4_res1-2000017.json",
+      "setup_quiescence": {
+        "schema_version": 1,
+        "checkpoint_completed": true,
+        "checkpoint_completed_at": "2026-10-25 22:58:51.52166-07",
+        "checkpoint_wal_lsn": "0/DAD2D80",
+        "measurement_completed_at": "2026-10-25 22:58:53.585093-07",
+        "measurement_completed_wal_lsn": "0/DAD3050",
+        "checkpointer_before": {
+          "num_timed": 0,
+          "num_requested": 2,
+          "num_done": 2,
+          "restartpoints_timed": 0,
+          "restartpoints_requested": 0,
+          "restartpoints_done": 0,
+          "write_time_ms": 103.0,
+          "sync_time_ms": 7.0,
+          "buffers_written": 14740,
+          "slru_written": 4
+        },
+        "checkpointer_after": {
+          "num_timed": 0,
+          "num_requested": 2,
+          "num_done": 2,
+          "restartpoints_timed": 0,
+          "restartpoints_requested": 0,
+          "restartpoints_done": 0,
+          "write_time_ms": 103.0,
+          "sync_time_ms": 7.0,
+          "buffers_written": 14740,
+          "slru_written": 4
+        },
+        "checkpointer_unchanged": true
+      },
+      "thermal": {
+        "cpu_scheduler_limit": null,
+        "cpu_speed_limit": null,
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded\n",
+        "pressure": false
+      },
+      "table_stats": [
+        {
+          "relname": "bench_h3_count_column",
+          "relpages": 9678,
+          "reltuples": 2000017.0,
+          "max_n_distinct": 2001.0
+        }
+      ],
+      "sanity_checks": [],
+      "resident_load_ms": 161.11700000000002,
+      "resident_lane": true,
+      "warm_summary": {
+        "cache_state": "warm",
+        "n": 10,
+        "accel_mean_ms": 15.211316700000001,
+        "accel_median_ms": 15.155104,
+        "accel_stddev_ms": 0.9401812740850743,
+        "accel_p95_ms": 16.7203939,
+        "accel_cv_pct": 6.18080139035613,
+        "accel_ci_95": [
+          14.538798259014271,
+          15.883835140985731
+        ],
+        "parallel_mean_ms": 90.08040849999999,
+        "parallel_median_ms": 90.86000050000001,
+        "parallel_stddev_ms": 3.4330298637979397,
+        "parallel_p95_ms": 94.2735708,
+        "parallel_cv_pct": 3.8110727082214995,
+        "parallel_ci_95": [
+          87.62473749750572,
+          92.53607950249426
+        ],
+        "speedup_mean_vs_parallel": 5.921933667977604,
+        "speedup_median_vs_parallel": 5.995339952797422,
+        "p_value_vs_parallel": 1.0595791735085294e-13,
+        "cohens_d_vs_parallel": 29.746475316384977,
+        "effect_size_meaningful": true
+      },
+      "combined_warm_summary": {
+        "cache_state": "warm",
+        "n": 11,
+        "accel_mean_ms": 25.014113727272726,
+        "accel_median_ms": 15.23475,
+        "accel_stddev_ms": 32.52443192251486,
+        "accel_p95_ms": 69.99879200000001,
+        "accel_cv_pct": 130.02432257695256,
+        "accel_ci_95": [
+          3.1652647003684713,
+          46.862962754176976
+        ],
+        "parallel_mean_ms": 90.33120472727272,
+        "parallel_median_ms": 91.254084,
+        "parallel_stddev_ms": 3.361400134603469,
+        "parallel_p95_ms": 94.52250000000001,
+        "parallel_cv_pct": 3.721194845958473,
+        "parallel_ci_95": [
+          88.0731261162478,
+          92.58928333829763
+        ],
+        "speedup_mean_vs_parallel": 3.611209484059601,
+        "speedup_median_vs_parallel": 5.989864224880619,
+        "p_value_vs_parallel": 0.00004714402225708463,
+        "cohens_d_vs_parallel": 2.8250426829935913,
+        "effect_size_meaningful": true
+      }
+    }
+  ],
+  "headline_speedup_allowed": true,
+  "artifact_dir": "/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-performance18-measured-h3_parent_count_int4_res1/artifacts",
+  "crashes": [],
+  "postmaster_start_time": "2026-10-25 22:58:45.958241-07"
+}

@@ -1,0 +1,11 @@
+   Compiling pg_accel_bench v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel_bench)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.90s
+     Running unittests src/main.rs (target/debug/deps/pg_accel_bench-d43b414edbd15989)
+
+running 3 tests
+test resident_concurrency_test::tests::ownership_snapshot_includes_idle_pools_without_changing_relation_bytes ... ok
+test resident_concurrency_test::tests::ownership_calibration_budget_and_release_include_idle_pools ... ok
+test resident_concurrency_test::tests::ownership_sum_rejects_each_negative_component_and_overflow ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 610 filtered out; finished in 0.00s
+

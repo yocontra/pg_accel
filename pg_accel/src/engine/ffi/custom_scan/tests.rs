@@ -1,8 +1,164 @@
-use super::*;
+#[cfg(test)]
+use super::{
+    AGG_EXEC_METHODS, AGG_SCAN_METHODS, RASTER_EXEC_METHODS, RASTER_SCAN_METHODS, agg_path_methods,
+    drop_installed_executor, raster_path_methods, resolve_thread_count,
+};
+use super::{
+    GpuAccelScanState, GpuAccelState, GpuStrategy, ResidentProofSnapshot, c_void,
+    executor_query_context_reset, install_boxed_executor, pg_sys,
+    with_installed_executor_error_boundary,
+};
 use crate::engine::executor::sort::{SORT_KEY_INTS, SortKeyDesc};
 use crate::engine::executor::window::{WINDOW_SPEC_INTS, WindowFunc, WindowFuncSpec};
 use std::cell::Cell;
 use std::rc::Rc;
+
+#[pgrx::pg_schema]
+mod tests {
+    use super::{
+        Cell, GpuAccelScanState, GpuAccelState, GpuStrategy, Rc, ResidentProofSnapshot, c_void,
+        executor_query_context_reset, install_boxed_executor, pg_sys,
+        with_installed_executor_error_boundary,
+    };
+    use pgrx::prelude::*;
+
+    #[pg_test]
+    fn pg_installed_boundary_restores_and_drops_once() {
+        struct Probe {
+            context: pg_sys::MemoryContext,
+            owner: pg_sys::ResourceOwner,
+            aborts: Rc<Cell<usize>>,
+            drops: Rc<Cell<usize>>,
+            restored: Rc<Cell<bool>>,
+        }
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                self.drops.set(self.drops.get() + 1);
+            }
+        }
+        unsafe fn abort_probe(executor: *mut c_void) {
+            // SAFETY: this callback is paired only with the installed Probe;
+            // observing backend globals does not call PostgreSQL during abort.
+            unsafe {
+                let probe = &*executor.cast::<Probe>();
+                probe.aborts.set(probe.aborts.get() + 1);
+                probe.restored.set(
+                    pg_sys::CurrentMemoryContext == probe.context
+                        && pg_sys::CurrentResourceOwner == probe.owner,
+                );
+            }
+        }
+        let mut state = GpuAccelScanState {
+            css: pg_sys::CustomScanState::default(),
+            accel: GpuAccelState {
+                strategy: GpuStrategy::Agg as i32,
+                exec_method: 0,
+                batch_size: 0,
+                expected_threads: 0,
+                rows_dispatched: 0,
+                batches_executed: 0,
+                dispatch_time_us: 0,
+                parallel_worker_number: -1,
+                dsm_flags: 0,
+                dsm_state: std::ptr::null_mut(),
+                dsm_counters_recorded: false,
+                parallel_agg_participants: 0,
+                parallel_agg_active_participants: 0,
+                parallel_agg_rows_dispatched: 0,
+                parallel_agg_batches_executed: 0,
+                parallel_agg_dispatch_time_us: 0,
+                resident_proof: ResidentProofSnapshot::default(),
+                executor: std::ptr::null_mut(),
+                executor_drop: None,
+                executor_prepare_reset: None,
+                executor_abort: None,
+                executor_close: None,
+            },
+            executor_cleanup: pg_sys::MemoryContextCallback::default(),
+        };
+        // SAFETY: the test runs on a live backend; entry owners remain live.
+        let (context, owner) =
+            unsafe { (pg_sys::CurrentMemoryContext, pg_sys::CurrentResourceOwner) };
+        // SAFETY: create empty children owned only by this bounded live test.
+        let (child, child_owner) = unsafe {
+            (
+                pg_sys::AllocSetContextCreateInternal(
+                    context,
+                    c"adaptive_boundary_test".as_ptr(),
+                    pg_sys::ALLOCSET_DEFAULT_MINSIZE as pg_sys::Size,
+                    pg_sys::ALLOCSET_DEFAULT_INITSIZE as pg_sys::Size,
+                    pg_sys::ALLOCSET_DEFAULT_MAXSIZE as pg_sys::Size,
+                ),
+                pg_sys::ResourceOwnerCreate(owner, c"adaptive_boundary_test".as_ptr()),
+            )
+        };
+        let aborts = Rc::new(Cell::new(0));
+        let drops = Rc::new(Cell::new(0));
+        let restored = Rc::new(Cell::new(false));
+        install_boxed_executor(
+            &mut state.accel.executor,
+            &mut state.accel.executor_drop,
+            &mut state.accel.executor_prepare_reset,
+            Probe {
+                context,
+                owner,
+                aborts: Rc::clone(&aborts),
+                drops: Rc::clone(&drops),
+                restored: Rc::clone(&restored),
+            },
+            None,
+        );
+        state.accel.executor_abort = Some(abort_probe);
+        let message = pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+            // SAFETY: this is the real installed-owner boundary with a valid
+            // state; child ownership intentionally differs when ERROR occurs.
+            unsafe {
+                with_installed_executor_error_boundary(&raw mut state, || {
+                    pg_sys::MemoryContextSwitchTo(child);
+                    pg_sys::CurrentResourceOwner = child_owner;
+                    // A genuine PostgreSQL C ERROR, not just a Rust panic,
+                    // exercises the guarded FFI error path and original state.
+                    pg_sys::pg_strtoint32(c"adaptive boundary original failure".as_ptr());
+                });
+            }
+            String::new()
+        }))
+        .catch_when(
+            PgSqlErrorCode::ERRCODE_INVALID_TEXT_REPRESENTATION,
+            |caught| match caught {
+                pg_sys::panic::CaughtError::PostgresError(report)
+                | pg_sys::panic::CaughtError::ErrorReport(report) => report.message().to_owned(),
+                pg_sys::panic::CaughtError::RustPanic { ereport, .. } => {
+                    ereport.message().to_owned()
+                }
+            },
+        )
+        .execute();
+        assert_eq!(
+            message,
+            "invalid input syntax for type integer: \"adaptive boundary original failure\""
+        );
+        assert!(restored.get(), "restored before the non-PG abort hook ran");
+        assert_eq!(aborts.get(), 1);
+        assert_eq!(drops.get(), 1);
+        assert!(state.accel.executor.is_null());
+        // SAFETY: emulate the later query reset after the eager error release;
+        // the cleared installed owner must make this an idempotent no-op.
+        unsafe { executor_query_context_reset((&raw mut state.accel).cast()) };
+        assert_eq!(aborts.get(), 1);
+        assert_eq!(drops.get(), 1);
+        // SAFETY: only these empty test-owned children are deleted, with the
+        // verified live entry owner/context restored by the tested boundary.
+        unsafe {
+            let current_context = pg_sys::CurrentMemoryContext;
+            let current_owner = pg_sys::CurrentResourceOwner;
+            assert_eq!(current_context, context);
+            assert_eq!(current_owner, owner);
+            pg_sys::ResourceOwnerDelete(child_owner);
+            pg_sys::MemoryContextDelete(child);
+        }
+    }
+}
 
 #[test]
 fn compatibility_strategy_tags_roundtrip() {

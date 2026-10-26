@@ -1,0 +1,200 @@
+2026-10-25 22:42:07.135 MST [60417] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-25 22:42:07.135 MST [60417] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-25 22:42:07.168 MST [60417] LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-25 22:42:07.168 MST [60417] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/h3rp18/.s.PGSQL.33218"
+2026-10-25 22:42:07.175 MST [60436] LOG:  database system was shut down at 2026-10-25 22:42:06 MST
+2026-10-25 22:42:07.178 MST [60417] LOG:  database system is ready to accept connections
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production-repair18/apps/global/jit-cache/15708062306988190290.10270754060747271903.metalar.60461.2756528682387257445.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production-repair18/apps/global/jit-cache/18384041738596059486.10679861981671940392.metalar.60461.13752051217015698172.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production-repair18/apps/global/jit-cache/4939212832255122260.1378868560533804794.metalar.60461.16359697822460132024.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production-repair18/apps/global/jit-cache/71121235393808374.2234286127181060247.metalar.60461.18048160768823018509.tmp (kernels_added=1 skipped=0)
+2026-10-25 22:42:12.197 MST [60433] LOG:  checkpoint starting: immediate force wait
+2026-10-25 22:42:12.222 MST [60433] LOG:  checkpoint complete: wrote 126 buffers (0.0%), wrote 3 SLRU buffers; 1 WAL file(s) added, 0 removed, 0 recycled; write=0.019 s, sync=0.003 s, total=0.025 s; sync files=54, longest=0.001 s, average=0.001 s; distance=5242 kB, estimate=5242 kB; lsn=0/1C2E610, redo lsn=0/1C2E5B8
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production-repair18/apps/global/jit-cache/14698056579597285764.3579585920436312592.metalar.60695.16708861987040335347.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production-repair18/apps/global/jit-cache/8680283755492788044.8552054542954140739.metalar.60695.11489140505288256740.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production-repair18/apps/global/jit-cache/12742463291825261128.9628444747223097921.metalar.60695.11060299794524864024.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production-repair18/apps/global/jit-cache/4939212832255122260.6237939138979752382.metalar.60695.11934575630652372736.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production-repair18/apps/global/jit-cache/17075605042627645658.8959692158553657888.metalar.60695.14341781039858271666.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production-repair18/apps/global/jit-cache/14690400167917884164.14211611095228352041.metalar.60695.16261420338626991156.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production-repair18/apps/global/jit-cache/2574708908066720270.10270754060747271903.metalar.60695.3748170100829644011.tmp (kernels_added=1 skipped=0)
+2026-10-26T05:42:16.722692Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production-repair18/apps/global/jit-cache/18304861154564092634.8959692158553657888.metalar.60695.18383216624254852494.tmp (kernels_added=1 skipped=0)
+2026-10-26T05:42:17.081591Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production-repair18/apps/global/jit-cache/7819755321666386692.10679861981671940392.metalar.60695.10690036761747679067.tmp (kernels_added=1 skipped=0)
+2026-10-26T05:42:17.881359Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:17.886794Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:20.297418Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:20.311257Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:20.508986Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:20.516254Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:23.555735Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:23.566254Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:23.796804Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:23.807438Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production-repair18/apps/global/jit-cache/14171431133706346120.10679861981671940392.metalar.60695.4571124099558043774.tmp (kernels_added=1 skipped=0)
+2026-10-26T05:42:24.612827Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:24.622452Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:28.137743Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:28.147136Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production-repair18/apps/global/jit-cache/15645957498266366212.15675045217815886616.metalar.60695.14631269759064605851.tmp (kernels_added=1 skipped=0)
+2026-10-26T05:42:28.756329Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:28.764551Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:28.949284Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:28.954683Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:29.135775Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:29.142616Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production-repair18/apps/global/jit-cache/15638379143336172420.18172618811436184833.metalar.60695.1224868798635488315.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production-repair18/apps/global/jit-cache/7676880867556255052.13488318957453097810.metalar.60695.5728991229948387916.tmp (kernels_added=1 skipped=0)
+2026-10-26T05:42:32.072480Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:32.074988Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:32.078330Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:32.081099Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:32.082037Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:32.082994Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:32.133102Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:32.134589Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:32.137673Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:32.140159Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:32.142254Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:32.144249Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:34.467681Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:34.479163Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:34.490685Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:34.492212Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:34.493247Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:34.495369Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:36.104754Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:36.108596Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:36.115035Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:36.117669Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:36.120986Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:36.124008Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:36.200447Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:36.202636Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:36.208168Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:36.209880Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:36.217952Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:36.221318Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:37.953940Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:37.955255Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:37.957245Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:37.969681Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:37.973218Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:37.974646Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:38.037748Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:38.039590Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:38.040695Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:38.041663Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:38.044092Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:38.046745Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:39.425852Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:39.426891Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:39.428219Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:39.430245Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:39.431202Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:39.432227Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:39.483637Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:39.484666Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:39.485538Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:39.486244Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:39.486882Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:39.487662Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:40.705652Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:40.707111Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:40.708060Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:40.708967Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:40.709834Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:40.710631Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:40.768589Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:40.769682Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:40.770417Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:40.771169Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:40.771886Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:40.772635Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:42.135092Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:42.135930Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:42.136800Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:42.137555Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:42.138388Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:42.139309Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:42.191800Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:42.192632Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:42.194261Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:42.195829Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:42.197184Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:42.198639Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:47.019198Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:47.026064Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:47.202399Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:47.207503Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:49.071814Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:49.077266Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:49.253256Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:49.263212Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:51.122001Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:51.129445Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:51.311970Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:51.319650Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:53.419337Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:53.426060Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:53.722102Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:53.744896Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:57.425780Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:57.446031Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:57.836034Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:42:57.847708Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:43:00.306476Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:43:00.311897Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:43:00.528179Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:43:00.543678Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production-repair18/apps/global/jit-cache/14690400167917884164.7365760609753380003.metalar.60695.2707504730199734997.tmp (kernels_added=1 skipped=0)
+2026-10-26T05:43:08.976924Z ERROR GPU kernel dispatch failed func="pgaccel_h3_cell_to_parent_resident_ex" status=InvalidArgument raw=-6 domain="h3"
+2026-10-26T05:43:09.842495Z ERROR GPU kernel dispatch failed func="pgaccel_h3_cell_to_parent_resident_ex" status=InvalidArgument raw=-6 domain="h3"
+2026-10-26T05:43:10.818354Z ERROR GPU kernel dispatch failed func="pgaccel_h3_cell_to_parent_resident_ex" status=InvalidArgument raw=-6 domain="h3"
+2026-10-26T05:43:11.942089Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-26T05:43:12.085363Z ERROR GPU kernel dispatch failed func="pgaccel_hash_count_partition_execute_v1" status=Error raw=-1 domain="hash_agg"
+2026-10-25 22:43:12.129 MST [60417] LOG:  received fast shutdown request
+2026-10-25 22:43:12.129 MST [60417] LOG:  aborting any active transactions
+2026-10-25 22:43:12.132 MST [60417] LOG:  background worker "logical replication launcher" (PID 60439) exited with exit code 1
+2026-10-25 22:43:12.168 MST [60433] LOG:  shutting down
+2026-10-25 22:43:12.168 MST [60433] LOG:  checkpoint starting: shutdown immediate
+2026-10-25 22:43:12.203 MST [60433] LOG:  checkpoint complete: wrote 166 buffers (0.0%), wrote 2 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.032 s, sync=0.003 s, total=0.036 s; sync files=49, longest=0.001 s, average=0.001 s; distance=1563 kB, estimate=4874 kB; lsn=0/1DB53D8, redo lsn=0/1DB53D8
+2026-10-25 22:43:12.215 MST [60417] LOG:  database system is shut down

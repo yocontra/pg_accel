@@ -14,8 +14,10 @@
 mod artifact;
 mod descriptor;
 mod execute;
+mod hash_partition;
 mod output;
 mod spatial;
+mod spool;
 
 #[cfg(feature = "pg_test")]
 pub(crate) use descriptor::scalar_measure_column;
@@ -147,6 +149,7 @@ fn test_execute_descriptor(
 
 pub(crate) use artifact::descriptor_program_clone_bytes;
 pub(crate) use artifact::estimate_descriptor_artifact_bytes_upper_bound;
+pub(crate) use descriptor::canonical_h3_count;
 pub(crate) use descriptor::dense_descriptor_memory_requirements;
 pub(crate) use descriptor::{DenseExecutionDecision, select_dense_execution};
 pub(crate) use descriptor::{H3PlanningMemory, h3_planning_memory};

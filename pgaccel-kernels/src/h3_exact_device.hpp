@@ -327,9 +327,8 @@ static inline void h3_set_index_digit(H3Index& h, int res, Direction digit) {
 }
 
 // Exact bit-domain helpers shared by the standalone H3 kernels and fused
-// consumers. These deliberately validate the complete H3 cell contract before
-// transforming a key; accepting a merely well-shaped bit pattern would differ
-// from h3-pg on pentagon deleted subsequences and malformed trailing digits.
+// consumers. Cell validity is a separate operation: upstream cellToParent
+// accepts noncanonical bits and checks only the requested resolution.
 static constexpr uint64_t H3_HIGH_BIT = uint64_t(1) << 63;
 static constexpr uint64_t H3_PENTAGON_BASE_LOW =
     (uint64_t(1) << 4) | (uint64_t(1) << 14) | (uint64_t(1) << 24) |
@@ -382,14 +381,23 @@ static inline uint64_t h3_unused_digit_mask_after(int parent_resolution) {
   return mask;
 }
 
-static inline H3Index h3_cell_to_parent(H3Index cell, int parent_resolution) {
+static inline bool h3_cell_to_parent_exact(H3Index cell, int parent_resolution,
+                                         H3Index* parent) {
   const int resolution = h3_get_resolution(cell);
-  if (parent_resolution < 0 || parent_resolution > resolution)
-    return 0;
-  if (parent_resolution == resolution)
-    return cell;
+  if (parent_resolution < 0 || parent_resolution > MAX_H3_RES ||
+      parent_resolution > resolution)
+    return false;
   h3_set_resolution(cell, parent_resolution);
-  return cell | h3_unused_digit_mask_after(parent_resolution);
+  for (int r = parent_resolution + 1; r <= resolution; ++r)
+    cell |= uint64_t(INVALID_DIGIT) << ((MAX_H3_RES - r) * H3_PER_DIGIT_OFFSET);
+  *parent = cell;
+  return true;
+}
+
+static inline H3Index h3_cell_to_parent(H3Index cell, int parent_resolution) {
+  H3Index parent = 0;
+  h3_cell_to_parent_exact(cell, parent_resolution, &parent);
+  return parent;
 }
 
 static inline int round_to_int(double x) {

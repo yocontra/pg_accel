@@ -371,6 +371,12 @@ mod tests {
             postgres::NoTls,
         )
         .expect("live PostgreSQL");
+        crate::integration_connection::register_live_pg_client(
+            &mut client,
+            &crate::integration_connection::test_connection(),
+            crate::integration_connection::live_pg_scope().expect("owning live-test scope"),
+        )
+        .expect("register stock-only TPC-H backend");
         let mut transaction = client
             .transaction()
             .expect("rollback-only corpus transaction");

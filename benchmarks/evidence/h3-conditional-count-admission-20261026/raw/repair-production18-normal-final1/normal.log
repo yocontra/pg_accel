@@ -1,0 +1,2994 @@
+SET
+RESET
+RESET
+RESET
+SET
+ cpu_cores | configured_workers | gpu_available | gpu_device_name |  memory_model   | pg_version | pg_accel_version 
+-----------+--------------------+---------------+-----------------+-----------------+------------+------------------
+        12 |                  0 | t             | Apple M2 Max    | explicit_device |     180004 | 1.0.0-rc1
+(1 row)
+
+                     name                      |    value    |      source      
+-----------------------------------------------+-------------+------------------
+ resident_memory_budget_bytes                  | 8589934592  | hardware_derived
+ resident_domain_max_exact_value_bytes         | 1048576     | hardware_derived
+ auto_load_amortization_queries                | 8           | hardware_derived
+ resident_load_scan_per_row_cost               | 0.01        | hardware_derived
+ resident_load_per_byte_cost                   | 0.001       | hardware_derived
+ gpu_min_rows                                  | 8421        | hardware_derived
+ gpu_sort_min_rows                             | 84210       | hardware_derived
+ gpu_sort_planner_min_rows                     | 84210       | hardware_derived
+ gpu_window_min_rows                           | 84210       | hardware_derived
+ gpu_reduce_min_rows                           | 21052       | hardware_derived
+ gpu_hash_agg_min_rows                         | 210526      | hardware_derived
+ gpu_hash_agg_unsafe_input_rows                | 100000      | hardware_derived
+ gpu_hash_agg_max_groups                       | 100000      | hardware_derived
+ gpu_h3_max_groups                             | 16776704    | hardware_derived
+ gpu_reduce_max_chunk                          | 1000000     | hardware_derived
+ gpu_grouped_agg_one_shot_max_rows             | 1000000     | hardware_derived
+ gpu_sort_max_elements                         | 4000000     | hardware_derived
+ gpu_sort_topk_max_limit                       | 128         | hardware_derived
+ gpu_sort_heap_topk_max_fraction               | 0.25        | hardware_derived
+ gpu_sort_heap_topk_max_width_bytes            | 16          | hardware_derived
+ gpu_join_max_output_rows                      | 118750      | hardware_derived
+ gpu_h3_group_min_rows                         | 84210       | hardware_derived
+ gpu_h3_max_chunk_rows                         | 4000000     | hardware_derived
+ gpu_spatial_min_vertices                      | 84          | hardware_derived
+ gpu_spatial_max_vertices_per_row              | 1000000     | hardware_derived
+ gpu_spatial_max_output_fraction               | 0.8         | hardware_derived
+ gpu_spatial_max_recheck_fraction              | 0.1         | hardware_derived
+ gpu_spatial_pairwise_chunk_rows               | 65536       | hardware_derived
+ gpu_raster_min_pixels                         | 55188       | hardware_derived
+ gpu_raster_max_chunk_pixels                   | 4000000     | hardware_derived
+ gpu_expr_min_rows                             | 210526      | hardware_derived
+ gpu_hash_join_build_max_rows                  | 99999       | hardware_derived
+ gpu_pipeline_fusion_min_rows                  | 8421        | hardware_derived
+ gpu_preagg_min_fact_rows                      | 42105       | hardware_derived
+ gpu_preagg_max_dim_rows                       | 2000000     | hardware_derived
+ preagg_dim_materialize_cost                   | 0.1         | hardware_derived
+ preagg_fact_scan_cost                         | 0.001       | hardware_derived
+ preagg_probe_cost                             | 0.003       | hardware_derived
+ preagg_agg_cost                               | 0.002       | hardware_derived
+ preagg_yield_cost                             | 0.03        | hardware_derived
+ optimal_batch_min                             | 256         | hardware_derived
+ optimal_batch_max                             | 32768       | hardware_derived
+ fused_interrupt_interval                      | 65536       | hardware_derived
+ gpu_op_cost_reduce                            | 0.0005      | hardware_derived
+ gpu_op_cost_hash_agg                          | 0.002       | hardware_derived
+ gpu_op_cost_sort                              | 0.003       | hardware_derived
+ gpu_op_cost_window                            | 0.001       | hardware_derived
+ gpu_op_cost_filter                            | 0.001       | hardware_derived
+ gpu_op_cost_h3_parent_resident                | 0.001       | hardware_derived
+ gpu_hashjoin_build_per_row                    | 0.001       | hardware_derived
+ gpu_hashjoin_probe_per_row                    | 0.001       | hardware_derived
+ custom_scan_yield_per_row                     | 0.001       | hardware_derived
+ gpu_partial_agg_per_row                       | 0.001       | hardware_derived
+ gpu_agg_cost_ratio                            | 0.8         | hardware_derived
+ gpu_window_cost_ratio                         | 1.5         | hardware_derived
+ gpu_preagg_cost_ratio                         | 1.5         | hardware_derived
+ reduce_f32_break_even_rows                    | 21052       | hardware_derived
+ reduce_f64_break_even_rows                    | 42105       | hardware_derived
+ reduce_i64_break_even_rows                    | 63157       | hardware_derived
+ reduce_bit_break_even_rows                    | 252631      | hardware_derived
+ reduce_bool_break_even_rows                   | 421052      | hardware_derived
+ hashagg_min_rows_per_group                    | 32          | hardware_derived
+ hashagg_max_state_bytes_per_group             | 256         | hardware_derived
+ sort_break_even_rows_int                      | 84210       | hardware_derived
+ sort_break_even_rows_float                    | 67368       | hardware_derived
+ spatial_point_in_ring_break_even_verts_x_rows | 500000000   | hardware_derived
+ spatial_point_in_ring_max_verts_x_rows        | 50000000000 | hardware_derived
+ window_min_partition_rows                     | 8421        | hardware_derived
+ expr_min_predicate_complexity_x_rows          | 50000       | hardware_derived
+ hashjoin_min_build_rows                       | 4210        | hardware_derived
+ gpu_nlj_min_outer_rows                        | 842         | hardware_derived
+ gpu_nlj_min_inner_rows                        | 842         | hardware_derived
+ gpu_nlj_max_output_rows                       | 118750      | hardware_derived
+ gpu_nlj_per_pair_cost                         | 0.0000001   | hardware_derived
+ has_native_fp64                               | false       | hardware_derived
+ soft_fp64_cost_multiplier                     | 32          | hardware_derived
+(76 rows)
+
+                name                | setting |    source    
+------------------------------------+---------+--------------
+ jit                                | on      | default
+ max_parallel_workers               | 8       | default
+ max_parallel_workers_per_gather    | 2       | default
+ pg_accel.assert_dispatch           | off     | default
+ pg_accel.auto_load                 | on      | default
+ pg_accel.cost_multiplier           | 1       | default
+ pg_accel.enabled                   | on      | session
+ pg_accel.execution_profiling       | off     | default
+ pg_accel.fp64_enabled              | on      | default
+ pg_accel.gpu_enabled               | on      | default
+ pg_accel.kernel_timeout_ms         | 5000    | default
+ pg_accel.log_level                 | Notice  | default
+ pg_accel.max_workers_total         | 0       | default
+ pg_accel.min_batch_size            | 65536   | default
+ pg_accel.otel_log_max_mb           | 256     | default
+ pg_accel.otel_log_max_rotations    | 4       | default
+ pg_accel.parallel_fused_count      | off     | default
+ pg_accel.planner_profiling         | off     | default
+ pg_accel.resident_memory_budget_mb | -1      | default
+ pg_accel.soft_fp64_cost_multiplier | 32      | default
+ shared_buffers                     | 2097152 | command line
+ work_mem                           | 4096    | default
+(22 rows)
+
+DO
+CREATE FUNCTION
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=4.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8575934354
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16702.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16702.2:type=16) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16702.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=16 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16702 generation=1 global=1 relfilenode=16702
+  GPU Descriptor Bytes: raw=14000238 derived=9000153 artifact=9000153 total=23000391
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 1000017
+  Batches: 1
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 1582.931 ms
+  Avg Dispatch Time Per Batch: 1582.931 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 1047.929 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=156
+Planning Time: 0.666 ms
+Execution Time: 2631.211 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=18 result_delta=1 reason=no_gpu_resident_pipeline query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_NINE_TYPE_PASS type=boolean rows=1000017
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 2000034
+  GPU Adaptive Aggregate Attempts: 2
+  GPU Adaptive Capacity Overflows: 1
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8575917931
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16702.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16702.2:type=16) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16702.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=16 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=16702)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16702 generation=2 global=1 relfilenode=16702
+  GPU Descriptor Bytes: raw=14000238 derived=9000153 artifact=9000153 total=23000391
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 2000034
+  Batches: 2
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 354.987 ms
+  Avg Dispatch Time Per Batch: 177.494 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 112.662 ms
+  Total Residency Preparation Time: 120.019 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=141
+Planning Time: 0.766 ms
+Execution Time: 475.232 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=19 result_delta=2 reason=no_gpu_resident_pipeline query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 2000034
+  GPU Adaptive Aggregate Attempts: 2
+  GPU Adaptive Capacity Overflows: 1
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=8000136 ephemeral_bytes=0 construction_time_us=667 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=1 ephemeral_build_launches=0 consumer_launches=1 budget_headroom_bytes=8566906388
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16702.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16702.2:type=16) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=16 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16702 generation=2 global=1 relfilenode=16702
+  GPU Descriptor Bytes: raw=14000238 derived=17000289 artifact=8000136 total=31000527
+  GPU Resident Stage Mask: 17417
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 2000034
+  Batches: 2
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 612.251 ms
+  Avg Dispatch Time Per Batch: 306.125 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 1.757 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=141
+Planning Time: 0.497 ms
+Execution Time: 614.210 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=3 result_delta=2 reason=setop_no_gpu_kernel query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_NONCANONICAL_NINE_TYPE_PASS type=boolean rows=1000017
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=4.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8572892086
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16724.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16724.2:type=21) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16724.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=21 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16724 generation=1 global=1 relfilenode=16724
+  GPU Descriptor Bytes: raw=17000289 derived=9000153 artifact=9000153 total=26000442
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 1000017
+  Batches: 1
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 5.929 ms
+  Avg Dispatch Time Per Batch: 5.929 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 64.775 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=156
+Planning Time: 0.505 ms
+Execution Time: 71.230 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=18 result_delta=1 reason=no_gpu_resident_pipeline query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_NINE_TYPE_PASS type=smallint rows=1000017
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 2000034
+  GPU Adaptive Aggregate Attempts: 2
+  GPU Adaptive Capacity Overflows: 1
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8572878838
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16724.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16724.2:type=21) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16724.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=21 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=16724)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16724 generation=2 global=1 relfilenode=16724
+  GPU Descriptor Bytes: raw=17000289 derived=9000153 artifact=9000153 total=26000442
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 2000034
+  Batches: 2
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 11.379 ms
+  Avg Dispatch Time Per Batch: 5.689 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 113.458 ms
+  Total Residency Preparation Time: 131.430 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=141
+Planning Time: 0.907 ms
+Execution Time: 143.119 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=19 result_delta=2 reason=no_gpu_resident_pipeline query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 2000034
+  GPU Adaptive Aggregate Attempts: 2
+  GPU Adaptive Capacity Overflows: 1
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=8000136 ephemeral_bytes=0 construction_time_us=667 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=1 ephemeral_build_launches=0 consumer_launches=1 budget_headroom_bytes=8563873445
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16724.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16724.2:type=21) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=21 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16724 generation=2 global=1 relfilenode=16724
+  GPU Descriptor Bytes: raw=17000289 derived=17000289 artifact=8000136 total=34000578
+  GPU Resident Stage Mask: 17417
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 2000034
+  Batches: 2
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 6.063 ms
+  Avg Dispatch Time Per Batch: 3.031 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 3.571 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=141
+Planning Time: 0.726 ms
+Execution Time: 9.856 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=3 result_delta=2 reason=setop_no_gpu_kernel query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_NONCANONICAL_NINE_TYPE_PASS type=smallint rows=1000017
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=4.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8572859194
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16746.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16746.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16746.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16746 generation=1 global=1 relfilenode=16746
+  GPU Descriptor Bytes: raw=17000289 derived=9000153 artifact=9000153 total=26000442
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 1000017
+  Batches: 1
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 7.603 ms
+  Avg Dispatch Time Per Batch: 7.603 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 96.715 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=156
+Planning Time: 0.523 ms
+Execution Time: 104.682 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=18 result_delta=1 reason=no_gpu_resident_pipeline query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_NINE_TYPE_PASS type=integer rows=1000017
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 2000034
+  GPU Adaptive Aggregate Attempts: 2
+  GPU Adaptive Capacity Overflows: 1
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8572850030
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16746.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16746.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16746.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=16746)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16746 generation=2 global=1 relfilenode=16746
+  GPU Descriptor Bytes: raw=17000289 derived=9000153 artifact=9000153 total=26000442
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 2000034
+  Batches: 2
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 5.342 ms
+  Avg Dispatch Time Per Batch: 2.671 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 118.647 ms
+  Total Residency Preparation Time: 141.808 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=141
+Planning Time: 1.766 ms
+Execution Time: 147.665 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=19 result_delta=2 reason=no_gpu_resident_pipeline query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 2000034
+  GPU Adaptive Aggregate Attempts: 2
+  GPU Adaptive Capacity Overflows: 1
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=8000136 ephemeral_bytes=0 construction_time_us=667 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=1 ephemeral_build_launches=0 consumer_launches=1 budget_headroom_bytes=8563859041
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16746.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16746.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16746 generation=2 global=1 relfilenode=16746
+  GPU Descriptor Bytes: raw=17000289 derived=17000289 artifact=8000136 total=34000578
+  GPU Resident Stage Mask: 17417
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 2000034
+  Batches: 2
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 19.175 ms
+  Avg Dispatch Time Per Batch: 9.588 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 3.691 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=141
+Planning Time: 1.410 ms
+Execution Time: 23.129 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=3 result_delta=2 reason=setop_no_gpu_kernel query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_NONCANONICAL_NINE_TYPE_PASS type=integer rows=1000017
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(*) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 2000034
+  GPU Adaptive Aggregate Attempts: 2
+  GPU Adaptive Capacity Overflows: 1
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8555858905
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16746.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16746.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16746 generation=2 global=1 relfilenode=16746
+  GPU Descriptor Bytes: raw=17000289 derived=26000442 artifact=9000153 total=43000731
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 2000034
+  Batches: 2
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 581.212 ms
+  Avg Dispatch Time Per Batch: 290.606 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 19.782 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=141
+Planning Time: 0.485 ms
+Execution Time: 601.391 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=19 result_delta=2 reason=setop_no_gpu_kernel query=SELECT public.h3_cell_to_parent(cell,0) parent,count(*) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN HashAggregate (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), sum(v) FILTER (WHERE p)
+  Group Key: h3_cell_to_parent(h3_normal_qualified.cell, 0)
+  Batches: 1  Memory Usage: 48kB
+  Buffers: local read=12346 written=1
+  ->  Seq Scan on pg_temp.h3_normal_qualified (actual rows=1000017.00 loops=1)
+        Output: h3_cell_to_parent(cell, 0), v, p
+        Buffers: local read=12346 written=1
+Planning:
+  Buffers: shared hit=87
+Planning Time: 0.261 ms
+Execution Time: 192.576 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=native plan_delta=0 result_delta=0 reason=generic_descriptor_capability query=SELECT public.h3_cell_to_parent(cell,0) parent,sum(v) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN HashAggregate (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), count(v) FILTER (WHERE (NOT p))
+  Group Key: h3_cell_to_parent(h3_normal_qualified.cell, 0)
+  Batches: 1  Memory Usage: 48kB
+  Buffers: local read=12346 written=1
+  ->  Seq Scan on pg_temp.h3_normal_qualified (actual rows=1000017.00 loops=1)
+        Output: h3_cell_to_parent(cell, 0), v, p
+        Buffers: local read=12346 written=1
+Planning:
+  Buffers: shared hit=87
+Planning Time: 0.277 ms
+Execution Time: 234.391 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=native plan_delta=0 result_delta=0 reason=generic_descriptor_capability query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE NOT p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN HashAggregate (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), count(v) FILTER (WHERE (p AND (v IS NOT NULL)))
+  Group Key: h3_cell_to_parent(h3_normal_qualified.cell, 0)
+  Batches: 1  Memory Usage: 48kB
+  Buffers: local read=12346 written=1
+  ->  Seq Scan on pg_temp.h3_normal_qualified (actual rows=1000017.00 loops=1)
+        Output: h3_cell_to_parent(cell, 0), v, p
+        Buffers: local read=12346 written=1
+Planning:
+  Buffers: shared hit=87
+Planning Time: 0.224 ms
+Execution Time: 425.634 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=native plan_delta=0 result_delta=0 reason=generic_descriptor_capability query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p AND v IS NOT NULL) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN HashAggregate (actual rows=73.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), count(v) FILTER (WHERE p)
+  Group Key: h3_cell_to_parent(h3_normal_qualified.cell, 0)
+  Batches: 1  Memory Usage: 32kB
+  Buffers: local read=12346 written=1
+  ->  Seq Scan on pg_temp.h3_normal_qualified (actual rows=571438.00 loops=1)
+        Output: h3_cell_to_parent(cell, 0), v, p
+        Filter: (h3_normal_qualified.v IS NOT NULL)
+        Rows Removed by Filter: 428579
+        Buffers: local read=12346 written=1
+Planning:
+  Buffers: shared hit=87
+Planning Time: 0.295 ms
+Execution Time: 178.689 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=native plan_delta=0 result_delta=0 reason=generic_descriptor_capability query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p) n FROM h3_normal_qualified WHERE v IS NOT NULL GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN HashAggregate (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), count(v), count(*) FILTER (WHERE p)
+  Group Key: h3_cell_to_parent(h3_normal_qualified.cell, 0)
+  Batches: 1  Memory Usage: 48kB
+  Buffers: local read=12346 written=1
+  ->  Seq Scan on pg_temp.h3_normal_qualified (actual rows=1000017.00 loops=1)
+        Output: h3_cell_to_parent(cell, 0), v, p
+        Buffers: local read=12346 written=1
+Planning:
+  Buffers: shared hit=87
+Planning Time: 0.220 ms
+Execution Time: 190.737 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=native plan_delta=0 result_delta=0 reason=shape_aggregate_modifier query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v),count(*) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(p) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 2000034
+  GPU Adaptive Aggregate Attempts: 2
+  GPU Adaptive Capacity Overflows: 1
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8546838075
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16746.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16746.3:type=16) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16746.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=16 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16746 generation=2 global=1 relfilenode=16746
+  GPU Descriptor Bytes: raw=17000289 derived=35000595 artifact=9000153 total=52000884
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 2000034
+  Batches: 2
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 8.610 ms
+  Avg Dispatch Time Per Batch: 4.305 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 29.187 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=141
+Planning Time: 0.560 ms
+Execution Time: 38.018 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=19 result_delta=2 reason=setop_no_gpu_kernel query=SELECT public.h3_cell_to_parent(cell,0) parent,count(p) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(p) FILTER (WHERE q))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 2000034
+  GPU Adaptive Aggregate Attempts: 2
+  GPU Adaptive Capacity Overflows: 1
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8537837922
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16746.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16746.3:type=16) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16746.4:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=16 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16746 generation=2 global=1 relfilenode=16746
+  GPU Descriptor Bytes: raw=17000289 derived=44000748 artifact=9000153 total=61001037
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 2000034
+  Batches: 2
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 7.043 ms
+  Avg Dispatch Time Per Batch: 3.522 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 414.296 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=156
+Planning Time: 0.630 ms
+Execution Time: 421.578 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=19 result_delta=2 reason=setop_no_gpu_kernel query=SELECT public.h3_cell_to_parent(cell,0) parent,count(p) FILTER (WHERE q) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(p) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 2000034
+  GPU Adaptive Aggregate Attempts: 2
+  GPU Adaptive Capacity Overflows: 1
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=exact_cache_hit construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=true invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8528837769
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16746.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16746.3:type=16) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16746.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=16 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: hit
+  GPU Descriptor Generations: rel=16746 generation=2 global=1 relfilenode=16746
+  GPU Descriptor Bytes: raw=17000289 derived=44000748 artifact=9000153 total=61001037
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 2000034
+  Batches: 2
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 4.780 ms
+  Avg Dispatch Time Per Batch: 2.390 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 0.007 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=141
+Planning Time: 0.706 ms
+Execution Time: 5.036 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=2 result_delta=2 reason=setop_no_gpu_kernel query=SELECT public.h3_cell_to_parent(cell,0) parent,count(p) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 2000034
+  GPU Adaptive Aggregate Attempts: 2
+  GPU Adaptive Capacity Overflows: 1
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=exact_cache_hit construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=true invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8528837769
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16746.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16746.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16746.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: hit
+  GPU Descriptor Generations: rel=16746 generation=2 global=1 relfilenode=16746
+  GPU Descriptor Bytes: raw=17000289 derived=44000748 artifact=9000153 total=61001037
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 2000034
+  Batches: 2
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 6.677 ms
+  Avg Dispatch Time Per Batch: 3.338 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 0.004 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=156
+Planning Time: 0.563 ms
+Execution Time: 6.859 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=2 result_delta=2 reason=setop_no_gpu_kernel query=EXECUTE h3_qualified_prepared
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=1.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8573838534
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16746.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16746.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16746.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=16746)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16746 generation=3 global=1 relfilenode=16746
+  GPU Descriptor Bytes: raw=16000272 derived=9000153 artifact=9000153 total=25000425
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 1000017
+  Batches: 1
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 3.333 ms
+  Avg Dispatch Time Per Batch: 3.333 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 123.831 ms
+  Total Residency Preparation Time: 864.976 ms
+  Buffers: shared hit=15
+Planning Time: 0.003 ms
+Execution Time: 868.551 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=18 result_delta=1 reason=no_gpu_resident_pipeline query=EXECUTE h3_qualified_prepared
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=4097.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 7
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 7000119
+  GPU Adaptive Aggregate Attempts: 7
+  GPU Adaptive Capacity Overflows: 6
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8573826650
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16746.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16746.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16746.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=16746)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16746 generation=4 global=1 relfilenode=16746
+  GPU Descriptor Bytes: raw=16000272 derived=9000153 artifact=9000153 total=25000425
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 7000119
+  Batches: 7
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 60.523 ms
+  Avg Dispatch Time Per Batch: 8.646 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 246.204 ms
+  Total Residency Preparation Time: 268.576 ms
+  Buffers: shared hit=15
+Planning Time: 0.002 ms
+Execution Time: 330.451 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=24 result_delta=7 reason=no_gpu_resident_pipeline query=EXECUTE h3_qualified_prepared
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=1.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8572147535
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16746.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16746.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16746.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=16746)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16746 generation=5 global=1 relfilenode=16746
+  GPU Descriptor Bytes: raw=17000289 derived=9000153 artifact=9000153 total=26000442
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 1000017
+  Batches: 1
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 5.829 ms
+  Avg Dispatch Time Per Batch: 5.829 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 271.179 ms
+  Total Residency Preparation Time: 292.271 ms
+  Buffers: shared hit=15
+Planning Time: 0.002 ms
+Execution Time: 298.370 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=18 result_delta=1 reason=no_gpu_resident_pipeline query=EXECUTE h3_qualified_prepared
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=4097.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 7
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 7000119
+  GPU Adaptive Aggregate Attempts: 7
+  GPU Adaptive Capacity Overflows: 6
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8574152928
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16746.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16746.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16746.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=16746)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16746 generation=7 global=1 relfilenode=16746
+  GPU Descriptor Bytes: raw=15000255 derived=9000153 artifact=9000153 total=24000408
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 7000119
+  Batches: 7
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 76.240 ms
+  Avg Dispatch Time Per Batch: 10.891 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 319.032 ms
+  Total Residency Preparation Time: 391.203 ms
+  Buffers: shared hit=15
+Planning Time: 0.002 ms
+Execution Time: 469.005 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=24 result_delta=7 reason=no_gpu_resident_pipeline query=EXECUTE h3_qualified_prepared
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=4097.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 7
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 7000119
+  GPU Adaptive Aggregate Attempts: 7
+  GPU Adaptive Capacity Overflows: 6
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8573152911
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16746.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16746.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16746.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=16746)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16746 generation=8 global=1 relfilenode=16746
+  GPU Descriptor Bytes: raw=16000272 derived=9000153 artifact=9000153 total=25000425
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 7000119
+  Batches: 7
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 79.399 ms
+  Avg Dispatch Time Per Batch: 11.343 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 364.669 ms
+  Total Residency Preparation Time: 392.683 ms
+  Buffers: shared hit=15
+Planning Time: 0.003 ms
+Execution Time: 474.032 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=24 result_delta=7 reason=no_gpu_resident_pipeline query=EXECUTE h3_qualified_prepared
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=4097.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 7
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 7000119
+  GPU Adaptive Aggregate Attempts: 7
+  GPU Adaptive Capacity Overflows: 6
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8574152928
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16746.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16746.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16746.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=16746)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16746 generation=9 global=1 relfilenode=16746
+  GPU Descriptor Bytes: raw=15000255 derived=9000153 artifact=9000153 total=24000408
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 7000119
+  Batches: 7
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 58.104 ms
+  Avg Dispatch Time Per Batch: 8.301 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 213.185 ms
+  Total Residency Preparation Time: 223.411 ms
+  Buffers: shared hit=15
+Planning Time: 0.003 ms
+Execution Time: 282.647 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=24 result_delta=7 reason=no_gpu_resident_pipeline query=EXECUTE h3_qualified_prepared
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=4097.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 7
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 7000119
+  GPU Adaptive Aggregate Attempts: 7
+  GPU Adaptive Capacity Overflows: 6
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8574152928
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16746.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16746.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16746.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=16746)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16746 generation=10 global=1 relfilenode=16746
+  GPU Descriptor Bytes: raw=15000255 derived=9000153 artifact=9000153 total=24000408
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 7000119
+  Batches: 7
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 60.656 ms
+  Avg Dispatch Time Per Batch: 8.665 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 229.291 ms
+  Total Residency Preparation Time: 241.757 ms
+  Buffers: shared hit=15
+Planning Time: 0.003 ms
+Execution Time: 303.597 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=24 result_delta=7 reason=no_gpu_resident_pipeline query=EXECUTE h3_qualified_prepared
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=4097.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 7
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 7000119
+  GPU Adaptive Aggregate Attempts: 7
+  GPU Adaptive Capacity Overflows: 6
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8575152945
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16746.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16746.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16746.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=16746)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16746 generation=11 global=1 relfilenode=16746
+  GPU Descriptor Bytes: raw=14000238 derived=9000153 artifact=9000153 total=23000391
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 7000119
+  Batches: 7
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 54.225 ms
+  Avg Dispatch Time Per Batch: 7.746 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 265.121 ms
+  Total Residency Preparation Time: 281.349 ms
+  Buffers: shared hit=15
+Planning Time: 0.003 ms
+Execution Time: 336.808 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=24 result_delta=7 reason=no_gpu_resident_pipeline query=EXECUTE h3_qualified_prepared
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=1.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8573835552
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16746.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16746.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16746.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=16746)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16746 generation=12 global=1 relfilenode=16746
+  GPU Descriptor Bytes: raw=15000255 derived=9000153 artifact=9000153 total=24000408
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 1000017
+  Batches: 1
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 5.209 ms
+  Avg Dispatch Time Per Batch: 5.209 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 279.039 ms
+  Total Residency Preparation Time: 302.959 ms
+  Buffers: shared hit=15
+Planning Time: 0.002 ms
+Execution Time: 308.527 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=18 result_delta=1 reason=no_gpu_resident_pipeline query=EXECUTE h3_qualified_prepared
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=0.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: ephemeral_fused reason=zero_retained_bytes construction_bytes=0 ephemeral_bytes=0 construction_time_us=1 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=0 ephemeral_build_launches=0 consumer_launches=1 budget_headroom_bytes=8588851364
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16746.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16746.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16746.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=16746)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16746 generation=13 global=1 relfilenode=16746
+  GPU Descriptor Bytes: raw=0 derived=0 artifact=0 total=0
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 0
+  Batches: 1
+  Rows Per Batch: 0.000
+  Dispatch Time: 2.821 ms
+  Avg Dispatch Time Per Batch: 2.821 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.392 ms
+  Total Residency Preparation Time: 2.751 ms
+  Buffers: shared hit=15
+Planning Time: 0.002 ms
+Execution Time: 5.785 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=empty plan_delta=1 result_delta=1 reason=no_gpu_resident_pipeline query=EXECUTE h3_qualified_prepared
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=1.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8573867437
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16746.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16746.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16746.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16746 generation=14 global=1 relfilenode=16746
+  GPU Descriptor Bytes: raw=15000255 derived=9000153 artifact=9000153 total=24000408
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 1000017
+  Batches: 1
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 2.048 ms
+  Avg Dispatch Time Per Batch: 2.048 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 7.502 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=156
+Planning Time: 0.520 ms
+Execution Time: 9.722 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=18 result_delta=1 reason=no_gpu_resident_pipeline query=EXECUTE h3_qualified_prepared
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN HashAggregate (actual rows=1.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), count(v) FILTER (WHERE p)
+  Group Key: h3_cell_to_parent(h3_normal_qualified.cell, 0)
+  Batches: 1  Memory Usage: 32kB
+  Buffers: local read=5406 written=1
+  ->  Seq Scan on pg_temp.h3_normal_qualified (actual rows=1000017.00 loops=1)
+        Output: h3_cell_to_parent(cell, 0), v, p
+        Buffers: local read=5406 written=1
+Planning:
+  Buffers: shared hit=156
+Planning Time: 0.553 ms
+Execution Time: 113.031 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=native plan_delta=0 result_delta=0 reason=generic_residency_budget_exceeded query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=1.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=exact_cache_hit construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=true invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8564867284
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16746.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16746.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16746.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: hit
+  GPU Descriptor Generations: rel=16746 generation=14 global=1 relfilenode=16746
+  GPU Descriptor Bytes: raw=15000255 derived=9000153 artifact=9000153 total=24000408
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 1000017
+  Batches: 1
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 4.834 ms
+  Avg Dispatch Time Per Batch: 4.834 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 0.004 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=156
+Planning Time: 0.480 ms
+Execution Time: 4.940 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=1 result_delta=1 reason=setop_no_gpu_kernel query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_LIFECYCLE_BUDGET_PASS
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=4.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8567867335
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16912.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16912.2:type=20) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16912.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=20 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16912 generation=1 global=1 relfilenode=16912
+  GPU Descriptor Bytes: raw=21000357 derived=9000153 artifact=9000153 total=30000510
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 1000017
+  Batches: 1
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 1.757 ms
+  Avg Dispatch Time Per Batch: 1.757 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 9.745 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=156
+Planning Time: 0.601 ms
+Execution Time: 11.660 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=18 result_delta=1 reason=no_gpu_resident_pipeline query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_NINE_TYPE_PASS type=bigint rows=1000017
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 2000034
+  GPU Adaptive Aggregate Attempts: 2
+  GPU Adaptive Capacity Overflows: 1
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8567878915
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16912.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16912.2:type=20) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16912.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=20 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=16912)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16912 generation=2 global=1 relfilenode=16912
+  GPU Descriptor Bytes: raw=21000357 derived=9000153 artifact=9000153 total=30000510
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 2000034
+  Batches: 2
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 5.776 ms
+  Avg Dispatch Time Per Batch: 2.888 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 118.876 ms
+  Total Residency Preparation Time: 158.363 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=141
+Planning Time: 0.879 ms
+Execution Time: 164.450 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=19 result_delta=2 reason=no_gpu_resident_pipeline query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 2000034
+  GPU Adaptive Aggregate Attempts: 2
+  GPU Adaptive Capacity Overflows: 1
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=8000136 ephemeral_bytes=0 construction_time_us=667 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=1 ephemeral_build_launches=0 consumer_launches=1 budget_headroom_bytes=8558890988
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16912.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16912.2:type=20) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=20 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16912 generation=2 global=1 relfilenode=16912
+  GPU Descriptor Bytes: raw=21000357 derived=17000289 artifact=8000136 total=38000646
+  GPU Resident Stage Mask: 17417
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 2000034
+  Batches: 2
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 3.329 ms
+  Avg Dispatch Time Per Batch: 1.665 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 2.065 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=141
+Planning Time: 0.601 ms
+Execution Time: 5.588 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=3 result_delta=2 reason=setop_no_gpu_kernel query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_NONCANONICAL_NINE_TYPE_PASS type=bigint rows=1000017
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=4.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8571880769
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16934.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16934.2:type=700) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16934.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=700 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16934 generation=1 global=1 relfilenode=16934
+  GPU Descriptor Bytes: raw=17000289 derived=9000153 artifact=9000153 total=26000442
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 1000017
+  Batches: 1
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 1.103 ms
+  Avg Dispatch Time Per Batch: 1.103 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 7.572 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=156
+Planning Time: 0.510 ms
+Execution Time: 8.832 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=18 result_delta=1 reason=no_gpu_resident_pipeline query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_NINE_TYPE_PASS type=real rows=1000017
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 2000034
+  GPU Adaptive Aggregate Attempts: 2
+  GPU Adaptive Capacity Overflows: 1
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8572531081
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16934.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16934.2:type=700) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16934.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=700 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=16934)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16934 generation=2 global=1 relfilenode=16934
+  GPU Descriptor Bytes: raw=17000289 derived=9000153 artifact=9000153 total=26000442
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 2000034
+  Batches: 2
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 3.916 ms
+  Avg Dispatch Time Per Batch: 1.958 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 110.380 ms
+  Total Residency Preparation Time: 119.752 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=141
+Planning Time: 0.817 ms
+Execution Time: 123.887 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=19 result_delta=2 reason=no_gpu_resident_pipeline query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 2000034
+  GPU Adaptive Aggregate Attempts: 2
+  GPU Adaptive Capacity Overflows: 1
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=8000136 ephemeral_bytes=0 construction_time_us=667 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=1 ephemeral_build_launches=0 consumer_launches=1 budget_headroom_bytes=8563525688
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16934.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16934.2:type=700) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=700 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16934 generation=2 global=1 relfilenode=16934
+  GPU Descriptor Bytes: raw=17000289 derived=17000289 artifact=8000136 total=34000578
+  GPU Resident Stage Mask: 17417
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 2000034
+  Batches: 2
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 5.707 ms
+  Avg Dispatch Time Per Batch: 2.853 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 2.061 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=141
+Planning Time: 0.689 ms
+Execution Time: 8.032 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=3 result_delta=2 reason=setop_no_gpu_kernel query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_NONCANONICAL_NINE_TYPE_PASS type=real rows=1000017
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=4.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8568515325
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16956.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16956.2:type=701) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16956.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=701 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16956 generation=1 global=1 relfilenode=16956
+  GPU Descriptor Bytes: raw=21000357 derived=9000153 artifact=9000153 total=30000510
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 1000017
+  Batches: 1
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 2.135 ms
+  Avg Dispatch Time Per Batch: 2.135 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 10.739 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=156
+Planning Time: 0.572 ms
+Execution Time: 13.042 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=18 result_delta=1 reason=no_gpu_resident_pipeline query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_NINE_TYPE_PASS type=double precision rows=1000017
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 2000034
+  GPU Adaptive Aggregate Attempts: 2
+  GPU Adaptive Capacity Overflows: 1
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8568515205
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16956.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16956.2:type=701) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16956.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=701 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=16956)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16956 generation=2 global=1 relfilenode=16956
+  GPU Descriptor Bytes: raw=21000357 derived=9000153 artifact=9000153 total=30000510
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 2000034
+  Batches: 2
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 5.702 ms
+  Avg Dispatch Time Per Batch: 2.851 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 109.405 ms
+  Total Residency Preparation Time: 124.562 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=141
+Planning Time: 0.788 ms
+Execution Time: 130.504 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=19 result_delta=2 reason=no_gpu_resident_pipeline query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 2000034
+  GPU Adaptive Aggregate Attempts: 2
+  GPU Adaptive Capacity Overflows: 1
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=8000136 ephemeral_bytes=0 construction_time_us=667 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=1 ephemeral_build_launches=0 consumer_launches=1 budget_headroom_bytes=8559509812
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16956.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16956.2:type=701) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=701 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16956 generation=2 global=1 relfilenode=16956
+  GPU Descriptor Bytes: raw=21000357 derived=17000289 artifact=8000136 total=38000646
+  GPU Resident Stage Mask: 17417
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 2000034
+  Batches: 2
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 6.663 ms
+  Avg Dispatch Time Per Batch: 3.332 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 2.335 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=141
+Planning Time: 0.526 ms
+Execution Time: 9.165 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=3 result_delta=2 reason=setop_no_gpu_kernel query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_NONCANONICAL_NINE_TYPE_PASS type=double precision rows=1000017
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=4.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8572499713
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16978.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16978.2:type=1082) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16978.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=1082 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16978 generation=1 global=1 relfilenode=16978
+  GPU Descriptor Bytes: raw=17000289 derived=9000153 artifact=9000153 total=26000442
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 1000017
+  Batches: 1
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 1.567 ms
+  Avg Dispatch Time Per Batch: 1.567 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 12.179 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=156
+Planning Time: 0.530 ms
+Execution Time: 13.936 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=18 result_delta=1 reason=no_gpu_resident_pipeline query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_NINE_TYPE_PASS type=date rows=1000017
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 2000034
+  GPU Adaptive Aggregate Attempts: 2
+  GPU Adaptive Capacity Overflows: 1
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8572515273
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16978.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16978.2:type=1082) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16978.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=1082 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=16978)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16978 generation=2 global=1 relfilenode=16978
+  GPU Descriptor Bytes: raw=17000289 derived=9000153 artifact=9000153 total=26000442
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 2000034
+  Batches: 2
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 6.711 ms
+  Avg Dispatch Time Per Batch: 3.356 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 121.709 ms
+  Total Residency Preparation Time: 142.478 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=141
+Planning Time: 0.849 ms
+Execution Time: 149.472 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=19 result_delta=2 reason=no_gpu_resident_pipeline query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 2000034
+  GPU Adaptive Aggregate Attempts: 2
+  GPU Adaptive Capacity Overflows: 1
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=8000136 ephemeral_bytes=0 construction_time_us=667 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=1 ephemeral_build_launches=0 consumer_launches=1 budget_headroom_bytes=8563509880
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16978.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16978.2:type=1082) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=1082 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16978 generation=2 global=1 relfilenode=16978
+  GPU Descriptor Bytes: raw=17000289 derived=17000289 artifact=8000136 total=34000578
+  GPU Resident Stage Mask: 17417
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 2000034
+  Batches: 2
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 33.212 ms
+  Avg Dispatch Time Per Batch: 16.606 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 8.505 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=141
+Planning Time: 0.496 ms
+Execution Time: 42.086 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=3 result_delta=2 reason=setop_no_gpu_kernel query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_NONCANONICAL_NINE_TYPE_PASS type=date rows=1000017
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=4.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8568499645
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(17000.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(17000.2:type=1114) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=17000.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=1114 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=17000 generation=1 global=1 relfilenode=17000
+  GPU Descriptor Bytes: raw=21000357 derived=9000153 artifact=9000153 total=30000510
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 1000017
+  Batches: 1
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 5.493 ms
+  Avg Dispatch Time Per Batch: 5.493 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 109.592 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=157
+Planning Time: 0.630 ms
+Execution Time: 115.338 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=18 result_delta=1 reason=no_gpu_resident_pipeline query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_NINE_TYPE_PASS type=timestamp rows=1000017
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 2000034
+  GPU Adaptive Aggregate Attempts: 2
+  GPU Adaptive Capacity Overflows: 1
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8568515205
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(17000.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(17000.2:type=1114) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=17000.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=1114 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=17000)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=17000 generation=2 global=1 relfilenode=17000
+  GPU Descriptor Bytes: raw=21000357 derived=9000153 artifact=9000153 total=30000510
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 2000034
+  Batches: 2
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 10.972 ms
+  Avg Dispatch Time Per Batch: 5.486 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 179.971 ms
+  Total Residency Preparation Time: 216.791 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=142
+Planning Time: 1.164 ms
+Execution Time: 228.387 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=19 result_delta=2 reason=no_gpu_resident_pipeline query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 2000034
+  GPU Adaptive Aggregate Attempts: 2
+  GPU Adaptive Capacity Overflows: 1
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=8000136 ephemeral_bytes=0 construction_time_us=667 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=1 ephemeral_build_launches=0 consumer_launches=1 budget_headroom_bytes=8559509812
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(17000.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(17000.2:type=1114) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=1114 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=17000 generation=2 global=1 relfilenode=17000
+  GPU Descriptor Bytes: raw=21000357 derived=17000289 artifact=8000136 total=38000646
+  GPU Resident Stage Mask: 17417
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 2000034
+  Batches: 2
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 11.262 ms
+  Avg Dispatch Time Per Batch: 5.631 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 3.288 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=142
+Planning Time: 0.513 ms
+Execution Time: 14.780 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=3 result_delta=2 reason=setop_no_gpu_kernel query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_NONCANONICAL_NINE_TYPE_PASS type=timestamp rows=1000017
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=4.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8568499645
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(17022.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(17022.2:type=1184) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=17022.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=1184 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=17022 generation=1 global=1 relfilenode=17022
+  GPU Descriptor Bytes: raw=21000357 derived=9000153 artifact=9000153 total=30000510
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 1000017
+  Batches: 1
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 6.192 ms
+  Avg Dispatch Time Per Batch: 6.192 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 24.159 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=156
+Planning Time: 0.853 ms
+Execution Time: 30.524 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=18 result_delta=1 reason=no_gpu_resident_pipeline query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_NINE_TYPE_PASS type=timestamptz rows=1000017
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 2000034
+  GPU Adaptive Aggregate Attempts: 2
+  GPU Adaptive Capacity Overflows: 1
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8568504885
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(17022.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(17022.2:type=1184) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=17022.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=1184 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=17022)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=17022 generation=2 global=1 relfilenode=17022
+  GPU Descriptor Bytes: raw=21000357 derived=9000153 artifact=9000153 total=30000510
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 2000034
+  Batches: 2
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 4.737 ms
+  Avg Dispatch Time Per Batch: 2.369 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 130.414 ms
+  Total Residency Preparation Time: 143.389 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=141
+Planning Time: 0.874 ms
+Execution Time: 148.337 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=19 result_delta=2 reason=no_gpu_resident_pipeline query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=127.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 2000034
+  GPU Adaptive Aggregate Attempts: 2
+  GPU Adaptive Capacity Overflows: 1
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=8000136 ephemeral_bytes=0 construction_time_us=667 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=1 ephemeral_build_launches=0 consumer_launches=1 budget_headroom_bytes=8559513896
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(17022.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(17022.2:type=1184) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=1184 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=17022 generation=2 global=1 relfilenode=17022
+  GPU Descriptor Bytes: raw=21000357 derived=17000289 artifact=8000136 total=38000646
+  GPU Resident Stage Mask: 17417
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 2000034
+  Batches: 2
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 17.089 ms
+  Avg Dispatch Time Per Batch: 8.544 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 4.675 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=141
+Planning Time: 0.589 ms
+Execution Time: 23.066 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=3 result_delta=2 reason=setop_no_gpu_kernel query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_NONCANONICAL_NINE_TYPE_PASS type=timestamptz rows=1000017
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN HashAggregate (actual rows=1.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), count(v) FILTER (WHERE p)
+  Group Key: h3_cell_to_parent(h3_normal_qualified.cell, 0)
+  Batches: 1  Memory Usage: 32kB
+  Buffers: local hit=456
+  ->  Seq Scan on pg_temp.h3_normal_qualified (actual rows=84209.00 loops=1)
+        Output: h3_cell_to_parent(cell, 0), v, p
+        Buffers: local hit=456
+Planning:
+  Buffers: shared hit=87
+Planning Time: 0.193 ms
+Execution Time: 14.329 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=native plan_delta=0 result_delta=0 reason=h3_rows_below_grouped_agg_min query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_FLOOR_PASS rows=84209 device_floor=84210
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=1.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=757890 ephemeral_bytes=84210 construction_time_us=64 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=3 ephemeral_build_launches=2 consumer_launches=1 budget_headroom_bytes=8588251256
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(17054.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(17054.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=17054.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=17054 generation=1 global=1 relfilenode=17054
+  GPU Descriptor Bytes: raw=1263150 derived=757890 artifact=757890 total=2021040
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 84210
+  Batches: 1
+  Rows Per Batch: 84210.000
+  Dispatch Time: 3.354 ms
+  Avg Dispatch Time Per Batch: 3.354 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 7.403 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=160
+Planning Time: 0.624 ms
+Execution Time: 10.984 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=boundary plan_delta=4 result_delta=1 reason=no_gpu_resident_pipeline query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_FLOOR_PASS rows=84210 device_floor=84210
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=1.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=757899 ephemeral_bytes=84211 construction_time_us=64 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=3 ephemeral_build_launches=2 consumer_launches=1 budget_headroom_bytes=8588296933
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(17064.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(17064.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=17064.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=17064 generation=1 global=1 relfilenode=17064
+  GPU Descriptor Bytes: raw=1263165 derived=757899 artifact=757899 total=2021064
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 84211
+  Batches: 1
+  Rows Per Batch: 84211.000
+  Dispatch Time: 1.937 ms
+  Avg Dispatch Time Per Batch: 1.937 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 4.124 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=156
+Planning Time: 1.945 ms
+Execution Time: 6.327 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=boundary plan_delta=4 result_delta=1 reason=no_gpu_resident_pipeline query=SELECT public.h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p) n FROM h3_normal_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:182: NOTICE:  H3_FILTER_FLOOR_PASS rows=84211 device_floor=84210
+DO
+CREATE FUNCTION
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:224: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=1.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8576565373
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(17075.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(17075.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=17075.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=17075)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=17075 generation=2 global=1 relfilenode=17075
+  GPU Descriptor Bytes: raw=13000221 derived=9000153 artifact=9000153 total=22000374
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 1000017
+  Batches: 1
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 7.742 ms
+  Avg Dispatch Time Per Batch: 7.742 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 108.097 ms
+  Total Residency Preparation Time: 130.249 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=141
+Planning Time: 0.690 ms
+Execution Time: 138.233 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:224: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=18 result_delta=1 reason=no_gpu_resident_pipeline query=SELECT public.h3_cell_to_parent(cell,0),count(v) FILTER (WHERE p) FROM h3_invalid_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:224: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=1.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(*))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=8000136 ephemeral_bytes=0 construction_time_us=667 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=1 ephemeral_build_launches=0 consumer_launches=1 budget_headroom_bytes=8567570716
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(17075.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=17075 generation=2 global=1 relfilenode=17075
+  GPU Descriptor Bytes: raw=13000221 derived=17000289 artifact=8000136 total=30000510
+  GPU Resident Stage Mask: 17417
+  GPU Resident Device Columns: 1
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 1000017
+  Batches: 1
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 2452.242 ms
+  Avg Dispatch Time Per Batch: 2452.242 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 13.608 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=126
+Planning Time: 0.485 ms
+Execution Time: 2466.022 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:224: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=2 result_delta=1 reason=setop_no_gpu_kernel query=SELECT public.h3_cell_to_parent(cell,0),count(*) FROM h3_invalid_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:224: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=1.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8575868076
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(17075.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(17075.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=17075.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=17075)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=17075 generation=3 global=1 relfilenode=17075
+  GPU Descriptor Bytes: raw=14000238 derived=9000153 artifact=9000153 total=23000391
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 1000017
+  Batches: 1
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 1.998 ms
+  Avg Dispatch Time Per Batch: 1.998 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 125.281 ms
+  Total Residency Preparation Time: 142.085 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=141
+Planning Time: 0.838 ms
+Execution Time: 144.255 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:224: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=18 result_delta=1 reason=no_gpu_resident_pipeline query=SELECT public.h3_cell_to_parent(cell,0),count(v) FILTER (WHERE p) FROM h3_invalid_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:224: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=1.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(*))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=8000136 ephemeral_bytes=0 construction_time_us=667 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=1 ephemeral_build_launches=0 consumer_launches=1 budget_headroom_bytes=8566867923
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(17075.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=17075 generation=3 global=1 relfilenode=17075
+  GPU Descriptor Bytes: raw=14000238 derived=17000289 artifact=8000136 total=31000527
+  GPU Resident Stage Mask: 17417
+  GPU Resident Device Columns: 1
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 1000017
+  Batches: 1
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 2.837 ms
+  Avg Dispatch Time Per Batch: 2.837 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 5.616 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=126
+Planning Time: 0.546 ms
+Execution Time: 8.721 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:224: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=2 result_delta=1 reason=setop_no_gpu_kernel query=SELECT public.h3_cell_to_parent(cell,0),count(*) FROM h3_invalid_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:224: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=1.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8576868093
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(17075.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(17075.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=17075.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=17075)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=17075 generation=4 global=1 relfilenode=17075
+  GPU Descriptor Bytes: raw=13000221 derived=9000153 artifact=9000153 total=22000374
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 1000017
+  Batches: 1
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 2.518 ms
+  Avg Dispatch Time Per Batch: 2.518 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 135.294 ms
+  Total Residency Preparation Time: 144.818 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=187
+Planning Time: 1.122 ms
+Execution Time: 147.504 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:224: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=18 result_delta=1 reason=no_gpu_resident_pipeline query=SELECT public.h3_cell_to_parent(cell,0),count(v) FILTER (WHERE p) FROM h3_invalid_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:224: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=1.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(*))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 1
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=8000136 ephemeral_bytes=0 construction_time_us=667 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=1 ephemeral_build_launches=0 consumer_launches=1 budget_headroom_bytes=8567867940
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(17075.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=17075 generation=4 global=1 relfilenode=17075
+  GPU Descriptor Bytes: raw=13000221 derived=17000289 artifact=8000136 total=30000510
+  GPU Resident Stage Mask: 17417
+  GPU Resident Device Columns: 1
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 1000017
+  Batches: 1
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 1.565 ms
+  Avg Dispatch Time Per Batch: 1.565 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 2.602 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=126
+Planning Time: 0.481 ms
+Execution Time: 4.304 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:224: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=2 result_delta=1 reason=setop_no_gpu_kernel query=SELECT public.h3_cell_to_parent(cell,0),count(*) FROM h3_invalid_qualified GROUP BY 1
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:224: NOTICE:  H3_FILTER_INVALID_KEY_PASS predicate=false state=38000
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:224: NOTICE:  H3_FILTER_INVALID_KEY_PASS predicate=NULL state=38000
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:224: NOTICE:  H3_FILTER_INVALID_KEY_PASS predicate=true state=38000
+DO
+CREATE TABLE
+INSERT 0 1000017
+ANALYZE
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:235: NOTICE:  H3_REPAIR_EXECUTED_PLAN Custom Scan (GpuAccelAgg) (actual rows=126.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 2
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000017
+  GPU Adaptive Attempted Scan Rows: 2000034
+  GPU Adaptive Aggregate Attempts: 2
+  GPU Adaptive Capacity Overflows: 1
+  GPU Adaptive Completed Leaves: 1
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=9000153 ephemeral_bytes=1000017 construction_time_us=751 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8577868110
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(17116.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(17116.2:type=16) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=17116.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=16 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=17116)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=17116 generation=1 global=1 relfilenode=17116
+  GPU Descriptor Bytes: raw=12000204 derived=9000153 artifact=9000153 total=21000357
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 2000034
+  Batches: 2
+  Rows Per Batch: 1000017.000
+  Dispatch Time: 6.350 ms
+  Avg Dispatch Time Per Batch: 3.175 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 76.822 ms
+  Total Residency Preparation Time: 91.601 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=141
+Planning Time: 0.510 ms
+Execution Time: 98.259 ms
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production-normal.sql:235: NOTICE:  H3_FILTER_PRODUCTION_PASS expectation=gpu plan_delta=19 result_delta=19 reason=no_gpu_resident_pipeline query=SELECT h3_cell_to_parent(cell,0) parent,count(v) FILTER (WHERE p) n FROM h3_repair_cold GROUP BY 1
+ assert_h3_count 
+-----------------
+ 
+(1 row)
+
+ pg_accel_evict 
+----------------
+ t
+(1 row)
+
+DROP TABLE

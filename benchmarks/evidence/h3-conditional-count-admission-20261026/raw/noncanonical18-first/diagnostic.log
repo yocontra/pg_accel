@@ -1,0 +1,543 @@
+SET
+                                                      version                                                       
+--------------------------------------------------------------------------------------------------------------------
+ PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+(1 row)
+
+ extname  | extversion 
+----------+------------
+ plpgsql  | 1.0
+ pg_accel | 1.0.0-rc1
+ h3       | unreleased
+(3 rows)
+
+ cpu_cores | configured_workers | gpu_available | gpu_device_name |  memory_model   | pg_version | pg_accel_version 
+-----------+--------------------+---------------+-----------------+-----------------+------------+------------------
+        12 |                  0 | t             | Apple M2 Max    | explicit_device |     180004 | 1.0.0-rc1
+(1 row)
+
+                     name                      |    value    |      source      
+-----------------------------------------------+-------------+------------------
+ resident_memory_budget_bytes                  | 8589934592  | hardware_derived
+ resident_domain_max_exact_value_bytes         | 1048576     | hardware_derived
+ auto_load_amortization_queries                | 8           | hardware_derived
+ resident_load_scan_per_row_cost               | 0.01        | hardware_derived
+ resident_load_per_byte_cost                   | 0.001       | hardware_derived
+ gpu_min_rows                                  | 8421        | hardware_derived
+ gpu_sort_min_rows                             | 84210       | hardware_derived
+ gpu_sort_planner_min_rows                     | 84210       | hardware_derived
+ gpu_window_min_rows                           | 84210       | hardware_derived
+ gpu_reduce_min_rows                           | 21052       | hardware_derived
+ gpu_hash_agg_min_rows                         | 210526      | hardware_derived
+ gpu_hash_agg_unsafe_input_rows                | 100000      | hardware_derived
+ gpu_hash_agg_max_groups                       | 100000      | hardware_derived
+ gpu_h3_max_groups                             | 16776704    | hardware_derived
+ gpu_reduce_max_chunk                          | 1000000     | hardware_derived
+ gpu_grouped_agg_one_shot_max_rows             | 1000000     | hardware_derived
+ gpu_sort_max_elements                         | 4000000     | hardware_derived
+ gpu_sort_topk_max_limit                       | 128         | hardware_derived
+ gpu_sort_heap_topk_max_fraction               | 0.25        | hardware_derived
+ gpu_sort_heap_topk_max_width_bytes            | 16          | hardware_derived
+ gpu_join_max_output_rows                      | 118750      | hardware_derived
+ gpu_h3_group_min_rows                         | 84210       | hardware_derived
+ gpu_h3_max_chunk_rows                         | 4000000     | hardware_derived
+ gpu_spatial_min_vertices                      | 84          | hardware_derived
+ gpu_spatial_max_vertices_per_row              | 1000000     | hardware_derived
+ gpu_spatial_max_output_fraction               | 0.8         | hardware_derived
+ gpu_spatial_max_recheck_fraction              | 0.1         | hardware_derived
+ gpu_spatial_pairwise_chunk_rows               | 65536       | hardware_derived
+ gpu_raster_min_pixels                         | 55188       | hardware_derived
+ gpu_raster_max_chunk_pixels                   | 4000000     | hardware_derived
+ gpu_expr_min_rows                             | 210526      | hardware_derived
+ gpu_hash_join_build_max_rows                  | 99999       | hardware_derived
+ gpu_pipeline_fusion_min_rows                  | 8421        | hardware_derived
+ gpu_preagg_min_fact_rows                      | 42105       | hardware_derived
+ gpu_preagg_max_dim_rows                       | 2000000     | hardware_derived
+ preagg_dim_materialize_cost                   | 0.1         | hardware_derived
+ preagg_fact_scan_cost                         | 0.001       | hardware_derived
+ preagg_probe_cost                             | 0.003       | hardware_derived
+ preagg_agg_cost                               | 0.002       | hardware_derived
+ preagg_yield_cost                             | 0.03        | hardware_derived
+ optimal_batch_min                             | 256         | hardware_derived
+ optimal_batch_max                             | 32768       | hardware_derived
+ fused_interrupt_interval                      | 65536       | hardware_derived
+ gpu_op_cost_reduce                            | 0.0005      | hardware_derived
+ gpu_op_cost_hash_agg                          | 0.002       | hardware_derived
+ gpu_op_cost_sort                              | 0.003       | hardware_derived
+ gpu_op_cost_window                            | 0.001       | hardware_derived
+ gpu_op_cost_filter                            | 0.001       | hardware_derived
+ gpu_op_cost_h3_parent_resident                | 0.001       | hardware_derived
+ gpu_hashjoin_build_per_row                    | 0.001       | hardware_derived
+ gpu_hashjoin_probe_per_row                    | 0.001       | hardware_derived
+ custom_scan_yield_per_row                     | 0.001       | hardware_derived
+ gpu_partial_agg_per_row                       | 0.001       | hardware_derived
+ gpu_agg_cost_ratio                            | 0.8         | hardware_derived
+ gpu_window_cost_ratio                         | 1.5         | hardware_derived
+ gpu_preagg_cost_ratio                         | 1.5         | hardware_derived
+ reduce_f32_break_even_rows                    | 21052       | hardware_derived
+ reduce_f64_break_even_rows                    | 42105       | hardware_derived
+ reduce_i64_break_even_rows                    | 63157       | hardware_derived
+ reduce_bit_break_even_rows                    | 252631      | hardware_derived
+ reduce_bool_break_even_rows                   | 421052      | hardware_derived
+ hashagg_min_rows_per_group                    | 32          | hardware_derived
+ hashagg_max_state_bytes_per_group             | 256         | hardware_derived
+ sort_break_even_rows_int                      | 84210       | hardware_derived
+ sort_break_even_rows_float                    | 67368       | hardware_derived
+ spatial_point_in_ring_break_even_verts_x_rows | 500000000   | hardware_derived
+ spatial_point_in_ring_max_verts_x_rows        | 50000000000 | hardware_derived
+ window_min_partition_rows                     | 8421        | hardware_derived
+ expr_min_predicate_complexity_x_rows          | 50000       | hardware_derived
+ hashjoin_min_build_rows                       | 4210        | hardware_derived
+ gpu_nlj_min_outer_rows                        | 842         | hardware_derived
+ gpu_nlj_min_inner_rows                        | 842         | hardware_derived
+ gpu_nlj_max_output_rows                       | 118750      | hardware_derived
+ gpu_nlj_per_pair_cost                         | 0.0000001   | hardware_derived
+ has_native_fp64                               | false       | hardware_derived
+ soft_fp64_cost_multiplier                     | 32          | hardware_derived
+(76 rows)
+
+                name                | setting | source  
+------------------------------------+---------+---------
+ pg_accel.assert_dispatch           | off     | default
+ pg_accel.auto_load                 | on      | default
+ pg_accel.cost_multiplier           | 1       | default
+ pg_accel.enabled                   | on      | default
+ pg_accel.execution_profiling       | off     | default
+ pg_accel.fp64_enabled              | on      | default
+ pg_accel.gpu_enabled               | on      | default
+ pg_accel.kernel_timeout_ms         | 5000    | default
+ pg_accel.log_level                 | Notice  | default
+ pg_accel.max_workers_total         | 0       | default
+ pg_accel.min_batch_size            | 65536   | default
+ pg_accel.otel_log_max_mb           | 256     | default
+ pg_accel.otel_log_max_rotations    | 4       | default
+ pg_accel.parallel_fused_count      | off     | default
+ pg_accel.planner_profiling         | off     | default
+ pg_accel.resident_memory_budget_mb | -1      | default
+ pg_accel.soft_fp64_cost_multiplier | 32      | default
+(17 rows)
+
+CREATE FUNCTION
+CREATE TABLE
+INSERT 0 1000017
+ANALYZE
+ pg_accel_pin 
+--------------
+      1000017
+(1 row)
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:32: NOTICE:  CASE=zero false enabled=off PLAN=HashAggregate
+  Output: (h3_cell_to_parent(cell, 0)), count(v) FILTER (WHERE p)
+  Group Key: h3_cell_to_parent(_noncanonical.cell, 0)
+  ->  Seq Scan on pg_temp._noncanonical
+        Output: h3_cell_to_parent(cell, 0), v, p
+ REASON=no_gpu_resident_pipeline
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:32: NOTICE:  ROW {"k":"0","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:32: NOTICE:  CASE=zero false enabled=off SQLSTATE=00000 calls=0
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:32: NOTICE:  CASE=zero false enabled=on PLAN=Custom Scan (GpuAccelAgg)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16558.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16558.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16558.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+ REASON=no_gpu_resident_pipeline
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:32: NOTICE:  CASE=zero false enabled=on SQLSTATE=38000 message=pg_accel: H3 parent transform failed (GPU h3 kernel(h3_cell_to_parent_resident) failed with invalid_argument); refusing CPU fallback calls=1
+ probe 
+-------
+ 
+(1 row)
+
+UPDATE 1000017
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:34: NOTICE:  CASE=zero null enabled=off PLAN=HashAggregate
+  Output: (h3_cell_to_parent(cell, 0)), count(v) FILTER (WHERE p)
+  Group Key: h3_cell_to_parent(_noncanonical.cell, 0)
+  ->  Seq Scan on pg_temp._noncanonical
+        Output: h3_cell_to_parent(cell, 0), v, p
+ REASON=no_gpu_resident_pipeline
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:34: NOTICE:  ROW {"k":"0","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:34: NOTICE:  CASE=zero null enabled=off SQLSTATE=00000 calls=0
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:34: NOTICE:  CASE=zero null enabled=on PLAN=Custom Scan (GpuAccelAgg)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16558.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16558.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16558.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+ REASON=no_gpu_resident_pipeline
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:34: NOTICE:  CASE=zero null enabled=on SQLSTATE=38000 message=pg_accel: H3 parent transform failed (GPU h3 kernel(h3_cell_to_parent_resident) failed with invalid_argument); refusing CPU fallback calls=1
+ probe 
+-------
+ 
+(1 row)
+
+UPDATE 1000017
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:36: NOTICE:  CASE=zero true enabled=off PLAN=HashAggregate
+  Output: (h3_cell_to_parent(cell, 0)), count(v) FILTER (WHERE p)
+  Group Key: h3_cell_to_parent(_noncanonical.cell, 0)
+  ->  Seq Scan on pg_temp._noncanonical
+        Output: h3_cell_to_parent(cell, 0), v, p
+ REASON=no_gpu_resident_pipeline
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:36: NOTICE:  ROW {"k":"0","n":1000017}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:36: NOTICE:  CASE=zero true enabled=off SQLSTATE=00000 calls=0
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:36: NOTICE:  CASE=zero true enabled=on PLAN=Custom Scan (GpuAccelAgg)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16558.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16558.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16558.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+ REASON=no_gpu_resident_pipeline
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:36: NOTICE:  CASE=zero true enabled=on SQLSTATE=38000 message=pg_accel: H3 parent transform failed (GPU h3 kernel(h3_cell_to_parent_resident) failed with invalid_argument); refusing CPU fallback calls=1
+ probe 
+-------
+ 
+(1 row)
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:37: NOTICE:  CASE=zero star enabled=off PLAN=HashAggregate
+  Output: (h3_cell_to_parent(cell, 0)), count(*)
+  Group Key: h3_cell_to_parent(_noncanonical.cell, 0)
+  ->  Seq Scan on pg_temp._noncanonical
+        Output: h3_cell_to_parent(cell, 0)
+ REASON=no_gpu_resident_pipeline
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:37: NOTICE:  ROW {"k":"0","n":1000017}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:37: NOTICE:  CASE=zero star enabled=off SQLSTATE=00000 calls=0
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:37: NOTICE:  CASE=zero star enabled=on PLAN=Custom Scan (GpuAccelAgg)
+  Output: (h3_cell_to_parent(cell, 0)), (count(*))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16558.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 17417
+  GPU Resident Device Columns: 1
+  GPU Resident Boundary: none: no CPU boundary
+ REASON=no_gpu_resident_pipeline
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:37: NOTICE:  CASE=zero star enabled=on SQLSTATE=38000 message=pg_accel: H3 parent transform failed (GPU h3 kernel(h3_cell_to_parent_resident) failed with invalid_argument); refusing CPU fallback calls=1
+ probe 
+-------
+ 
+(1 row)
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:38: NOTICE:  CASE=zero resolution mismatch enabled=off PLAN=HashAggregate
+  Output: (h3_cell_to_parent(cell, 1)), count(v) FILTER (WHERE p)
+  Group Key: h3_cell_to_parent(_noncanonical.cell, 1)
+  ->  Seq Scan on pg_temp._noncanonical
+        Output: h3_cell_to_parent(cell, 1), v, p
+ REASON=no_gpu_resident_pipeline
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:38: NOTICE:  CASE=zero resolution mismatch enabled=off SQLSTATE=38000 message=error code: 12 calls=0
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:38: NOTICE:  CASE=zero resolution mismatch enabled=on PLAN=Custom Scan (GpuAccelAgg)
+  Output: (h3_cell_to_parent(cell, 1)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16558.1:type=16421, resolution=1) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16558.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16558.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+ REASON=no_gpu_resident_pipeline
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:38: NOTICE:  CASE=zero resolution mismatch enabled=on SQLSTATE=38000 message=pg_accel: H3 parent transform failed (GPU h3 kernel(h3_cell_to_parent_resident) failed with invalid_argument); refusing CPU fallback calls=1
+ probe 
+-------
+ 
+(1 row)
+
+UPDATE 1000017
+ANALYZE
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  CASE=124 noncanonical groups enabled=off PLAN=HashAggregate
+  Output: (h3_cell_to_parent(cell, 0)), count(v) FILTER (WHERE p)
+  Group Key: h3_cell_to_parent(_noncanonical.cell, 0)
+  ->  Seq Scan on pg_temp._noncanonical
+        Output: h3_cell_to_parent(cell, 0), v, p
+ REASON=no_gpu_resident_pipeline
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"7c","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"7b","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"7a","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"79","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"78","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"77","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"76","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"75","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"74","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"73","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"72","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"71","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"70","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"6f","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"6e","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"6d","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"6c","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"6b","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"6a","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"69","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"68","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"67","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"66","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"65","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"64","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"63","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"62","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"61","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"60","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"5f","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"5e","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"5d","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"5c","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"5b","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"5a","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"59","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"58","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"57","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"56","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"55","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"54","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"53","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"52","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"51","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"50","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"4f","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"4e","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"4d","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"4c","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"4b","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"4a","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"49","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"48","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"47","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"46","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"45","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"44","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"43","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"42","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"41","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"40","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"3f","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"3e","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"3d","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"3c","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"3b","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"3a","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"39","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"38","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"37","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"36","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"35","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"34","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"33","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"32","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"31","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"30","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"2f","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"2e","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"2d","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"2c","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"2b","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"2a","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"29","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"28","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"27","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"26","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"25","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"24","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"23","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"22","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"21","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"20","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"1f","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"1e","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"1d","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"1c","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"1b","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"1a","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"19","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"18","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"17","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"16","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"15","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"14","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"13","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"12","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"11","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"10","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"f","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"e","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"d","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"c","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"b","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"a","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"9","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"8","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"7","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"6","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"5","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"4","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"3","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"2","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  ROW {"k":"1","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  CASE=124 noncanonical groups enabled=off SQLSTATE=00000 calls=0
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  CASE=124 noncanonical groups enabled=on PLAN=Custom Scan (GpuAccelAgg)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16558.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16558.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16558.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+ REASON=no_gpu_resident_pipeline
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:41: NOTICE:  CASE=124 noncanonical groups enabled=on SQLSTATE=38000 message=pg_accel: H3 parent transform failed (GPU h3 kernel(h3_cell_to_parent_resident) failed with invalid_argument); refusing CPU fallback calls=1
+ probe 
+-------
+ 
+(1 row)
+
+UPDATE 1000017
+ANALYZE
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:44: NOTICE:  CASE=malformed trailing digits enabled=off PLAN=HashAggregate
+  Output: (h3_cell_to_parent(cell, 0)), count(v) FILTER (WHERE p)
+  Group Key: h3_cell_to_parent(_noncanonical.cell, 0)
+  ->  Seq Scan on pg_temp._noncanonical
+        Output: h3_cell_to_parent(cell, 0), v, p
+ REASON=no_gpu_resident_pipeline
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:44: NOTICE:  ROW {"k":"1c0000000000","n":0}
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:44: NOTICE:  CASE=malformed trailing digits enabled=off SQLSTATE=00000 calls=0
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:44: NOTICE:  CASE=malformed trailing digits enabled=on PLAN=Custom Scan (GpuAccelAgg)
+  Output: (h3_cell_to_parent(cell, 0)), (count(v) FILTER (WHERE p))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(16558.1:type=16421, resolution=0) type=16421 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(16558.2:type=23) -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=sql_mask(input=16558.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=16421 result_type=16421 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+  GPU Descriptor Artifact: not initialized
+  GPU Descriptor Generations: not inspected
+  GPU Descriptor Bytes: not inspected
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+ REASON=no_gpu_resident_pipeline
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/noncanonical-diagnostic.sql:44: NOTICE:  CASE=malformed trailing digits enabled=on SQLSTATE=38000 message=pg_accel: H3 parent transform failed (GPU h3 kernel(h3_cell_to_parent_resident) failed with invalid_argument); refusing CPU fallback calls=1
+ probe 
+-------
+ 
+(1 row)
+

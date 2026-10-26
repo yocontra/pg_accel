@@ -470,6 +470,42 @@ pub const PHASE6_DOMAIN_CONTRACTS: &[Phase6DomainContract] = &[
         H3_COUNT_COLUMN_ROWS
     ),
     phase6_contract!(
+        "h3_parent_count_star_filter_res0",
+        WorkloadCategory::GpuH3,
+        Phase6DomainOracle::NativeH3,
+        H3_COUNT_COLUMN_ROWS
+    ),
+    phase6_contract!(
+        "h3_parent_count_star_filter_res1",
+        WorkloadCategory::GpuH3,
+        Phase6DomainOracle::NativeH3,
+        H3_COUNT_COLUMN_ROWS
+    ),
+    phase6_contract!(
+        "h3_parent_count_int4_filter_res0",
+        WorkloadCategory::GpuH3,
+        Phase6DomainOracle::NativeH3,
+        H3_COUNT_COLUMN_ROWS
+    ),
+    phase6_contract!(
+        "h3_parent_count_int4_filter_res1",
+        WorkloadCategory::GpuH3,
+        Phase6DomainOracle::NativeH3,
+        H3_COUNT_COLUMN_ROWS
+    ),
+    phase6_contract!(
+        "h3_parent_count_bool_filter_res0",
+        WorkloadCategory::GpuH3,
+        Phase6DomainOracle::NativeH3,
+        H3_COUNT_COLUMN_ROWS
+    ),
+    phase6_contract!(
+        "h3_parent_count_bool_filter_res1",
+        WorkloadCategory::GpuH3,
+        Phase6DomainOracle::NativeH3,
+        H3_COUNT_COLUMN_ROWS
+    ),
+    phase6_contract!(
         "h3_grid_distance",
         WorkloadCategory::GpuH3,
         Phase6DomainOracle::NativeH3FailClosed,
@@ -870,6 +906,12 @@ const PINS_HASHAGG_F64: &[ResidentPinSpec] = &[pin!("bench_fp64_num", ["gk", "v_
 const PINS_H3_PARENT: &[ResidentPinSpec] = &[pin!("bench_h3_parent", ["cell"])];
 const PINS_H3_COUNT_COLUMN: &[ResidentPinSpec] =
     &[pin!("bench_h3_count_column", ["cell", "value"])];
+const PINS_H3_FILTER_STAR: &[ResidentPinSpec] =
+    &[pin!("bench_h3_count_filter", ["cell", "qualifies"])];
+const PINS_H3_FILTER_COLUMN: &[ResidentPinSpec] = &[pin!(
+    "bench_h3_count_filter",
+    ["cell", "value", "qualifies"]
+)];
 const PINS_SPATIAL_RESIDENT_AGG: &[ResidentPinSpec] =
     &[pin!("bench_spatial_resident_agg", ["geom"])];
 const PINS_HASH_JOIN: &[ResidentPinSpec] = &[
@@ -1570,6 +1612,72 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
             min_warm_speedup: 1.15,
         })
         .evidence(H3_WINNER),
+    workload(
+        "h3_parent_count_star_filter_res0",
+        C::GpuH3,
+        K::H3CellToParent,
+    )
+    .pins(PINS_H3_FILTER_STAR)
+    .extensions(H3)
+    .h3(H3LaneClass::Winning {
+        min_warm_speedup: 1.15,
+    })
+    .evidence(H3_WINNER),
+    workload(
+        "h3_parent_count_star_filter_res1",
+        C::GpuH3,
+        K::H3CellToParent,
+    )
+    .pins(PINS_H3_FILTER_STAR)
+    .extensions(H3)
+    .h3(H3LaneClass::Winning {
+        min_warm_speedup: 1.15,
+    })
+    .evidence(H3_WINNER),
+    workload(
+        "h3_parent_count_int4_filter_res0",
+        C::GpuH3,
+        K::H3CellToParent,
+    )
+    .pins(PINS_H3_FILTER_COLUMN)
+    .extensions(H3)
+    .h3(H3LaneClass::Winning {
+        min_warm_speedup: 1.15,
+    })
+    .evidence(H3_WINNER),
+    workload(
+        "h3_parent_count_int4_filter_res1",
+        C::GpuH3,
+        K::H3CellToParent,
+    )
+    .pins(PINS_H3_FILTER_COLUMN)
+    .extensions(H3)
+    .h3(H3LaneClass::Winning {
+        min_warm_speedup: 1.15,
+    })
+    .evidence(H3_WINNER),
+    workload(
+        "h3_parent_count_bool_filter_res0",
+        C::GpuH3,
+        K::H3CellToParent,
+    )
+    .pins(PINS_H3_FILTER_COLUMN)
+    .extensions(H3)
+    .h3(H3LaneClass::Winning {
+        min_warm_speedup: 1.15,
+    })
+    .evidence(H3_WINNER),
+    workload(
+        "h3_parent_count_bool_filter_res1",
+        C::GpuH3,
+        K::H3CellToParent,
+    )
+    .pins(PINS_H3_FILTER_COLUMN)
+    .extensions(H3)
+    .h3(H3LaneClass::Winning {
+        min_warm_speedup: 1.15,
+    })
+    .evidence(H3_WINNER),
     workload("h3_grid_distance", C::GpuH3, K::H3LatLng)
         .extensions(H3)
         .h3(H3LaneClass::Parity)

@@ -1,0 +1,22 @@
+2026-10-25 18:14:35.764 MST [66321] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-25 18:14:35.764 MST [66321] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-25 18:14:35.882 MST [66321] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-25 18:14:35.883 MST [66321] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/h3nc19/.s.PGSQL.33219"
+2026-10-25 18:14:35.895 MST [66326] LOG:  database system was shut down at 2026-10-25 18:14:35 MST
+2026-10-25 18:14:35.899 MST [66321] LOG:  database system is ready to accept connections
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/cache-production19/apps/global/jit-cache/17096745992902397796.18172618811436184833.metalar.66333.6265211768099289161.tmp (kernels_added=1 skipped=0)
+2026-10-26T01:14:40.123872Z ERROR GPU kernel dispatch failed func="pgaccel_h3_cell_to_parent_resident_ex" status=InvalidArgument raw=-6 domain="h3"
+2026-10-26T01:14:41.215572Z ERROR GPU kernel dispatch failed func="pgaccel_h3_cell_to_parent_resident_ex" status=InvalidArgument raw=-6 domain="h3"
+2026-10-26T01:14:42.295894Z ERROR GPU kernel dispatch failed func="pgaccel_h3_cell_to_parent_resident_ex" status=InvalidArgument raw=-6 domain="h3"
+2026-10-26T01:14:42.406420Z ERROR GPU kernel dispatch failed func="pgaccel_h3_cell_to_parent_resident_ex" status=InvalidArgument raw=-6 domain="h3"
+2026-10-26T01:14:42.421862Z ERROR GPU kernel dispatch failed func="pgaccel_h3_cell_to_parent_resident_ex" status=InvalidArgument raw=-6 domain="h3"
+2026-10-26T01:14:43.760297Z ERROR GPU kernel dispatch failed func="pgaccel_h3_cell_to_parent_resident_ex" status=InvalidArgument raw=-6 domain="h3"
+2026-10-26T01:14:45.090772Z ERROR GPU kernel dispatch failed func="pgaccel_h3_cell_to_parent_resident_ex" status=InvalidArgument raw=-6 domain="h3"
+2026-10-25 18:14:45.101 MST [66321] LOG:  received fast shutdown request
+2026-10-25 18:14:45.101 MST [66321] LOG:  aborting any active transactions
+2026-10-25 18:14:45.106 MST [66321] LOG:  background worker "logical replication launcher" (PID 66329) exited with exit code 1
+2026-10-25 18:14:45.416 MST [66324] LOG:  shutting down
+2026-10-25 18:14:45.416 MST [66324] LOG:  checkpoint starting: shutdown fast
+2026-10-25 18:14:45.459 MST [66324] LOG:  checkpoint complete: shutdown fast: wrote 194 buffers (0.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.039 s, sync=0.004 s, total=0.043 s; sync files=74, longest=0.001 s, average=0.001 s; distance=1403 kB, estimate=1403 kB; lsn=0/018A18D8, redo lsn=0/018A18D8
+2026-10-25 18:14:45.468 MST [66321] LOG:  database system is shut down

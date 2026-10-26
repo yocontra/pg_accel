@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.43s
+     Running unittests src/main.rs (target/debug/deps/pg_accel_bench-55e77d1a663b8eeb)
+
+running 1 test
+test h3_protection_test::typed_h3_count_all_fixed_types_default_planner_matches_native ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 661 filtered out; finished in 15.25s
+

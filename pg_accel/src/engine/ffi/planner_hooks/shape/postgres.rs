@@ -616,6 +616,15 @@ pub(super) unsafe fn parse_aggregate(
     node: *mut Node,
     query: &pg_sys::Query,
 ) -> Result<AggregateExpr, ShapeDecline> {
+    // SAFETY: preserve the caller's live planner-tree contract without an H3 context.
+    unsafe { parse_aggregate_with_h3_context(node, query, None) }
+}
+
+unsafe fn parse_aggregate_with_h3_context(
+    node: *mut Node,
+    query: &pg_sys::Query,
+    h3_fact: Option<u32>,
+) -> Result<AggregateExpr, ShapeDecline> {
     // SAFETY: node is a planner expression and PostgreSQL owns the returned
     // inner expression for the same planner lifetime.
     let node = unsafe { pg_sys::strip_implicit_coercions(node) };
@@ -643,37 +652,63 @@ pub(super) unsafe fn parse_aggregate(
     let expression = unsafe { measure_expression(aggregate, query, kind) }?;
     // SAFETY: aggfilter, when present, belongs to this analyzed Aggref and
     // shares the active Query's planner lifetime.
-    let (expression, filter) =
-        match unsafe { aggregate_filter(aggregate.aggfilter.cast::<Node>(), query) } {
-            Ok(filter) => (lower_filtered_count(expression, kind, &filter), filter),
-            Err(ShapeDecline::UnsupportedAggregateModifier) => {
-                // The built-in aggregate and argument shape were checked above.
-                // Qualified strict INT4/DATE aggregates or Boolean COUNT can use
-                // a lazy scalar producer: rejected rows yield NULL, never an
-                // argument evaluation, while group activity stays unchanged.
-                let argument = if expression == MeasureExpr::CountStar {
-                    None
-                } else {
-                    // SAFETY: aggregate is the same validated, live Aggref.
-                    Some(
-                        unsafe { first_aggregate_argument(aggregate) }
-                            .ok_or(ShapeDecline::UnsupportedAggregateModifier)?,
-                    )
-                };
-                // SAFETY: predicate/argument belong to this simplified query;
-                // no PostgreSQL pointers escape the synchronous lowerer.
-                let lowered = unsafe {
-                    super::postgres_scalar::lower_filtered_scalar_expression(
-                        aggregate.aggfilter.cast::<Node>(),
-                        argument,
-                        query,
-                    )
-                }
-                .map_err(|_| ShapeDecline::UnsupportedAggregateModifier)?;
-                (lowered.into_measure_expression(), FilterSpec::None)
+    let filter_node = aggregate.aggfilter.cast::<Node>();
+    let direct_h3_filter = if kind == AggregateKind::Count
+        && h3_fact.is_some()
+        && !filter_node.is_null()
+        // SAFETY: non-null aggregate FILTER belongs to this analyzed Aggref.
+        && unsafe { (*filter_node).type_ } == NodeTag::T_Var
+        && (expression == MeasureExpr::CountStar
+            || matches!(expression, MeasureExpr::Column(column)
+                if Some(column.relation_oid) == h3_fact
+                    && matches!(column.type_oid, 16 | 21 | 23 | 20 | 700 | 701 | 1082 | 1114 | 1184)))
+    {
+        // SAFETY: exact Var node belongs to the same active query; no coercion stripping.
+        unsafe { direct_var(filter_node, query) }
+            .filter(|column| {
+                Some(column.column.relation_oid) == h3_fact
+                    && column.column.type_oid == u32::from(pg_sys::BOOLOID)
+            })
+            .map(|column| FilterSpec::Mask {
+                input: column.column,
+                kind: MaskKind::Sql,
+            })
+    } else {
+        None
+    };
+    // SAFETY: FILTER and query share the active analyzed planner lifetime.
+    let parsed_filter =
+        direct_h3_filter.map_or_else(|| unsafe { aggregate_filter(filter_node, query) }, Ok);
+    let (expression, filter) = match parsed_filter {
+        Ok(filter) => (lower_filtered_count(expression, kind, &filter), filter),
+        Err(ShapeDecline::UnsupportedAggregateModifier) => {
+            // The built-in aggregate and argument shape were checked above.
+            // Qualified strict INT4/DATE aggregates or Boolean COUNT can use
+            // a lazy scalar producer: rejected rows yield NULL, never an
+            // argument evaluation, while group activity stays unchanged.
+            let argument = if expression == MeasureExpr::CountStar {
+                None
+            } else {
+                // SAFETY: aggregate is the same validated, live Aggref.
+                Some(
+                    unsafe { first_aggregate_argument(aggregate) }
+                        .ok_or(ShapeDecline::UnsupportedAggregateModifier)?,
+                )
+            };
+            // SAFETY: predicate/argument belong to this simplified query;
+            // no PostgreSQL pointers escape the synchronous lowerer.
+            let lowered = unsafe {
+                super::postgres_scalar::lower_filtered_scalar_expression(
+                    aggregate.aggfilter.cast::<Node>(),
+                    argument,
+                    query,
+                )
             }
-            Err(error) => return Err(error),
-        };
+            .map_err(|_| ShapeDecline::UnsupportedAggregateModifier)?;
+            (lowered.into_measure_expression(), FilterSpec::None)
+        }
+        Err(error) => return Err(error),
+    };
     Ok(AggregateExpr {
         expression,
         output: AggregateOutput {
@@ -748,6 +783,7 @@ unsafe fn projections_and_aggregates(
     query: &pg_sys::Query,
     inventory: &ExpressionInventory,
     targets: *mut pg_sys::List,
+    h3_fact: Option<u32>,
 ) -> Result<(Vec<InputProjection>, Vec<AggregateExpr>), ShapeDecline> {
     let mut projections = Vec::new();
     let mut aggregates = Vec::new();
@@ -795,7 +831,13 @@ unsafe fn projections_and_aggregates(
         let aggregate_index =
             u32::try_from(aggregates.len()).map_err(|_| ShapeDecline::UnsupportedProjection)?;
         // SAFETY: the NodeTag check proves stripped is an Aggref in query.
-        let aggregate = unsafe { parse_aggregate(stripped, query) }?;
+        let aggregate = if h3_fact.is_some() {
+            // SAFETY: the NodeTag check proves this is an Aggref in query.
+            unsafe { parse_aggregate_with_h3_context(stripped, query, h3_fact) }?
+        } else {
+            // SAFETY: preserve the original parser for non-H3 grouping.
+            unsafe { parse_aggregate(stripped, query) }?
+        };
         let nullable = aggregate.output.kind != AggregateKind::Count;
         let source_type_oid = match &aggregate.expression {
             MeasureExpr::CountStar => 0,
@@ -2659,9 +2701,18 @@ pub(super) unsafe fn extract_input(
 
     // SAFETY: all adapters inspect the same still-live planner Query.
     let groups = unsafe { group_keys(query) }?;
+    let h3_fact = match groups.as_slice() {
+        [
+            PlannerGroupKey::Expression {
+                source: GroupKeySource::H3CellToParent { cell, .. },
+                ..
+            },
+        ] => Some(cell.relation_oid),
+        _ => None,
+    };
     // SAFETY: inventory pointers were collected synchronously from query.
     let (projections, aggregates) =
-        unsafe { projections_and_aggregates(query, &inventory, targets) }?;
+        unsafe { projections_and_aggregates(query, &inventory, targets, h3_fact) }?;
     let dense_where = aggregates.iter().any(|aggregate| {
         aggregate.expression == MeasureExpr::CountStar
             || matches!(aggregate.expression, MeasureExpr::Bytecode { .. })

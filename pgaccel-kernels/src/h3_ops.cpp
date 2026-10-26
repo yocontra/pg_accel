@@ -1013,9 +1013,7 @@ pgaccel_h3_cell_to_parent_resident_ex(const uint64_t* cells, const uint8_t* null
         uint32_t row_failure = null_byte > 1 ? H3_RESIDENT_FAILURE_CONTRACT : 0;
         if (row_failure == 0 && null_byte == 0) {
           const uint64_t cell = cells[row];
-          if (!h3_is_valid_cell(cell))
-            row_failure = H3_RESIDENT_FAILURE_INVALID_CELL;
-          else if (target_resolution > h3_get_resolution(cell))
+          if (target_resolution > h3_get_resolution(cell))
             row_failure = H3_RESIDENT_FAILURE_RES_MISMATCH;
         }
         if (row_failure != 0) {
@@ -1037,7 +1035,6 @@ pgaccel_h3_cell_to_parent_resident_ex(const uint64_t* cells, const uint8_t* null
     return PGACCEL_INVALID_ARGUMENT;
   }
 
-  const uint64_t unused_digit_mask = h3_unused_digit_mask_after(parent_res);
   queue.parallel_for<H3CellToParentResidentTransformKernel>(
       sycl::range<1>(count), [=](sycl::id<1> id) {
         const size_t row = id[0];
@@ -1045,7 +1042,7 @@ pgaccel_h3_cell_to_parent_resident_ex(const uint64_t* cells, const uint8_t* null
           parents[row] = 0;
           return;
         }
-        parents[row] = h3_cell_to_parent_masked(cells[row], target_resolution, unused_digit_mask);
+        parents[row] = pgaccel_h3_exact::h3_cell_to_parent(cells[row], target_resolution);
       });
   queue.wait_and_throw();
   pgaccel_record_gpu_exec();

@@ -1,0 +1,48 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running unittests src/main.rs (target/debug/deps/pg_accel_bench-55e77d1a663b8eeb)
+
+running 1 test
+test resident_concurrency_test::resident_eight_backend_grouped_soak_enforces_budget_and_ownership ... resident worker ownership slot=8 pid=88587 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=0 pid=88589 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=1 pid=88590 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=2 pid=88591 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=3 pid=88592 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=4 pid=88593 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=5 pid=88594 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=7 pid=88596 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=6 pid=88595 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=3 pid=88592 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=1 pid=88590 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=2 pid=88591 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=6 pid=88595 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=4 pid=88593 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=7 pid=88596 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=0 pid=88589 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=5 pid=88594 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=1 pid=88590 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=2 pid=88591 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=0 pid=88589 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=5 pid=88594 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=6 pid=88595 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=4 pid=88593 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=7 pid=88596 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=3 pid=88592 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=1 pid=88590 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=0 pid=88589 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=2 pid=88591 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=5 pid=88594 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=7 pid=88596 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=6 pid=88595 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=4 pid=88593 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=3 pid=88592 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=3 pid=88592 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=5 pid=88594 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=4 pid=88593 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=7 pid=88596 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=1 pid=88590 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=6 pid=88595 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+resident worker ownership slot=2 pid=88591 status=LocalStatus { rows: 1, raw_bytes: 2105256, derived_bytes: 1052628, workspace_idle_bytes: 8832, output_idle_bytes: 2624, all_pinned: true } total=3169340
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 661 filtered out; finished in 1.57s
+

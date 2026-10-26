@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+     Running unittests src/main.rs (target/debug/deps/pg_accel_bench-55e77d1a663b8eeb)
+
+running 1 test
+test resident_concurrency_test::resident_real_user_cancel_is_bounded_exact_and_recoverable ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 658 filtered out; finished in 1.02s
+

@@ -99,9 +99,9 @@ OUTPUT_ASSIGNMENTS = frozenset(
 )
 
 DEFAULT_ABI_MANIFEST = pathlib.Path(__file__).with_name("cpu_cheat_abi_manifest.txt")
-EXPECTED_ABI_MANIFEST_COUNT = 131
+EXPECTED_ABI_MANIFEST_COUNT = 133
 EXPECTED_ABI_MANIFEST_SHA256 = (
-    "d4dc7e0e01e18f9e642a5ac69ae4e4c0f361df6ef88d570dce361ea240b5402c"
+    "0bf4c2bcbf1890eb8cc64f838518cd8f1c30afeb34cc768fff72595975f410aa"
 )
 INTERNAL_NON_ABI_HEADERS = frozenset(
     {"alloc_helper.h", "pgaccel_error.h", "pgaccel_queue.h"}
@@ -11157,6 +11157,107 @@ class _PathAuditor:
         return proof
 
 
+def _partition_forwarding_obligations(
+    tokens: Sequence[Token], functions: Sequence[Function]
+) -> dict[str, tuple[str, ...]]:
+    """Reject changed ABI forwarding; this is not a device/metadata proof.
+
+    These obligations deliberately only add failures. Passing them must never
+    bypass recursive helper analysis, validation dominance, output provenance,
+    or the release-object requirement. In particular a correctly forwarded
+    partition is not evidence that its rows were computed on the device.
+    """
+
+    wrappers = {
+        "pgaccel_grouped_agg_execute_ex": (
+            "pgaccel_status (const pgaccel_grouped_agg_desc *, "
+            "pgaccel_grouped_agg_out *, int32_t *)",
+            "return execute_grouped_agg_impl(desc, out, detail, nullptr);",
+        ),
+        "pgaccel_hash_count_partition_execute_v1": (
+            "pgaccel_status (const pgaccel_grouped_agg_desc *, "
+            "const pgaccel_hash_count_partition_v1 *, "
+            "pgaccel_grouped_agg_out *, int32_t *)",
+            "if (partition == nullptr) return PGACCEL_ERROR; "
+            "return execute_grouped_agg_impl(desc, out, detail, partition);",
+        ),
+        "pgaccel_grouped_agg_execute": (
+            "pgaccel_status (const pgaccel_grouped_agg_desc *, "
+            "pgaccel_grouped_agg_out *)",
+            "int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE; "
+            "return pgaccel_grouped_agg_execute_ex(desc, out, &detail);",
+        ),
+    }
+    definitions = _group_by_name(functions)
+    # A differently named toy wrapper must not acquire a name-based proof.
+    present = set(wrappers).intersection(definitions)
+    if "pgaccel_hash_count_partition_execute_v1" not in present:
+        return {}
+
+    def values(source: str) -> tuple[str, ...]:
+        return tuple(token.value for token in lex_cpp(source))
+
+    common: list[str] = []
+    helpers = definitions.get("execute_grouped_agg_impl", ())
+    if len(helpers) != 1:
+        common.append("shared execution helper must have one visible definition")
+    else:
+        helper = helpers[0]
+        body = tuple(
+            token.value for token in tokens[helper.body_open + 1 : helper.body_close]
+        )
+        # Both conditional arms matter: the legacy null branch must stay null,
+        # and the partition branch must forward the validated value snapshot.
+        obligations = (
+            (
+                "nullable partition snapshot",
+                "const pgaccel_hash_count_partition_v1 partition_snapshot = "
+                "partition == nullptr ? pgaccel_hash_count_partition_v1{} : *partition;",
+            ),
+            (
+                "partition snapshot forwarding",
+                "return execute_grouped_agg_finalize(queue, descriptor_contract, "
+                "out, detail, descriptor_contract.scratch, layout, "
+                "partition == nullptr ? nullptr : &partition_snapshot);",
+            ),
+        )
+        for label, source in obligations:
+            expected = values(source)
+            matches = sum(
+                body[index : index + len(expected)] == expected
+                for index in range(len(body) - len(expected) + 1)
+            )
+            if matches != 1:
+                common.append(label + " is not the exact single forwarding expression")
+
+    failures: dict[str, tuple[str, ...]] = {}
+    for name in sorted(present):
+        signature, expected_body = wrappers[name]
+        errors = list(common)
+        candidates = definitions[name]
+        if len(candidates) != 1:
+            errors.append("ABI wrapper must have one visible definition")
+        else:
+            wrapper = candidates[0]
+            actual_signature = _full_signature(
+                wrapper.return_spelling,
+                _parameter_type_spellings(tokens, wrapper.lparen, wrapper.rparen),
+            )
+            if _canonical_signature_tokens(actual_signature) != _canonical_signature_tokens(
+                signature
+            ):
+                errors.append("ABI wrapper signature does not preserve forwarding types")
+            actual_body = tuple(
+                token.value
+                for token in tokens[wrapper.body_open + 1 : wrapper.body_close]
+            )
+            if actual_body != values(expected_body):
+                errors.append("ABI wrapper does not exactly forward arguments and status")
+        if errors:
+            failures[name] = tuple(errors)
+    return failures
+
+
 def _audit_source_literal(
     path: pathlib.Path,
     source: str,
@@ -11252,6 +11353,7 @@ def _audit_source_literal(
         observer_trusted,
         inherited_type_token_sources,
     )
+    forwarding_failures = _partition_forwarding_obligations(tokens, functions)
     entrypoint_audits: list[EntrypointAudit] = []
     for entrypoint in sorted(entrypoints, key=lambda function: function.line):
         if entrypoint.name in duplicate_entries:
@@ -11269,6 +11371,17 @@ def _audit_source_literal(
             )
             continue
         proof = auditor.prove(entrypoint)
+        if entrypoint.name in forwarding_failures:
+            proof = dataclasses.replace(
+                proof,
+                ok=False,
+                detail=_bounded_detail(
+                    (proof.detail, *forwarding_failures[entrypoint.name])
+                ),
+                classifications=tuple(
+                    sorted(set(proof.classifications) | {"partition_forwarding_unproved"})
+                ),
+            )
         if ambiguous_directives:
             condition_lines = ", ".join(
                 str(directive.line) for directive in ambiguous_directives

@@ -257,6 +257,10 @@ pub(super) struct GpuAccelState {
     /// Optional typed preparation required after query-context children have
     /// been deleted but before the executor destructor runs.
     executor_prepare_reset: Option<ExecutorPrepareResetFn>,
+    /// Non-flushing detach while query children are still live in PG catch.
+    executor_abort: Option<ExecutorPrepareResetFn>,
+    /// Explicit fallible normal close, invoked before installed owner removal.
+    executor_close: Option<ExecutorPrepareResetFn>,
 }
 
 unsafe fn drop_boxed_executor<T>(executor: *mut c_void) {
@@ -303,7 +307,25 @@ unsafe fn prepare_raster_executor_for_query_context_reset(executor: *mut c_void)
     unsafe { (*executor.cast::<RasterExecState>()).prepare_for_query_context_reset() };
 }
 
+unsafe fn abandon_aggregate_transport(executor: *mut c_void) {
+    // SAFETY: aggregate installation pairs this callback with AggExecState.
+    unsafe { (*executor.cast::<AggExecState>()).abandon_transport() };
+}
+
+unsafe fn close_aggregate_transport(executor: *mut c_void) {
+    // SAFETY: normal End/ReScan retains the installed executor/live context.
+    unsafe { (*executor.cast::<AggExecState>()).close_transport() };
+}
+
 unsafe fn release_executor(state: &mut GpuAccelState, query_context_reset: bool) {
+    if !query_context_reset
+        && !state.executor.is_null()
+        && let Some(close) = state.executor_close
+    {
+        // SAFETY: normal close may ERROR; caller's installed-owner boundary
+        // detaches without repeating close before preserving that error.
+        unsafe { close(state.executor) };
+    }
     #[cfg(any(test, feature = "pg_test"))]
     if !state.executor.is_null() {
         record_executor_release(query_context_reset);
@@ -320,6 +342,8 @@ unsafe fn release_executor(state: &mut GpuAccelState, query_context_reset: bool)
     // SAFETY: executor and its type-bound callbacks are installed and cleared
     // as one ownership record.
     unsafe {
+        state.executor_abort = None;
+        state.executor_close = None;
         drop_installed_executor(
             &mut state.executor,
             &mut state.executor_drop,
@@ -333,6 +357,13 @@ unsafe fn release_executor(state: &mut GpuAccelState, query_context_reset: bool)
 /// post-context-reset preparation must not run; the eventual registered
 /// callback observes the cleared owner and becomes an idempotent no-op.
 unsafe fn release_executor_after_caught_error(state: &mut GpuAccelState) {
+    if !state.executor.is_null()
+        && let Some(abort) = state.executor_abort.take()
+    {
+        // SAFETY: typed abort hook only invalidates handles, never invokes PG.
+        unsafe { abort(state.executor) };
+    }
+    state.executor_close = None;
     #[cfg(any(test, feature = "pg_test"))]
     if !state.executor.is_null() {
         record_executor_release(true);
@@ -350,6 +381,29 @@ unsafe fn release_executor_after_caught_error(state: &mut GpuAccelState) {
             &mut state.executor_prepare_reset,
         );
     }
+}
+
+/// Restore entry context/owner before detaching on PG ERROR. Spilling can switch
+/// both globals internally; no child-owned pointer is dereferenced by abort.
+unsafe fn with_installed_executor_error_boundary<T>(
+    state: *mut GpuAccelScanState,
+    body: impl FnOnce() -> T,
+) -> T {
+    // SAFETY: callback runs on the main backend and these entry owners remain
+    // live until the caught error is rethrown to PostgreSQL's outer boundary.
+    let (context, owner) = unsafe { (pg_sys::CurrentMemoryContext, pg_sys::CurrentResourceOwner) };
+    pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(body))
+        .catch_others(|caught| {
+            // SAFETY: restore live entry globals before any Rust owner cleanup;
+            // never flush/close the abandoned spool or release unrelated owners.
+            unsafe {
+                pg_sys::CurrentMemoryContext = context;
+                pg_sys::CurrentResourceOwner = owner;
+                release_executor_after_caught_error(&mut (*state).accel);
+            }
+            caught.rethrow()
+        })
+        .execute()
 }
 
 unsafe extern "C-unwind" fn executor_query_context_reset(arg: *mut c_void) {
@@ -908,16 +962,19 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 });
             // SAFETY: state is our live extended allocation.
             unsafe {
+                (*state).accel.executor_abort = Some(abandon_aggregate_transport);
+                (*state).accel.executor_close = Some(close_aggregate_transport);
                 install_boxed_executor(
                     &mut (*state).accel.executor,
                     &mut (*state).accel.executor_drop,
                     &mut (*state).accel.executor_prepare_reset,
                     exec,
-                    None,
+                    Some(abandon_aggregate_transport),
                 );
                 // Preparation can raise a PostgreSQL ERROR or cancellation.
                 // Install the concrete owner first so the registered query
                 // context callback releases it on every nonlocal exit.
+                (*(*state).accel.executor.cast::<AggExecState>()).set_query_context(query_context);
                 (*(*state).accel.executor.cast::<AggExecState>()).prepare_descriptor();
             }
         }
@@ -977,9 +1034,10 @@ unsafe extern "C-unwind" fn exec_custom_scan(
         pgrx::error!("pg_accel: resident Custom Scan has no executor");
     }
 
-    pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
-        // SAFETY: strategy and executor were installed together in Begin.
-        unsafe {
+    // SAFETY: state is installed and its query context is live for this callback.
+    unsafe {
+        with_installed_executor_error_boundary(state, || {
+            // SAFETY: strategy and executor were installed together in Begin.
             if (*node).ss.ps.qual.is_null() && (*node).ss.ps.ps_ProjInfo.is_null() {
                 #[cfg(any(test, feature = "pg_test"))]
                 TEST_SCAN_FETCH_COUNTS.with(|slot| {
@@ -999,16 +1057,8 @@ unsafe extern "C-unwind" fn exec_custom_scan(
                     Some(recheck_resident_scan_tuple),
                 )
             }
-        }
-    }))
-    .catch_others(|caught| {
-        // SAFETY: this callback owns the live state and catches the error before
-        // PostgreSQL resets its query context. Clear Rust ownership exactly once
-        // before preserving the original SQLSTATE and message.
-        unsafe { release_executor_after_caught_error(&mut (*state).accel) };
-        caught.rethrow()
-    })
-    .execute()
+        })
+    }
 }
 
 #[pgrx::pg_guard]
@@ -1073,7 +1123,11 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
     // SAFETY: executor and its concrete destructor were installed together in
     // BeginCustomScan. Clearing the pointer first makes repeated End calls and
     // the later query-context callback harmless.
-    unsafe { release_executor(&mut (*state).accel, false) };
+    unsafe {
+        with_installed_executor_error_boundary(state, || {
+            release_executor(&mut (*state).accel, false);
+        });
+    };
 }
 
 /// Reset an aggregate or raster executor without changing its exact contract.
@@ -1085,30 +1139,32 @@ unsafe extern "C-unwind" fn rescan_custom_scan(node: *mut pg_sys::CustomScanStat
     let state = node.cast::<GpuAccelScanState>();
     // SAFETY: strategy and concrete executor were installed together.
     unsafe {
-        if (*state).accel.executor.is_null() {
-            pgrx::error!("pg_accel: resident rescan found no executor state");
-        }
-        match GpuStrategy::decode((*state).accel.strategy) {
-            GpuStrategy::Agg => {
-                (*(*state).accel.executor.cast::<AggExecState>()).reset_for_rescan();
+        with_installed_executor_error_boundary(state, || {
+            if (*state).accel.executor.is_null() {
+                pgrx::error!("pg_accel: resident rescan found no executor state");
             }
-            GpuStrategy::Raster => {
-                (*(*state).accel.executor.cast::<RasterExecState>()).reset_for_rescan();
+            match GpuStrategy::decode((*state).accel.strategy) {
+                GpuStrategy::Agg => {
+                    (*(*state).accel.executor.cast::<AggExecState>()).reset_for_rescan();
+                }
+                GpuStrategy::Raster => {
+                    (*(*state).accel.executor.cast::<RasterExecState>()).reset_for_rescan();
+                }
+                strategy => {
+                    pgrx::error!("pg_accel: retired {strategy:?} strategy reached resident rescan");
+                }
             }
-            strategy => {
-                pgrx::error!("pg_accel: retired {strategy:?} strategy reached resident rescan");
+            reset_observability(&mut (*state).accel);
+            if GpuStrategy::decode((*state).accel.strategy) == GpuStrategy::Raster {
+                let raster = &*(*state).accel.executor.cast::<RasterExecState>();
+                (*state).accel.rows_dispatched =
+                    crate::engine::executor::ExecutorState::rows_dispatched(raster);
+                (*state).accel.batches_executed =
+                    crate::engine::executor::ExecutorState::batches_executed(raster);
+                (*state).accel.dispatch_time_us =
+                    crate::engine::executor::ExecutorState::dispatch_time_us(raster);
             }
-        }
-        reset_observability(&mut (*state).accel);
-        if GpuStrategy::decode((*state).accel.strategy) == GpuStrategy::Raster {
-            let raster = &*(*state).accel.executor.cast::<RasterExecState>();
-            (*state).accel.rows_dispatched =
-                crate::engine::executor::ExecutorState::rows_dispatched(raster);
-            (*state).accel.batches_executed =
-                crate::engine::executor::ExecutorState::batches_executed(raster);
-            (*state).accel.dispatch_time_us =
-                crate::engine::executor::ExecutorState::dispatch_time_us(raster);
-        }
+        });
     }
 }
 

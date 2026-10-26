@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "generated_unix_seconds": 1792994651,
+  "artifact_root": "benchmarks/artifacts/resident-concurrency-1792994650-13400-596375000",
+  "known_paths": {
+    "run_manifest_path": "manifest.json",
+    "resume_audit_manifest_path": "resume_audit_manifest.json",
+    "artifact_index_path": "artifact_index.json",
+    "artifact_checklist_path": "artifact_checklist.md"
+  },
+  "bounded_log_policy": {
+    "log_tail_bytes": 65536,
+    "log_delta_bytes": 262144,
+    "telemetry_tail_bytes": 65536,
+    "max_log_candidates": 32,
+    "log_candidates": [
+      "/Users/contra/.pgrx/19.log",
+      "/Users/contra/.pgrx/data-19/pg_accel_panic.log",
+      "/Users/contra/.pgrx/data-19/pg_accel_traces.jsonl",
+      "/Users/contra/.pgrx/data-19/pg_accel_otel.jsonl",
+      "/tmp/pg_accel_panic.log",
+      "/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production19-integration-tail-final1/pgdata/pg_accel_panic.log",
+      "/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production19-integration-tail-final1/pgdata/pg_accel_traces.jsonl",
+      "/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production19-integration-tail-final1/pgdata/pg_accel_otel.jsonl"
+    ],
+    "telemetry_candidates": [
+      "/Users/contra/.pgrx/data-19/pg_accel_traces.jsonl",
+      "/Users/contra/.pgrx/data-19/pg_accel_otel.jsonl",
+      "/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production19-integration-tail-final1/pgdata/pg_accel_traces.jsonl",
+      "/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production19-integration-tail-final1/pgdata/pg_accel_otel.jsonl"
+    ]
+  },
+  "log_offset_provenance": [
+    {
+      "path": "/Users/contra/.pgrx/19.log",
+      "existed": true,
+      "len_bytes": 2659090
+    },
+    {
+      "path": "/Users/contra/.pgrx/data-19/pg_accel_panic.log",
+      "existed": true,
+      "len_bytes": 13625
+    },
+    {
+      "path": "/Users/contra/.pgrx/data-19/pg_accel_traces.jsonl",
+      "existed": true,
+      "len_bytes": 184801
+    },
+    {
+      "path": "/Users/contra/.pgrx/data-19/pg_accel_otel.jsonl",
+      "existed": true,
+      "len_bytes": 14806
+    },
+    {
+      "path": "/tmp/pg_accel_panic.log",
+      "existed": false,
+      "len_bytes": 0
+    },
+    {
+      "path": "/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production19-integration-tail-final1/pgdata/pg_accel_panic.log",
+      "existed": false,
+      "len_bytes": 0
+    },
+    {
+      "path": "/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production19-integration-tail-final1/pgdata/pg_accel_traces.jsonl",
+      "existed": true,
+      "len_bytes": 0
+    },
+    {
+      "path": "/Users/contra/Projects/pg_accel/.codex/scratch/h3-conditional-count-20261026/repair-production19-integration-tail-final1/pgdata/pg_accel_otel.jsonl",
+      "existed": true,
+      "len_bytes": 0
+    }
+  ],
+  "inventory": {
+    "completed_artifacts": [],
+    "correctness_artifacts": [],
+    "pre_risk_artifacts": [],
+    "plan_artifacts": [],
+    "crash_artifacts": [
+      "crashes.json",
+      "crashes.md"
+    ],
+    "log_artifacts": [
+      "log_tails/resident-concurrency/00-19.log.delta",
+      "log_tails/resident-concurrency/00-19.log.tail",
+      "log_tails/resident-concurrency/01-pg_accel_panic.log.delta",
+      "log_tails/resident-concurrency/01-pg_accel_panic.log.tail",
+      "log_tails/resident-concurrency/02-pg_accel_traces.jsonl.delta",
+      "log_tails/resident-concurrency/02-pg_accel_traces.jsonl.tail",
+      "log_tails/resident-concurrency/03-pg_accel_otel.jsonl.delta",
+      "log_tails/resident-concurrency/03-pg_accel_otel.jsonl.tail",
+      "log_tails/resident-concurrency/06-pg_accel_traces.jsonl.delta",
+      "log_tails/resident-concurrency/06-pg_accel_traces.jsonl.tail",
+      "log_tails/resident-concurrency/07-pg_accel_otel.jsonl.delta",
+      "log_tails/resident-concurrency/07-pg_accel_otel.jsonl.tail"
+    ],
+    "provenance_artifacts": [],
+    "failure_artifacts": [
+      "failure-resident-concurrency.txt"
+    ]
+  }
+}

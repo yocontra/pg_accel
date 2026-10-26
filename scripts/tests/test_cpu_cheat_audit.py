@@ -6936,11 +6936,11 @@ class AbiInventoryTests(unittest.TestCase):
 
     def test_checked_in_manifest_has_literal_integrity_anchor(self) -> None:
         manifest = audit.load_abi_manifest(audit.DEFAULT_ABI_MANIFEST)
-        self.assertEqual(manifest.count, 131)
-        self.assertEqual(audit.EXPECTED_ABI_MANIFEST_COUNT, 131)
+        self.assertEqual(manifest.count, 133)
+        self.assertEqual(audit.EXPECTED_ABI_MANIFEST_COUNT, 133)
         self.assertEqual(
             manifest.sha256,
-            "d4dc7e0e01e18f9e642a5ac69ae4e4c0f361df6ef88d570dce361ea240b5402c",
+            "0bf4c2bcbf1890eb8cc64f838518cd8f1c30afeb34cc768fff72595975f410aa",
         )
         self.assertEqual(manifest.sha256, audit.EXPECTED_ABI_MANIFEST_SHA256)
 
@@ -7166,15 +7166,15 @@ class ProductionWitnessTests(unittest.TestCase):
         )
 
     def test_complete_real_abi_baseline_and_violation_floor(self) -> None:
-        self.assertEqual(len(self.abi.definitions), 131)
-        self.assertEqual(len({item.name for item in self.abi.definitions}), 131)
-        self.assertEqual(len({item.name for item in self.abi.declarations}), 131)
+        self.assertEqual(len(self.abi.definitions), 133)
+        self.assertEqual(len({item.name for item in self.abi.definitions}), 133)
+        self.assertEqual(len({item.name for item in self.abi.declarations}), 133)
         self.assertFalse(self.abi.findings)
         self.assertEqual(self.abi.definition_hash, self.abi.declaration_hash)
         self.assertEqual(self.abi.source_definition_hash, self.abi.definition_hash)
         self.assertEqual(self.abi.manifest["status"], "verified")
         self.assertEqual(self.abi.compiler["status"], "verified")
-        self.assertEqual(self.abi.compiler["inventory_count"], 131)
+        self.assertEqual(self.abi.compiler["inventory_count"], 133)
         status_names = sorted(
             entry.entrypoint for entry in self.by_name.values() if entry.is_status
         )[:82]
@@ -7372,6 +7372,126 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(report["entrypoints"][0]["name"], "pgaccel_bad")
         self.assertIn("host_computation", report["findings"][0]["classifications"])
         self.assertIn("fake_gpu_counter", report["findings"][0]["classifications"])
+
+
+class PartitionForwardingObligationTests(unittest.TestCase):
+    """Actual-source obligations, deliberately not an overall positive proof."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.source = (REPO_ROOT / "pgaccel-kernels/src/grouped_agg.cpp").read_text()
+
+    def obligations(self, source: str) -> dict[str, tuple[str, ...]]:
+        normalized, _ = audit.normalize_preprocessor(source)
+        tokens = audit.lex_cpp(normalized)
+        return audit._partition_forwarding_obligations(
+            tokens, audit.parse_functions(tokens)
+        )
+
+    def mutated(self, before: str, after: str) -> str:
+        self.assertEqual(self.source.count(before), 1, before)
+        return self.source.replace(before, after)
+
+    def test_actual_source_preserves_forwarding_obligations(self) -> None:
+        # Empty obligations only mean forwarding has this exact syntax. The
+        # normal analyzer still has to prove the entire helper and its callees.
+        self.assertEqual(self.obligations(self.source), {})
+
+    def test_each_nullable_snapshot_arm_is_required(self) -> None:
+        original = "partition == nullptr ? pgaccel_hash_count_partition_v1{} : *partition"
+        for replacement in (
+            "partition == nullptr ? *partition : *partition",
+            "partition == nullptr ? pgaccel_hash_count_partition_v1{} "
+            ": pgaccel_hash_count_partition_v1{}",
+            "partition != nullptr ? pgaccel_hash_count_partition_v1{} : *partition",
+        ):
+            with self.subTest(replacement=replacement):
+                failures = self.obligations(self.mutated(original, replacement))
+                self.assertEqual(len(failures), 3)
+                self.assertTrue(
+                    all(
+                        "nullable partition snapshot" in errors[0]
+                        for errors in failures.values()
+                    )
+                )
+
+    def test_each_nullable_forwarding_arm_is_required(self) -> None:
+        original = "partition == nullptr ? nullptr : &partition_snapshot"
+        for replacement in (
+            "partition == nullptr ? &partition_snapshot : &partition_snapshot",
+            "partition == nullptr ? nullptr : nullptr",
+            "partition == nullptr ? nullptr : partition",
+            "partition != nullptr ? nullptr : &partition_snapshot",
+        ):
+            with self.subTest(replacement=replacement):
+                failures = self.obligations(self.mutated(original, replacement))
+                self.assertEqual(len(failures), 3)
+                self.assertTrue(
+                    all(
+                        "partition snapshot forwarding" in errors[0]
+                        for errors in failures.values()
+                    )
+                )
+
+    def test_wrapper_cannot_redirect_arguments_or_status(self) -> None:
+        original = "return execute_grouped_agg_impl(desc, out, detail, partition);"
+        for replacement in (
+            "return execute_grouped_agg_impl(desc, out, detail, nullptr);",
+            "return execute_grouped_agg_impl(desc, nullptr, detail, partition);",
+            "execute_grouped_agg_impl(desc, out, detail, partition); return PGACCEL_OK;",
+            "return unrecognized_helper(desc, out, detail, partition);",
+        ):
+            with self.subTest(replacement=replacement):
+                failures = self.obligations(self.mutated(original, replacement))
+                self.assertIn("pgaccel_hash_count_partition_execute_v1", failures)
+
+    def test_legacy_wrapper_cannot_forward_partition_or_discard_status(self) -> None:
+        original = "return execute_grouped_agg_impl(desc, out, detail, nullptr);"
+        for replacement in (
+            "return execute_grouped_agg_impl(desc, out, detail, partition);",
+            "execute_grouped_agg_impl(desc, out, detail, nullptr); return PGACCEL_OK;",
+        ):
+            with self.subTest(replacement=replacement):
+                failures = self.obligations(self.mutated(original, replacement))
+                self.assertIn("pgaccel_grouped_agg_execute_ex", failures)
+
+    def test_legacy_execute_cannot_redirect_output_or_hide_failure(self) -> None:
+        original = "return pgaccel_grouped_agg_execute_ex(desc, out, &detail);"
+        for replacement in (
+            "return pgaccel_grouped_agg_execute_ex(desc, nullptr, &detail);",
+            "pgaccel_grouped_agg_execute_ex(desc, out, &detail); return PGACCEL_OK;",
+        ):
+            with self.subTest(replacement=replacement):
+                failures = self.obligations(self.mutated(original, replacement))
+                self.assertIn("pgaccel_grouped_agg_execute", failures)
+
+    def test_forwarding_rejection_preserves_underlying_proof_failures(self) -> None:
+        # A small deliberately unsafe implementation tests the report seam,
+        # independently of the actual-source forwarding mutations above.
+        source = """
+        using pgaccel_status = int;
+        static pgaccel_status execute_grouped_agg_impl(
+            const int* desc, int* out, int* detail, const int* partition) {
+          *out = desc[0];
+          return PGACCEL_OK;
+        }
+        extern "C" pgaccel_status pgaccel_hash_count_partition_execute_v1(
+            const int* desc, const int* partition, int* out, int* detail) {
+          return execute_grouped_agg_impl(desc, out, detail, partition);
+        }
+        """
+        result = audit._audit_source_literal(FIXTURE_PATH, source)
+        finding = finding_for(result, "pgaccel_hash_count_partition_execute_v1")
+        ordinary = audit._audit_source_literal(
+            FIXTURE_PATH,
+            source.replace(
+                "pgaccel_hash_count_partition_execute_v1", "pgaccel_unsafe_wrapper"
+            ),
+        )
+        underlying = finding_for(ordinary, "pgaccel_unsafe_wrapper")
+        self.assertIn("partition_forwarding_unproved", finding.classifications)
+        self.assertTrue(set(underlying.classifications) <= set(finding.classifications))
+        self.assertTrue(underlying.classifications)
 
 
 if __name__ == "__main__":

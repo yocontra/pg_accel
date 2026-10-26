@@ -1879,7 +1879,7 @@ fn run_with_timing_and_cache_internal(
         && workload_is_resident_lane(workload.name());
     let mut artifact_lifecycle_probe = None;
     let mut artifact_steady_state_captures = Vec::with_capacity(iterations);
-    let capture_typed_h3 = crate::workloads::h3_count_column_contract(workload.name()).is_some();
+    let capture_typed_h3 = crate::workloads::h3_count_contract(workload.name()).is_some();
     let mut typed_h3_settings = Vec::new();
 
     for i in 0..total_runs {

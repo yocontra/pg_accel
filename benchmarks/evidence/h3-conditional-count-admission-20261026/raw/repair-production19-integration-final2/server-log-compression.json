@@ -1,0 +1,20 @@
+{
+  "representation": "lossless gzip -n -k; original local raw log preserved",
+  "raw_file": "server.log",
+  "raw_bytes": 153032991,
+  "raw_sha256": "359a412e21f3b50d4bf32a53b37af9fd070d4513e72c32f261b2378c2b019513",
+  "compressed_file": "server.log.gz",
+  "compressed_bytes": 611830,
+  "compressed_sha256": "00b27de7dd29745a096918f6611e1027884976cca9d5d58563bf6dade6be1665",
+  "gzip_integrity_check": "passed",
+  "decompressed_sha256": "359a412e21f3b50d4bf32a53b37af9fd070d4513e72c32f261b2378c2b019513",
+  "large_log_cause": "1000054 PostgreSQL warnings from integration fixture use of the installed H3 deprecated h3_lat_lng_to_cell alias; each recommends h3_latlng_to_cell. No warning/error lines removed.",
+  "postgres_severity_counts": {
+    "WARNING_deprecated_H3_alias": 1000054,
+    "ERROR_expected_user_cancel": 1,
+    "ERROR_expected_ninth_backend_budget_rejection": 1,
+    "FATAL": 0,
+    "PANIC": 0
+  },
+  "scope": "Production PG19 correctness integration suite, not a measured performance run. This is not a clean/no-warning log claim. The two ERROR records are asserted negative-test outcomes. Full original bytes are recoverable and hash-verifiable."
+}

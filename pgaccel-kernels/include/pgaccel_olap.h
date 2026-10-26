@@ -75,7 +75,25 @@ typedef enum {
   PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW = 2,
   PGACCEL_GROUPED_AGG_DEVICE_ERROR_DIVISION_BY_ZERO = 3,
   PGACCEL_GROUPED_AGG_DEVICE_ERROR_DATE_OUT_OF_RANGE = 4,
+  /* Returned only by hash_count_partition_execute_v1 with ERROR. Legacy
+   * execute/_ex preserve UNSUPPORTED/NONE for capacity exhaustion. */
+  PGACCEL_GROUPED_AGG_DEVICE_ERROR_HASH_CAPACITY = 5,
+  PGACCEL_GROUPED_AGG_DEVICE_ERROR_H3_RESOLUTION = 6,
 } pgaccel_grouped_agg_device_error;
+
+#define PGACCEL_HASH_COUNT_PARTITION_VERSION 1u
+#define PGACCEL_HASH_COUNT_PARTITION_ALL 0u
+#define PGACCEL_HASH_COUNT_PARTITION_NONNULL_PREFIX 1u
+#define PGACCEL_HASH_COUNT_PARTITION_NULL_ONLY 2u
+typedef struct {
+  uint32_t version;
+  uint32_t struct_size;
+  uint32_t flags;
+  uint32_t kind;
+  uint32_t prefix_bits;
+  uint32_t reserved;
+  uint64_t prefix;
+} pgaccel_hash_count_partition_v1;
 
 typedef enum {
   PGACCEL_GROUPED_AGG_MEASURE_COLUMN = 0,
@@ -516,6 +534,33 @@ pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_agg_desc* de
                                               pgaccel_grouped_agg_out* out, int32_t* detail);
 pgaccel_status pgaccel_grouped_agg_execute(const pgaccel_grouped_agg_desc* desc,
                                            pgaccel_grouped_agg_out* out);
+
+/* Metadata-only control-aware query. Prefix is left aligned with unused low
+ * bits zero; ALL/NULL_ONLY require zero prefix and width. No SQL WHERE, SUM,
+ * dimensions or multi-measure shapes. Existing descriptor layouts unchanged. */
+pgaccel_status pgaccel_hash_count_partition_workspace_requirements_v1(
+    const pgaccel_grouped_agg_desc* desc, const pgaccel_hash_count_partition_v1* partition,
+    pgaccel_grouped_agg_workspace_req* out);
+/* Success selected_count is the partition's population BEFORE aggregate FILTER.
+ * Failure publishes no result, including capacity overflow (ERROR/detail5).
+ * Caller supplies the exactly queried scratch; no hidden allocation. */
+pgaccel_status pgaccel_hash_count_partition_execute_v1(
+    const pgaccel_grouped_agg_desc* desc, const pgaccel_hash_count_partition_v1* partition,
+    pgaccel_grouped_agg_out* out, int32_t* detail);
+
+PGACCEL_ABI_PIN(sizeof(pgaccel_hash_count_partition_v1) == 32, "partition size");
+#ifdef __cplusplus
+PGACCEL_ABI_PIN(alignof(pgaccel_hash_count_partition_v1) == 8, "partition alignment");
+#else
+PGACCEL_ABI_PIN(_Alignof(pgaccel_hash_count_partition_v1) == 8, "partition alignment");
+#endif
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v1, version) == 0, "partition.version");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v1, struct_size) == 4, "partition.size");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v1, flags) == 8, "partition.flags");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v1, kind) == 12, "partition.kind");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v1, prefix_bits) == 16, "partition.bits");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v1, reserved) == 20, "partition.reserved");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v1, prefix) == 24, "partition.prefix");
 
 /* LP64 layout pins. pgaccel_val and pgaccel_expr_usm_col are pinned by
  * pgaccel_expr.h. Every field in every new ABI struct is pinned below. */

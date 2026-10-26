@@ -1948,7 +1948,7 @@ fn threshold_lane_requires_resident_groupagg_logical_spec(lane: &str) -> bool {
         || lane.starts_with("ssbm_q")
         || lane.starts_with("h3_latlng_to_cell_grouped_")
         || lane.starts_with("h3_cell_to_parent_grouped_count_")
-        || crate::workloads::h3_count_column_contract(lane).is_some()
+        || crate::workloads::h3_count_contract(lane).is_some()
         || lane == "hashjoin_filter_groupagg"
         || lane == "hashjoin_groupagg_exact_sum_count"
         || lane == "ssbm_resident_int4_year_size_revenue"
@@ -2042,37 +2042,43 @@ fn plan_contains_resident_groupagg_logical_evidence(plan: &str) -> bool {
 }
 
 fn plan_contains_required_groupagg_logical_evidence(plan: &str, lane: &str) -> bool {
-    if let Some((type_oid, resolution)) = crate::workloads::h3_count_column_contract(lane) {
-        plan_contains_typed_h3_count(plan, type_oid, resolution)
-    } else if lane == "ssbm_resident_int4_year_size_revenue" {
-        plan_contains_exact_ssbm_two_dimension_descriptor(plan)
-    } else {
-        plan_contains_resident_groupagg_logical_evidence(plan)
-    }
+    crate::workloads::h3_count_contract(lane).map_or_else(
+        || {
+            if lane == "ssbm_resident_int4_year_size_revenue" {
+                plan_contains_exact_ssbm_two_dimension_descriptor(plan)
+            } else {
+                plan_contains_resident_groupagg_logical_evidence(plan)
+            }
+        },
+        |contract| plan_contains_h3_count_contract(plan, contract),
+    )
 }
 
 /// Require one ordinary planner CustomScan and bind every descriptor property
 /// to that node. A staged SELECT, COUNT(*), or a sibling node is not proof.
+#[cfg(test)]
 pub fn plan_contains_typed_h3_count(plan: &str, type_oid: u32, resolution: i32) -> bool {
+    plan_contains_h3_count_contract(
+        plan,
+        crate::workloads::H3CountContract {
+            measure: crate::workloads::H3CountMeasure::Column { type_oid, attno: 2 },
+            resolution,
+            predicate_attno: None,
+        },
+    )
+}
+
+/// Exact star/column and direct-BOOL FILTER identity, all on one CustomScan.
+pub fn plan_contains_h3_count_contract(
+    plan: &str,
+    contract: crate::workloads::H3CountContract,
+) -> bool {
     let blocks = pg_accel_custom_scan_blocks(plan);
     let [block] = blocks.as_slice() else {
         return false;
     };
     let direct = direct_custom_scan_property_lines(block).join("\n");
     if !plan_contains_resident_groupagg_logical_evidence(&direct) {
-        return false;
-    }
-    let Some(aggregate) = plan_text_property(&direct, &["gpu descriptor aggregates"]) else {
-        return false;
-    };
-    let Some(column) = aggregate
-        .strip_prefix("m0:column(")
-        .and_then(|s| s.strip_suffix(") -> value.count"))
-        .and_then(parse_descriptor_column)
-    else {
-        return false;
-    };
-    if column.type_oid != type_oid || column.attno != 2 || column.relation_oid == 0 {
         return false;
     }
     let Some(key) = plan_text_property(&direct, &["gpu descriptor group keys"]) else {
@@ -2087,20 +2093,54 @@ pub fn plan_contains_typed_h3_count(plan: &str, type_oid: u32, resolution: i32) 
     let Some(cell) = parse_descriptor_column(cell) else {
         return false;
     };
-    cell.relation_oid == column.relation_oid
+    let Some(aggregate) = plan_text_property(&direct, &["gpu descriptor aggregates"]) else {
+        return false;
+    };
+    let source_type = match contract.measure {
+        crate::workloads::H3CountMeasure::Star => {
+            if aggregate != "m0:count_star -> value.count" {
+                return false;
+            }
+            0
+        }
+        crate::workloads::H3CountMeasure::Column { type_oid, attno } => {
+            let Some(column) = aggregate
+                .strip_prefix("m0:column(")
+                .and_then(|s| s.strip_suffix(") -> value.count"))
+                .and_then(parse_descriptor_column)
+            else {
+                return false;
+            };
+            if column.type_oid != type_oid
+                || column.attno != attno
+                || column.relation_oid != cell.relation_oid
+                || attno <= 0
+            {
+                return false;
+            }
+            type_oid
+        }
+    };
+    let filter = contract.predicate_attno.map_or_else(
+        || "none".to_owned(),
+        |attno| format!("sql_mask(input={}.{attno}:type=16)", cell.relation_oid),
+    );
+    cell.relation_oid != 0
         && cell.attno == 1
         && cell.type_oid != 0
         && tail
             == format!(
-                "{resolution}) type={} collation=0 encoding=hash",
-                cell.type_oid
+                "{}) type={} collation=0 encoding=hash",
+                contract.resolution, cell.type_oid
             )
-        && plan_text_property(&direct, &["gpu descriptor filter"]).as_deref()
-            == Some("fact=none; measures=[m0=none]; dimensions=[none]")
+        && plan_text_property(&direct, &["gpu descriptor filter"])
+            == Some(format!(
+                "fact=none; measures=[m0={filter}]; dimensions=[none]"
+            ))
         && plan_text_property(&direct, &["gpu descriptor output"])
             == Some(format!(
                 "slot0:group[k0] source_type={} result_type={} typmod=-1 collation=0 nullable=true; \
-             slot1:aggregate[m0].value.count source_type={type_oid} result_type=20 typmod=-1 collation=0 nullable=false",
+             slot1:aggregate[m0].value.count source_type={source_type} result_type=20 typmod=-1 collation=0 nullable=false",
                 cell.type_oid, cell.type_oid
             ))
 }
@@ -5197,9 +5237,7 @@ impl BenchReport {
             let Some(class) = crate::workloads::h3_lane_class(&w.name) else {
                 continue;
             };
-            if let Some((type_oid, resolution)) =
-                crate::workloads::h3_count_column_contract(&w.name)
-            {
+            if let Some(contract) = crate::workloads::h3_count_contract(&w.name) {
                 let speedup = warm_speedup_for_gate(w);
                 let warm_pairs = w
                     .iterations
@@ -5235,9 +5273,9 @@ impl BenchReport {
                     && w.physical_kernel_mode.as_deref() == Some("parallel_hash")
                     && w.physical_kernel_mode_counts.parallel_hash > 0
                     && w.physical_kernel_mode_counts.serial_generic == 0
-                    && w.plan_snippet.as_deref().is_some_and(|plan| {
-                        plan_contains_typed_h3_count(plan, type_oid, resolution)
-                    });
+                    && w.plan_snippet
+                        .as_deref()
+                        .is_some_and(|plan| plan_contains_h3_count_contract(plan, contract));
                 if !verified || !speedup.is_finite() || speedup < 1.15 {
                     failures.push(H3LaneGateFailure {
                         workload: w.name.clone(),
@@ -8411,8 +8449,7 @@ mod tests {
     }
 
     fn typed_h3_workload(name: &str) -> WorkloadResult {
-        let (type_oid, resolution) =
-            crate::workloads::h3_count_column_contract(name).expect("typed lane");
+        let contract = crate::workloads::h3_count_contract(name).expect("count lane");
         let mut workload = mock_workload_result(name, 1_000_017, 10.0, 50.0);
         workload.category = "gpu_h3".to_owned();
         workload.kernel_class = "h3_cell_to_parent".to_owned();
@@ -8427,8 +8464,29 @@ mod tests {
         workload.physical_kernel_mode_counts.parallel_hash = 10;
         workload.warmup_iterations = workload.iterations.iter().take(5).cloned().collect();
         workload.warm_summary = None;
-        workload.plan_snippet = Some(typed_h3_plan(type_oid, resolution));
+        workload.plan_snippet = Some(h3_contract_plan(contract));
         workload
+    }
+
+    fn h3_contract_plan(contract: crate::workloads::H3CountContract) -> String {
+        use crate::workloads::H3CountMeasure;
+        let (type_oid, attno) = match contract.measure {
+            H3CountMeasure::Star => (0, 2),
+            H3CountMeasure::Column { type_oid, attno } => (type_oid, attno),
+        };
+        let mut plan = typed_h3_plan(type_oid, contract.resolution);
+        if contract.measure == H3CountMeasure::Star {
+            plan = plan.replace("m0:column(100.2:type=0)", "m0:count_star");
+        } else if attno != 2 {
+            plan = plan.replace("100.2:type=", &format!("100.{attno}:type="));
+        }
+        if let Some(predicate) = contract.predicate_attno {
+            plan = plan.replace(
+                "measures=[m0=none]",
+                &format!("measures=[m0=sql_mask(input=100.{predicate}:type=16)]"),
+            );
+        }
+        plan
     }
 
     fn add_typed_h3_defaults(report: &mut BenchReport) {
@@ -8441,7 +8499,7 @@ mod tests {
         ]);
         let settings = report.gucs.as_ref().expect("mock GUCs").clone();
         for workload in &mut report.workloads {
-            if crate::workloads::h3_count_column_contract(&workload.name).is_none() {
+            if crate::workloads::h3_count_contract(&workload.name).is_none() {
                 continue;
             }
             for (phase, samples) in [
@@ -8515,6 +8573,126 @@ mod tests {
         );
         assert_eq!(report.methodology.timing_mode, "raw-wallclock");
         assert!(report.evaluate_h3_lane_gate().is_empty());
+    }
+
+    #[test]
+    fn conditional_h3_proof_binds_filter_measure_and_output_on_one_node() {
+        use crate::workloads::{H3CountContract, H3CountMeasure, h3_count_contract};
+        for name in crate::workloads::h3_winning_lane_names() {
+            let Some(contract) = h3_count_contract(name).filter(|c| c.predicate_attno.is_some())
+            else {
+                continue;
+            };
+            let valid = h3_contract_plan(contract);
+            assert!(
+                plan_contains_h3_count_contract(&valid, contract),
+                "{name}: {valid}"
+            );
+            let mask = "sql_mask(input=100.3:type=16)";
+            for invalid in [
+                valid.replace(mask, "none"),
+                valid.replace(mask, "sql_mask(input=100.4:type=16)"),
+                valid.replace(mask, "sql_mask(input=101.3:type=16)"),
+                valid.replace(mask, "sql_mask(input=100.3:type=23)"),
+                valid.replace(mask, "recheck_mask(input=100.3:type=16)"),
+                valid.replace(
+                    "fact=none; measures=[m0=sql_mask(input=100.3:type=16)]",
+                    "fact=sql_mask(input=100.3:type=16); measures=[m0=none]",
+                ),
+                valid.replace("GPU Descriptor Filter:", "  GPU Descriptor Filter:"),
+                format!("{valid}\n{valid}"),
+            ] {
+                assert!(
+                    !plan_contains_h3_count_contract(&invalid, contract),
+                    "{name}: {invalid}"
+                );
+            }
+            assert!(!plan_contains_h3_count_contract(
+                &valid,
+                H3CountContract {
+                    predicate_attno: None,
+                    ..contract
+                }
+            ));
+            let substituted = H3CountContract {
+                measure: if contract.measure == H3CountMeasure::Star {
+                    H3CountMeasure::Column {
+                        type_oid: 23,
+                        attno: 2,
+                    }
+                } else {
+                    H3CountMeasure::Star
+                },
+                ..contract
+            };
+            assert!(!plan_contains_h3_count_contract(
+                &h3_contract_plan(substituted),
+                contract
+            ));
+            let wrong_output = valid.replace(
+                "result_type=20 typmod=-1 collation=0 nullable=false",
+                "result_type=23 typmod=-1 collation=0 nullable=false",
+            );
+            assert!(!plan_contains_h3_count_contract(&wrong_output, contract));
+        }
+        let alias = H3CountContract {
+            measure: H3CountMeasure::Column {
+                type_oid: 16,
+                attno: 3,
+            },
+            resolution: 1,
+            predicate_attno: Some(3),
+        };
+        assert!(plan_contains_h3_count_contract(
+            &h3_contract_plan(alias),
+            alias
+        ));
+        assert!(!plan_contains_h3_count_contract(
+            &h3_contract_plan(alias),
+            H3CountContract {
+                predicate_attno: Some(4),
+                ..alias
+            }
+        ));
+    }
+
+    #[test]
+    fn conditional_h3_lanes_share_strict_samples_defaults_and_warm_floor() {
+        for name in crate::workloads::h3_winning_lane_names() {
+            if crate::workloads::h3_count_contract(name).is_none_or(|c| c.predicate_attno.is_none())
+            {
+                continue;
+            }
+            let mut report = mock_report(vec![typed_h3_workload(name)]);
+            add_typed_h3_defaults(&mut report);
+            assert!(report.evaluate_h3_lane_gate().is_empty(), "{name}");
+            for mutation in 0..7 {
+                let mut changed = report.clone();
+                let workload = &mut changed.workloads[0];
+                match mutation {
+                    0 => {
+                        workload.plan_snippet = workload
+                            .plan_snippet
+                            .as_ref()
+                            .map(|p| p.replace("sql_mask(input=100.3:type=16)", "none"));
+                    }
+                    1 => workload.typed_h3_settings.clear(),
+                    2 => workload.iterations.truncate(9),
+                    3 => workload.warmup_iterations.truncate(4),
+                    4 => workload.speedup_median_vs_parallel = 1.149,
+                    5 => workload.gpu_kernel_execution_delta = 0,
+                    6 => workload
+                        .iterations
+                        .iter_mut()
+                        .for_each(|p| p.accel_first = true),
+                    _ => unreachable!(),
+                }
+                assert!(
+                    !changed.evaluate_h3_lane_gate().is_empty(),
+                    "{name}/mutation{mutation}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -9593,7 +9771,7 @@ mod tests {
         // per-Winner advisory threshold (1.5x).
         let mut workloads = Vec::new();
         for name in crate::workloads::h3_winning_lane_names() {
-            if crate::workloads::h3_count_column_contract(name).is_some() {
+            if crate::workloads::h3_count_contract(name).is_some() {
                 workloads.push(typed_h3_workload(name));
                 continue;
             }

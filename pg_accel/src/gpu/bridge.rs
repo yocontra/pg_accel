@@ -781,6 +781,21 @@ bridge_status_fns! {
         detail: *mut i32,
     ) -> PgaccelStatus;
 
+    /// Metadata-only workspace quote for exact hash COUNT partition controls.
+    pub fn pgaccel_hash_count_partition_workspace_requirements_v1(
+        desc: *const crate::engine::spec::abi::PgaccelGroupedAggDesc,
+        partition: *const crate::engine::spec::abi::PgaccelHashCountPartitionV1,
+        out: *mut crate::engine::spec::abi::PgaccelGroupedAggWorkspaceReq,
+    ) -> PgaccelStatus;
+
+    /// One synchronous partition; only ERROR/HASH_CAPACITY is retryable.
+    pub fn pgaccel_hash_count_partition_execute_v1(
+        desc: *const crate::engine::spec::abi::PgaccelGroupedAggDesc,
+        partition: *const crate::engine::spec::abi::PgaccelHashCountPartitionV1,
+        out: *mut crate::engine::spec::abi::PgaccelGroupedAggOut,
+        detail: *mut i32,
+    ) -> PgaccelStatus;
+
 }
 
 /// Raw resident raster entry point kept outside [`bridge_status_fns!`].

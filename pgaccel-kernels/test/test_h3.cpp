@@ -484,7 +484,33 @@ static void test_cell_to_parent_resident() {
   status = pgaccel_h3_cell_to_parent_resident_ex(
       malformed_cells.data(), nullptr, malformed.size() - 1, 3, rejected_output.data(), &detail);
   ASSERT_EQ("resident ex invalid cell status", status, PGACCEL_INVALID_ARGUMENT);
-  ASSERT_EQ("resident ex invalid cell detail", detail, PGACCEL_H3_PARENT_DETAIL_INVALID_CELL);
+  ASSERT_EQ("resident ex resolution error detail", detail, PGACCEL_H3_PARENT_DETAIL_RES_MISMATCH);
+
+  // Upstream cellToParent accepts all raw bits when resolution permits it.
+  // Its lower-resolution rewrite stops at the original child resolution.
+  for (int target : {0, 1, 2, 3, 5}) {
+    std::vector<uint64_t> accepted;
+    std::vector<uint64_t> oracle;
+    for (uint64_t raw : malformed) {
+      const int child = static_cast<int>((raw >> 52) & 15);
+      if (child < target)
+        continue;
+      uint64_t expected = (raw & ~(UINT64_C(15) << 52)) |
+                          (static_cast<uint64_t>(target) << 52);
+      for (int digit = target + 1; digit <= child; ++digit)
+        expected |= UINT64_C(7) << ((15 - digit) * 3);
+      accepted.push_back(raw);
+      oracle.push_back(expected);
+    }
+    SharedResidentArray<uint64_t> accepted_cells(accepted);
+    SharedResidentArray<uint64_t> actual(std::vector<uint64_t>(accepted.size(), sentinel));
+    detail = PGACCEL_H3_PARENT_DETAIL_NONE;
+    ASSERT_STATUS_OK("resident permissive raw-bit parent",
+        pgaccel_h3_cell_to_parent_resident_ex(accepted_cells.data(), nullptr, accepted.size(),
+                                             target, actual.data(), &detail));
+    for (size_t i = 0; i < accepted.size(); ++i)
+      ASSERT_EQ("resident exact raw-bit parent", actual[i], oracle[i]);
+  }
 
   SharedResidentArray<uint64_t> coarse_cell(std::vector<uint64_t>({too_coarse}));
   SharedResidentArray<uint64_t> coarse_output(std::vector<uint64_t>({sentinel}));
@@ -505,7 +531,7 @@ static void test_cell_to_parent_resident() {
                                                  invalid_and_coarse_output.data(), &detail);
   ASSERT_EQ("resident ex mixed invalid cell status", status, PGACCEL_INVALID_ARGUMENT);
   ASSERT_EQ("resident ex mixed invalid cell precedence", detail,
-            PGACCEL_H3_PARENT_DETAIL_INVALID_CELL);
+            PGACCEL_H3_PARENT_DETAIL_RES_MISMATCH);
 
   SharedResidentArray<uint8_t> malformed_nulls(std::vector<uint8_t>({0, 2, 0, 0}));
   SharedResidentArray<uint64_t> malformed_null_output(

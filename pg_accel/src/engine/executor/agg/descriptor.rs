@@ -18,6 +18,7 @@ use super::artifact::{
     h3_count_filter, h3_parent_artifact_bytes, hash_where_filter, learned_hash_group_bound,
     prepare_agg_artifact,
 };
+use super::hash_partition::HashPartitionDriver;
 use super::output::{DescriptorAggOutput, validate_compact_integer_key_buffers};
 use super::spatial::{SpatialAggArtifact, SpatialTransformPlan, SpatialWorkspace};
 use crate::engine::cost::{ExecutorLimits, GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS, Rows};
@@ -1489,7 +1490,7 @@ fn compact_hash_column_refs(spec: &AggQuerySpec) -> Result<Vec<ResidentColumnRef
 
 /// The normal H3 admission envelope, deliberately narrower than staged hash
 /// binding (which also supports FILTER and integer aggregate states).
-fn canonical_h3_count(spec: &AggQuerySpec) -> bool {
+pub fn canonical_h3_count(spec: &AggQuerySpec) -> bool {
     let Some((cell, resolution, result_type)) = h3_parent_group(spec) else {
         return false;
     };
@@ -1506,7 +1507,19 @@ fn canonical_h3_count(spec: &AggQuerySpec) -> bool {
         && spec.star_dims.is_empty()
         && matches!(spec.fact_filter, FilterSpec::None)
         && spec.having.is_none()
-        && matches!(measure.filter, FilterSpec::None)
+        && match measure.filter {
+            FilterSpec::None => true,
+            FilterSpec::Mask {
+                input,
+                kind: crate::engine::spec::MaskKind::Sql,
+            } => {
+                input.relation_oid == spec.fact_rel
+                    && input.type_oid == BOOLOID
+                    && input.attno > 0
+                    && i16::try_from(input.attno).is_ok()
+            }
+            _ => false,
+        }
         && measure.outputs.len() == 1
         && measure.outputs[0].source == AggregateSource::Value
         && measure.outputs[0].kind == AggregateKind::Count
@@ -1555,7 +1568,7 @@ fn validate_h3_runtime_capability(
         return Err("H3 parent grouping does not support joins, filters, or HAVING".to_owned());
     }
     if !canonical_h3_count(spec) {
-        return Err("H3 parent grouping requires one unfiltered fixed-width COUNT".to_owned());
+        return Err("H3 parent grouping requires one fixed-width COUNT with an optional direct Boolean FILTER".to_owned());
     }
     if projection.slots.len() != 2
         || projection
@@ -2756,6 +2769,24 @@ fn raw_hash_group_capacity(rows: usize, max_groups: usize) -> Result<usize, Stri
     Ok(rows.max(1).min(max_groups).min(1 << 30))
 }
 
+/// The valid-cell universe is only an initial allocation heuristic: native H3
+/// accepts noncanonical bit patterns outside it. Adaptive COUNT completes via
+/// typed overflow/growth/partitioning, without raising any per-call cap.
+fn initial_h3_group_capacity(
+    spec: &AggQuerySpec,
+    rows: usize,
+    resolution: i32,
+    maximum: usize,
+) -> Result<usize, String> {
+    if !canonical_h3_count(spec) {
+        return h3_group_capacity(rows, resolution, maximum);
+    }
+    if maximum == 0 || rows > u32::MAX as usize {
+        return Err("adaptive H3 rows/capacity exceed the native domain".into());
+    }
+    Ok(h3_group_capacity(rows.min(1 << 30), resolution, usize::MAX)?.min(maximum))
+}
+
 fn selected_fact_rows(
     selected: &[ResidentRelationEvidence],
     fact_rel: u32,
@@ -2976,6 +3007,13 @@ impl DescriptorAggPlan {
         } else {
             limits.gpu_hash_agg_max_groups
         };
+        #[cfg(feature = "pg_test")]
+        let max_groups = if canonical_h3_count(&spec) {
+            TEST_ADAPTIVE_HASH_CAP
+                .with(|cap| cap.get().map_or(max_groups, |cap| cap.min(max_groups)))
+        } else {
+            max_groups
+        };
         Ok(Self {
             spec,
             projection,
@@ -3188,7 +3226,12 @@ impl DescriptorAggPlan {
                 | DescriptorArtifactKind::RawHash { .. } => {
                     let (group_capacity, resolution) = match &self.artifact_kind {
                         DescriptorArtifactKind::H3Parent { resolution, .. } => (
-                            h3_group_capacity(fact_rows, *resolution, self.max_groups)?,
+                            initial_h3_group_capacity(
+                                &self.spec,
+                                fact_rows,
+                                *resolution,
+                                self.max_groups,
+                            )?,
                             *resolution,
                         ),
                         DescriptorArtifactKind::RawHash { .. } => {
@@ -3294,8 +3337,12 @@ impl DescriptorAggPlan {
                     resolution,
                     max_chunk_rows,
                 } => {
-                    let group_capacity =
-                        h3_group_capacity(fact_rows, *resolution, self.max_groups)?;
+                    let group_capacity = initial_h3_group_capacity(
+                        &self.spec,
+                        fact_rows,
+                        *resolution,
+                        self.max_groups,
+                    )?;
                     let result = run_interruptible_dispatch(
                         |pending| match ensure_device_derived_artifact_with_report(
                             owner_relid,
@@ -3507,6 +3554,12 @@ impl DescriptorAggPlan {
                         &bound.desc,
                         &inputs.artifact.resolved_spec,
                         &inputs.evidence,
+                        hash_predicate_layout(
+                            &inputs.artifact.resolved_spec,
+                            &self.dispatch_columns,
+                            &inputs.columns,
+                            bound.desc.row_count,
+                        )?,
                     )
                 },
             )??;
@@ -3524,21 +3577,7 @@ impl DescriptorAggPlan {
                 owner,
                 artifact,
                 &self.dispatch_columns,
-                |inputs| {
-                    let bound = build_fused_hash_descriptor(
-                        inputs.artifact,
-                        &self.dispatch_columns,
-                        &inputs.columns,
-                        cell,
-                        &mut || false,
-                    )?;
-                    hash_execution_snapshot(
-                        &bound.desc,
-                        &inputs.artifact.resolved_spec,
-                        &inputs.evidence,
-                    )
-                    .map_err(ResidentLoadError::Loader)
-                },
+                |inputs| fused_hash_execution_snapshot(&inputs, &self.dispatch_columns, cell),
             )??;
             let protection =
                 ExecutionMemoryProtection::ephemeral(owner, artifact, &self.dispatch_columns)?;
@@ -3845,6 +3884,428 @@ pub(super) struct DescriptorAggDispatch {
     pub dispatch_time_us: u64,
     pub kernel_mode: GroupedAggKernelMode,
     pub residency: Option<DescriptorResidencyReport>,
+}
+
+/// Installed executor-owned adaptive state. It contains no resident pointers;
+/// the only device owner is its once-converted query-local SQL FILTER mask.
+#[derive(Default)]
+pub(super) struct AdaptiveHashExecution {
+    driver: Option<HashPartitionDriver>,
+    fingerprint: Option<HashExecutionFingerprint>,
+    filter: Option<crate::gpu::SqlBoolMask>,
+    filter_initialized: bool,
+    learned_candidate: Option<usize>,
+    pub(super) fact_rows: usize,
+    pub(super) calls: u64,
+    pub(super) scheduled_calls: u64,
+    pub(super) aggregate_calls: u64,
+    pub(super) scanned_rows: u64,
+    pub(super) overflow_attempts: u64,
+    pub(super) dispatch_time_us: u64,
+    pub(super) residency: Option<DescriptorResidencyReport>,
+}
+
+#[cfg(feature = "pg_test")]
+thread_local! {
+    static TEST_ADAPTIVE_HASH_CAP: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+#[cfg(feature = "pg_test")]
+fn set_adaptive_hash_test_cap(capacity: Option<usize>) -> Option<usize> {
+    assert!(capacity != Some(0));
+    TEST_ADAPTIVE_HASH_CAP.with(|cap| cap.replace(capacity))
+}
+
+// Keep the owned output inline: this short-lived control transfer must not add
+// a fallible heap allocation between native completion and installed ownership.
+#[allow(clippy::large_enum_variant)]
+pub(super) enum AdaptiveHashStep {
+    Retry,
+    Leaf {
+        output: DescriptorAggOutput,
+        needs_spool: bool,
+        done: bool,
+    },
+}
+
+// Same ownership-transfer rationale as AdaptiveHashStep above.
+#[allow(clippy::large_enum_variant)]
+enum AdaptiveHashAttempt {
+    Complete(DescriptorAggOutput, u64, usize),
+    Capacity,
+    AllocationPressure,
+}
+
+impl DescriptorAggPlan {
+    /// Called only after the executor serviced pending interrupts and all
+    /// leaves completed. A partial/overflowed attempt never teaches capacity.
+    pub(super) fn finish_adaptive_hash(
+        &self,
+        state: &mut AdaptiveHashExecution,
+    ) -> Result<(), DescriptorAggExecutionError> {
+        if state.calls != state.scheduled_calls {
+            return Err("adaptive completed schedule mismatch".to_owned().into());
+        }
+        let Some(emitted) = state.learned_candidate.take() else {
+            return Ok(());
+        };
+        if self.artifact_policy.get() != DescriptorArtifactPolicy::CachedReusable {
+            return Ok(());
+        }
+        // Revalidate the exact generation fingerprint before reacquiring its
+        // artifact. No PostgreSQL service occurs between these bounded leases.
+        self.with_adaptive_hash_descriptor(state, true, |_| Ok(()))?;
+        with_derived_artifact_inputs::<H3ParentArtifact, _>(
+            pg_sys::Oid::from(self.spec.fact_rel),
+            &self.identity,
+            &self.dispatch_columns,
+            |inputs| inputs.artifact.record_validated_groups(emitted),
+        )??;
+        Ok(())
+    }
+
+    pub(super) fn uses_adaptive_hash_count(&self) -> bool {
+        canonical_h3_count(&self.spec)
+    }
+
+    /// Resolve a fresh borrowed descriptor for exactly one quote/dispatch.
+    /// Never return its pointers. quote=true cannot allocate/convert a mask.
+    fn with_adaptive_hash_descriptor<R>(
+        &self,
+        state: &mut AdaptiveHashExecution,
+        quote: bool,
+        callback: impl FnOnce(abi::PgaccelGroupedAggDesc) -> Result<R, DescriptorAggExecutionError>,
+    ) -> Result<R, DescriptorAggExecutionError> {
+        let (cell, _, _) =
+            h3_parent_group(&self.spec).ok_or("missing adaptive H3 key".to_owned())?;
+        let owner = pg_sys::Oid::from(self.spec.fact_rel);
+        if self.artifact_policy.get() == DescriptorArtifactPolicy::CachedReusable {
+            with_derived_artifact_inputs::<H3ParentArtifact, _>(
+                owner,
+                &self.identity,
+                &self.dispatch_columns,
+                |inputs| {
+                    let bound = build_h3_descriptor(
+                        inputs.artifact,
+                        &self.dispatch_columns,
+                        &inputs.columns,
+                        cell,
+                    )?;
+                    validate_hash_execution_snapshot(
+                        state.fingerprint.as_ref(),
+                        &bound.desc,
+                        &inputs.artifact.resolved_spec,
+                        &inputs.evidence,
+                        hash_predicate_layout(
+                            &self.spec,
+                            &self.dispatch_columns,
+                            &inputs.columns,
+                            bound.desc.row_count,
+                        )?,
+                    )?;
+                    callback(bound.desc)
+                },
+            )?
+        } else {
+            let ephemeral = self.ephemeral_artifact.borrow();
+            let Some(EphemeralDescriptorArtifact::Hash(artifact)) = ephemeral.as_ref() else {
+                return Err("adaptive fused H3 owner missing".to_owned().into());
+            };
+            with_ephemeral_artifact_inputs(owner, artifact, &self.dispatch_columns, |inputs| {
+                let (actual, _) =
+                    fused_hash_execution_snapshot(&inputs, &self.dispatch_columns, cell)?;
+                if state.fingerprint.as_ref() != Some(&actual) {
+                    return Err("adaptive H3 inputs changed between attempts"
+                        .to_owned()
+                        .into());
+                }
+                let mut desc = fused_hash_descriptor_inputs(
+                    inputs.artifact,
+                    &self.dispatch_columns,
+                    &inputs.columns,
+                    cell,
+                )?;
+                if !quote && !state.filter_initialized {
+                    let (_, mask_calls) = h3_mask_work(&self.spec, desc.row_count)?;
+                    state.scheduled_calls = state
+                        .scheduled_calls
+                        .checked_add(mask_calls)
+                        .ok_or("adaptive mask schedule overflow".to_owned())?;
+                    let bound = build_fused_hash_descriptor(
+                        inputs.artifact,
+                        &self.dispatch_columns,
+                        &inputs.columns,
+                        cell,
+                        &mut postgres_interrupt_pending,
+                    )?;
+                    state.filter = bound._filter;
+                    state.filter_initialized = true;
+                    state.calls = state
+                        .calls
+                        .checked_add(mask_calls)
+                        .ok_or("adaptive mask call counter overflow".to_owned())?;
+                }
+                if h3_count_filter(&self.spec)?.is_some() && desc.row_count != 0 {
+                    desc.measure_filters[0].kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
+                    // A metadata-only marker's synthetic row span must not
+                    // overlap stack-owned native query outputs. Never execute it.
+                    desc.measure_filters[0].mask = if quote {
+                        std::ptr::dangling::<i8>()
+                    } else {
+                        state
+                            .filter
+                            .as_ref()
+                            .ok_or("adaptive SQL mask owner missing".to_owned())?
+                            .as_ptr()
+                    };
+                }
+                callback(desc)
+            })?
+        }
+    }
+
+    fn adaptive_hash_protection(&self) -> Result<ExecutionMemoryProtection, ResidentLoadError> {
+        let owner = pg_sys::Oid::from(self.spec.fact_rel);
+        if self.artifact_policy.get() == DescriptorArtifactPolicy::CachedReusable {
+            ExecutionMemoryProtection::cached(owner, &self.identity, &self.dispatch_columns)
+        } else {
+            let ephemeral = self.ephemeral_artifact.borrow();
+            let Some(EphemeralDescriptorArtifact::Hash(artifact)) = ephemeral.as_ref() else {
+                return Err("adaptive H3 ephemeral protection missing".to_owned().into());
+            };
+            ExecutionMemoryProtection::ephemeral(owner, artifact, &self.dispatch_columns)
+        }
+    }
+
+    fn quote_adaptive_hash(
+        &self,
+        state: &mut AdaptiveHashExecution,
+        partition: crate::gpu::HashCountPartition,
+        capacity: usize,
+    ) -> Result<u64, DescriptorAggExecutionError> {
+        let mask_bytes = if self.artifact_policy.get() != DescriptorArtifactPolicy::CachedReusable
+            && !state.filter_initialized
+            && h3_count_filter(&self.spec)?.is_some()
+        {
+            state.fact_rows as u64
+        } else {
+            0
+        };
+        self.with_adaptive_hash_descriptor(state, true, |mut desc| {
+            desc.group_capacity = capacity;
+            // SAFETY: query reads bounded metadata only; any mask marker is
+            // opaque and is never made into an executable plan.
+            let memory =
+                unsafe { crate::gpu::query_hash_partition_memory_layout(&desc, partition) }
+                    .map_err(|error| gpu_execution_error("adaptive hash quote rejected", error))?;
+            (memory.total_bytes as u64)
+                .checked_add(mask_bytes)
+                .ok_or_else(|| "adaptive hash footprint overflow".to_owned().into())
+        })
+    }
+
+    pub(super) fn next_adaptive_hash(
+        &self,
+        state: &mut AdaptiveHashExecution,
+    ) -> Result<AdaptiveHashStep, DescriptorAggExecutionError> {
+        if state.driver.is_none() {
+            let (fingerprint, rebuilt) = execute_with_single_artifact_rebuild(
+                || self.prepare_h3_execution().map(Ok),
+                || self.ensure_artifact(),
+            )?;
+            let fingerprint =
+                fingerprint.ok_or("adaptive H3 fingerprint unavailable".to_owned())?;
+            state.fact_rows = usize::try_from(fingerprint.layout[0])
+                .map_err(|_| "adaptive H3 row count overflow".to_owned())?;
+            let capacity = usize::try_from(fingerprint.layout[1])
+                .map_err(|_| "adaptive H3 capacity overflow".to_owned())?;
+            state.driver = Some(HashPartitionDriver::new(
+                capacity,
+                self.max_groups.min(state.fact_rows.max(1)).min(1 << 30),
+            )?);
+            state.fingerprint = Some(fingerprint);
+            state.residency = rebuilt;
+        }
+        let (partition, capacity) = state
+            .driver
+            .as_ref()
+            .expect("initialized driver")
+            .attempt()?
+            .ok_or("adaptive hash called after EOF".to_owned())?;
+        let bytes = self.quote_adaptive_hash(state, partition, capacity)?;
+        let protection = self.adaptive_hash_protection()?;
+        if let Err(error) =
+            crate::engine::residency::reclaim_protected_execution_memory(&protection, bytes)
+        {
+            if state.aggregate_calls == 0 {
+                return Err(error.into());
+            }
+            state
+                .driver
+                .as_mut()
+                .expect("initialized driver")
+                .pressure_shrink()?;
+            return Ok(AdaptiveHashStep::Retry);
+        }
+        let started = Instant::now();
+        let mut counters = crate::gpu::HashCountExecutionCounters::default();
+        let attempt = self.with_adaptive_hash_descriptor(state, false, |mut desc| {
+            desc.group_capacity = capacity;
+            // SAFETY: every raw input/mask is owned and pinned for this callback.
+            let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }
+                .map_err(|error| gpu_execution_error("adaptive H3 descriptor rejected", error))?;
+            let mut output = match GroupedAggOutputStorage::new(&plan) {
+                Ok(output) => output,
+                Err(error) if error.status == GpuStatusDetail::OutOfMemory => {
+                    return Ok(AdaptiveHashAttempt::AllocationPressure);
+                }
+                Err(error) => {
+                    return Err(gpu_execution_error(
+                        "adaptive H3 output allocation failed",
+                        error,
+                    ));
+                }
+            };
+            match crate::gpu::execute_hash_count_partition(
+                &plan,
+                partition,
+                &mut output,
+                &mut counters,
+            ) {
+                Ok(outcome) => {
+                    let GroupedAggOutcome::Complete(result) = outcome else {
+                        return Err("adaptive H3 uncertain output".to_owned().into());
+                    };
+                    let selected = usize::try_from(result.selected_count)
+                        .map_err(|_| "adaptive selected population overflow".to_owned())?;
+                    if selected > desc.row_count {
+                        return Err("adaptive leaf population exceeds input".to_owned().into());
+                    }
+                    validate_hash_compact_outcome(outcome, &output, selected, &self.spec)?;
+                    let output = DescriptorAggOutput::new(
+                        output,
+                        outcome,
+                        std::rc::Rc::from(Vec::<super::artifact::GroupDomain>::new()),
+                        &self.spec,
+                        self.projection.clone(),
+                    )?;
+                    Ok(AdaptiveHashAttempt::Complete(
+                        output,
+                        result.selected_count,
+                        result.emitted_group_count,
+                    ))
+                }
+                Err(error)
+                    if error.domain == GpuErrorDomain::GroupedAgg
+                        && error.status == GpuStatusDetail::CapacityOverflow
+                        && error.operation
+                            == GpuOperation::Kernel("hash_count_partition_execute_v1") =>
+                {
+                    Ok(AdaptiveHashAttempt::Capacity)
+                }
+                Err(error)
+                    if error.status == GpuStatusDetail::OutOfMemory && counters.scheduled == 0 =>
+                {
+                    Ok(AdaptiveHashAttempt::AllocationPressure)
+                }
+                Err(error)
+                    if error.domain == GpuErrorDomain::H3
+                        && error.status == GpuStatusDetail::ShapeMismatch
+                        && error.operation
+                            == GpuOperation::Kernel("hash_count_partition_execute_v1") =>
+                {
+                    Err(DescriptorAggExecutionError::ExternalRoutineException(
+                        error.to_string(),
+                    ))
+                }
+                Err(error) => Err(gpu_execution_error("adaptive H3 kernel failed", error)),
+            }
+        })?;
+        if matches!(attempt, AdaptiveHashAttempt::AllocationPressure) {
+            if state.aggregate_calls == 0 {
+                return Err("adaptive hash initial allocation failed".to_owned().into());
+            }
+            state
+                .driver
+                .as_mut()
+                .expect("initialized driver")
+                .pressure_shrink()?;
+            return Ok(AdaptiveHashStep::Retry);
+        }
+        if counters.scheduled != counters.observed || counters.verified != counters.observed {
+            return Err("adaptive hash schedule/mode evidence mismatch"
+                .to_owned()
+                .into());
+        }
+        state.scheduled_calls = state
+            .scheduled_calls
+            .checked_add(counters.scheduled)
+            .ok_or("adaptive scheduled count overflow".to_owned())?;
+        state.calls = state
+            .calls
+            .checked_add(counters.observed)
+            .ok_or("adaptive call count overflow".to_owned())?;
+        state.aggregate_calls = state
+            .aggregate_calls
+            .checked_add(counters.verified)
+            .ok_or("adaptive aggregate call count overflow".to_owned())?;
+        state.scanned_rows = state
+            .scanned_rows
+            .checked_add(counters.scanned_rows)
+            .ok_or("adaptive scanned row count overflow".to_owned())?;
+        state.dispatch_time_us = state
+            .dispatch_time_us
+            .checked_add(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX))
+            .ok_or("adaptive dispatch time overflow".to_owned())?;
+        if let AdaptiveHashAttempt::Complete(output, selected, emitted) = attempt {
+            let driver = state.driver.as_mut().expect("initialized driver");
+            driver.complete_leaf(selected)?;
+            let done = driver.attempt()?.is_none();
+            if done && driver.selected_rows != state.fact_rows as u64 {
+                return Err("adaptive partitions do not cover all input rows"
+                    .to_owned()
+                    .into());
+            }
+            if done {
+                state.filter = None;
+                if !driver.overflowed {
+                    state.learned_candidate = Some(emitted);
+                }
+            }
+            return Ok(AdaptiveHashStep::Leaf {
+                output,
+                needs_spool: driver.overflowed,
+                done,
+            });
+        }
+        let next_capacity = state
+            .driver
+            .as_ref()
+            .expect("initialized driver")
+            .next_capacity();
+        state.overflow_attempts = state
+            .overflow_attempts
+            .checked_add(1)
+            .ok_or("adaptive overflow attempt count overflow".to_owned())?;
+        let grow = next_capacity > capacity && {
+            let bytes = self.quote_adaptive_hash(state, partition, next_capacity)?;
+            crate::engine::residency::reclaim_protected_execution_memory(&protection, bytes).is_ok()
+        };
+        state
+            .driver
+            .as_mut()
+            .expect("initialized driver")
+            .capacity_overflow(grow)?;
+        Ok(AdaptiveHashStep::Retry)
+    }
+}
+
+impl AdaptiveHashExecution {
+    pub(super) fn completed_leaves(&self) -> u64 {
+        self.driver
+            .as_ref()
+            .map_or(0, |driver| driver.completed_leaves)
+    }
 }
 
 fn find_view<'a>(
@@ -5279,8 +5740,8 @@ pub fn h3_count_memory_requirements(
         return Err("hash memory forecast requires the normal H3 COUNT envelope".into());
     }
     let (cell, resolution, _) = h3_parent_group(spec).expect("canonical H3 key");
-    if capacity == 0 || capacity > h3_group_capacity(rows, resolution, usize::MAX)? {
-        return Err("hash memory forecast capacity is not a valid current bound".into());
+    if capacity == 0 || capacity > rows.clamp(1, 1 << 30) {
+        return Err("hash memory forecast capacity exceeds row/native allocation limits".into());
     }
     let marker = 0_i64;
     let null_marker = 0_u8;
@@ -5327,6 +5788,10 @@ pub fn h3_count_memory_requirements(
             flags: 0,
         };
     }
+    if rows != 0 && h3_count_filter(spec)?.is_some() {
+        desc.measure_filters[0].kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
+        desc.measure_filters[0].mask = std::ptr::from_ref(&null_marker).cast();
+    }
     // SAFETY: the metadata-only API never reads row buffers or retains markers.
     unsafe { crate::gpu::query_hash_grouped_memory_layout(&desc) }
         .map_err(|error| error.to_string())
@@ -5336,6 +5801,7 @@ pub fn h3_count_memory_requirements(
 pub struct H3PlanningMemory {
     pub bytes: u64,
     pub capacity: usize,
+    pub cached_owner: bool,
 }
 
 /// Reconstruct exactly the execution identity before inspecting residency.
@@ -5345,6 +5811,7 @@ pub fn h3_planning_memory(
     projection: &AggOutputProjection,
     estimate: &crate::engine::residency::ResidentLoadEstimate,
     estimated_rows: u64,
+    max_groups: usize,
 ) -> Result<Option<H3PlanningMemory>, String> {
     if !canonical_h3_count(spec) {
         return Ok(None);
@@ -5361,7 +5828,7 @@ pub fn h3_planning_memory(
     if rows > u32::MAX as usize {
         return Err("H3 rows exceed the native u32 domain".into());
     }
-    let theoretical = h3_group_capacity(rows, resolution, usize::MAX)?;
+    let theoretical = initial_h3_group_capacity(spec, rows, resolution, max_groups)?;
     let requests = compact_hash_column_refs(spec)?;
     let nullable = if estimate.loaded {
         estimate
@@ -5373,6 +5840,7 @@ pub fn h3_planning_memory(
         requests.iter().map(|column| column.attno).collect()
     };
     let mut capacity = theoretical;
+    let mut cached_owner = false;
     if estimate.loaded {
         // SAFETY: normal planner invocation on PostgreSQL's main thread. The
         // entire catalog lookup finishes before the immutable STORE inspection.
@@ -5394,9 +5862,7 @@ pub fn h3_planning_memory(
                     selected,
                     loaded_estimate: estimate,
                     expected_accounting: ResidentByteAccounting {
-                        device_bytes: (rows as u64)
-                            .checked_mul(8)
-                            .ok_or("H3 parent bytes overflow")?,
+                        device_bytes: h3_parent_artifact_bytes(spec, rows)?,
                         retained_host_exact_bytes: 0,
                     },
                 },
@@ -5409,6 +5875,7 @@ pub fn h3_planning_memory(
             )
             .map_err(|error| error.to_string())?;
         if let Some(current) = current {
+            cached_owner = true;
             capacity = usize::try_from(current.capacity.group_capacity)
                 .map_err(|_| "current H3 capacity overflow")?;
             if capacity > theoretical {
@@ -5424,6 +5891,7 @@ pub fn h3_planning_memory(
         bytes: u64::try_from(cached.total_bytes.max(fused.total_bytes))
             .map_err(|_| "H3 native footprint exceeds u64")?,
         capacity,
+        cached_owner,
     }))
 }
 
@@ -5778,6 +6246,17 @@ fn build_fused_hash_descriptor(
     cell: ColumnRef,
     pending: &mut dyn FnMut() -> bool,
 ) -> Result<BoundHashDescriptor, ResidentLoadError> {
+    let desc = fused_hash_descriptor_inputs(artifact, requests, views, cell)?;
+    bind_h3_filter(desc, &artifact.resolved_spec, requests, views, pending)
+}
+
+/// Bind row metadata only. This does not allocate or normalize predicate masks.
+fn fused_hash_descriptor_inputs(
+    artifact: &FusedHashArtifact,
+    requests: &[ResidentColumnRef],
+    views: &[ResidentColumnView<'_>],
+    cell: ColumnRef,
+) -> Result<abi::PgaccelGroupedAggDesc, ResidentLoadError> {
     let raw = raw_hash_group(&artifact.resolved_spec);
     let (flags, transform_arg) = if let Some(column) = raw {
         if column != cell || artifact.resolution != 0 {
@@ -5864,7 +6343,7 @@ fn build_fused_hash_descriptor(
         desc.keys[0].values.tag = PgaccelValTag::Int32;
     }
     bind_hash_measure(&mut desc, &artifact.resolved_spec, requests, views)?;
-    bind_h3_filter(desc, &artifact.resolved_spec, requests, views, pending)
+    Ok(desc)
 }
 
 fn verify_native_one_shot_mode(
@@ -5955,18 +6434,68 @@ struct HashExecutionFingerprint {
     sources: Vec<(u32, u64, u64, u32, u64, u64)>,
 }
 
+fn hash_predicate_layout(
+    spec: &AggQuerySpec,
+    requests: &[ResidentColumnRef],
+    views: &[ResidentColumnView<'_>],
+    rows: usize,
+) -> Result<u64, String> {
+    let input = resolve_h3_filter(spec, requests, views, rows)?;
+    Ok(match input {
+        Some(input) => 2 + u64::from(input.nulls.is_some()),
+        None => u64::from(h3_count_filter(spec)?.is_some()),
+    })
+}
+
+/// The marker is consumed only by the metadata query, never by an executable
+/// plan. No mask conversion, allocation or GPU launch occurs under this lease.
+fn fused_hash_execution_snapshot(
+    inputs: &ResolvedDerivedInputs<'_, FusedHashArtifact>,
+    requests: &[ResidentColumnRef],
+    cell: ColumnRef,
+) -> Result<(HashExecutionFingerprint, u64), ResidentLoadError> {
+    let mut desc = fused_hash_descriptor_inputs(inputs.artifact, requests, &inputs.columns, cell)?;
+    let layout = hash_predicate_layout(
+        &inputs.artifact.resolved_spec,
+        requests,
+        &inputs.columns,
+        desc.row_count,
+    )?;
+    let marker = 0_i8;
+    let mask_bytes = if h3_count_filter(&inputs.artifact.resolved_spec)?.is_some() {
+        if desc.row_count != 0 {
+            desc.measure_filters[0].kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
+            desc.measure_filters[0].mask = &raw const marker;
+        }
+        desc.row_count as u64
+    } else {
+        0
+    };
+    let (fingerprint, native_bytes) = hash_execution_snapshot(
+        &desc,
+        &inputs.artifact.resolved_spec,
+        &inputs.evidence,
+        layout,
+    )?;
+    let prospective_bytes = native_bytes
+        .checked_add(mask_bytes)
+        .ok_or_else(|| "H3 mask/native footprint overflow".to_owned())?;
+    Ok((fingerprint, prospective_bytes))
+}
+
 fn hash_execution_snapshot(
     desc: &abi::PgaccelGroupedAggDesc,
     spec: &AggQuerySpec,
     evidence: &[ResidentRelationEvidence],
+    predicate_layout: u64,
 ) -> Result<(HashExecutionFingerprint, u64), String> {
     if !canonical_h3_count(spec) {
         return Err("hash memory protection is restricted to normal H3 COUNT".into());
     }
-    let (cell, resolution, _) = h3_parent_group(spec).expect("canonical H3 key");
+    let (cell, _, _) = h3_parent_group(spec).expect("canonical H3 key");
     if desc.row_count > u32::MAX as usize
         || desc.group_capacity == 0
-        || desc.group_capacity > h3_group_capacity(desc.row_count, resolution, usize::MAX)?
+        || desc.group_capacity > desc.row_count.clamp(1, 1 << 30)
     {
         return Err("H3 runtime rows/capacity are outside the checked domain".into());
     }
@@ -5990,6 +6519,15 @@ fn hash_execution_snapshot(
                     .map_err(|_| "negative H3 physical type")?,
                 u64::from(measure.value.element_bytes),
                 u64::from(!measure.value.nulls.is_null()),
+                u64::try_from(desc.measure_filters[0].kind)
+                    .map_err(|_| "negative H3 filter kind")?,
+                u64::from(!desc.measure_filters[0].mask.is_null()),
+                predicate_layout,
+                if h3_count_filter(spec)?.is_some() {
+                    desc.row_count as u64
+                } else {
+                    0
+                },
                 memory.workspace_bytes as u64,
                 memory.output_bytes as u64,
             ],
@@ -6016,9 +6554,10 @@ fn validate_hash_execution_snapshot(
     desc: &abi::PgaccelGroupedAggDesc,
     spec: &AggQuerySpec,
     evidence: &[ResidentRelationEvidence],
+    predicate_layout: u64,
 ) -> Result<(), DescriptorAggExecutionError> {
     if let Some(expected) = expected {
-        let (actual, _) = hash_execution_snapshot(desc, spec, evidence)
+        let (actual, _) = hash_execution_snapshot(desc, spec, evidence, predicate_layout)
             .map_err(DescriptorAggExecutionError::Failure)?;
         if &actual != expected {
             return Err(DescriptorAggExecutionError::Failure(
@@ -6047,6 +6586,13 @@ fn build_and_execute_h3_one_shot(
         &desc.desc,
         &inputs.artifact.resolved_spec,
         &inputs.evidence,
+        hash_predicate_layout(
+            &inputs.artifact.resolved_spec,
+            requests,
+            &inputs.columns,
+            desc.desc.row_count,
+        )
+        .map_err(DescriptorAggExecutionError::Failure)?,
     )?;
     // SAFETY: hash/H3 is deliberately one-shot because its native owner
     // indexes are relative to this exact row pointer range. Every pointer is
@@ -6120,6 +6666,16 @@ fn build_and_execute_fused_hash_one_shot(
     pending: &mut dyn FnMut() -> bool,
     prepared: Option<&HashExecutionFingerprint>,
 ) -> Result<DescriptorAggDispatch, DescriptorDispatchFailure> {
+    if let Some(expected) = prepared {
+        let (actual, _) = fused_hash_execution_snapshot(&inputs, requests, cell)
+            .map_err(DescriptorDispatchFailure::Residency)?;
+        if &actual != expected {
+            return Err(DescriptorAggExecutionError::Failure(
+                "H3 ownership/layout changed before mask allocation".into(),
+            )
+            .into());
+        }
+    }
     let desc =
         stats::profile_descriptor_stage(stats::DescriptorExecStage::DerivedInputBinding, || {
             build_fused_hash_descriptor(inputs.artifact, requests, &inputs.columns, cell, pending)
@@ -6130,6 +6686,13 @@ fn build_and_execute_fused_hash_one_shot(
         &desc.desc,
         &inputs.artifact.resolved_spec,
         &inputs.evidence,
+        hash_predicate_layout(
+            &inputs.artifact.resolved_spec,
+            requests,
+            &inputs.columns,
+            desc.desc.row_count,
+        )
+        .map_err(DescriptorAggExecutionError::Failure)?,
     )?;
     if pending() {
         return Err(DescriptorDispatchFailure::Residency(
@@ -9998,6 +10561,44 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_h3_seed_and_metadata_support_full_u32_row_domain() {
+        let (mut spec, _) = h3_count_shape();
+        let GroupKeySource::H3CellToParent { resolution, .. } = &mut spec.group_keys[0].source
+        else {
+            unreachable!()
+        };
+        *resolution = 0;
+        for fused in [false, true] {
+            assert!(
+                h3_count_memory_requirements(&spec, &[], 20_000_000, 16_776_704, fused).is_ok()
+            );
+            assert!(h3_count_memory_requirements(&spec, &[], 10, 0, fused).is_err());
+            assert!(h3_count_memory_requirements(&spec, &[], 10, 11, fused).is_err());
+            assert!(
+                h3_count_memory_requirements(&spec, &[], u32::MAX as usize, (1 << 30) + 1, fused)
+                    .is_err()
+            );
+        }
+        let GroupKeySource::H3CellToParent { resolution, .. } = &mut spec.group_keys[0].source
+        else {
+            unreachable!()
+        };
+        *resolution = 15;
+        for rows in [(1_usize << 30) + 1, u32::MAX as usize] {
+            assert_eq!(initial_h3_group_capacity(&spec, rows, 15, 19), Ok(19));
+            assert!(h3_count_memory_requirements(&spec, &[], rows, 19, false).is_ok());
+            assert!(h3_count_memory_requirements(&spec, &[], rows, 19, true).is_ok());
+        }
+        assert!(initial_h3_group_capacity(&spec, u32::MAX as usize + 1, 15, 19).is_err());
+        assert!(initial_h3_group_capacity(&spec, 1, 15, 0).is_err());
+        spec.measures[0].outputs[0].kind = AggregateKind::Sum;
+        assert!(
+            initial_h3_group_capacity(&spec, 1_000, 15, 19).is_err(),
+            "nonadaptive staged families retain old capacity rejection"
+        );
+    }
+
+    #[test]
     fn h3_count_partition_rejects_invalid_compact_state() {
         validate_h3_count_partition(&[2, 3, 0], 3, 2, 5, HashMeasureInput::Star)
             .expect("valid emitted counts with a zero tail");
@@ -13092,12 +13693,11 @@ mod tests {
                                 .validate(&spec)
                                 .expect("no extra COUNT projection needed");
                             assert_eq!(projection.slots.len(), 1 + outputs.len());
-                            let normal_count = !filtered
-                                && outputs.as_slice()
-                                    == [AggregateOutput {
-                                        source: AggregateSource::Value,
-                                        kind: AggregateKind::Count,
-                                    }];
+                            let normal_count = outputs.as_slice()
+                                == [AggregateOutput {
+                                    source: AggregateSource::Value,
+                                    kind: AggregateKind::Count,
+                                }];
                             assert_eq!(
                                 validate_internal_runtime_capability(&spec, &projection).is_ok(),
                                 normal_count
@@ -13635,8 +14235,8 @@ mod tests {
             HashMeasureInput::from_spec(&spec),
             Ok(HashMeasureInput::FilteredStar)
         );
-        assert!(validate_normal_descriptor_capability(&spec, &projection).is_err());
-        assert!(validate_internal_runtime_capability(&spec, &projection).is_err());
+        assert!(validate_normal_descriptor_capability(&spec, &projection).is_ok());
+        assert!(validate_internal_runtime_capability(&spec, &projection).is_ok());
         let requests = dispatch_column_refs(&spec).expect("predicate request");
         assert_eq!(requests.iter().map(|r| r.attno).collect::<Vec<_>>(), [1, 3]);
         let selected = selected_relations(&spec).expect("resident predicate dependency");

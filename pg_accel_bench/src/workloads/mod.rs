@@ -165,7 +165,9 @@ pub use grouped_integer_sum_avg_candidate::{
 pub use grouped_multikey_integer::GroupedMultikeyInteger;
 pub use grouped_multimeasure_integer::GroupedMultimeasureInteger;
 pub use h3_bulk::H3Bulk;
-pub use h3_cell_to_parent::{H3CellToParent, H3ParentCountColumn, H3ParentResolution};
+pub use h3_cell_to_parent::{
+    H3CellToParent, H3ParentCountColumn, H3ParentFilteredCount, H3ParentResolution,
+};
 pub use h3_grid_distance::H3GridDistance;
 pub use h3_resolution_sweep::H3ResolutionSweep;
 pub use h3_srf_grid_disk::H3SrfGridDisk;
@@ -622,6 +624,12 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(H3ParentCountColumn::<false, 1>),
         Box::new(H3ParentCountColumn::<true, 0>),
         Box::new(H3ParentCountColumn::<true, 1>),
+        Box::new(H3ParentFilteredCount::<0, 0>),
+        Box::new(H3ParentFilteredCount::<0, 1>),
+        Box::new(H3ParentFilteredCount::<23, 0>),
+        Box::new(H3ParentFilteredCount::<23, 1>),
+        Box::new(H3ParentFilteredCount::<16, 0>),
+        Box::new(H3ParentFilteredCount::<16, 1>),
         Box::new(H3GridDistance),
         Box::new(H3ResolutionSweep),
         Box::new(H3SrfGridDisk),
@@ -1328,6 +1336,42 @@ const RELEASED_ENVELOPE_CONTRACTS: &[ReleasedEnvelopeContract] = &[
     },
     ReleasedEnvelopeContract {
         workload: "h3_parent_count_bool_res1",
+        min_rows: H3_COUNT_COLUMN_MIN_ROWS,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::H3Parent,
+    },
+    ReleasedEnvelopeContract {
+        workload: "h3_parent_count_star_filter_res0",
+        min_rows: H3_COUNT_COLUMN_MIN_ROWS,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::H3Parent,
+    },
+    ReleasedEnvelopeContract {
+        workload: "h3_parent_count_star_filter_res1",
+        min_rows: H3_COUNT_COLUMN_MIN_ROWS,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::H3Parent,
+    },
+    ReleasedEnvelopeContract {
+        workload: "h3_parent_count_int4_filter_res0",
+        min_rows: H3_COUNT_COLUMN_MIN_ROWS,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::H3Parent,
+    },
+    ReleasedEnvelopeContract {
+        workload: "h3_parent_count_int4_filter_res1",
+        min_rows: H3_COUNT_COLUMN_MIN_ROWS,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::H3Parent,
+    },
+    ReleasedEnvelopeContract {
+        workload: "h3_parent_count_bool_filter_res0",
+        min_rows: H3_COUNT_COLUMN_MIN_ROWS,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::H3Parent,
+    },
+    ReleasedEnvelopeContract {
+        workload: "h3_parent_count_bool_filter_res1",
         min_rows: H3_COUNT_COLUMN_MIN_ROWS,
         max_rows: 2_000_017,
         family: ReleasedPathFamily::H3Parent,
@@ -2498,11 +2542,50 @@ pub fn h3_count_column_contract(name: &str) -> Option<(u32, i32)> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum H3CountMeasure {
+    Star,
+    Column { type_oid: u32, attno: i32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct H3CountContract {
+    pub measure: H3CountMeasure,
+    pub resolution: i32,
+    pub predicate_attno: Option<i32>,
+}
+
+pub fn h3_count_contract(name: &str) -> Option<H3CountContract> {
+    if let Some((type_oid, resolution)) = h3_count_column_contract(name) {
+        return Some(H3CountContract {
+            measure: H3CountMeasure::Column { type_oid, attno: 2 },
+            resolution,
+            predicate_attno: None,
+        });
+    }
+    let (type_oid, resolution) = match name {
+        "h3_parent_count_star_filter_res0" => (None, 0),
+        "h3_parent_count_star_filter_res1" => (None, 1),
+        "h3_parent_count_int4_filter_res0" => (Some(23), 0),
+        "h3_parent_count_int4_filter_res1" => (Some(23), 1),
+        "h3_parent_count_bool_filter_res0" => (Some(16), 0),
+        "h3_parent_count_bool_filter_res1" => (Some(16), 1),
+        _ => return None,
+    };
+    Some(H3CountContract {
+        measure: type_oid.map_or(H3CountMeasure::Star, |type_oid| H3CountMeasure::Column {
+            type_oid,
+            attno: 2,
+        }),
+        resolution,
+        predicate_attno: Some(3),
+    })
+}
+
 fn h3_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThresholdMatrixEntry> {
     // Outside the measured typed-COUNT envelope we make no static claim about
     // the device-derived planner floor or its cost decision.
-    if h3_count_column_contract(name).is_some()
-        && !(H3_COUNT_COLUMN_MIN_ROWS..=2_000_017).contains(&rows)
+    if h3_count_contract(name).is_some() && !(H3_COUNT_COLUMN_MIN_ROWS..=2_000_017).contains(&rows)
     {
         return None;
     }
@@ -2611,18 +2694,33 @@ fn h3_matrix_profile(name: &str) -> Option<H3MatrixProfile> {
         "h3_parent_count_int4_res1" => Some("h3_parent_count_int4_res1"),
         "h3_parent_count_bool_res0" => Some("h3_parent_count_bool_res0"),
         "h3_parent_count_bool_res1" => Some("h3_parent_count_bool_res1"),
+        "h3_parent_count_star_filter_res0" => Some("h3_parent_count_star_filter_res0"),
+        "h3_parent_count_star_filter_res1" => Some("h3_parent_count_star_filter_res1"),
+        "h3_parent_count_int4_filter_res0" => Some("h3_parent_count_int4_filter_res0"),
+        "h3_parent_count_int4_filter_res1" => Some("h3_parent_count_int4_filter_res1"),
+        "h3_parent_count_bool_filter_res0" => Some("h3_parent_count_bool_filter_res0"),
+        "h3_parent_count_bool_filter_res1" => Some("h3_parent_count_bool_filter_res1"),
         _ => None,
     };
     if let Some(lane) = typed_lane {
+        let filtered = h3_count_contract(lane).is_some_and(|c| c.predicate_attno.is_some());
         return Some(H3MatrixProfile {
             lane,
             data_type: "nullable h3index and nullable fixed-width COUNT value",
             cardinality: "three deterministic world sites plus a NULL key",
-            selectivity: "all rows grouped; NULL values excluded from COUNT, zero-count groups retained",
+            selectivity: if filtered {
+                "all rows grouped; only direct BOOL FILTER TRUE accepts inputs; value NULLs excluded for column counts; zero-count groups retained"
+            } else {
+                "all rows grouped; NULL values excluded from COUNT, zero-count groups retained"
+            },
             result_count: grouped_result,
             batch_count: "one-shot parallel_hash; no dense chunking",
-            row_width: "8-byte H3 cell plus typed value and NULL sidecars",
-            output_size: "parent h3index and COUNT(column), including zero-count groups",
+            row_width: if filtered {
+                "8-byte H3 cell, direct BOOL predicate, optional counted value and NULL sidecars"
+            } else {
+                "8-byte H3 cell plus typed value and NULL sidecars"
+            },
+            output_size: "parent h3index and exact star/column COUNT, including zero-count groups",
             threshold_basis: "typed COUNT default-planner winner: >=5 warmups and >=10 paired samples; preload/first-use separate; >=1.15x warm median",
             decline_reason: "h3_parent_count_column_unexpected_native_decline",
         });
@@ -3924,6 +4022,12 @@ fn static_workload_name(name: &str) -> &'static str {
         "h3_parent_count_int4_res1" => "h3_parent_count_int4_res1",
         "h3_parent_count_bool_res0" => "h3_parent_count_bool_res0",
         "h3_parent_count_bool_res1" => "h3_parent_count_bool_res1",
+        "h3_parent_count_star_filter_res0" => "h3_parent_count_star_filter_res0",
+        "h3_parent_count_star_filter_res1" => "h3_parent_count_star_filter_res1",
+        "h3_parent_count_int4_filter_res0" => "h3_parent_count_int4_filter_res0",
+        "h3_parent_count_int4_filter_res1" => "h3_parent_count_int4_filter_res1",
+        "h3_parent_count_bool_filter_res0" => "h3_parent_count_bool_filter_res0",
+        "h3_parent_count_bool_filter_res1" => "h3_parent_count_bool_filter_res1",
         "h3_grid_distance" => "h3_grid_distance",
         "h3_dist_near" => "h3_dist_near",
         "h3_dist_far" => "h3_dist_far",
@@ -4143,7 +4247,7 @@ mod tests {
     }
 
     fn supported_default_suite_probe(name: &str, rows: usize) -> bool {
-        if h3_count_column_contract(name).is_some() {
+        if h3_count_contract(name).is_some() {
             return matches!(rows, 1_000_017 | 2_000_017);
         }
         matches!(
@@ -4712,6 +4816,12 @@ mod tests {
             "h3_parent_count_int4_res1",
             "h3_parent_count_bool_res0",
             "h3_parent_count_bool_res1",
+            "h3_parent_count_star_filter_res0",
+            "h3_parent_count_star_filter_res1",
+            "h3_parent_count_int4_filter_res0",
+            "h3_parent_count_int4_filter_res1",
+            "h3_parent_count_bool_filter_res0",
+            "h3_parent_count_bool_filter_res1",
         ] {
             for rows in [1_000_017, 2_000_017] {
                 assert!(supported_default_suite_probe(name, rows));
@@ -6029,7 +6139,13 @@ mod tests {
                 "h3_parent_count_int4_res0",
                 "h3_parent_count_int4_res1",
                 "h3_parent_count_bool_res0",
-                "h3_parent_count_bool_res1"
+                "h3_parent_count_bool_res1",
+                "h3_parent_count_star_filter_res0",
+                "h3_parent_count_star_filter_res1",
+                "h3_parent_count_int4_filter_res0",
+                "h3_parent_count_int4_filter_res1",
+                "h3_parent_count_bool_filter_res0",
+                "h3_parent_count_bool_filter_res1"
             ]
         );
     }
@@ -6038,7 +6154,7 @@ mod tests {
     fn typed_h3_count_envelope_does_not_invent_device_floor_declines() {
         for name in h3_winning_lane_names()
             .into_iter()
-            .filter(|name| h3_count_column_contract(name).is_some())
+            .filter(|name| h3_count_contract(name).is_some())
         {
             for rows in [100_000, H3_COUNT_COLUMN_MIN_ROWS - 1, 2_000_018] {
                 assert!(benchmark_threshold_matrix_entry(name, rows).is_none());
