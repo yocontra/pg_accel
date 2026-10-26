@@ -61,6 +61,16 @@ The September implementation plan expands the objective beyond the historical
 completion of this expansion. Retain this file and planning docs until the
 complete objective is implemented and verified.
 
+- [x] Correct integration observer address extraction without weakening strict
+  numeric-IP validation. Use PostgreSQL's host-only inet formatting; retain
+  Unix-socket identity and port. All six focused live registration/reconnection/
+  cleanup checks pass across IPv4, IPv6 and Unix sockets on PG18 and PG19.
+  Strict benchmark Clippy passes; the retained initial formatting failure is
+  followed by a reviewed whitespace-only fix and passing formatting check.
+  This resolves the first error behind 49 hosted PG18 integration failures;
+  a successful hosted rerun and complete-suite qualification remain unproven.
+  Evidence: `benchmarks/evidence/observer-address-20261026/README.md`.
+
 - [x] Repair direct Rust fetch error cleanup while preserving the guarded
   PostgreSQL callback. Tests require exact SQLSTATE/message, exactly-once
   executor release on direct and ExecScan paths, cursor-close safety, repeated

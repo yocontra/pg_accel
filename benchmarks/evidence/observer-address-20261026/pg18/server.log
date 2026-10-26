@@ -1,0 +1,13 @@
+2026-10-26 02:42:31.969 MST [40158] LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-26 02:42:31.969 MST [40158] LOG:  listening on IPv4 address "127.0.0.1", port 33718
+2026-10-26 02:42:31.969 MST [40158] LOG:  listening on IPv6 address "::1", port 33718
+2026-10-26 02:42:31.969 MST [40158] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/obstrans18/.s.PGSQL.33718"
+2026-10-26 02:42:31.974 MST [40165] LOG:  database system was shut down at 2026-10-26 02:42:31 MST
+2026-10-26 02:42:31.975 MST [40158] LOG:  database system is ready to accept connections
+2026-10-26 02:42:38.529 MST [40158] LOG:  received fast shutdown request
+2026-10-26 02:42:38.529 MST [40158] LOG:  aborting any active transactions
+2026-10-26 02:42:38.530 MST [40158] LOG:  background worker "logical replication launcher" (PID 40168) exited with exit code 1
+2026-10-26 02:42:38.535 MST [40163] LOG:  shutting down
+2026-10-26 02:42:38.537 MST [40163] LOG:  checkpoint starting: shutdown immediate
+2026-10-26 02:42:38.538 MST [40163] LOG:  checkpoint complete: wrote 0 buffers (0.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.002 s; sync files=2, longest=0.001 s, average=0.001 s; distance=0 kB, estimate=0 kB; lsn=0/170FC60, redo lsn=0/170FC60
+2026-10-26 02:42:38.542 MST [40158] LOG:  database system is shut down

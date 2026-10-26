@@ -207,7 +207,7 @@ mod lifetime {
             .query_one(
                 "SELECT pg_backend_pid(), extract(epoch FROM backend_start)::text,
                     current_database(), extract(epoch FROM pg_postmaster_start_time())::text,
-                    inet_server_addr()::text, inet_server_port(), current_user::text
+                    pg_catalog.host(inet_server_addr()), inet_server_port(), current_user::text
              FROM pg_stat_activity WHERE pid=pg_backend_pid()",
                 &[],
             )
@@ -645,6 +645,80 @@ mod lifetime {
                     .is_none()
             );
             drop(guard);
+        }
+
+        #[cfg(feature = "integration_tests")]
+        #[test]
+        fn observer_registration_uses_numeric_host_and_preserves_socket_identity() {
+            let _guard = live_pg_test_lock();
+            let connection = crate::integration_connection::test_connection();
+            let mut client = postgres::Client::connect(&connection, postgres::NoTls)
+                .expect("connect observer registration fixture");
+            let token = live_pg_scope().expect("owning live-test scope");
+            register_live_pg_client(&mut client, &connection, token)
+                .expect("register bounded observer without a network suffix");
+
+            // Explicit inet::text retains /32 or /128, unlike host(inet).
+            // Exercise PostgreSQL's real formatter for both address families;
+            // accepting host names or stripping arbitrary suffixes in Rust is
+            // not a substitute for the strict numeric observer endpoint.
+            for row in client
+                .query(
+                    "SELECT address::text, pg_catalog.host(address)
+                     FROM (VALUES ('127.0.0.1'::inet), ('::1'::inet),
+                                  ('2001:db8::1/64'::inet)) AS fixtures(address)",
+                    &[],
+                )
+                .expect("real PostgreSQL address formatting")
+            {
+                let legacy: String = row.get(0);
+                let host: String = row.get(1);
+                assert!(legacy.contains('/'), "explicit inet cast must retain mask");
+                assert!(legacy.parse::<IpAddr>().is_err());
+                assert!(host.parse::<IpAddr>().is_ok());
+            }
+            for invalid in ["localhost", "127.0.0.1/32", "::1/128", "[::1]", ""] {
+                assert!(invalid.parse::<IpAddr>().is_err());
+            }
+
+            let address: Option<String> = client
+                .query_one("SELECT pg_catalog.host(inet_server_addr())", &[])
+                .expect("actual connected server address")
+                .get(0);
+            let scope = snapshot(token).expect("registered identity-only scope");
+            let observer = scope
+                .observer
+                .as_ref()
+                .expect("bounded observer configured");
+            if let Some(address) = address {
+                let numeric: IpAddr = address.parse().expect("bare actual server IP");
+                assert_eq!(observer.get_hostaddrs(), &[numeric]);
+                assert!(observer.get_hosts().is_empty(), "observer must not use DNS");
+            } else {
+                #[cfg(unix)]
+                {
+                    let original: postgres::Config = connection.parse().expect("socket config");
+                    let [postgres::config::Host::Unix(expected)] = original.get_hosts() else {
+                        panic!("Unix fixture requires one explicit socket directory");
+                    };
+                    let [tokio_postgres::config::Host::Unix(actual)] = observer.get_hosts() else {
+                        panic!("observer must preserve the explicit socket directory");
+                    };
+                    assert_eq!(actual, expected);
+                    assert!(observer.get_hostaddrs().is_empty());
+                    assert_eq!(
+                        observer.get_ports(),
+                        &[original.get_ports().first().copied().unwrap_or(5432)]
+                    );
+                }
+                #[cfg(not(unix))]
+                panic!("Unix fixture unavailable on this platform");
+            }
+            observe(&scope, &[], None, "numeric or socket observer connection")
+                .expect("observer reaches the same server without extension activation");
+            drop(client);
+            observe(&scope, &scope.identities, None, "registered fixture exit")
+                .expect("exact owned backend exits before guard cleanup");
         }
 
         #[test]

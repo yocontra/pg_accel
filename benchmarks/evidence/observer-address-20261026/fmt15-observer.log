@@ -1,0 +1,12 @@
+Diff in /Users/contra/Projects/pg_accel/pg_accel_bench/src/integration_connection.rs:686:
+                 .expect("actual connected server address")
+                 .get(0);
+             let scope = snapshot(token).expect("registered identity-only scope");
+-            let observer = scope.observer.as_ref().expect("bounded observer configured");
++            let observer = scope
++                .observer
++                .as_ref()
++                .expect("bounded observer configured");
+             if let Some(address) = address {
+                 let numeric: IpAddr = address.parse().expect("bare actual server IP");
+                 assert_eq!(observer.get_hostaddrs(), &[numeric]);
