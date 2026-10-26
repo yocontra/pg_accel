@@ -7,7 +7,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from metadata_effects import Unproven, Verifier, compile_ast  # noqa: E402
+from metadata_effects import OutputRecord, Unproven, Verifier, compile_ast  # noqa: E402
 
 
 PRELUDE = r"""
@@ -517,6 +517,257 @@ class ProductionMetadataEffectsTests(unittest.TestCase):
                     ("pgaccel_join_rows_request", "pgaccel_join_control"),
                 )
                 self.assertFalse(result.ok, result)
+
+
+class OutputRecordCapabilityTests(unittest.TestCase):
+    contract = OutputRecord(
+        "Workspace",
+        (("version", "unsigned int"), ("bytes", "unsigned long long"),
+         ("alignment", "unsigned long long")),
+        frozenset({"version", "bytes", "alignment"}),
+        frozenset({"bytes", "alignment"}),
+    )
+    declarations = """
+    struct Workspace {
+      unsigned int version;
+      unsigned long long bytes;
+      unsigned long long alignment;
+    };
+    """
+
+    def check(self, body, helpers="", *, contract=None, declarations=None):
+        source = PRELUDE + (declarations or self.declarations) + helpers + """
+        extern "C" pgaccel_status pgaccel_metadata(const Request* req, Workspace* out) {
+          if (!req || !out || out->version != 1) return PGACCEL_INVALID_ARGUMENT;
+        """ + body + "}"
+        ast = compile_ast(source, ROOT, ROOT / "pgaccel-kernels/include")
+        return Verifier(ast).prove(
+            "pgaccel_metadata", ("Request",), output_record=contract or self.contract
+        )
+
+    def test_complete_scalar_record_publication(self):
+        result = self.check("out->bytes = req->rows; out->alignment = 64; return PGACCEL_OK;")
+        self.assertTrue(result.ok, result.detail)
+
+    def test_field_identity_survives_output_alias(self):
+        result = self.check("Workspace& alias = *out; alias.bytes = req->rows; "
+                            "alias.alignment = 64; return PGACCEL_OK;")
+        self.assertTrue(result.ok, result.detail)
+
+    def test_every_branch_must_publish_every_required_field(self):
+        for branch in (
+            "if (req->rows) out->alignment = 64;",
+            "if (req->rows) out->alignment = 64; else out->bytes = 0;",
+            "req->rows ? (out->alignment = 64) : (out->bytes = 0);",
+            "req->rows && (out->alignment = 64);",
+            "req->rows || (out->alignment = 64);",
+        ):
+            with self.subTest(branch=branch):
+                result = self.check("out->bytes = req->rows; " + branch + "return PGACCEL_OK;")
+                self.assertFalse(result.ok, result)
+
+    def test_both_branches_publish_same_fields(self):
+        result = self.check("out->bytes = req->rows; if (req->rows) "
+                            "out->alignment = 64; else out->alignment = 32; return PGACCEL_OK;")
+        self.assertTrue(result.ok, result.detail)
+
+    def test_unlisted_write_whole_record_and_payload_reads_fail(self):
+        for body in (
+            "out->version = 2; out->bytes = req->rows; out->alignment = 64;",
+            "Workspace replacement{1, req->rows, 64}; *out = replacement;",
+            "out->bytes = req->values[0]; out->alignment = 64;",
+            "out->bytes = req->rows; out->alignment = 64; req->writable[0] = 1;",
+        ):
+            with self.subTest(body=body):
+                self.assertFalse(self.check(body + "return PGACCEL_OK;").ok)
+
+    def test_helper_cannot_publish_output_field(self):
+        result = self.check(
+            "publish(&out->bytes, req->rows); out->alignment = 64; return PGACCEL_OK;",
+            "uint64_t publish(unsigned long long* p, uint64_t v) { *p = v; return v; }",
+        )
+        self.assertFalse(result.ok, result)
+
+    def test_layout_and_read_capability_are_exact(self):
+        body = "out->bytes = req->rows; out->alignment = 64; return PGACCEL_OK;"
+        self.assertFalse(self.check(body, declarations=self.declarations.replace(
+            "unsigned int version", "unsigned long long version")).ok)
+        restricted = OutputRecord(
+            self.contract.type_name, self.contract.fields,
+            frozenset(), self.contract.required,
+        )
+        self.assertFalse(self.check(body, contract=restricted).ok)
+
+    def test_default_scalar_contract_is_unchanged(self):
+        self.assertTrue(prove(fixture("*out = req->rows; return PGACCEL_OK;")).ok)
+        result = prove(fixture("*out = *out + req->rows; return PGACCEL_OK;"))
+        self.assertFalse(result.ok)
+        self.assertIn("write-only", result.detail)
+
+    def test_failure_guard_bounds_immutable_input_field_loop(self):
+        loop = (
+            "uint64_t total = 0; for (uint64_t i = 0; i < req->rows; ++i) "
+            "total += req->counts[i]; out->bytes = total; out->alignment = 64; "
+            "return PGACCEL_OK;"
+        )
+        for guard in (
+            "if (req->rows > 4) return PGACCEL_INVALID_ARGUMENT;",
+            "if (req->rows >= 5) return PGACCEL_INVALID_ARGUMENT;",
+            "if (req->rows > 4 || out->version != 1) return PGACCEL_INVALID_ARGUMENT;",
+        ):
+            with self.subTest(guard=guard):
+                result = self.check(guard + loop)
+                self.assertTrue(result.ok, result.detail)
+                self.assertEqual(result.loop_bounds, (4,))
+
+    def test_missing_wrong_or_branch_local_bounds_cannot_escape(self):
+        loop = (
+            "uint64_t total = 0; for (uint64_t i = 0; i < req->rows; ++i) "
+            "total += req->counts[i]; out->bytes = total; out->alignment = 64; "
+            "return PGACCEL_OK;"
+        )
+        for guard in (
+            "",
+            "if (req->rows > 5) return PGACCEL_INVALID_ARGUMENT;",
+            "if (req->counts[0] > 4) return PGACCEL_INVALID_ARGUMENT;",
+            "if (req->rows > 4 && out->version != 1) return PGACCEL_INVALID_ARGUMENT;",
+            "if (out->version == 1) { if (req->rows > 4) return PGACCEL_INVALID_ARGUMENT; }",
+        ):
+            with self.subTest(guard=guard):
+                result = self.check(guard + loop)
+                self.assertFalse(result.ok, result)
+
+    def test_helper_guard_is_not_an_unchecked_postcondition(self):
+        helper = (
+            "uint64_t validate(const Request* req) { "
+            "if (req->rows > 4) return 4; return 0; }"
+        )
+        result = self.check(
+            "validate(req); uint64_t total = 0; "
+            "for (uint64_t i = 0; i < req->rows; ++i) total += req->counts[i]; "
+            "out->bytes = total; out->alignment = 64; return PGACCEL_OK;", helper,
+        )
+        self.assertFalse(result.ok, result)
+
+    def test_output_alias_cannot_invalidate_input_bound(self):
+        contract = OutputRecord(
+            "R", (("rows", "unsigned long long"), ("value", "unsigned long long")),
+            frozenset({"rows"}), frozenset({"rows"}),
+        )
+        for mutation in (
+            "out->rows = 1000;",
+            "out->rows += 1000;",
+            "R& alias = *out; alias.rows = 1000;",
+            "if (req->value) out->rows = 1000;",
+            "for (unsigned i = 0; i < 1; ++i) out->rows = 1000;",
+        ):
+            with self.subTest(mutation=mutation):
+                source = """
+                enum pgaccel_status { OK = 0, ERROR = 4 };
+                struct R { unsigned long long rows, value; };
+                extern "C" pgaccel_status metadata(const R* req, R* out) {
+                  if (req->rows > 4) return ERROR;
+                """ + mutation + """
+                  unsigned long long total = 0;
+                  for (unsigned i = 0; i < req->rows; ++i) total += req->value;
+                  out->rows = total;
+                  return OK;
+                }
+                """
+                ast = compile_ast(source, ROOT, ROOT / "pgaccel-kernels/include")
+                result = Verifier(ast).prove("metadata", ("R",), output_record=contract)
+                self.assertFalse(result.ok, result)
+
+    def test_output_write_inside_guarded_loop_is_rejected(self):
+        result = self.check(
+            "if (req->rows > 4) return PGACCEL_INVALID_ARGUMENT; "
+            "for (uint64_t i = 0; i < req->rows; ++i) out->bytes = 1000; "
+            "out->bytes = req->rows; out->alignment = 64; return PGACCEL_OK;"
+        )
+        self.assertFalse(result.ok, result)
+        self.assertIn("may alias", result.detail)
+
+    def test_alias_cannot_prolong_loop_through_reference_compound_write(self):
+        source = """
+        enum pgaccel_status { OK = 0, ERROR = 4 };
+        struct R { unsigned long long rows; };
+        extern "C" pgaccel_status metadata(const R* req, R* out) {
+          if (req->rows > 4) return ERROR;
+          R& alias = *out;
+          for (unsigned i = 0; i < req->rows; ++i) alias.rows += 1;
+          out->rows = req->rows;
+          return OK;
+        }
+        """
+        contract = OutputRecord(
+            "R", (("rows", "unsigned long long"),),
+            frozenset({"rows"}), frozenset({"rows"}),
+        )
+        ast = compile_ast(source, ROOT, ROOT / "pgaccel-kernels/include")
+        result = Verifier(ast).prove("metadata", ("R",), output_record=contract)
+        self.assertFalse(result.ok, result)
+        self.assertIn("may alias", result.detail)
+
+    def test_guard_condition_output_write_cannot_recreate_stale_bounds(self):
+        contract = OutputRecord(
+            "R", (("rows", "unsigned long long"), ("value", "unsigned long long")),
+            frozenset({"rows"}), frozenset({"rows"}),
+        )
+        for condition in (
+            "req->rows > 4 || (out->rows = 1000) == 0",
+            "req->rows > 4 || (out->rows += 1000) == 0",
+            "(out->rows = 1000) == 0 || req->rows > 4",
+        ):
+            with self.subTest(condition=condition):
+                source = """
+                enum pgaccel_status { OK = 0, ERROR = 4 };
+                struct R { unsigned long long rows, value; };
+                extern "C" pgaccel_status metadata(const R* req, R* out) {
+                """ + "if (" + condition + ") return ERROR;" + """
+                  unsigned long long total = 0;
+                  for (unsigned i = 0; i < req->rows; ++i) total += req->value;
+                  out->rows = total;
+                  return OK;
+                }
+                """
+                ast = compile_ast(source, ROOT, ROOT / "pgaccel-kernels/include")
+                result = Verifier(ast).prove("metadata", ("R",), output_record=contract)
+                self.assertFalse(result.ok, result)
+
+    def test_argument_order_cannot_lend_stale_bounds_to_helper(self):
+        prefix = """
+        enum pgaccel_status { OK = 0, ERROR = 4 };
+        struct R { unsigned long long rows, value; };
+        unsigned long long scan(const R* req) {
+          unsigned long long n = 0;
+          for (unsigned i = 0; i < req->rows; ++i) n += req->value;
+          return n;
+        }
+        unsigned long long combine(unsigned long long a, unsigned long long b) {
+          return a + b;
+        }
+        extern "C" pgaccel_status metadata(const R* req, R* out) {
+          if (req->rows > 4) return ERROR;
+          out->rows =
+        """
+        contract = OutputRecord(
+            "R", (("rows", "unsigned long long"), ("value", "unsigned long long")),
+            frozenset({"rows"}), frozenset({"rows"}),
+        )
+        for expression, expected in (
+            ("combine(scan(req), req->value)", True),
+            ("combine(req->value, scan(req))", True),
+            ("combine(scan(req), (out->rows = 1000))", False),
+            ("combine((out->rows = 1000), scan(req))", False),
+            ("combine(scan(req), ++out->rows)", False),
+        ):
+            with self.subTest(expression=expression):
+                ast = compile_ast(
+                    prefix + expression + "; return OK; }",
+                    ROOT, ROOT / "pgaccel-kernels/include",
+                )
+                result = Verifier(ast).prove("metadata", ("R",), output_record=contract)
+                self.assertEqual(result.ok, expected, result)
 
 
 if __name__ == "__main__":

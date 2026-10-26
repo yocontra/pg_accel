@@ -44,6 +44,21 @@ class Place:
     type: str
     writable: bool
     extent: int = 1
+    fields: tuple[str, ...] = ()
+
+
+@dataclasses.dataclass(frozen=True)
+class OutputRecord:
+    """Opt-in scalar field effects, not a validation/arithmetic proof.
+
+    Field types are exact compiler-desugared types. The complete layout must
+    match this sequence; read and publication capabilities are separate.
+    """
+
+    type_name: str
+    fields: tuple[tuple[str, str], ...]
+    readable: frozenset[str]
+    required: frozenset[str]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -91,6 +106,26 @@ def declaration(node: Node) -> str | None:
     return None
 
 
+def may_mutate_expression(node: Node) -> bool:
+    """Conservative syntax preflight, never a purity proof for callees.
+
+    Unknown/helper effects still undergo normal recursive verification. A
+    syntactic mutation may target output through a reference, so input bounds
+    cannot be used to analyze an earlier sibling in an unspecified order.
+    """
+    if node.get("kind") == "UnaryExprOrTypeTraitExpr":
+        # The canonical compiler rejects VLAs; the verifier separately checks
+        # the measured type. Ordinary sizeof/alignof operands are unevaluated.
+        return False
+    if (
+        node.get("kind") in {"CompoundAssignOperator", "CXXOperatorCallExpr"}
+        or (node.get("kind") == "BinaryOperator" and node.get("opcode") == "=")
+        or (node.get("kind") == "UnaryOperator" and node.get("opcode") in {"++", "--"})
+    ):
+        return True
+    return any(may_mutate_expression(child) for child in node.get("inner", ()))
+
+
 class Verifier:
     MAX_LOOP = 64
     MAX_WORK = 100_000
@@ -117,6 +152,11 @@ class Verifier:
         self.serial = 0
         self.root_function = ""
         self.published = False
+        self.output_record: OutputRecord | None = None
+        self.published_fields: frozenset[str] = frozenset()
+        self.input_field_bounds: dict[tuple[str, tuple[str, ...]], int] = {}
+        self.guarded_loop_depth = 0
+        self.output_write_generation = 0
         self.input_read = False
         self.started = False
         short_records: dict[str, set[str]] = {}
@@ -425,7 +465,15 @@ class Verifier:
         if not isinstance(value, Place):
             return value
         if value.root == "output":
-            raise Unproven("metadata output is write-only")
+            contract = self.output_record
+            if contract is None:
+                raise Unproven("metadata output is write-only")
+            if (
+                len(value.fields) != 1
+                or value.fields[0] not in contract.readable
+                or not self.scalar(value.type)
+            ):
+                raise Unproven("metadata output read lacks a scalar field capability")
         if value.root.startswith("input"):
             self.input_read = True
         if "*" in value.type:
@@ -433,6 +481,9 @@ class Verifier:
             # authority from its spelling. It could point directly at row data.
             return Value("pointer")
         if self.scalar(value.type):
+            field_bound = self.input_field_bounds.get((value.root, value.fields))
+            if field_bound is not None:
+                return Value(constant=0, upper=field_bound)
             bounds = self.frozen.get(value.root)
             return Value(constant=bounds[0], upper=bounds[1]) if bounds else Value()
         self.data_type(value.type)
@@ -446,7 +497,24 @@ class Verifier:
         if place.root == "output":
             if self.stack[-1] != self.root_function:
                 self.fail(node, "helper publication lacks an export-path proof")
-            self.published = True
+            if self.output_record is not None:
+                if self.guarded_loop_depth:
+                    self.fail(node, "output may alias a guarded loop's input bound")
+                # Const input parameters do not establish no-alias with output.
+                # A valid output write can change the underlying input object.
+                self.input_field_bounds.clear()
+                self.output_write_generation += 1
+            if self.output_record is None:
+                self.published = True
+            else:
+                if (
+                    len(place.fields) != 1
+                    or place.fields[0] not in self.output_record.required
+                    or not self.scalar(place.type)
+                ):
+                    self.fail(node, "output write lacks a scalar field capability")
+                self.published_fields |= frozenset(place.fields)
+                self.published = self.output_record.required <= self.published_fields
         self.data_type(place.type)
         source = self.read(value)
         if self.scalar(place.type) != (
@@ -503,7 +571,9 @@ class Verifier:
                 if array:
                     return Value(
                         "pointer",
-                        Place(source.root, array[0], source.writable, array[1]),
+                        Place(
+                            source.root, array[0], source.writable, array[1], source.fields
+                        ),
                     )
             if cast == "NullToPointer":
                 return Value("pointer")
@@ -546,7 +616,12 @@ class Verifier:
             field = node.get("referencedMemberDecl", "")
             if self.field_owners.get(field) != self.type(base.type):
                 self.fail(node, "field does not belong to the proven metadata object")
-            return Place(base.root, self.type(spelling(node)), base.writable)
+            return Place(
+                base.root,
+                self.type(spelling(node)),
+                base.writable,
+                fields=(*base.fields, node.get("name", "")),
+            )
         if kind == "ArraySubscriptExpr" and len(children) == 2:
             base = self.read(self.expr(children[0], env))
             index = self.read(self.expr(children[1], env))
@@ -563,7 +638,9 @@ class Verifier:
                 or not 0 <= index.constant <= index.upper < base.target.extent
             ):
                 self.fail(node, "metadata array index lacks a fixed in-bounds range")
-            return dataclasses.replace(base.target, extent=1)
+            return dataclasses.replace(
+                base.target, extent=1, fields=(*base.target.fields, "[]")
+            )
         if kind == "UnaryOperator" and len(children) == 1:
             op = node.get("opcode")
             value = self.expr(children[0], env)
@@ -590,9 +667,19 @@ class Verifier:
                 return Value()
             self.fail(node, "unsupported unary metadata operation")
         if kind in {"BinaryOperator", "CompoundAssignOperator"} and len(children) == 2:
+            if (
+                self.output_record is not None
+                and node.get("opcode") not in {"&&", "||"}
+                and any(may_mutate_expression(child) for child in children)
+            ):
+                self.input_field_bounds.clear()
             left = self.expr(children[0], env)
+            before_right = (self.published, self.published_fields)
             right = self.expr(children[1], env)
             op = node.get("opcode", "")
+            if self.output_record is not None and op in {"&&", "||"}:
+                # RHS effects must still be checked, but may not execute.
+                self.published, self.published_fields = before_right
             if op == "=":
                 self.write(left, right, node)
                 return left
@@ -609,7 +696,17 @@ class Verifier:
                 self.fail(node, "unsupported scalar operation")
             return Value()
         if kind == "ConditionalOperator" and len(children) == 3:
-            values = [self.read(self.expr(child, env)) for child in children]
+            if self.output_record is None:
+                values = [self.read(self.expr(child, env)) for child in children]
+            else:
+                values = [self.read(self.expr(children[0], env))]
+                before = (self.published, self.published_fields)
+                values.append(self.read(self.expr(children[1], dict(env))))
+                then_fields = self.published_fields
+                self.published, self.published_fields = before
+                values.append(self.read(self.expr(children[2], dict(env))))
+                self.published_fields &= then_fields
+                self.published = self.output_record.required <= self.published_fields
             if all(
                 isinstance(value, Value) and value.kind == "scalar" for value in values
             ):
@@ -640,6 +737,13 @@ class Verifier:
                 return Value(constant=0, upper=0)
             return self.temporary(node, type_name)
         if kind in {"CallExpr", "CXXOperatorCallExpr"} and children:
+            if self.output_record is not None and any(
+                may_mutate_expression(child) for child in children[1:]
+            ):
+                # C++17 arguments are indeterminately sequenced, not evaluated
+                # in this interpreter's list order. Do not let an earlier
+                # analyzed helper borrow bounds a sibling may invalidate first.
+                self.input_field_bounds.clear()
             callee = self.expr(children[0], env)
             if not isinstance(callee, Value) or callee.kind != "function":
                 self.fail(node, "indirect/callback call")
@@ -695,6 +799,63 @@ class Verifier:
                 self.fail(node, "memcmp reads outside a fixed metadata object")
             self.read(value.target)
 
+    def input_guard_bounds(
+        self, condition: Node, rejected: Node, env: dict[str, Value | Place]
+    ) -> dict[tuple[str, tuple[str, ...]], int]:
+        """Infer only immutable unsigned input bounds after exact failure exits.
+
+        This opt-in fact is not a general branch solver or a helper summary.
+        The condition is already effect-checked before this method is called.
+        """
+        if self.output_record is None:
+            return {}
+        if rejected.get("kind") == "CompoundStmt":
+            statements = rejected.get("inner", ())
+            if len(statements) != 1:
+                return {}
+            rejected = statements[0]
+        returns = rejected.get("inner", ())
+        if rejected.get("kind") != "ReturnStmt" or len(returns) != 1:
+            return {}
+        status = self.constant(returns[0])
+        if status is None or status == 0:
+            return {}
+
+        def collect(node: Node) -> dict[tuple[str, tuple[str, ...]], int]:
+            node = strip(node)
+            children = node.get("inner", ())
+            if node.get("kind") != "BinaryOperator" or len(children) != 2:
+                return {}
+            if node.get("opcode") == "||":
+                result = collect(children[0])
+                for key, bound in collect(children[1]).items():
+                    result[key] = min(result.get(key, bound), bound)
+                return result
+            if node.get("opcode") not in {">", ">="}:
+                return {}
+            bound = self.constant(children[1])
+            if bound is None:
+                return {}
+            field = strip(children[0])
+            if field.get("kind") != "MemberExpr":
+                return {}
+            place = self.expr(field, env)
+            if (
+                not isinstance(place, Place)
+                or place.writable
+                or not place.root.startswith("input:")
+                or not place.fields
+                or "[]" in place.fields
+                or not self.type(place.type).startswith("unsigned ")
+            ):
+                return {}
+            upper = bound - (node.get("opcode") == ">=")
+            if not 0 <= upper <= self.MAX_LOOP:
+                return {}
+            return {(place.root, place.fields): upper}
+
+        return collect(condition)
+
     def stmt(
         self,
         node: Node,
@@ -731,8 +892,14 @@ class Verifier:
                         self.read(self.expr(item, env))
                     env[child["id"]] = Place(child["id"], type_name, True)
         elif kind == "IfStmt" and len(children) in {2, 3} and not node.get("hasInit"):
+            condition_write_generation = self.output_write_generation
             self.expr(children[0], env)
+            condition_wrote_output = (
+                self.output_write_generation != condition_write_generation
+            )
             before = self.published
+            before_fields = self.published_fields
+            before_bounds = dict(self.input_field_bounds)
             condition = strip(children[0])
             extra: frozenset[str] = frozenset()
             guarded_return = children[1]
@@ -753,10 +920,27 @@ class Verifier:
                     extra = frozenset({declaration(b)})
             self.stmt(children[1], dict(env), failure_guards | extra)
             then_published = self.published
+            then_fields = self.published_fields
+            then_bounds = dict(self.input_field_bounds)
             self.published = before
+            self.published_fields = before_fields
+            self.input_field_bounds = dict(before_bounds)
             if len(children) == 3:
                 self.stmt(children[2], dict(env), failure_guards)
             self.published = self.published and then_published
+            self.published_fields &= then_fields
+            self.input_field_bounds = {
+                key: max(bound, then_bounds[key])
+                for key, bound in self.input_field_bounds.items()
+                if key in then_bounds
+            }
+            if len(children) == 2 and not condition_wrote_output:
+                for key, bound in self.input_guard_bounds(
+                    children[0], children[1], env
+                ).items():
+                    self.input_field_bounds[key] = min(
+                        self.input_field_bounds.get(key, bound), bound
+                    )
         elif kind == "ForStmt" and len(children) == 5:
             init, condition_variable, condition, increment, body = children
             if (
@@ -773,6 +957,12 @@ class Verifier:
                 bound_test = bound_test["inner"][0]
             parts = bound_test.get("inner", ())
             limit = self.constant(parts[1]) if len(parts) == 2 else None
+            guarded_limit = False
+            if limit is None and len(parts) == 2 and self.output_record is not None:
+                value = self.read(self.expr(parts[1], env))
+                if isinstance(value, Value) and value.constant == 0:
+                    limit = value.upper
+                    guarded_limit = True
             if (
                 len(initializers) != 1
                 or self.constant(initializers[0]) != 0
@@ -791,6 +981,9 @@ class Verifier:
             self.frozen[identity] = (0, limit - 1)
             self.multiplier *= limit
             before = self.published
+            before_fields = self.published_fields
+            before_bounds = dict(self.input_field_bounds)
+            self.guarded_loop_depth += guarded_limit
             try:
                 self.expr(condition, env)
                 self.stmt(body, dict(env), failure_guards)
@@ -798,6 +991,13 @@ class Verifier:
                 self.multiplier //= limit
                 self.frozen.pop(identity)
                 self.published = before
+                self.published_fields = before_fields
+                self.guarded_loop_depth -= guarded_limit
+                self.input_field_bounds = {
+                    key: max(bound, before_bounds[key])
+                    for key, bound in self.input_field_bounds.items()
+                    if key in before_bounds
+                }
         elif kind == "ReturnStmt" and len(children) == 1:
             value = self.read(self.expr(children[0], env))
             if not isinstance(value, Value) or value.kind != "scalar":
@@ -854,13 +1054,23 @@ class Verifier:
                 env[parameter["id"]] = Place(parameter["id"], type_name, True)
         self.stack.append(identity)
         self.visited.add(function.get("name", "?"))
+        before_bounds = dict(self.input_field_bounds)
         try:
             self.stmt(bodies[0], env)
         finally:
+            # A helper's success-conditioned refinements are not a caller
+            # postcondition until its return value/control flow is modeled.
+            self.input_field_bounds = before_bounds
             self.stack.pop()
         return Value()
 
-    def prove(self, name: str, inputs: tuple[str, ...]) -> Result:
+    def prove(
+        self,
+        name: str,
+        inputs: tuple[str, ...],
+        *,
+        output_record: OutputRecord | None = None,
+    ) -> Result:
         if self.started:
             return Result(False, "a verifier instance proves exactly one export")
         self.started = True
@@ -894,10 +1104,38 @@ class Verifier:
                         "pointer", Place(f"input:{index}", self.type(input_type), False)
                     )
                 )
-            if parameters[-1].get("type", {}).get("qualType") != "uint64_t *":
-                raise Unproven("metadata output must be one uint64_t")
+            output_type = "uint64_t"
+            if output_record is None:
+                if parameters[-1].get("type", {}).get("qualType") != "uint64_t *":
+                    raise Unproven("metadata output must be one uint64_t")
+            else:
+                output_type = output_record.type_name
+                if spelling(parameters[-1]) != f"{output_type} *":
+                    raise Unproven("metadata output record type differs from contract")
+                record = self.record(output_type)
+                fields = tuple(
+                    (field.get("name", ""), spelling(field))
+                    for field in record.get("inner", ())
+                    if field.get("kind") == "FieldDecl"
+                )
+                names = frozenset(name for name, _ in fields)
+                if (
+                    fields != output_record.fields
+                    or len(names) != len(fields)
+                    or not output_record.required
+                    or not output_record.required <= names
+                    or not output_record.readable <= names
+                    or any(not self.scalar(type_name) for _, type_name in fields)
+                    or any(
+                        field.get("isBitfield")
+                        for field in record.get("inner", ())
+                        if field.get("kind") == "FieldDecl"
+                    )
+                ):
+                    raise Unproven("metadata output record layout/capabilities differ")
+                self.output_record = output_record
             arguments.append(
-                Value("pointer", Place("output", self.type("uint64_t"), True))
+                Value("pointer", Place("output", self.type(output_type), True))
             )
             self.root_function = function["id"]
             self.call(function, arguments)
