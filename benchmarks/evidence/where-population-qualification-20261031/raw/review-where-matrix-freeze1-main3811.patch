@@ -1,0 +1,983 @@
+diff --git a/pg_accel_bench/src/report.rs b/pg_accel_bench/src/report.rs
+index f52fd187..7bfbc3c7 100644
+--- a/pg_accel_bench/src/report.rs
++++ b/pg_accel_bench/src/report.rs
+@@ -388,6 +388,13 @@ pub struct WorkloadResult {
+     /// dispatch is excluded from all measured samples and counter windows.
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub raw_integer_count_execution_proof: Option<RawIntegerCountExecutionProof>,
++    /// Exact new WHERE contract; never populated for released no-WHERE lanes.
++    #[serde(default, skip_serializing_if = "Vec::is_empty")]
++    pub where_count_settings: Vec<TypedH3SettingsCapture>,
++    #[serde(default, skip_serializing_if = "Vec::is_empty")]
++    pub where_count_native_kernel_deltas: Vec<u64>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub where_count_execution_proof: Option<RawIntegerCountExecutionProof>,
+     /// Per-pair, off-clock planner-stage deltas for native-decline benchmark
+     /// cells. Entries index `iterations`; absent for non-native cells.
+     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+@@ -1370,6 +1377,9 @@ impl WorkloadResult {
+             raw_integer_count_settings: Vec::new(),
+             raw_integer_count_native_kernel_deltas: Vec::new(),
+             raw_integer_count_execution_proof: None,
++            where_count_settings: Vec::new(),
++            where_count_native_kernel_deltas: Vec::new(),
++            where_count_execution_proof: None,
+             planner_stage_captures: Vec::new(),
+             native_parity_pair_captures: Vec::new(),
+             artifact_lifecycle_probe: None,
+@@ -2279,6 +2289,117 @@ fn raw_integer_count_plan_evidence_verified(
+             })
+ }
+ 
++/// Same-node typed WHERE evidence, independent of the released no-WHERE parser.
++pub fn plan_contains_where_count(
++    plan: &str,
++    c: crate::workloads::hash_count_where::Contract,
++    executed: bool,
++) -> bool {
++    use crate::workloads::hash_count_where::{Form, Key};
++    let blocks = pg_accel_custom_scan_blocks(plan);
++    let [block] = blocks.as_slice() else {
++        return false;
++    };
++    let direct = direct_custom_scan_property_lines(block).join("\n");
++    let Some(key) = plan_text_property(&direct, &["gpu descriptor group keys"]) else {
++        return false;
++    };
++    let column = if c.key == Key::H3 {
++        key.strip_prefix("k0:h3_cell_to_parent(")
++            .and_then(|s| s.split_once(", resolution="))
++            .and_then(|(column, tail)| {
++                let parsed = parse_descriptor_column(column)?;
++                (tail == format!("3) type={} collation=0 encoding=hash", parsed.type_oid))
++                    .then_some(parsed)
++            })
++    } else {
++        let oid = match c.key {
++            Key::Int2 => 21,
++            Key::Int4 => 23,
++            _ => 20,
++        };
++        key.strip_prefix("k0:fact(")
++            .and_then(|s| s.strip_suffix(&format!(") type={oid} collation=0 encoding=hash")))
++            .and_then(parse_descriptor_column)
++            .filter(|column| column.type_oid == oid)
++    };
++    let Some(column) = column else {
++        return false;
++    };
++    let (aggregate, count_oid, filter) = match c.form {
++        Form::Star => (
++            "m0:count_star -> value.count".to_owned(),
++            0,
++            "none".to_owned(),
++        ),
++        Form::Independent => (
++            format!(
++                "m0:column({}.4:type=16) -> value.count",
++                column.relation_oid
++            ),
++            16,
++            format!("sql_mask(input={}.3:type=16)", column.relation_oid),
++        ),
++        Form::Identical => (
++            format!(
++                "m0:column({}.5:type=23) -> value.count",
++                column.relation_oid
++            ),
++            23,
++            format!("sql_mask(input={}.2:type=16)", column.relation_oid),
++        ),
++    };
++    column.relation_oid > 0
++        && column.attno == 1
++        && column.type_oid > 0
++        && plan_contains_resident_groupagg_logical_evidence(&direct)
++        && plan_text_property(&direct, &["gpu descriptor specialization"])
++            == Some("hash_count".to_owned())
++        && plan_text_property(&direct, &["gpu physical kernel mode"])
++            == Some("parallel_hash".to_owned())
++        && plan_text_property(&direct, &["gpu descriptor aggregates"]) == Some(aggregate)
++        && plan_text_property(&direct, &["gpu descriptor filter"])
++            == Some(format!(
++                "fact=sql_mask(input={}.2:type=16); measures=[m0={filter}]; dimensions=[none]",
++                column.relation_oid
++            ))
++        && plan_text_property(&direct, &["gpu descriptor output"])
++            == Some(format!(
++                "slot0:group[k0] source_type={} result_type={} typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type={count_oid} result_type=20 typmod=-1 collation=0 nullable=false",
++                column.type_oid, column.type_oid
++            ))
++        && (!executed
++            || (plan_text_property(&direct, &["gpu dispatched physical kernel mode"])
++                == Some("parallel_hash".to_owned())
++                && plan_text_property(&direct, &["gpu physical kernel mode verified"])
++                    == Some("true".to_owned())
++                && plan_text_property(&direct, &["gpu lifecycle calls verified"])
++                    == Some("true".to_owned())
++                && plan_text_property(&direct, &["gpu descriptor artifact policy"])
++                    .is_some_and(|p| p.split_whitespace().next() == Some("ephemeral_fused"))))
++}
++
++fn where_count_calls_verified(
++    w: &WorkloadResult,
++    c: crate::workloads::hash_count_where::Contract,
++) -> bool {
++    let Some(mask_calls) = u64::try_from(w.rows.div_ceil(65_536))
++        .ok()
++        .and_then(|chunks| chunks.checked_mul(u64::try_from(c.mask_count()).ok()?))
++        .and_then(|calls| calls.checked_mul(u64::try_from(w.iterations.len()).ok()?))
++    else {
++        return false;
++    };
++    w.physical_kernel_mode_counts
++        .parallel_hash
++        .checked_add(mask_calls)
++        == Some(w.gpu_kernel_execution_delta)
++        && w.physical_kernel_mode_counts.parallel_dense_count == 0
++        && w.physical_kernel_mode_counts.parallel_dense_integer == 0
++        && w.physical_kernel_mode_counts.parallel_dense_numeric == 0
++        && w.physical_kernel_mode_counts.serial_generic == 0
++}
++
+ fn typed_h3_default_settings(gucs: Option<&GucSettings>) -> bool {
+     let Some(gucs) = gucs else {
+         return false;
+@@ -5589,6 +5710,75 @@ impl BenchReport {
+         for w in &report.workloads {
+             let threshold_entry =
+                 crate::workloads::benchmark_threshold_matrix_entry(&w.name, w.rows);
++            if let Some(contract) = crate::workloads::hash_count_where::contract(&w.name) {
++                let pairs = w
++                    .iterations
++                    .iter()
++                    .filter(|p| p.cache_state == CacheState::Warm)
++                    .collect::<Vec<_>>();
++                let first = pairs.iter().filter(|p| p.accel_first).count();
++                let common = crate::workloads::hash_count_where::ROW_SCALES.contains(&w.rows)
++                    && report.methodology.timing_mode == "raw-wallclock"
++                    && report.methodology.warmup == 5
++                    && report.methodology.iterations == 10
++                    && w.warmup_iterations
++                        .iter()
++                        .filter(|p| p.cache_state == CacheState::Warm)
++                        .count()
++                        == 5
++                    && pairs.len() == 10
++                    && first == 5
++                    && pairs.iter().all(|p| {
++                        p.accel_ms.is_finite()
++                            && p.accel_ms > 0.0
++                            && p.parallel_ms.is_finite()
++                            && p.parallel_ms > 0.0
++                    })
++                    && count_settings_verified(w, &w.where_count_settings)
++                    && w.where_count_native_kernel_deltas.len()
++                        == w.iterations.len() + w.warmup_iterations.len()
++                    && w.where_count_native_kernel_deltas
++                        .iter()
++                        .all(|delta| *delta == 0)
++                    && w.correctness_diff_artifact.is_some();
++                let proof = w.where_count_execution_proof.as_ref();
++                let verified = common
++                    && (!contract.designated()
++                        || (w.plan_selected
++                            && w.gpu_kernel_dispatched
++                            && w.dispatch_counter_captured
++                            && w.gpu_kernel_execution_delta > 0
++                            && w.pg_accel_stock_exec_delta == 0
++                            && w.accel_output_rows_consumed == 163_890
++                            && w.physical_kernel_mode_verified
++                            && w.physical_kernel_mode.as_deref() == Some("parallel_hash")
++                            && w.physical_kernel_mode_counts.parallel_hash > 0
++                            && where_count_calls_verified(w, contract)
++                            && w.physical_kernel_mode_counts.serial_generic == 0
++                            && w.plan_snippet
++                                .as_deref()
++                                .is_some_and(|p| plan_contains_where_count(p, contract, false))
++                            && proof.is_some_and(|p| {
++                                p.gpu_kernel_execution_delta > 0
++                                    && p.stock_exec_delta == 0
++                                    && typed_h3_default_settings(Some(&p.settings))
++                                    && plan_contains_where_count(&p.explain_analyze, contract, true)
++                            })
++                            && raw_integer_count_lifecycle_evidence_error(w).is_none()));
++                let speedup = warm_speedup_for_gate(w);
++                if !verified || (contract.designated() && (!speedup.is_finite() || speedup < 1.15))
++                {
++                    failures.push(BenchmarkShipGateFailure {
++                        workload:w.name.clone(),rows:w.rows,
++                        kind:if verified {BenchmarkShipGateFailureKind::ExpectedWinnerBelowThreshold} else {BenchmarkShipGateFailureKind::ExpectedWinnerMissingEvidence},
++                        speedup_median:speedup,gate_floor:if contract.designated(){1.15}else{0.0},
++                        detail:"frozen WHERE matrix requires five warmups, ten balanced raw pairs, default settings and full parity; designated cells additionally require exact typed WHERE/hash proof and >=1.15x warm speedup; controls have no winner floor".to_owned(),
++                    });
++                }
++                // Sensitivity controls report either selected or declined paths;
++                // they are never relabeled wins or subjected to winner ratchets.
++                continue;
++            }
+             if let Some(contract) =
+                 crate::workloads::raw_integer_count::contract(&w.name).filter(|c| !c.dense_control)
+             {
+@@ -6856,6 +7046,96 @@ fn detect_memory() -> String {
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn where_evidence_fields_are_additive_and_fail_closed() {
++        let old = mock_workload_result("raw_int2_count_star", 1_000_017, 1.0, 2.0);
++        let json = serde_json::to_value(&old).expect("old report serialization");
++        assert!(json.get("where_count_settings").is_none());
++        assert!(json.get("where_count_native_kernel_deltas").is_none());
++        assert!(json.get("where_count_execution_proof").is_none());
++        let restored: WorkloadResult =
++            serde_json::from_value(json).expect("old report compatibility");
++        assert!(restored.where_count_settings.is_empty());
++        assert!(restored.where_count_execution_proof.is_none());
++        for name in crate::workloads::hash_count_where::NAMES {
++            let result = mock_workload_result(name, 1_000_017, 1.0, 100.0);
++            assert!(
++                !mock_report(vec![result])
++                    .evaluate_benchmark_ship_gate()
++                    .is_empty(),
++                "summary-only WHERE evidence rejected: {name}"
++            );
++        }
++    }
++
++    #[test]
++    fn where_mask_and_aggregate_calls_have_independent_exact_accounting() {
++        for name in &crate::workloads::hash_count_where::NAMES[..12] {
++            let c = crate::workloads::hash_count_where::contract(name).expect("contract");
++            let mut w = mock_workload_result(name, 1_000_017, 1.0, 2.0);
++            w.physical_kernel_mode_counts = PhysicalKernelModeCounts::default();
++            w.physical_kernel_mode_counts.parallel_hash = 30;
++            w.gpu_kernel_execution_delta =
++                30 + 160 * u64::try_from(c.mask_count()).expect("small mask count");
++            assert!(where_count_calls_verified(&w, c));
++            w.gpu_kernel_execution_delta += 1;
++            assert!(!where_count_calls_verified(&w, c));
++            w.gpu_kernel_execution_delta -= 1;
++            w.physical_kernel_mode_counts.parallel_dense_numeric = 1;
++            assert!(!where_count_calls_verified(&w, c));
++        }
++    }
++
++    #[test]
++    fn where_parser_requires_exact_key_mask_and_count_in_one_node() {
++        use crate::workloads::hash_count_where::{Form, Key, NAMES, contract};
++        for name in &NAMES[..12] {
++            let c = contract(name).expect("exact contract");
++            let oid = match c.key {
++                Key::Int2 => 21,
++                Key::Int4 => 23,
++                Key::Int8 => 20,
++                Key::H3 => 16400,
++            };
++            let key = if c.key == Key::H3 {
++                format!(
++                    "k0:h3_cell_to_parent(17000.1:type={oid}, resolution=3) type={oid} collation=0 encoding=hash"
++                )
++            } else {
++                format!("k0:fact(17000.1:type={oid}) type={oid} collation=0 encoding=hash")
++            };
++            let (aggregate, source, filter) = match c.form {
++                Form::Star => ("m0:count_star -> value.count".to_owned(), 0, "none"),
++                Form::Independent => (
++                    "m0:column(17000.4:type=16) -> value.count".to_owned(),
++                    16,
++                    "sql_mask(input=17000.3:type=16)",
++                ),
++                Form::Identical => (
++                    "m0:column(17000.5:type=23) -> value.count".to_owned(),
++                    23,
++                    "sql_mask(input=17000.2:type=16)",
++                ),
++            };
++            let plan = format!(
++                "Custom Scan (GpuAccelAgg)\n  GPU Resident Operator Class: resident_groupagg\n  GPU Descriptor Strategy: descriptor_grouped_aggregate\n  GPU Descriptor Specialization: hash_count\n  GPU Physical Kernel Mode: parallel_hash\n  GPU Dispatched Physical Kernel Mode: parallel_hash\n  GPU Physical Kernel Mode Verified: true\n  GPU Lifecycle Calls Verified: true\n  GPU Descriptor Artifact Policy: ephemeral_fused reason=zero_retained_bytes\n  GPU Descriptor Group Keys: {key}\n  GPU Descriptor Aggregates: {aggregate}\n  GPU Descriptor Filter: fact=sql_mask(input=17000.2:type=16); measures=[m0={filter}]; dimensions=[none]\n  GPU Descriptor Output: slot0:group[k0] source_type={oid} result_type={oid} typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type={source} result_type=20 typmod=-1 collation=0 nullable=false"
++            );
++            assert!(plan_contains_where_count(&plan, c, true), "{name}");
++            for wrong in [
++                plan.replace("fact=sql_mask(input=17000.2:type=16)", "fact=none"),
++                plan.replace("parallel_hash", "parallel_dense_count"),
++                plan.replace("input=17000.2:type=16", "input=17001.2:type=16"),
++                plan.replace("ephemeral_fused", "cached_transform"),
++                format!("{plan}\n  -> Custom Scan (GpuAccelAgg)\n"),
++            ] {
++                assert!(
++                    !plan_contains_where_count(&wrong, c, true),
++                    "{name} malformed proof"
++                );
++            }
++        }
++    }
++
+     fn mock_workload_result(
+         name: &str,
+         rows: usize,
+diff --git a/pg_accel_bench/src/runner.rs b/pg_accel_bench/src/runner.rs
+index 89df0aa5..b39896aa 100644
+--- a/pg_accel_bench/src/runner.rs
++++ b/pg_accel_bench/src/runner.rs
+@@ -1917,8 +1917,11 @@ fn run_with_timing_and_cache_internal(
+     let mut artifact_steady_state_captures = Vec::with_capacity(iterations);
+     let capture_raw_count =
+         crate::workloads::raw_integer_count::contract(workload.name()).is_some();
+-    let capture_typed_h3 =
+-        crate::workloads::h3_count_contract(workload.name()).is_some() || capture_raw_count;
++    let capture_where_count =
++        crate::workloads::hash_count_where::contract(workload.name()).is_some();
++    let capture_typed_h3 = crate::workloads::h3_count_contract(workload.name()).is_some()
++        || capture_raw_count
++        || capture_where_count;
+     let mut typed_h3_settings = Vec::new();
+     let mut raw_integer_count_native_kernel_deltas = Vec::new();
+ 
+@@ -2027,7 +2030,8 @@ fn run_with_timing_and_cache_internal(
+                 && matches!(modes[idx], BenchMode::Accel)
+                 && !planner_capture_taken;
+             planner_capture_taken |= capture_this_planner;
+-            let native_before = if capture_raw_count && matches!(modes[idx], BenchMode::PgParallel)
++            let native_before = if (capture_raw_count || capture_where_count)
++                && matches!(modes[idx], BenchMode::PgParallel)
+             {
+                 Some(capture_dispatch_stats(&mut mode_clients[client_idx])?)
+             } else {
+@@ -2233,7 +2237,10 @@ fn run_with_timing_and_cache_internal(
+         true,
+     );
+     result.set_warmup_iterations(warmup_results);
+-    if capture_raw_count {
++    if capture_where_count {
++        result.where_count_settings = typed_h3_settings;
++        result.where_count_native_kernel_deltas = raw_integer_count_native_kernel_deltas;
++    } else if capture_raw_count {
+         result.raw_integer_count_settings = typed_h3_settings;
+         result.raw_integer_count_native_kernel_deltas = raw_integer_count_native_kernel_deltas;
+     } else {
+@@ -4440,6 +4447,38 @@ fn run_workload_with_config(
+         )?;
+     }
+     setup(connection, workload, rows, config.seed)?;
++    if let Some(contract) = crate::workloads::hash_count_where::contract(workload.name()) {
++        let writer = artifacts.ok_or("WHERE COUNT qualification requires retained artifacts")?;
++        let directory = writer.root().join("fixture_manifests");
++        std::fs::create_dir_all(&directory)?;
++        let seeds = if contract.key == crate::workloads::hash_count_where::Key::H3 {
++            let mut client = Client::connect(connection, NoTls)?;
++            client.batch_execute("SET pg_accel.enabled=off")?;
++            let seeds = client.query("SELECT ordinal, parent::text, child::text FROM bench_hash_where_seeds ORDER BY ordinal", &[])?
++                .iter().map(|r| (r.get::<_,i64>(0),r.get::<_,String>(1),r.get::<_,String>(2))).collect::<Vec<_>>();
++            if seeds.len() != contract.groups() {
++                return Err("WHERE H3 ordered seed count changed".into());
++            }
++            Some(seeds)
++        } else {
++            None
++        };
++        let seed_path = directory.join(format!("{}-{rows}-seeds.json", workload.name()));
++        std::fs::write(&seed_path, serde_json::to_vec_pretty(&seeds)?)?;
++        let seed_sha256 = sha256_file(&seed_path).map_err(std::io::Error::other)?;
++        let manifest = serde_json::json!({
++            "workload": workload.name(), "rows": rows, "generator":"where-arithmetic-v1",
++            "designated":contract.designated(), "groups":contract.groups(), "distinct_masks":contract.mask_count(),
++            "mandatory_scales":crate::workloads::hash_count_where::ROW_SCALES,
++            "setup_sql":workload.setup_sql(rows), "query_sql":workload.query_sql(),
++            "ordered_seeds_file":seed_path.file_name().and_then(|s|s.to_str()), "ordered_seeds_sha256":seed_sha256,
++            "warmups":config.warmup,"iterations":config.iterations,
++        });
++        std::fs::write(
++            directory.join(format!("{}-{rows}.json", workload.name())),
++            serde_json::to_vec_pretty(&manifest)?,
++        )?;
++    }
+ 
+     // VACUUM (ANALYZE, VERBOSE) after load, before timing begins. This proves the parallel
+     // baseline's planner had fresh stats for every measured row — otherwise
+@@ -4619,6 +4658,11 @@ fn run_workload_with_config(
+         )?);
+     }
+     result.correctness_diff_artifact = correctness_diff_artifact;
++    if crate::workloads::hash_count_where::contract(workload.name()).is_some() {
++        result.where_count_execution_proof = Some(capture_raw_integer_count_execution_proof(
++            connection, workload,
++        )?);
++    }
+     result.thermal = thermal;
+     // Cold-honesty tag: if the workload fixture fits within shared_buffers,
+     // the data stays resident even after the OS page-cache purge, so a "cold"
+diff --git a/pg_accel_bench/src/workloads/mod.rs b/pg_accel_bench/src/workloads/mod.rs
+index 4d0dfa23..17df19b8 100644
+--- a/pg_accel_bench/src/workloads/mod.rs
++++ b/pg_accel_bench/src/workloads/mod.rs
+@@ -30,6 +30,7 @@ mod grouped_filtered_integer;
+ mod grouped_integer_sum_avg_candidate;
+ mod grouped_multikey_integer;
+ mod grouped_multimeasure_integer;
++pub mod hash_count_where;
+ mod hashagg_sweep;
+ mod predicate_expression_grouped_agg_int4;
+ mod predicate_filter_expression_grouped_agg;
+@@ -350,6 +351,42 @@ pub trait Workload: Send + Sync {
+ /// Return all registered workloads.
+ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
+     vec![
++        Box::new(hash_count_where::HashCountWhere("where_int2_count_star")),
++        Box::new(hash_count_where::HashCountWhere(
++            "where_int2_count_independent",
++        )),
++        Box::new(hash_count_where::HashCountWhere(
++            "where_int2_count_identical",
++        )),
++        Box::new(hash_count_where::HashCountWhere("where_int4_count_star")),
++        Box::new(hash_count_where::HashCountWhere(
++            "where_int4_count_independent",
++        )),
++        Box::new(hash_count_where::HashCountWhere(
++            "where_int4_count_identical",
++        )),
++        Box::new(hash_count_where::HashCountWhere("where_int8_count_star")),
++        Box::new(hash_count_where::HashCountWhere(
++            "where_int8_count_independent",
++        )),
++        Box::new(hash_count_where::HashCountWhere(
++            "where_int8_count_identical",
++        )),
++        Box::new(hash_count_where::HashCountWhere("where_h3_count_star")),
++        Box::new(hash_count_where::HashCountWhere(
++            "where_h3_count_independent",
++        )),
++        Box::new(hash_count_where::HashCountWhere("where_h3_count_identical")),
++        Box::new(hash_count_where::HashCountWhere(
++            "where_int8_sparse_control",
++        )),
++        Box::new(hash_count_where::HashCountWhere(
++            "where_int8_rejected_control",
++        )),
++        Box::new(hash_count_where::HashCountWhere("where_h3_sparse_control")),
++        Box::new(hash_count_where::HashCountWhere(
++            "where_h3_rejected_control",
++        )),
+         Box::new(raw_integer_count::RawIntegerCount("raw_int2_count_star")),
+         Box::new(raw_integer_count::RawIntegerCount(
+             "raw_int2_count_bool_filter",
+@@ -1122,6 +1159,78 @@ struct ReleasedEnvelopeContract {
+ }
+ 
+ const RELEASED_ENVELOPE_CONTRACTS: &[ReleasedEnvelopeContract] = &[
++    ReleasedEnvelopeContract {
++        workload: "where_int2_count_star",
++        min_rows: 1_000_017,
++        max_rows: 2_000_017,
++        family: ReleasedPathFamily::GroupedAggregate,
++    },
++    ReleasedEnvelopeContract {
++        workload: "where_int2_count_independent",
++        min_rows: 1_000_017,
++        max_rows: 2_000_017,
++        family: ReleasedPathFamily::GroupedAggregate,
++    },
++    ReleasedEnvelopeContract {
++        workload: "where_int2_count_identical",
++        min_rows: 1_000_017,
++        max_rows: 2_000_017,
++        family: ReleasedPathFamily::GroupedAggregate,
++    },
++    ReleasedEnvelopeContract {
++        workload: "where_int4_count_star",
++        min_rows: 1_000_017,
++        max_rows: 2_000_017,
++        family: ReleasedPathFamily::GroupedAggregate,
++    },
++    ReleasedEnvelopeContract {
++        workload: "where_int4_count_independent",
++        min_rows: 1_000_017,
++        max_rows: 2_000_017,
++        family: ReleasedPathFamily::GroupedAggregate,
++    },
++    ReleasedEnvelopeContract {
++        workload: "where_int4_count_identical",
++        min_rows: 1_000_017,
++        max_rows: 2_000_017,
++        family: ReleasedPathFamily::GroupedAggregate,
++    },
++    ReleasedEnvelopeContract {
++        workload: "where_int8_count_star",
++        min_rows: 1_000_017,
++        max_rows: 2_000_017,
++        family: ReleasedPathFamily::GroupedAggregate,
++    },
++    ReleasedEnvelopeContract {
++        workload: "where_int8_count_independent",
++        min_rows: 1_000_017,
++        max_rows: 2_000_017,
++        family: ReleasedPathFamily::GroupedAggregate,
++    },
++    ReleasedEnvelopeContract {
++        workload: "where_int8_count_identical",
++        min_rows: 1_000_017,
++        max_rows: 2_000_017,
++        family: ReleasedPathFamily::GroupedAggregate,
++    },
++    ReleasedEnvelopeContract {
++        workload: "where_h3_count_star",
++        min_rows: 1_000_017,
++        max_rows: 2_000_017,
++        family: ReleasedPathFamily::H3Parent,
++    },
++    ReleasedEnvelopeContract {
++        workload: "where_h3_count_independent",
++        min_rows: 1_000_017,
++        max_rows: 2_000_017,
++        family: ReleasedPathFamily::H3Parent,
++    },
++    ReleasedEnvelopeContract {
++        workload: "where_h3_count_identical",
++        min_rows: 1_000_017,
++        max_rows: 2_000_017,
++        family: ReleasedPathFamily::H3Parent,
++    },
+     ReleasedEnvelopeContract {
+         workload: "raw_int2_count_star",
+         min_rows: 1_000_017,
+@@ -1666,7 +1775,8 @@ pub fn benchmark_threshold_matrix_entry(
+     name: &str,
+     rows: usize,
+ ) -> Option<BenchmarkThresholdMatrixEntry> {
+-    raw_integer_count_threshold_entry(name, rows)
++    hash_count_where_threshold_entry(name, rows)
++        .or_else(|| raw_integer_count_threshold_entry(name, rows))
+         .or_else(|| groupagg_threshold_matrix_entry(name, rows))
+         .or_else(|| olap_threshold_matrix_entry(name, rows))
+         .or_else(|| h3_threshold_matrix_entry(name, rows))
+@@ -1681,6 +1791,39 @@ pub fn benchmark_threshold_matrix_entry(
+         .map(validate_performance_envelope)
+ }
+ 
++fn hash_count_where_threshold_entry(name: &str, rows: usize) -> Option<PerformanceEnvelope> {
++    let c = hash_count_where::contract(name)?;
++    if !c.designated() || !hash_count_where::ROW_SCALES.contains(&rows) {
++        return None;
++    }
++    Some(PerformanceEnvelope {
++        lane: c.name,
++        workload: c.name,
++        rows,
++        data_type: match c.key {
++            hash_count_where::Key::Int2 => "INT2",
++            hash_count_where::Key::Int4 => "INT4",
++            hash_count_where::Key::Int8 => "INT8",
++            hash_count_where::Key::H3 => "H3 resolution15 to parent3",
++        },
++        cardinality: "16388 distinct non-NULL groups plus NULL; arithmetic skew",
++        selectivity: "cycle-varying direct BOOL WHERE; nullable independent or identical FILTER",
++        result_count: "16389".to_owned(),
++        index_pruning_shape: "n/a",
++        prepared_geometry: "n/a",
++        batch_count: "bounded v2 WHERE hash COUNT with natural capacity".to_owned(),
++        row_width: "typed key and physically required Boolean/value columns",
++        output_size: "16389 complete typed key/count rows",
++        dispatch_evidence: "default result-producing verified parallel_hash; actual lifecycle, v2 WHERE population, positive GPU and zero stock fallback",
++        correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
++        cache_gate: GENERIC_CACHE_GATE,
++        threshold_basis: "predeclared 24 WHERE designated cells; eight sensitivities never relabeled winners",
++        expectation: BenchmarkLaneExpectation::GpuWinner {
++            min_warm_speedup: 1.15,
++        },
++    })
++}
++
+ fn raw_integer_count_threshold_entry(name: &str, rows: usize) -> Option<PerformanceEnvelope> {
+     let contract = raw_integer_count::contract(name)?;
+     if contract.dense_control || !raw_integer_count::ROW_SCALES.contains(&rows) {
+@@ -4341,7 +4484,10 @@ mod tests {
+     }
+ 
+     fn supported_default_suite_probe(name: &str, rows: usize) -> bool {
+-        if h3_count_contract(name).is_some() || raw_integer_count::contract(name).is_some() {
++        if h3_count_contract(name).is_some()
++            || raw_integer_count::contract(name).is_some()
++            || hash_count_where::contract(name).is_some()
++        {
+             return matches!(rows, 1_000_017 | 2_000_017);
+         }
+         matches!(
+diff --git a/pg_accel_bench/src/workloads/registry.rs b/pg_accel_bench/src/workloads/registry.rs
+index d505be8a..80e4894f 100644
+--- a/pg_accel_bench/src/workloads/registry.rs
++++ b/pg_accel_bench/src/workloads/registry.rs
+@@ -905,6 +905,10 @@ const PINS_REDUCE_F64: &[ResidentPinSpec] = &[pin!("bench_fp64_num", ["v_f64"])]
+ const PINS_HASHAGG_F64: &[ResidentPinSpec] = &[pin!("bench_fp64_num", ["gk", "v_f64", "w_f64"])];
+ const PINS_H3_PARENT: &[ResidentPinSpec] = &[pin!("bench_h3_parent", ["cell"])];
+ const PINS_RAW_COUNT_STAR: &[ResidentPinSpec] = &[pin!("bench_raw_integer_count", ["k"])];
++const PINS_WHERE_STAR: &[ResidentPinSpec] = &[pin!("bench_hash_where", ["k", "w"])];
++const PINS_WHERE_INDEPENDENT: &[ResidentPinSpec] =
++    &[pin!("bench_hash_where", ["k", "w", "f", "vb"])];
++const PINS_WHERE_IDENTICAL: &[ResidentPinSpec] = &[pin!("bench_hash_where", ["k", "w", "vi"])];
+ const PINS_RAW_COUNT_FILTER: &[ResidentPinSpec] =
+     &[pin!("bench_raw_integer_count", ["k", "value", "qualifies"])];
+ const PINS_H3_COUNT_COLUMN: &[ResidentPinSpec] =
+@@ -1127,6 +1131,61 @@ const PINS_CLICKBENCH_TOP_URLS: &[ResidentPinSpec] = &[pin!(
+ 
+ /// Canonical registry. Exact workload names appear once and only once here.
+ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
++    workload("where_int2_count_star", C::GpuHashAgg, K::HashAgg)
++        .pins(PINS_WHERE_STAR)
++        .evidence(WINNER),
++    workload("where_int2_count_independent", C::GpuHashAgg, K::HashAgg)
++        .pins(PINS_WHERE_INDEPENDENT)
++        .evidence(WINNER),
++    workload("where_int2_count_identical", C::GpuHashAgg, K::HashAgg)
++        .pins(PINS_WHERE_IDENTICAL)
++        .evidence(WINNER),
++    workload("where_int4_count_star", C::GpuHashAgg, K::HashAgg)
++        .pins(PINS_WHERE_STAR)
++        .evidence(WINNER),
++    workload("where_int4_count_independent", C::GpuHashAgg, K::HashAgg)
++        .pins(PINS_WHERE_INDEPENDENT)
++        .evidence(WINNER),
++    workload("where_int4_count_identical", C::GpuHashAgg, K::HashAgg)
++        .pins(PINS_WHERE_IDENTICAL)
++        .evidence(WINNER),
++    workload("where_int8_count_star", C::GpuHashAgg, K::HashAgg)
++        .pins(PINS_WHERE_STAR)
++        .evidence(WINNER),
++    workload("where_int8_count_independent", C::GpuHashAgg, K::HashAgg)
++        .pins(PINS_WHERE_INDEPENDENT)
++        .evidence(WINNER),
++    workload("where_int8_count_identical", C::GpuHashAgg, K::HashAgg)
++        .pins(PINS_WHERE_IDENTICAL)
++        .evidence(WINNER),
++    workload("where_h3_count_star", C::GpuHashAgg, K::H3CellToParent)
++        .pins(PINS_WHERE_STAR)
++        .extensions(H3)
++        .evidence(WINNER),
++    workload(
++        "where_h3_count_independent",
++        C::GpuHashAgg,
++        K::H3CellToParent,
++    )
++    .pins(PINS_WHERE_INDEPENDENT)
++    .extensions(H3)
++    .evidence(WINNER),
++    workload("where_h3_count_identical", C::GpuHashAgg, K::H3CellToParent)
++        .pins(PINS_WHERE_IDENTICAL)
++        .extensions(H3)
++        .evidence(WINNER),
++    workload("where_int8_sparse_control", C::GpuHashAgg, K::HashAgg).pins(PINS_WHERE_STAR),
++    workload("where_int8_rejected_control", C::GpuHashAgg, K::HashAgg).pins(PINS_WHERE_STAR),
++    workload("where_h3_sparse_control", C::GpuHashAgg, K::H3CellToParent)
++        .pins(PINS_WHERE_STAR)
++        .extensions(H3),
++    workload(
++        "where_h3_rejected_control",
++        C::GpuHashAgg,
++        K::H3CellToParent,
++    )
++    .pins(PINS_WHERE_STAR)
++    .extensions(H3),
+     workload("gpu_reduce_sum", C::GpuReduce, K::Reduce),
+     workload("gpu_reduce_scaling", C::GpuReduce, K::Reduce),
+     workload("reduce_sum_f32", C::GpuReduce, K::Reduce),
+diff --git a/pg_accel_bench/src/workloads/hash_count_where.rs b/pg_accel_bench/src/workloads/hash_count_where.rs
+new file mode 100644
+index 00000000..809f39db
+--- /dev/null
++++ b/pg_accel_bench/src/workloads/hash_count_where.rs
+@@ -0,0 +1,294 @@
++//! Frozen WHERE admission matrix: 24 designated cells and eight sensitivities.
++//! This is separate from every released no-WHERE fixture.
++use super::{ExpectedResultValue, ResultOracle, Workload};
++
++pub const ROW_SCALES: &[usize] = &[1_000_017, 2_000_017];
++pub const NAMES: &[&str] = &[
++    "where_int2_count_star",
++    "where_int2_count_independent",
++    "where_int2_count_identical",
++    "where_int4_count_star",
++    "where_int4_count_independent",
++    "where_int4_count_identical",
++    "where_int8_count_star",
++    "where_int8_count_independent",
++    "where_int8_count_identical",
++    "where_h3_count_star",
++    "where_h3_count_independent",
++    "where_h3_count_identical",
++    "where_int8_sparse_control",
++    "where_int8_rejected_control",
++    "where_h3_sparse_control",
++    "where_h3_rejected_control",
++];
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Key {
++    Int2,
++    Int4,
++    Int8,
++    H3,
++}
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Form {
++    Star,
++    Independent,
++    Identical,
++}
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Selection {
++    Mixed,
++    Sparse,
++    Rejected,
++}
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct Contract {
++    pub name: &'static str,
++    pub key: Key,
++    pub form: Form,
++    pub selection: Selection,
++}
++impl Contract {
++    pub const fn designated(self) -> bool {
++        matches!(self.selection, Selection::Mixed)
++    }
++    pub const fn groups(self) -> usize {
++        if self.designated() { 16_388 } else { 64 }
++    }
++    pub const fn mask_count(self) -> usize {
++        if matches!(self.form, Form::Independent) {
++            2
++        } else {
++            1
++        }
++    }
++    pub const fn key_sql(self) -> &'static str {
++        match self.key {
++            Key::H3 => "public.h3_cell_to_parent(k,3)",
++            _ => "k",
++        }
++    }
++}
++pub fn contract(name: &str) -> Option<Contract> {
++    let index = NAMES.iter().position(|candidate| *candidate == name)?;
++    let (key, form, selection) = if index < 12 {
++        (
++            [Key::Int2, Key::Int4, Key::Int8, Key::H3][index / 3],
++            [Form::Star, Form::Independent, Form::Identical][index % 3],
++            Selection::Mixed,
++        )
++    } else {
++        (
++            if index < 14 { Key::Int8 } else { Key::H3 },
++            Form::Star,
++            if index % 2 == 0 {
++                Selection::Sparse
++            } else {
++                Selection::Rejected
++            },
++        )
++    };
++    Some(Contract {
++        name: NAMES[index],
++        key,
++        form,
++        selection,
++    })
++}
++
++/// Independent arithmetic oracle; slots preserve groups with zero counts.
++fn counts(c: Contract, rows: usize) -> (usize, Vec<Option<i64>>) {
++    let groups = c.groups();
++    let mut counts = vec![None; groups + 1];
++    let mut accepted = 0;
++    for i in 1..=rows {
++        let admitted = i % 13 != 0
++            && match c.selection {
++                Selection::Mixed => ((i - 1) / groups) % 4 != 0,
++                Selection::Sparse => i % 101 == 0,
++                Selection::Rejected => false,
++            };
++        if !admitted {
++            continue;
++        }
++        accepted += 1;
++        let g = if i > groups && i % 5 == 0 {
++            0
++        } else {
++            (i - 1) % groups
++        };
++        let key = if i % 97 == 0 { groups } else { g };
++        let count = counts[key].get_or_insert(0);
++        if match c.form {
++            Form::Star => true,
++            Form::Independent => i % 7 != 0 && g != 0 && i % 11 != 0 && i % 3 != 0,
++            Form::Identical => i % 7 != 0,
++        } {
++            *count += 1;
++        }
++    }
++    (accepted, counts)
++}
++
++pub struct HashCountWhere(pub &'static str);
++impl Workload for HashCountWhere {
++    fn name(&self) -> &'static str {
++        self.0
++    }
++    fn description(&self) -> &'static str {
++        "Frozen direct Boolean WHERE COUNT matrix; signed integer/H3 keys, skew, nullable independent/folded FILTER, fixed sensitivity controls"
++    }
++    fn row_scales(&self) -> &'static [usize] {
++        ROW_SCALES
++    }
++    fn setup_sql(&self, rows: usize) -> Vec<String> {
++        assert!(ROW_SCALES.contains(&rows), "frozen WHERE scale");
++        let c = contract(self.0).expect("registered WHERE fixture");
++        let groups = c.groups();
++        let sql_type = match c.key {
++            Key::Int2 => "int2",
++            Key::Int4 => "int4",
++            Key::Int8 => "int8",
++            Key::H3 => "h3index",
++        };
++        let key = match c.key {
++            Key::Int2 => "g*3-24582",
++            Key::Int4 => "g*200003-1638844582",
++            Key::Int8 => "g*100000000003-819400000024582",
++            Key::H3 => "(SELECT child FROM bench_hash_where_seeds WHERE ordinal=g)",
++        };
++        let predicate = match c.selection {
++            Selection::Mixed => {
++                format!("CASE WHEN i%13=0 THEN NULL::boolean ELSE ((i-1)/{groups})%4<>0 END")
++            }
++            Selection::Sparse => "CASE WHEN i%13=0 THEN NULL::boolean ELSE i%101=0 END".to_owned(),
++            Selection::Rejected => "CASE WHEN i%2=0 THEN false ELSE NULL::boolean END".to_owned(),
++        };
++        let mut sql = vec![
++            "DROP TABLE IF EXISTS bench_hash_where".to_owned(),
++            "DROP TABLE IF EXISTS bench_hash_where_seeds".to_owned(),
++        ];
++        if c.key == Key::H3 {
++            sql.push(format!("CREATE TABLE bench_hash_where_seeds AS SELECT row_number() OVER(ORDER BY parent)-1 AS ordinal, parent, public.h3_cell_to_center_child(parent,15) AS child FROM (SELECT DISTINCT child AS parent FROM public.h3_get_res_0_cells() r(cell) CROSS JOIN LATERAL public.h3_cell_to_children(r.cell,3) c(child) ORDER BY parent LIMIT {groups}) seeds"));
++            sql.push("ALTER TABLE bench_hash_where_seeds ADD PRIMARY KEY(ordinal)".to_owned());
++            sql.push(format!("DO $$ BEGIN IF (SELECT count(*)={groups} AND count(DISTINCT parent)={groups} AND bool_and(public.h3_get_resolution(parent)=3 AND public.h3_get_resolution(child)=15 AND public.h3_cell_to_parent(child,3)=parent) FROM bench_hash_where_seeds) IS DISTINCT FROM true THEN RAISE EXCEPTION 'frozen H3 seed cardinality/roundtrip'; END IF; END $$"));
++        }
++        sql.push(format!(
++            "CREATE TABLE bench_hash_where(k {sql_type}, w boolean, f boolean, vb boolean, vi int4)"
++        ));
++        sql.push(format!("INSERT INTO bench_hash_where SELECT CASE WHEN i%97=0 THEN NULL::{sql_type} ELSE ({key})::{sql_type} END, {predicate}, CASE WHEN g=0 THEN false WHEN i%11=0 THEN NULL::boolean ELSE i%3<>0 END, CASE WHEN i%7=0 THEN NULL::boolean ELSE i%2=0 END, CASE WHEN i%7=0 THEN NULL::int4 ELSE (i%1000-500)::int4 END FROM (SELECT i, CASE WHEN i>{groups} AND i%5=0 THEN 0 ELSE (i-1)%{groups} END g FROM generate_series(1::bigint,{rows})s(i)) fixture"));
++        sql.push("ANALYZE bench_hash_where".to_owned());
++        let (accepted, expected) = counts(c, rows);
++        let selected_groups = expected.iter().flatten().count();
++        let zero_groups = expected.iter().flatten().filter(|n| **n == 0).count();
++        let query = self.query_sql();
++        sql.push(format!("DO $$ BEGIN IF (SELECT count(*)={rows} AND count(*) FILTER(WHERE w)={accepted} FROM bench_hash_where) IS DISTINCT FROM true THEN RAISE EXCEPTION 'frozen WHERE row population'; END IF; IF (SELECT count(*)={selected_groups} AND count(*) FILTER(WHERE n=0)={zero_groups} FROM ({query}) actual) IS DISTINCT FROM true THEN RAISE EXCEPTION 'frozen WHERE selected/zero group cardinality'; END IF; END $$"));
++        sql
++    }
++    fn query_sql(&self) -> String {
++        let c = contract(self.0).expect("registered WHERE fixture");
++        let count = match c.form {
++            Form::Star => "count(*)",
++            Form::Independent => "count(vb) FILTER(WHERE f)",
++            Form::Identical => "count(vi) FILTER(WHERE w)",
++        };
++        format!(
++            "SELECT {} AS k, {count} AS n FROM bench_hash_where WHERE w GROUP BY 1",
++            c.key_sql()
++        )
++    }
++    fn result_oracle(&self, rows: usize) -> Option<ResultOracle> {
++        let c = contract(self.0).expect("registered WHERE fixture");
++        let (_, counts) = counts(c, rows);
++        Some(ResultOracle::one_row(
++            format!(
++                "SELECT count(*)::int8, COALESCE(sum(n),0)::int8, count(*) FILTER(WHERE n=0)::int8, COALESCE(bool_or(k IS NULL),false) FROM ({}) actual",
++                self.query_sql()
++            ),
++            vec![
++                ExpectedResultValue::I64(super::usize_to_i64(counts.iter().flatten().count())),
++                ExpectedResultValue::I64(counts.iter().flatten().sum()),
++                ExpectedResultValue::I64(super::usize_to_i64(
++                    counts.iter().flatten().filter(|n| **n == 0).count(),
++                )),
++                ExpectedResultValue::Bool(counts[c.groups()].is_some()),
++            ],
++        ))
++    }
++    fn cleanup_sql(&self) -> Vec<String> {
++        vec![
++            "DROP TABLE IF EXISTS bench_hash_where".to_owned(),
++            "DROP TABLE IF EXISTS bench_hash_where_seeds".to_owned(),
++        ]
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{Form, HashCountWhere, Key, NAMES, ROW_SCALES, contract, counts};
++    use crate::workloads::Workload;
++    #[test]
++    fn independent_registry_and_thresholds_do_not_relabel_old_contracts() {
++        for name in NAMES {
++            let c = contract(name).expect("contract");
++            assert!(crate::workloads::raw_integer_count::contract(name).is_none());
++            assert!(crate::workloads::h3_count_contract(name).is_none());
++            let metadata = crate::workloads::workload_metadata(name).expect("registered metadata");
++            assert_eq!(metadata.resident_pins.len(), 1);
++            assert_eq!(metadata.resident_pins[0].table, "bench_hash_where");
++            for rows in ROW_SCALES {
++                let gate = crate::workloads::benchmark_threshold_matrix_entry(name, *rows);
++                assert_eq!(gate.is_some(), c.designated());
++                if let Some(gate) = gate {
++                    assert_eq!(
++                        gate.expectation,
++                        crate::workloads::BenchmarkLaneExpectation::GpuWinner {
++                            min_warm_speedup: 1.15
++                        }
++                    );
++                }
++            }
++        }
++        for name in crate::workloads::raw_integer_count::NAMES {
++            assert!(contract(name).is_none());
++            assert!(
++                !crate::workloads::raw_integer_count::RawIntegerCount(name)
++                    .query_sql()
++                    .contains(" WHERE ")
++            );
++        }
++    }
++    #[test]
++    fn exact_32_cell_inventory_and_populations() {
++        assert_eq!(NAMES.len() * ROW_SCALES.len(), 32);
++        assert_eq!(
++            NAMES
++                .iter()
++                .filter(|n| contract(n).expect("contract").designated())
++                .count()
++                * 2,
++            24
++        );
++        for name in NAMES {
++            let c = contract(name).expect("contract");
++            for (rows, accepted) in ROW_SCALES.iter().zip([681_055, 1_377_222]) {
++                let (actual, result) = counts(c, *rows);
++                if c.designated() {
++                    assert_eq!(actual, accepted);
++                    assert_eq!(result.iter().flatten().count(), 16_389);
++                    assert_eq!(
++                        result.iter().flatten().filter(|n| **n == 0).count(),
++                        usize::from(c.form == Form::Independent)
++                    );
++                }
++                let sql = HashCountWhere(name).setup_sql(*rows).join("\n");
++                assert!(sql.contains("frozen WHERE row population"));
++                assert!(!sql.contains("SET "));
++                assert_eq!(
++                    sql.contains("frozen H3 seed cardinality/roundtrip"),
++                    c.key == Key::H3
++                );
++            }
++        }
++    }
++}

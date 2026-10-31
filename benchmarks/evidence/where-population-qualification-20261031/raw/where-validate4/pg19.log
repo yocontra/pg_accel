@@ -1,0 +1,6 @@
+   Compiling pgrx-pg-sys v0.19.1
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+   Compiling pgrx v0.19.1
+   Compiling pgrx-tests v0.19.1
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 25.00s
+  Executable unittests src/lib.rs (target/debug/deps/pg_accel-ee631feaa28e3472)

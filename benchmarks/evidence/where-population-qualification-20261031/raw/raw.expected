@@ -1,0 +1,9 @@
+engine::executor::agg::descriptor::raw_count_tests::tests::pg_pg_raw_count_actual_device_cap_plus_one
+engine::executor::agg::descriptor::raw_count_tests::tests::pg_pg_raw_count_forced_partition_signed_alias_and_predicate_identity
+engine::executor::agg::descriptor::raw_count_tests::tests::pg_pg_raw_count_mask_interrupt_preserves_sqlstate_and_benign_counts
+engine::executor::agg::descriptor::raw_count_tests::tests::pg_pg_raw_count_retained_cold_mutation_rollback_and_empty_reload
+engine::executor::agg::descriptor::raw_count_tests::tests::pg_pg_raw_count_smallint_complete_domain_and_null
+engine::executor::agg::descriptor::raw_count_tests::tests::pg_pg_raw_count_spool_failure_cancel_and_actual_rescan_cleanup
+engine::executor::agg::descriptor::raw_count_tests::tests::pg_pg_raw_where_all_key_and_count_types_partition_default_parity
+engine::executor::agg::descriptor::raw_count_tests::tests::pg_pg_raw_where_second_mask_interrupt_drops_partial_owners
+engine::executor::agg::descriptor::raw_count_tests::tests::pg_pg_where_empty_v2_facade_executes_control_without_row_work

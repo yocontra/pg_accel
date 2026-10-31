@@ -1,0 +1,11 @@
+2c2bfc9c9151361d71ae6a46cd000bb4241cc45a6cb6c9e630d00ffc8c5ccafb  .codex/scratch/hash-count-where-rust-20261030/qualify-where-population1.sh
+3f00932ab97b7afd8c8300402979636ea54eabb41488fc26b9ff163e4073cb01  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/run-where-population-live1.sh
+09a21188a8481066ba83d5b991498560676f43dbbd7f8726c4439221d6ae5614  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/check-live2.py
+1ae826b5f810c307e5f50bca52057aec07e92d0ea30428570b3ac1f80382ec64  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/raw.expected
+8ee524660c03b7c90af7679b6da87506302be84a320ade0acf19ef64395d3e0d  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/h3-22.expected
+cb5f3804675debc7561f32f8eb9b798db481f1f8c180fb96a06f204a3a8ed791  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/pgrx/config.toml
+b610f3def10045669267e1f7218ebc82b6a23d97a4e90fe82b8d6fc3f01b27b1  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/where-validate4/terminal.log
+7e80dff4a798aac80bff6e753ff4233983f349dd0d712b2ccc5c381e34b9c0ba  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/where-validate4/source.sha256
+2d254f01389cb6b8cedae8aa1c3c280ca3420cc04947fe195da3d1049d3aa188  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/where-validate4/harness.sha256
+3e8d23e60973bc36c565eaca122214aa6aa7ec0179c1d4d386779acafde3faa9  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/where-validate4/pg18.log
+9ff77529c3498f9e6cc23f2e257660635e37dc768d28dda7782e60923fc45200  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/where-validate4/pg19.log

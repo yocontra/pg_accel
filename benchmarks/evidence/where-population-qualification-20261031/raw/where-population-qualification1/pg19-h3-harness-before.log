@@ -1,0 +1,11 @@
+.codex/scratch/hash-count-where-rust-20261030/qualify-where-population1.sh: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/run-where-population-live1.sh: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/check-live2.py: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/raw.expected: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/h3-22.expected: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/pgrx/config.toml: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/where-validate4/terminal.log: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/where-validate4/source.sha256: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/where-validate4/harness.sha256: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/where-validate4/pg18.log: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/where-validate4/pg19.log: OK

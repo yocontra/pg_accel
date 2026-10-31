@@ -1,0 +1,15 @@
+Read-only verification on 2026-10-31. This is a transcription of tool output,
+not an original redirected historical build log. No build or benchmark rerun.
+Command: shasum -a256 -c .codex/scratch/dense-planning-diagnostic-20261030/lazy-production18/module.sha256
+Exit code: 0
+
+/Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/lazy-production18/postgres/lib/pg_accel.dylib: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/lazy-production18/target/release/libpg_accel.dylib: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/lazy-production18/postgres/bin/postgres: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/lazy-production18/postgres/bin/pg_config: OK
+
+The installed and built release extension hashes are identical:
+dde4b9950928f3f9fd74588e3460d584a9625ca400ced179cb1f8c46b34c2b7e
+Source identity is separately recorded in baseline-0af-source-audit.log.
+This supports reusing the retained artifact as a candidate baseline; it does
+not by itself complete build-input/toolchain audit or any fresh control gate.

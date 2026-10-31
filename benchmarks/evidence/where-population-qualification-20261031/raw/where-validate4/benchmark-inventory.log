@@ -1,0 +1,7 @@
+test report::tests::where_population_requires_complete_exact_same_node_evidence ... ok
+test report::tests::where_gate_accepts_complete_warm_and_both_and_rejects_mutations ... ok
+test report::tests::where_evidence_fields_are_additive_and_fail_closed ... ok
+test report::tests::where_mask_and_aggregate_calls_have_independent_exact_accounting ... ok
+test report::tests::where_parser_requires_exact_key_mask_and_count_in_one_node ... ok
+test workloads::hash_count_where::tests::exact_32_cell_inventory_and_populations ... ok
+test result: ok. 626 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 106.08s

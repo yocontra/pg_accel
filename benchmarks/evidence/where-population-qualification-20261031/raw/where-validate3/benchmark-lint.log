@@ -1,0 +1,14 @@
+    Checking pg_accel_bench v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel_bench)
+error: manual implementation of `.is_multiple_of()`
+   --> pg_accel_bench/src/workloads/hash_count_where.rs:107:37
+    |
+107 |                 Selection::Mixed => ((i - 1) / groups) % 4 != 0,
+    |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace with: `!((i - 1) / groups).is_multiple_of(4)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#manual_is_multiple_of
+    = note: `-D clippy::manual-is-multiple-of` implied by `-D clippy::all`
+    = help: to override `-D clippy::all` add `#[allow(clippy::manual_is_multiple_of)]`
+
+error: could not compile `pg_accel_bench` (bin "pg_accel_bench") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `pg_accel_bench` (bin "pg_accel_bench" test) due to 1 previous error

@@ -1,0 +1,4 @@
+stage=benchmark-lint
+primary=101
+secondary=0
+terminal=101

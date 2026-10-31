@@ -1,0 +1,166 @@
+diff --git a/pg_accel_bench/src/report.rs b/pg_accel_bench/src/report.rs
+index 46e0d6d1..87fae310 100644
+--- a/pg_accel_bench/src/report.rs
++++ b/pg_accel_bench/src/report.rs
+@@ -7117,6 +7117,23 @@ mod tests {
+             w.iterations.splice(0..0, cold);
+         }
+         w = with_valid_resident_lifecycle(w);
++        // The real Both runner retains the warm sub-run's lifecycle summary;
++        // the generic mock helper includes every iteration, including cold.
++        let mut warm_with_probe = vec![
++            w.artifact_lifecycle_probe
++                .as_ref()
++                .expect("probe")
++                .iteration
++                .clone(),
++        ];
++        warm_with_probe.extend(
++            w.iterations
++                .iter()
++                .filter(|sample| sample.cache_state == CacheState::Warm)
++                .cloned(),
++        );
++        w.combined_warm_summary =
++            CacheModeSummary::from_iterations(CacheState::Warm, &warm_with_probe);
+         for capture in w
+             .artifact_lifecycle_probe
+             .iter_mut()
+diff --git a/pg_accel_bench/src/workloads/mod.rs b/pg_accel_bench/src/workloads/mod.rs
+index 17df19b8..4b0cb0de 100644
+--- a/pg_accel_bench/src/workloads/mod.rs
++++ b/pg_accel_bench/src/workloads/mod.rs
+@@ -6628,14 +6628,25 @@ mod tests {
+     // Validate every registered workload
+     // -----------------------------------------------------------------------
+ 
++    fn structural_scales(workload: &dyn Workload, legacy: &[usize]) -> Vec<usize> {
++        if hash_count_where::contract(workload.name()).is_some() {
++            assert_eq!(workload.row_scales(), hash_count_where::ROW_SCALES);
++            workload.row_scales().to_vec()
++        } else {
++            legacy.to_vec()
++        }
++    }
++
+     #[test]
+     fn test_validate_all_workloads() {
+         let workloads = all_workloads();
+         let mut all_issues = Vec::new();
+         for w in &workloads {
+-            let issues = validate_workload(w.as_ref(), 1000);
+-            for issue in &issues {
+-                all_issues.push(issue.clone());
++            for rows in structural_scales(w.as_ref(), &[1000]) {
++                let issues = validate_workload(w.as_ref(), rows);
++                for issue in &issues {
++                    all_issues.push(issue.clone());
++                }
+             }
+         }
+         assert!(
+@@ -6684,21 +6695,23 @@ mod tests {
+     #[test]
+     fn test_every_workload_setup_creates_tables() {
+         for w in &all_workloads() {
+-            let setup = w.setup_sql(100);
+-            // Match `CREATE TABLE`, `CREATE UNLOGGED TABLE`, `CREATE TEMP TABLE`,
+-            // and `CREATE TEMPORARY TABLE` — all legal PG table-creation forms.
+-            let has_create = setup.iter().any(|s| {
+-                let lower = s.to_lowercase();
+-                lower.contains("create table")
+-                    || lower.contains("create unlogged table")
+-                    || lower.contains("create temp table")
+-                    || lower.contains("create temporary table")
+-            });
+-            assert!(
+-                has_create,
+-                "workload '{}' setup_sql does not create any tables",
+-                w.name()
+-            );
++            for rows in structural_scales(w.as_ref(), &[100]) {
++                let setup = w.setup_sql(rows);
++                // Match `CREATE TABLE`, `CREATE UNLOGGED TABLE`, `CREATE TEMP TABLE`,
++                // and `CREATE TEMPORARY TABLE` — all legal PG table-creation forms.
++                let has_create = setup.iter().any(|s| {
++                    let lower = s.to_lowercase();
++                    lower.contains("create table")
++                        || lower.contains("create unlogged table")
++                        || lower.contains("create temp table")
++                        || lower.contains("create temporary table")
++                });
++                assert!(
++                    has_create,
++                    "workload '{}' setup_sql does not create any tables",
++                    w.name()
++                );
++            }
+         }
+     }
+ 
+@@ -6803,8 +6816,10 @@ mod tests {
+     fn test_all_workloads_balanced_parens() {
+         for w in &all_workloads() {
+             let mut issues = Vec::new();
+-            for (i, sql) in w.setup_sql(100).iter().enumerate() {
+-                check_balanced_parens(sql, &format!("{}/setup[{i}]", w.name()), &mut issues);
++            for rows in structural_scales(w.as_ref(), &[100]) {
++                for (i, sql) in w.setup_sql(rows).iter().enumerate() {
++                    check_balanced_parens(sql, &format!("{}/setup[{i}]", w.name()), &mut issues);
++                }
+             }
+             check_balanced_parens(&w.query_sql(), &format!("{}/query", w.name()), &mut issues);
+             for (i, sql) in w.cleanup_sql().iter().enumerate() {
+@@ -6844,7 +6859,7 @@ mod tests {
+             }
+ 
+             let mut scales = workload.row_scales().to_vec();
+-            scales.extend(boundary_scales);
++            scales.extend(structural_scales(workload.as_ref(), &boundary_scales));
+             scales.sort_unstable();
+             scales.dedup();
+             for rows in scales {
+diff --git a/pg_accel_bench/src/workloads/registry.rs b/pg_accel_bench/src/workloads/registry.rs
+index 80e4894f..64e5e616 100644
+--- a/pg_accel_bench/src/workloads/registry.rs
++++ b/pg_accel_bench/src/workloads/registry.rs
+@@ -2476,10 +2476,38 @@ mod tests {
+     fn registry_typed_policy_is_complete_for_special_families() {
+         for entry in WORKLOAD_REGISTRY {
+             let is_h3 = matches!(entry.kernel_class, K::H3LatLng | K::H3CellToParent);
++            let where_contract = super::super::hash_count_where::contract(entry.name);
++            if let Some(contract) = where_contract {
++                use super::super::hash_count_where::{Form, Key};
++                assert_eq!(entry.category, C::GpuHashAgg);
++                assert_eq!(is_h3, contract.key == Key::H3);
++                assert_eq!(
++                    entry.kernel_class,
++                    if is_h3 { K::H3CellToParent } else { K::HashAgg }
++                );
++                assert_eq!(
++                    entry.resident_pins,
++                    match contract.form {
++                        Form::Star => PINS_WHERE_STAR,
++                        Form::Independent => PINS_WHERE_INDEPENDENT,
++                        Form::Identical => PINS_WHERE_IDENTICAL,
++                    }
++                );
++                assert_eq!(entry.required_extensions, if is_h3 { H3 } else { &[] });
++                assert_eq!(
++                    entry.evidence,
++                    if contract.designated() {
++                        WINNER
++                    } else {
++                        EvidenceEligibility::NONE
++                    }
++                );
++                assert!(entry.h3_lane.is_none(), "WHERE has its own exact contract");
++            }
+             // Real-data characterization has no pre-declared winner/parity
+             // policy. It must report the observed lane, including losers;
+             // all existing release-H3 policies remain mandatory.
+-            let released_h3 = is_h3 && entry.category != C::NycTaxi;
++            let released_h3 = is_h3 && entry.category != C::NycTaxi && where_contract.is_none();
+             assert_eq!(
+                 released_h3,
+                 entry.h3_lane.is_some(),
