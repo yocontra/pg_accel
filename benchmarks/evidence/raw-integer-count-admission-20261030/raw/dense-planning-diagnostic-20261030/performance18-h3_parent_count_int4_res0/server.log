@@ -1,0 +1,42 @@
+2026-10-30 20:06:48.797 MST [94240] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-30 20:06:48.797 MST [94240] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-30 20:06:48.829 MST [94240] LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-30 20:06:48.829 MST [94240] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/rawbench18/.s.PGSQL.33618"
+2026-10-30 20:06:48.834 MST [94246] LOG:  database system was shut down at 2026-10-30 20:06:48 MST
+2026-10-30 20:06:48.836 MST [94240] LOG:  database system is ready to accept connections
+2026-10-30 20:06:49.230 MST [94240] LOG:  received SIGHUP, reloading configuration files
+2026-10-30 20:06:49.230 MST [94240] LOG:  parameter "work_mem" changed to "512MB"
+2026-10-30 20:06:49.230 MST [94240] LOG:  parameter "effective_cache_size" changed to "48GB"
+2026-10-30 20:06:49.230 MST [94240] LOG:  parameter "max_parallel_workers_per_gather" changed to "8"
+2026-10-30 20:06:49.230 MST [94240] LOG:  parameter "max_parallel_workers" changed to "12"
+2026-10-30 20:06:49.230 MST [94240] LOG:  parameter "maintenance_work_mem" changed to "2GB"
+2026-10-30 20:06:49.230 MST [94240] LOG:  parameter "jit" changed to "off"
+2026-10-30 20:06:49.230 MST [94240] LOG:  parameter "random_page_cost" changed to "1.1"
+2026-10-30 20:06:49.230 MST [94240] LOG:  parameter "effective_io_concurrency" changed to "256"
+2026-10-30 20:06:49.230 MST [94240] LOG:  parameter "track_io_timing" changed to "on"
+2026-10-30 20:06:49.443 MST [94398] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/cache-performance18/apps/global/jit-cache/1271822922861827712.9759206964653689209.metalar.94429.10216720991323314090.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/cache-performance18/apps/global/jit-cache/11684871488776710216.13865902797576668970.metalar.94429.10611629833502308941.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/cache-performance18/apps/global/jit-cache/3894682702795814436.13938743479207491959.metalar.94429.4216770178600505892.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/cache-performance18/apps/global/jit-cache/8733288213893629742.15838927696693884544.metalar.94429.3118643511437951466.tmp (kernels_added=1 skipped=0)
+2026-10-30 20:06:52.324 MST [94244] LOG:  checkpoint starting: immediate force wait
+2026-10-30 20:06:52.367 MST [94244] LOG:  checkpoint complete: wrote 5008 buffers (0.2%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 4 recycled; write=0.040 s, sync=0.003 s, total=0.044 s; sync files=80, longest=0.001 s, average=0.001 s; distance=67416 kB, estimate=67416 kB; lsn=0/58E5F18, redo lsn=0/58E5EC0
+2026-10-30 20:06:53.555 MST [94643] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 20:06:55.866 MST [94244] LOG:  checkpoint starting: immediate force wait
+2026-10-30 20:06:55.920 MST [94244] LOG:  checkpoint complete: wrote 9729 buffers (0.5%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 8 recycled; write=0.052 s, sync=0.002 s, total=0.055 s; sync files=33, longest=0.001 s, average=0.001 s; distance=133025 kB, estimate=133025 kB; lsn=0/DACE428, redo lsn=0/DACE3D0
+2026-10-30 20:06:57.668 MST [94240] LOG:  received fast shutdown request
+2026-10-30 20:06:57.669 MST [94240] LOG:  aborting any active transactions
+2026-10-30 20:06:57.670 MST [94240] LOG:  background worker "logical replication launcher" (PID 94249) exited with exit code 1
+2026-10-30 20:06:57.670 MST [94244] LOG:  shutting down
+2026-10-30 20:06:57.670 MST [94244] LOG:  checkpoint starting: shutdown immediate
+2026-10-30 20:06:57.679 MST [94244] LOG:  checkpoint complete: wrote 10 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.008 s, sync=0.001 s, total=0.009 s; sync files=8, longest=0.001 s, average=0.001 s; distance=58 kB, estimate=119728 kB; lsn=0/DADCD10, redo lsn=0/DADCD10
+2026-10-30 20:06:57.688 MST [94240] LOG:  database system is shut down

@@ -1,0 +1,17 @@
+2026-10-26 06:18:01.033 MST [71118] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-26 06:18:01.033 MST [71118] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-26 06:18:01.119 MST [71118] LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-26 06:18:01.119 MST [71118] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/raw18/.s.PGSQL.33518"
+2026-10-26 06:18:01.128 MST [71124] LOG:  database system was shut down at 2026-10-26 06:18:00 MST
+2026-10-26 06:18:01.131 MST [71118] LOG:  database system is ready to accept connections
+2026-10-26 06:18:13.944 MST [71122] LOG:  checkpoints are occurring too frequently (12 seconds apart)
+2026-10-26 06:18:13.944 MST [71122] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-26 06:18:13.947 MST [71122] LOG:  checkpoint starting: wal
+2026-10-26 06:18:19.826 MST [71118] LOG:  received fast shutdown request
+2026-10-26 06:18:19.826 MST [71118] LOG:  aborting any active transactions
+2026-10-26 06:18:19.828 MST [71118] LOG:  background worker "logical replication launcher" (PID 71127) exited with exit code 1
+2026-10-26 06:18:19.834 MST [71122] LOG:  checkpoint complete: wrote 1738 buffers (0.1%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 34 recycled; write=5.881 s, sync=0.002 s, total=5.891 s; sync files=48, longest=0.001 s, average=0.001 s; distance=549827 kB, estimate=549827 kB; lsn=0/31FAD0A0, redo lsn=0/23000BE0
+2026-10-26 06:18:19.834 MST [71122] LOG:  shutting down
+2026-10-26 06:18:19.834 MST [71122] LOG:  checkpoint starting: shutdown immediate
+2026-10-26 06:18:19.845 MST [71122] LOG:  checkpoint complete: wrote 34 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 14 recycled; write=0.008 s, sync=0.001 s, total=0.011 s; sync files=22, longest=0.001 s, average=0.001 s; distance=245425 kB, estimate=519387 kB; lsn=0/31FAD118, redo lsn=0/31FAD118
+2026-10-26 06:18:19.856 MST [71118] LOG:  database system is shut down

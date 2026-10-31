@@ -1,0 +1,40 @@
+2026-10-30 19:39:31.530 MST [66335] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-30 19:39:31.530 MST [66335] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-30 19:39:31.565 MST [66335] LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-30 19:39:31.566 MST [66335] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/dp18-20261030/.s.PGSQL.34318"
+2026-10-30 19:39:31.572 MST [66341] LOG:  database system was shut down at 2026-10-30 19:39:31 MST
+2026-10-30 19:39:31.574 MST [66335] LOG:  database system is ready to accept connections
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/run4/jit-cache/apps/global/jit-cache/9746615646409597690.17468199421789204575.metalar.66361.8826724724076774147.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/run4/jit-cache/apps/global/jit-cache/17075605042627645658.8959692158553657888.metalar.66361.11560958046144885396.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/run4/jit-cache/apps/global/jit-cache/2993083400042206172.16777302068134248360.metalar.66361.9070359026646888708.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/run4/jit-cache/apps/global/jit-cache/10813227848175954278.17468199421789204575.metalar.66361.3508589094720324846.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/run4/jit-cache/apps/global/jit-cache/71121235393808374.7197677791572510231.metalar.66361.7301673484251907688.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+2026-10-30 19:39:41.616 MST [66335] LOG:  received fast shutdown request
+2026-10-30 19:39:41.616 MST [66335] LOG:  aborting any active transactions
+2026-10-30 19:39:41.617 MST [66335] LOG:  background worker "logical replication launcher" (PID 66344) exited with exit code 1
+2026-10-30 19:39:41.618 MST [66339] LOG:  shutting down
+2026-10-30 19:39:41.618 MST [66339] LOG:  checkpoint starting: shutdown immediate
+2026-10-30 19:39:41.647 MST [66339] LOG:  checkpoint complete: wrote 74 buffers (0.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 16 recycled; write=0.026 s, sync=0.002 s, total=0.029 s; sync files=43, longest=0.001 s, average=0.001 s; distance=263395 kB, estimate=263395 kB; lsn=0/11848BB0, redo lsn=0/11848BB0
+2026-10-30 19:39:41.663 MST [66335] LOG:  database system is shut down

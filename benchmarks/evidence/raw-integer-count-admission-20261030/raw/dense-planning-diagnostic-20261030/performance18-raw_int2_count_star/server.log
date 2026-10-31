@@ -1,0 +1,52 @@
+2026-10-30 20:05:25.345 MST [88811] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-30 20:05:25.345 MST [88811] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-30 20:05:25.380 MST [88811] LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-30 20:05:25.380 MST [88811] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/rawbench18/.s.PGSQL.33618"
+2026-10-30 20:05:25.386 MST [88817] LOG:  database system was shut down at 2026-10-30 20:05:25 MST
+2026-10-30 20:05:25.388 MST [88811] LOG:  database system is ready to accept connections
+2026-10-30 20:05:25.530 MST [88811] LOG:  received SIGHUP, reloading configuration files
+2026-10-30 20:05:25.531 MST [88811] LOG:  parameter "work_mem" changed to "512MB"
+2026-10-30 20:05:25.531 MST [88811] LOG:  parameter "effective_cache_size" changed to "48GB"
+2026-10-30 20:05:25.531 MST [88811] LOG:  parameter "max_parallel_workers_per_gather" changed to "8"
+2026-10-30 20:05:25.531 MST [88811] LOG:  parameter "max_parallel_workers" changed to "12"
+2026-10-30 20:05:25.531 MST [88811] LOG:  parameter "maintenance_work_mem" changed to "2GB"
+2026-10-30 20:05:25.531 MST [88811] LOG:  parameter "jit" changed to "off"
+2026-10-30 20:05:25.531 MST [88811] LOG:  parameter "random_page_cost" changed to "1.1"
+2026-10-30 20:05:25.531 MST [88811] LOG:  parameter "effective_io_concurrency" changed to "256"
+2026-10-30 20:05:25.531 MST [88811] LOG:  parameter "track_io_timing" changed to "on"
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/cache-performance18/apps/global/jit-cache/2162414632176424564.276896800945861089.metalar.88993.16411554486829568736.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/cache-performance18/apps/global/jit-cache/14690400167917884164.3864273571305065621.metalar.88993.4858087133076565748.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/cache-performance18/apps/global/jit-cache/10472877249461755428.3710491702715165948.metalar.88993.5017606360572688599.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/cache-performance18/apps/global/jit-cache/11875988791388504772.5352501570065973448.metalar.88993.11179365176029656466.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/cache-performance18/apps/global/jit-cache/3343146203677648360.13938743479207491959.metalar.88993.4982967493771740567.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/cache-performance18/apps/global/jit-cache/13202969316813390278.13938743479207491959.metalar.88993.5073312842911642510.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/cache-performance18/apps/global/jit-cache/10472877249461755428.12301155396471007084.metalar.88993.7649522972313428959.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/cache-performance18/apps/global/jit-cache/6518194252491983574.5352501570065973448.metalar.88993.14371286135536032726.tmp (kernels_added=1 skipped=0)
+2026-10-30 20:05:29.627 MST [88815] LOG:  checkpoint starting: immediate force wait
+2026-10-30 20:05:29.666 MST [88815] LOG:  checkpoint complete: wrote 4515 buffers (0.2%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 4 recycled; write=0.037 s, sync=0.002 s, total=0.040 s; sync files=51, longest=0.001 s, average=0.001 s; distance=63389 kB, estimate=63389 kB; lsn=0/54F70E0, redo lsn=0/54F7088
+2026-10-30 20:05:32.785 MST [88815] LOG:  checkpoint starting: immediate force wait
+2026-10-30 20:05:32.834 MST [88815] LOG:  checkpoint complete: wrote 8900 buffers (0.4%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 8 recycled; write=0.046 s, sync=0.002 s, total=0.049 s; sync files=36, longest=0.001 s, average=0.001 s; distance=126159 kB, estimate=126159 kB; lsn=0/D02B0C0, redo lsn=0/D02B068
+2026-10-30 20:05:34.501 MST [88811] LOG:  received fast shutdown request
+2026-10-30 20:05:34.502 MST [88811] LOG:  aborting any active transactions
+2026-10-30 20:05:34.503 MST [88811] LOG:  background worker "logical replication launcher" (PID 88820) exited with exit code 1
+2026-10-30 20:05:34.503 MST [88815] LOG:  shutting down
+2026-10-30 20:05:34.503 MST [88815] LOG:  checkpoint starting: shutdown immediate
+2026-10-30 20:05:34.512 MST [88815] LOG:  checkpoint complete: wrote 11 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.008 s, sync=0.001 s, total=0.009 s; sync files=9, longest=0.001 s, average=0.001 s; distance=63 kB, estimate=113550 kB; lsn=0/D03AD10, redo lsn=0/D03AD10
+2026-10-30 20:05:34.521 MST [88811] LOG:  database system is shut down

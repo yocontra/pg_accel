@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "status": "pass",
+  "expected_extension_version": "1.0.0-rc1",
+  "postgres": {
+    "backend_pid": 18812,
+    "server_version": "18.4",
+    "data_directory": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/performance18-dense_int4_count_control-final3/pgdata",
+    "config_file": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/performance18-dense_int4_count_control-final3/pgdata/postgresql.conf",
+    "shared_preload_libraries": "pg_accel",
+    "postmaster_start_time": "2026-10-26 02:18:10.434052-07",
+    "postmaster_start_unix_seconds": 1793006290
+  },
+  "sql": {
+    "extversion": "1.0.0-rc1",
+    "pg_accel_version": "1.0.0-rc1",
+    "function_probin": "pg_accel",
+    "function_prosrc": "pg_accel_version_wrapper"
+  },
+  "live_smoke": {
+    "backend_pid": 18812,
+    "pg_accel_version": "1.0.0-rc1",
+    "kernel_executions": 0,
+    "stats_rows": 1,
+    "error": null
+  },
+  "pg_config": {
+    "command": "/Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/18.4/bin/pg_config",
+    "pkglibdir": "/Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/18.4/lib",
+    "sharedir": "/Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/18.4/share",
+    "error": null,
+    "control_file": {
+      "path": "/Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/18.4/share/extension/pg_accel.control",
+      "exists": true,
+      "sha256": "79599b7d8d15a0390b5651ba7cb5dd5838d04b8db0242db25989e9abdda5b2e7",
+      "len_bytes": 181,
+      "modified_unix_seconds": 1793006087,
+      "mapping_deleted": false,
+      "error": null
+    },
+    "control_default_version": "1.0.0-rc1",
+    "sql_files": [
+      {
+        "path": "/Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/18.4/share/extension/pg_accel--0.1.0.sql",
+        "exists": true,
+        "sha256": "60bbc0d23e06afd070bfa9326356064c807811795da1fddbae52bded161698cc",
+        "len_bytes": 15986,
+        "modified_unix_seconds": 1791844489,
+        "mapping_deleted": false,
+        "error": null
+      },
+      {
+        "path": "/Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/18.4/share/extension/pg_accel--1.0.0-rc1.sql",
+        "exists": true,
+        "sha256": "d32ae44270863a9c28cdd3c6a868a6cc799262b2049c55abc55cd212ae82d06f",
+        "len_bytes": 15986,
+        "modified_unix_seconds": 1793006087,
+        "mapping_deleted": false,
+        "error": null
+      }
+    ]
+  },
+  "expected_binary": {
+    "path": "/Users/contra/Projects/pg_accel/target/release/libpg_accel.dylib",
+    "exists": true,
+    "sha256": "ba2ae6bee5dd8be5ab9541c9803f19492d7c53a61b58431952a493a0ac0f7e4d",
+    "len_bytes": 9215632,
+    "modified_unix_seconds": 1793006087,
+    "mapping_deleted": false,
+    "error": null
+  },
+  "installed_binary": {
+    "path": "/Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/18.4/lib/pg_accel.dylib",
+    "exists": true,
+    "sha256": "ba2ae6bee5dd8be5ab9541c9803f19492d7c53a61b58431952a493a0ac0f7e4d",
+    "len_bytes": 9215632,
+    "modified_unix_seconds": 1793006087,
+    "mapping_deleted": false,
+    "error": null
+  },
+  "loaded_binaries": [
+    {
+      "path": "/Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/18.4/lib/pg_accel.dylib",
+      "exists": true,
+      "sha256": "ba2ae6bee5dd8be5ab9541c9803f19492d7c53a61b58431952a493a0ac0f7e4d",
+      "len_bytes": 9215632,
+      "modified_unix_seconds": 1793006087,
+      "mapping_deleted": false,
+      "error": null
+    }
+  ],
+  "mapped_library_discovery": {
+    "method": "lsof",
+    "mapped_paths": [
+      "/Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/18.4/lib/pg_accel.dylib"
+    ],
+    "warning": null
+  },
+  "device_limits_sources": [
+    "hardware_derived"
+  ],
+  "warnings": [],
+  "errors": []
+}

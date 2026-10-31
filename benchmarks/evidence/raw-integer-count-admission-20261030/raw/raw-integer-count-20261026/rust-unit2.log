@@ -1,0 +1,41 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.80s
+     Running unittests src/lib.rs (target/debug/deps/pg_accel-4b4c215d478719d0)
+
+running 33 tests
+test engine::cost::units::tests::pg_cost_round_trips_raw_value ... ok
+test engine::cost::units::tests::integer_units_round_trip_raw_values ... ok
+test engine::executor::agg::descriptor::tests::raw_hash_capacity_bounds_workspace_not_input_cardinality ... ok
+test engine::executor::tuple::tests::into_raw_releases_null_without_drop_work ... ok
+test engine::executor::agg::descriptor::tests::raw_hash_learns_only_validated_capacity_for_its_current_generation ... ok
+test engine::ffi::planner_hooks::shape::builder::tests::scalar_date_extrema_admission_does_not_broaden_raw_date_or_sum ... ok
+test engine::residency::loader::unit_tests::raw_datum_ingestion_preserves_values_and_nulls ... ok
+test engine::residency::loader::unit_tests::raw_h3_datum_preserves_all_unsigned_bits ... ok
+test engine::executor::agg::descriptor::tests::independent_integer_filters_bind_raw_inputs_and_keep_exact_states ... ok
+test engine::residency::store::tests::budget_eviction_drops_derived_before_raw_and_respects_pin ... ok
+test engine::residency::loader::unit_tests::raw_extension_datum_wrappers_have_exact_null_and_roundtrip_contracts ... ok
+test engine::executor::agg::descriptor::tests::numeric_filter_binds_an_independent_typed_raw_input_without_a_value_state ... ok
+test engine::executor::agg::descriptor::tests::bigint_numeric_binding_keeps_raw_buffers_and_independent_filters ... ok
+test engine::ffi::planner_hooks::decline_cache::tests::raw_and_legacy_candidate_declines_are_isolated_in_both_directions ... ok
+test engine::residency::store::tests::execution_reclamation_protects_full_artifact_identity_and_raw_pins ... ok
+test engine::ffi::custom_scan::private_data::typed_private_tests::raw_selection_roundtrips_and_rejects_malformed_or_ineligible_payloads ... ok
+test engine::residency::store::tests::protected_raw_dependencies_can_release_derived_artifacts ... ok
+test gpu::bridge::tests::raw_invalid_argument_status_is_typed ... ok
+test engine::executor::agg::descriptor::tests::raw_integer_hash_binding_preserves_inputs_and_native_shape ... ok
+test gpu::raster::resident_tests::host_launch_details_map_without_raw_enum_ffi ... ok
+test gpu::raster::resident_tests::raw_launch_outcome_is_fixed_pod_and_maps_only_on_request ... ok
+test engine::residency::store::tests::finite_budget_replaces_owner_artifact_without_evicting_raw_dependencies ... ok
+test phase2_bridge_tests::from_raw_maps_every_known_discriminant ... ok
+test phase2_bridge_tests::from_raw_rejects_out_of_range_values_with_raw_payload ... ok
+test gpu::spatial::resident_spatial_tests::raw_launch_outcomes_are_mapped_only_by_post_borrow_helpers ... ok
+test phase2_bridge_tests::from_raw_round_trips_every_variant_discriminant ... ok
+test gpu::spatial::resident_spatial_tests::raw_launch_outcome_capture_allocates_nothing ... ok
+test engine::residency::store::tests::raw_dispatch_requires_complete_current_canonical_dependencies ... ok
+test engine::residency::store::tests::planner_raw_owner_requires_complete_typed_union_and_preserves_selected_metadata ... ok
+test engine::ffi::planner_hooks::generic_groupagg::tests::partial_raw_snapshot_is_replaced_by_full_selected_estimate ... ok
+test engine::executor::agg::descriptor::tests::raw_count_envelope_and_metadata_cover_all_key_and_count_types ... ok
+test engine::executor::agg::descriptor::tests::scalar_mixed_states_preserve_independent_raw_filters_and_specialization ... ok
+test engine::residency::store::tests::staged_device_lifecycle_prepares_only_on_miss_and_outside_raw_dispatch_borrow ... ok
+
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 1314 filtered out; finished in 0.01s
+

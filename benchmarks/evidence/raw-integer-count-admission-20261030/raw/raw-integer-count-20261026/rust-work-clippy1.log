@@ -1,0 +1,83 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error: struct `DenseCountWork` is never constructed
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:4939:12
+     |
+4939 | pub struct DenseCountWork {
+     |            ^^^^^^^^^^^^^^
+     |
+     = note: `-D dead-code` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error: method `add_repeated` is never used
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:4945:8
+     |
+4944 | impl DenseCountWork {
+     | ------------------- method in this implementation
+4945 |     fn add_repeated(
+     |        ^^^^^^^^^^^^
+
+error: function `dense_count_work_requirements` is never used
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:4998:8
+     |
+4998 | pub fn dense_count_work_requirements(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: function `dense_count_lifecycle_work` is never used
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:5013:4
+     |
+5013 | fn dense_count_lifecycle_work(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: function `query_dense_count_work` is never used
+    --> pg_accel/src/gpu/grouped_agg.rs:3225:15
+     |
+3225 | pub unsafe fn query_dense_count_work(
+     |               ^^^^^^^^^^^^^^^^^^^^^^
+
+error: calling `PgaccelGroupedAggCountWorkV1::default()` is more clear than this expression
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:5018:16
+     |
+5018 |         facts: Default::default(),
+     |                ^^^^^^^^^^^^^^^^^^ help: try: `PgaccelGroupedAggCountWorkV1::default()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#default_trait_access
+     = note: `-D clippy::default-trait-access` implied by `-D clippy::pedantic`
+     = help: to override `-D clippy::pedantic` add `#[allow(clippy::default_trait_access)]`
+
+error: implicit borrow as raw pointer
+    --> pg_accel/src/gpu/grouped_agg.rs:3237:73
+     |
+3237 |         unsafe { bridge::pgaccel_grouped_agg_count_work_requirements_v1(&query, &mut facts) };
+     |                                                                         ^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#borrow_as_ptr
+     = note: `-D clippy::borrow-as-ptr` implied by `-D clippy::pedantic`
+     = help: to override `-D clippy::pedantic` add `#[allow(clippy::borrow_as_ptr)]`
+help: use a raw pointer instead
+     |
+3237 |         unsafe { bridge::pgaccel_grouped_agg_count_work_requirements_v1(&raw const query, &mut facts) };
+     |                                                                          +++++++++
+
+error: implicit borrow as raw pointer
+    --> pg_accel/src/gpu/grouped_agg.rs:3237:81
+     |
+3237 |         unsafe { bridge::pgaccel_grouped_agg_count_work_requirements_v1(&query, &mut facts) };
+     |                                                                                 ^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#borrow_as_ptr
+help: use a raw pointer instead
+     |
+3237 |         unsafe { bridge::pgaccel_grouped_agg_count_work_requirements_v1(&query, &raw mut facts) };
+     |                                                                                  +++
+
+error: could not compile `pg_accel` (lib) due to 8 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: calling `PgaccelGroupedAggCountWorkV1::default()` is more clear than this expression
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:9231:20
+     |
+9231 |             facts: Default::default(),
+     |                    ^^^^^^^^^^^^^^^^^^ help: try: `PgaccelGroupedAggCountWorkV1::default()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#default_trait_access
+
+error: could not compile `pg_accel` (lib test) due to 4 previous errors

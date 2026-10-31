@@ -1,0 +1,9 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 55.42s
+     Running unittests src/lib.rs (target/debug/deps/pg_accel-ee631feaa28e3472)
+
+running 1 test
+test engine::cost::tests::dense_count_serial_reference_units_and_zero_validation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1906 filtered out; finished in 0.00s
+

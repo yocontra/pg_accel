@@ -1,0 +1,106 @@
+2026-10-26 06:07:10.256 MST [67245] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-26 06:07:10.257 MST [67245] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-26 06:07:10.350 MST [67245] LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-26 06:07:10.350 MST [67245] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/rawselection18/.s.PGSQL.33818"
+2026-10-26 06:07:10.361 MST [67251] LOG:  database system was shut down at 2026-10-26 06:07:09 MST
+2026-10-26 06:07:10.364 MST [67245] LOG:  database system is ready to accept connections
+2026-10-26 06:07:11.216 MST [67260] ERROR:  wrong default strategy kind=int2 rows=1000017 groups=64 expected=parallel_dense_count plan=Custom Scan (GpuAccelAgg) (actual rows=65.00 loops=1)
+	  Output: k, (count(*))
+	  Strategy: GpuAgg
+	  Plan Selected: true
+	  Batch Size: 65536
+	  Expected Threads: 1
+	  GPU Resident Pipeline: true
+	  GPU Resident Proof Version: 2
+	  GPU Resident Operator Class: resident_groupagg
+	  GPU Physical Kernel Mode: parallel_hash
+	  GPU Dispatched Physical Kernel Mode: parallel_hash
+	  GPU Physical Kernel Mode Verified: true
+	  GPU Planned Lifecycle Calls: 1
+	  GPU Lifecycle Calls Verified: true
+	  GPU Descriptor Strategy: descriptor_grouped_aggregate
+	  GPU Descriptor Specialization: hash_count
+	  GPU Descriptor Specialization Cache: miss
+	  GPU Descriptor Artifact Policy: ephemeral_fused reason=zero_retained_bytes construction_bytes=0 ephemeral_bytes=0 construction_time_us=1 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=0 ephemeral_build_launches=0 consumer_launches=1 budget_headroom_bytes=8584934507
+	  GPU Descriptor Group Keys: k0:fact(16422.1:type=21) type=21 collation=0 encoding=hash
+	  GPU Descriptor Aggregates: m0:count_star -> value.count
+	  GPU Descriptor Filter: fact=none; measures=[m0=none]; dimensions=[none]
+	  GPU Descriptor Star Dimensions: none
+	  GPU Descriptor Output: slot0:group[k0] source_type=21 result_type=21 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+	  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+	  GPU Descriptor Artifact: built
+	  GPU Descriptor Generations: rel=16422 generation=1 global=1 relfilenode=16422
+	  GPU Descriptor Bytes: raw=5000085 derived=0 artifact=0 total=5000085
+	  GPU Resident Stage Mask: 16393
+	  GPU Resident Device Columns: 1
+	  GPU Resident Boundary: none: no CPU boundary
+	  GPU Kernel Dispatched: true
+	  Rows Returned To CPU: 0
+	  Rows Dispatched: 1000017
+	  Batches: 1
+	  Rows Per Batch: 1000017.000
+	  Dispatch Time: 41.030 ms
+	  Avg Dispatch Time Per Batch: 41.030 ms
+	  Counter Scope: Local Backend
+	  GPU Dispatched: true
+	  Raw Relation Load Time: 0.000 ms
+	  Total Residency Preparation Time: 0.029 ms
+	Planning:
+	  Buffers: shared hit=44
+	Planning Time: 1.010 ms
+	Execution Time: 41.605 ms
+	
+2026-10-26 06:07:11.216 MST [67260] CONTEXT:  PL/pgSQL function inline_code_block line 30 at RAISE
+2026-10-26 06:07:11.216 MST [67260] STATEMENT:  DO $$
+	DECLARE kind text; rows bigint; groups bigint; key_expr text; q text; line record;
+	 plan text; calls bigint; stock bigint; expected_mode text; actual_groups bigint;
+	BEGIN
+	 FOREACH kind IN ARRAY ARRAY['int2','int4','int8'] LOOP
+	  FOREACH rows IN ARRAY ARRAY[1000017::bigint,2000017::bigint] LOOP
+	   FOREACH groups IN ARRAY ARRAY[64::bigint,4096::bigint,16388::bigint] LOOP
+	    IF groups=4096 AND kind<>'int4' THEN CONTINUE; END IF;
+	    key_expr:=CASE WHEN groups=64 THEN 'g-32'
+	      WHEN kind='int2' THEN 'g*3-24582'
+	      WHEN kind='int4' THEN 'g*200003-1638844582'
+	      ELSE 'g*100000000003-819400000024582' END;
+	    EXECUTE format('CREATE TEMP TABLE count_selection(k %s)',kind);
+	    EXECUTE format('INSERT INTO count_selection SELECT CASE WHEN i%%97=0 THEN NULL::%s ELSE (%s)::%s END FROM (SELECT i,CASE WHEN i>%s AND i%%5=0 THEN 0 ELSE (i-1)%%%s END g FROM generate_series(1::bigint,%s)s(i))fixture',kind,key_expr,kind,groups,groups,rows);
+	    ANALYZE count_selection;
+	    PERFORM pg_accel_pin('count_selection',ARRAY['k']);
+	    q:='SELECT k,count(*) n FROM count_selection GROUP BY k';
+	    PERFORM set_config('pg_accel.enabled','off',false);
+	    calls:=pg_accel_kernel_executions(); SELECT stock_exec_count INTO stock FROM pg_accel_stats();
+	    EXECUTE 'CREATE TEMP TABLE selection_expected AS '||q;
+	    IF pg_accel_kernel_executions()<>calls OR (SELECT stock_exec_count FROM pg_accel_stats())<>stock THEN RAISE EXCEPTION 'native oracle dispatched'; END IF;
+	    PERFORM set_config('pg_accel.enabled','on',false);
+	    expected_mode:=CASE WHEN groups=64 THEN 'parallel_dense_count' ELSE 'parallel_hash' END;
+	    plan:=''; calls:=pg_accel_kernel_executions();
+	    FOR line IN EXECUTE 'EXPLAIN (ANALYZE,VERBOSE,COSTS OFF,TIMING OFF) '||q LOOP plan:=plan||line."QUERY PLAN"||E'\n'; END LOOP;
+	    IF pg_accel_kernel_executions()<=calls OR (SELECT stock_exec_count FROM pg_accel_stats())<>stock
+	      OR position('GPU Dispatched Physical Kernel Mode: '||expected_mode IN plan)=0
+	      OR position('GPU Physical Kernel Mode Verified: true' IN plan)=0
+	      OR position('GPU Lifecycle Calls Verified: true' IN plan)=0 THEN
+	      RAISE EXCEPTION 'wrong default strategy kind=% rows=% groups=% expected=% plan=%',kind,rows,groups,expected_mode,plan;
+	    END IF;
+	    calls:=pg_accel_kernel_executions();
+	    EXECUTE 'CREATE TEMP TABLE selection_actual AS '||q;
+	    IF pg_accel_kernel_executions()<=calls OR (SELECT stock_exec_count FROM pg_accel_stats())<>stock THEN RAISE EXCEPTION 'result missing GPU or stock fallback'; END IF;
+	    PERFORM set_config('pg_accel.enabled','off',false);
+	    SELECT count(*) INTO actual_groups FROM selection_actual;
+	    IF actual_groups<>groups+1 OR EXISTS((TABLE selection_actual EXCEPT ALL TABLE selection_expected) UNION ALL (TABLE selection_expected EXCEPT ALL TABLE selection_actual)) THEN RAISE EXCEPTION 'full parity/cardinality failure'; END IF;
+	    RAISE NOTICE 'COUNT_SELECTION_PASS kind=% rows=% groups=% mode=% full_parity=true actual_groups=%',kind,rows,groups,expected_mode,actual_groups;
+	    RAISE NOTICE 'COUNT_SELECTION_ACTUAL_PLAN %',plan;
+	    DROP TABLE selection_actual,selection_expected;
+	    PERFORM pg_accel_unpin('count_selection'); DROP TABLE count_selection;
+	    PERFORM set_config('pg_accel.enabled','on',false);
+	   END LOOP;
+	  END LOOP;
+	 END LOOP;
+	END $$;
+2026-10-26 06:07:11.228 MST [67245] LOG:  received fast shutdown request
+2026-10-26 06:07:11.230 MST [67245] LOG:  aborting any active transactions
+2026-10-26 06:07:11.232 MST [67245] LOG:  background worker "logical replication launcher" (PID 67254) exited with exit code 1
+2026-10-26 06:07:11.248 MST [67249] LOG:  shutting down
+2026-10-26 06:07:11.248 MST [67249] LOG:  checkpoint starting: shutdown immediate
+2026-10-26 06:07:11.268 MST [67249] LOG:  checkpoint complete: wrote 74 buffers (0.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.019 s, sync=0.002 s, total=0.021 s; sync files=43, longest=0.001 s, average=0.001 s; distance=325 kB, estimate=325 kB; lsn=0/1761008, redo lsn=0/1761008
+2026-10-26 06:07:11.282 MST [67245] LOG:  database system is shut down

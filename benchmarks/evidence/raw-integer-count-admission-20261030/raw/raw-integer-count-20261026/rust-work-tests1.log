@@ -1,0 +1,7 @@
+
+running 2 tests
+test engine::executor::agg::descriptor::tests::dense_count_work_matches_actual_call_multiplicity_and_empty_phases ... ok
+test engine::executor::agg::descriptor::tests::dense_count_work_repetition_checks_overflow_and_static_shape ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1349 filtered out; finished in 0.00s
+

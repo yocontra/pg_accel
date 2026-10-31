@@ -1,0 +1,589 @@
+{
+  "schema_version": 1,
+  "kind": "frozen_fit_validation_no_refit",
+  "fit_sha256": "27a4219e358771bf72d7b399b20bba10b8e6bf54f8e4c82e704c49464c20b84a",
+  "cells": [
+    {
+      "id": "n500017-g256",
+      "role": "holdout",
+      "path": "dense-count-validation1/n500017-g256.json",
+      "sha256": "e9017e85dc1a1744e1f9c515cf307207e644383a2b48e4efc8b29f99fac0691e",
+      "acquisition_started_at": "2026-10-26T12:02:35.330060+00:00",
+      "acquisition_completed_at": "2026-10-26T12:04:47.929950+00:00",
+      "acquisition_receipt": {
+        "path": "dense-count-validation1/n500017-g256-acquisition.json",
+        "sha256": "14013ac61673a803b17a6aeb09c32fd57e4df6248a8f874ba555cad268b589f6"
+      },
+      "heldout_fit_sha256": "27a4219e358771bf72d7b399b20bba10b8e6bf54f8e4c82e704c49464c20b84a",
+      "features": [
+        255.137,
+        2827,
+        1.0
+      ],
+      "work": {
+        "P": 500274,
+        "Q": 0,
+        "S": 2827,
+        "L": 1,
+        "actual_capacity": 257
+      },
+      "warmup_us": [
+        13671,
+        2606,
+        2571,
+        2481,
+        2516
+      ],
+      "samples_us": [
+        2586,
+        2491,
+        1522,
+        1577,
+        1486,
+        1515,
+        1440,
+        1465,
+        1351,
+        1477
+      ],
+      "median_us": 1500.5,
+      "cv_pct": 26.673865136749942,
+      "predicted_us": 2239.6850747877634,
+      "residual_us": -739.1850747877634
+    },
+    {
+      "id": "n500017-g4096",
+      "role": "holdout",
+      "path": "dense-count-validation1/n500017-g4096.json",
+      "sha256": "f8eff2dc42c9592c62731e4809f35ec1d7f641a1ac5ed36fb1520785ddb4edc2",
+      "acquisition_started_at": "2026-10-26T12:04:47.943055+00:00",
+      "acquisition_completed_at": "2026-10-26T12:04:49.659573+00:00",
+      "acquisition_receipt": {
+        "path": "dense-count-validation1/n500017-g4096-acquisition.json",
+        "sha256": "cec6796a35a1100f1808f1eb5df25107330dc7bcda6fdc4e5dd65f7eaaa22f03"
+      },
+      "heldout_fit_sha256": "27a4219e358771bf72d7b399b20bba10b8e6bf54f8e4c82e704c49464c20b84a",
+      "features": [
+        257.057,
+        45067,
+        1.0
+      ],
+      "work": {
+        "P": 504114,
+        "Q": 0,
+        "S": 45067,
+        "L": 1,
+        "actual_capacity": 4097
+      },
+      "warmup_us": [
+        8755,
+        8816,
+        8729,
+        8749,
+        8772
+      ],
+      "samples_us": [
+        8772,
+        8779,
+        8771,
+        8786,
+        8792,
+        8654,
+        8678,
+        8678,
+        8705,
+        8777
+      ],
+      "median_us": 8771.5,
+      "cv_pct": 0.6149979887943492,
+      "predicted_us": 9453.087075549674,
+      "residual_us": -681.5870755496744
+    },
+    {
+      "id": "n500017-g65536",
+      "role": "holdout",
+      "path": "dense-count-validation1/n500017-g65536.json",
+      "sha256": "cc235a85746e5bea1dcf656b8ff2793aa24e030bf1b74982b1214271ad1eb8dd",
+      "acquisition_started_at": "2026-10-26T12:04:49.670972+00:00",
+      "acquisition_completed_at": "2026-10-26T12:04:56.008318+00:00",
+      "acquisition_receipt": {
+        "path": "dense-count-validation1/n500017-g65536-acquisition.json",
+        "sha256": "fb843e91a513705aa72ff775bdb2a03f988d183a458d1c9ed7ca789659778ce1"
+      },
+      "heldout_fit_sha256": "27a4219e358771bf72d7b399b20bba10b8e6bf54f8e4c82e704c49464c20b84a",
+      "features": [
+        287.777,
+        720907,
+        1.0
+      ],
+      "work": {
+        "P": 565554,
+        "Q": 0,
+        "S": 720907,
+        "L": 1,
+        "actual_capacity": 65537
+      },
+      "warmup_us": [
+        126610,
+        125867,
+        125514,
+        126987,
+        126668
+      ],
+      "samples_us": [
+        126560,
+        126613,
+        124887,
+        126151,
+        126474,
+        125259,
+        126885,
+        125512,
+        125183,
+        126478
+      ],
+      "median_us": 126312.5,
+      "cv_pct": 0.5699829145687085,
+      "predicted_us": 124867.51908774028,
+      "residual_us": 1444.9809122597217
+    },
+    {
+      "id": "n1000017-g256",
+      "role": "holdout",
+      "path": "dense-count-validation1/n1000017-g256.json",
+      "sha256": "3ba9d1998602904160ade8eedfa96b330beec8c85505204c433cef08f62efe0e",
+      "acquisition_started_at": "2026-10-26T12:04:58.660538+00:00",
+      "acquisition_completed_at": "2026-10-26T12:05:05.194184+00:00",
+      "acquisition_receipt": {
+        "path": "dense-count-validation1/n1000017-g256-acquisition.json",
+        "sha256": "25ff85283a059d20a15478ee73e455d22febc57e930d36277b36fc114fbc594c"
+      },
+      "heldout_fit_sha256": "27a4219e358771bf72d7b399b20bba10b8e6bf54f8e4c82e704c49464c20b84a",
+      "features": [
+        515.2655,
+        3855,
+        1.0
+      ],
+      "work": {
+        "P": 1000531,
+        "Q": 0,
+        "S": 3855,
+        "L": 3,
+        "actual_capacity": 257
+      },
+      "warmup_us": [
+        6928,
+        4156,
+        4025,
+        3640,
+        2142
+      ],
+      "samples_us": [
+        2205,
+        2117,
+        2212,
+        2182,
+        2096,
+        2129,
+        2736,
+        2890,
+        2778,
+        2238
+      ],
+      "median_us": 2208.5,
+      "cv_pct": 13.195682343884904,
+      "predicted_us": 3069.1072632033292,
+      "residual_us": -860.6072632033292
+    },
+    {
+      "id": "n1000017-g4096",
+      "role": "holdout",
+      "path": "dense-count-validation1/n1000017-g4096.json",
+      "sha256": "78a028c902cfa78f55a0f152e2ac504a12015969bc708a46ff87d17af9948965",
+      "acquisition_started_at": "2026-10-26T12:05:05.208115+00:00",
+      "acquisition_completed_at": "2026-10-26T12:05:08.555869+00:00",
+      "acquisition_receipt": {
+        "path": "dense-count-validation1/n1000017-g4096-acquisition.json",
+        "sha256": "e3cccf89857abd35759e88dbc9cf35988ce9129a73b0c080e3e968a7e95f22d3"
+      },
+      "heldout_fit_sha256": "27a4219e358771bf72d7b399b20bba10b8e6bf54f8e4c82e704c49464c20b84a",
+      "features": [
+        519.1055,
+        61455,
+        1.0
+      ],
+      "work": {
+        "P": 1008211,
+        "Q": 0,
+        "S": 61455,
+        "L": 3,
+        "actual_capacity": 4097
+      },
+      "warmup_us": [
+        11456,
+        11272,
+        11395,
+        11341,
+        11512
+      ],
+      "samples_us": [
+        11379,
+        11455,
+        11267,
+        11319,
+        11425,
+        11387,
+        11490,
+        11305,
+        11445,
+        11394
+      ],
+      "median_us": 11390.5,
+      "cv_pct": 0.6271810326006233,
+      "predicted_us": 12908.636296741015,
+      "residual_us": -1518.136296741015
+    },
+    {
+      "id": "n1000017-g65536",
+      "role": "holdout",
+      "path": "dense-count-validation1/n1000017-g65536.json",
+      "sha256": "ac3af5812c12dc051814536d76b47572e17a53429c930e9fbc27e4d990112993",
+      "acquisition_started_at": "2026-10-26T12:05:08.569849+00:00",
+      "acquisition_completed_at": "2026-10-26T12:05:14.426646+00:00",
+      "acquisition_receipt": {
+        "path": "dense-count-validation1/n1000017-g65536-acquisition.json",
+        "sha256": "0556d8169ab2915caff1d3b6fdea5b700913f7a5e2920836a4ae0985f5336e71"
+      },
+      "heldout_fit_sha256": "27a4219e358771bf72d7b399b20bba10b8e6bf54f8e4c82e704c49464c20b84a",
+      "features": [
+        580.5455000000001,
+        983055,
+        1.0
+      ],
+      "work": {
+        "P": 1131091,
+        "Q": 0,
+        "S": 983055,
+        "L": 3,
+        "actual_capacity": 65537
+      },
+      "warmup_us": [
+        158027,
+        158113,
+        158259,
+        158049,
+        157442
+      ],
+      "samples_us": [
+        157574,
+        158371,
+        158105,
+        158432,
+        158776,
+        158170,
+        158027,
+        158011,
+        158042,
+        157990
+      ],
+      "median_us": 158073.5,
+      "cv_pct": 0.2028392876878529,
+      "predicted_us": 170341.100833344,
+      "residual_us": -12267.600833344011
+    },
+    {
+      "id": "n2000017-g256",
+      "role": "holdout",
+      "path": "dense-count-validation1/n2000017-g256.json",
+      "sha256": "a7faf4c2436c9ee7155dde3e5205632cd6051407cb2e79b93ceb2a2a5dc1fc05",
+      "acquisition_started_at": "2026-10-26T12:05:17.633672+00:00",
+      "acquisition_completed_at": "2026-10-26T12:05:21.818485+00:00",
+      "acquisition_receipt": {
+        "path": "dense-count-validation1/n2000017-g256-acquisition.json",
+        "sha256": "59c438e293929c5a59965e519510a81813ddb8b9de461fcf4c9a5efc3f3b1025"
+      },
+      "heldout_fit_sha256": "27a4219e358771bf72d7b399b20bba10b8e6bf54f8e4c82e704c49464c20b84a",
+      "features": [
+        1020.394,
+        4883,
+        1.0
+      ],
+      "work": {
+        "P": 2000788,
+        "Q": 0,
+        "S": 4883,
+        "L": 4,
+        "actual_capacity": 257
+      },
+      "warmup_us": [
+        3198,
+        2853,
+        2856,
+        2951,
+        2958
+      ],
+      "samples_us": [
+        2873,
+        2887,
+        3072,
+        2836,
+        2918,
+        2857,
+        2903,
+        2904,
+        2863,
+        2839
+      ],
+      "median_us": 2880.0,
+      "cv_pct": 2.3492681399181183,
+      "predicted_us": 4514.4812807882045,
+      "residual_us": -1634.4812807882045
+    },
+    {
+      "id": "n2000017-g4096",
+      "role": "holdout",
+      "path": "dense-count-validation1/n2000017-g4096.json",
+      "sha256": "ec34d321ceb2a6c820df241204edb0ecd14f1c2cadf844a36605e054d18ae8f4",
+      "acquisition_started_at": "2026-10-26T12:05:21.834481+00:00",
+      "acquisition_completed_at": "2026-10-26T12:05:27.131433+00:00",
+      "acquisition_receipt": {
+        "path": "dense-count-validation1/n2000017-g4096-acquisition.json",
+        "sha256": "a15428a9f6e197e2fb96179df7420486da0aaac67c76a0249ec193d2472ed13b"
+      },
+      "heldout_fit_sha256": "27a4219e358771bf72d7b399b20bba10b8e6bf54f8e4c82e704c49464c20b84a",
+      "features": [
+        1026.154,
+        77843,
+        1.0
+      ],
+      "work": {
+        "P": 2012308,
+        "Q": 0,
+        "S": 77843,
+        "L": 4,
+        "actual_capacity": 4097
+      },
+      "warmup_us": [
+        15753,
+        15718,
+        15609,
+        15660,
+        15770
+      ],
+      "samples_us": [
+        15866,
+        15729,
+        15585,
+        15524,
+        15530,
+        15569,
+        15514,
+        15586,
+        15690,
+        15473
+      ],
+      "median_us": 15577.0,
+      "cv_pct": 0.7719974132627724,
+      "predicted_us": 16980.137347101663,
+      "residual_us": -1403.1373471016632
+    },
+    {
+      "id": "n2000017-g65536",
+      "role": "holdout",
+      "path": "dense-count-validation1/n2000017-g65536.json",
+      "sha256": "d2b112e3ee72bcc4e2da540c0a944df42ce9817d8d76c3439d392bf5c6235858",
+      "acquisition_started_at": "2026-10-26T12:05:27.146903+00:00",
+      "acquisition_completed_at": "2026-10-26T12:05:36.232413+00:00",
+      "acquisition_receipt": {
+        "path": "dense-count-validation1/n2000017-g65536-acquisition.json",
+        "sha256": "171064bb312d2add96271752e4659304f6a8698745d3d77fccc4303ccb72fdd7"
+      },
+      "heldout_fit_sha256": "27a4219e358771bf72d7b399b20bba10b8e6bf54f8e4c82e704c49464c20b84a",
+      "features": [
+        1118.314,
+        1245203,
+        1.0
+      ],
+      "work": {
+        "P": 2196628,
+        "Q": 0,
+        "S": 1245203,
+        "L": 4,
+        "actual_capacity": 65537
+      },
+      "warmup_us": [
+        217490,
+        217470,
+        217409,
+        216851,
+        217306
+      ],
+      "samples_us": [
+        217352,
+        216636,
+        216753,
+        216252,
+        216645,
+        217816,
+        217026,
+        216771,
+        216138,
+        216815
+      ],
+      "median_us": 216762.0,
+      "cv_pct": 0.22681394483354028,
+      "predicted_us": 216430.634408117,
+      "residual_us": 331.36559188299
+    },
+    {
+      "id": "n500017-g16388",
+      "role": "existing_validation",
+      "path": "dense-count-validation1/n500017-g16388.json",
+      "sha256": "463a347c27291b1be8a248b80af206c4af537f42b5be958250ace19041fe7676",
+      "acquisition_started_at": "2026-10-26T12:04:56.021523+00:00",
+      "acquisition_completed_at": "2026-10-26T12:04:58.648346+00:00",
+      "acquisition_receipt": {
+        "path": "dense-count-validation1/n500017-g16388-acquisition.json",
+        "sha256": "c7c13e83c1f6d8d80ffda07c23f4affdb87ca27095bbfd4e71c1d09c24094a62"
+      },
+      "heldout_fit_sha256": "27a4219e358771bf72d7b399b20bba10b8e6bf54f8e4c82e704c49464c20b84a",
+      "features": [
+        263.20300000000003,
+        180279,
+        1.0
+      ],
+      "work": {
+        "P": 516406,
+        "Q": 0,
+        "S": 180279,
+        "L": 1,
+        "actual_capacity": 16389
+      },
+      "warmup_us": [
+        32448,
+        32274,
+        32376,
+        32319,
+        32313
+      ],
+      "samples_us": [
+        32244,
+        32153,
+        32191,
+        32158,
+        31941,
+        32246,
+        32229,
+        32133,
+        32196,
+        32280
+      ],
+      "median_us": 32193.5,
+      "cv_pct": 0.29608292948238546,
+      "predicted_us": 32543.487438405256,
+      "residual_us": -349.9874384052564
+    },
+    {
+      "id": "n1000017-g16388",
+      "role": "existing_validation",
+      "path": "dense-count-validation1/n1000017-g16388.json",
+      "sha256": "68da8a652a87d8a7bdba8e751f593c6c6ebbfbde0dcc72401d0ce28d9a6f051d",
+      "acquisition_started_at": "2026-10-26T12:05:14.441528+00:00",
+      "acquisition_completed_at": "2026-10-26T12:05:17.620178+00:00",
+      "acquisition_receipt": {
+        "path": "dense-count-validation1/n1000017-g16388-acquisition.json",
+        "sha256": "55b418f72ee4e55915e37cf652478cf327065bee2d6a93577ec55490cba37364"
+      },
+      "heldout_fit_sha256": "27a4219e358771bf72d7b399b20bba10b8e6bf54f8e4c82e704c49464c20b84a",
+      "features": [
+        531.3975,
+        245835,
+        1.0
+      ],
+      "work": {
+        "P": 1032795,
+        "Q": 0,
+        "S": 245835,
+        "L": 3,
+        "actual_capacity": 16389
+      },
+      "warmup_us": [
+        40708,
+        40679,
+        40665,
+        40565,
+        40762
+      ],
+      "samples_us": [
+        40815,
+        40797,
+        40827,
+        40590,
+        40755,
+        40705,
+        40622,
+        40634,
+        40481,
+        40709
+      ],
+      "median_us": 40707.0,
+      "cv_pct": 0.27410022248258775,
+      "predicted_us": 44405.378713471546,
+      "residual_us": -3698.378713471546
+    },
+    {
+      "id": "n2000017-g16388",
+      "role": "existing_validation",
+      "path": "dense-count-validation1/n2000017-g16388.json",
+      "sha256": "52cb96b0cacac53789b81fef25d3ec2caff6a1b8477ec9aae2d21ff471deb96b",
+      "acquisition_started_at": "2026-10-26T12:05:36.249584+00:00",
+      "acquisition_completed_at": "2026-10-26T12:05:41.935144+00:00",
+      "acquisition_receipt": {
+        "path": "dense-count-validation1/n2000017-g16388-acquisition.json",
+        "sha256": "b85a3656f48aadff2926ada3de009ff3163cc93175046554663801137fbf2fb5"
+      },
+      "heldout_fit_sha256": "27a4219e358771bf72d7b399b20bba10b8e6bf54f8e4c82e704c49464c20b84a",
+      "features": [
+        1044.592,
+        311391,
+        1.0
+      ],
+      "work": {
+        "P": 2049184,
+        "Q": 0,
+        "S": 311391,
+        "L": 4,
+        "actual_capacity": 16389
+      },
+      "warmup_us": [
+        56128,
+        56309,
+        56218,
+        55463,
+        56233
+      ],
+      "samples_us": [
+        56388,
+        57452,
+        56528,
+        56368,
+        56320,
+        56260,
+        56275,
+        56144,
+        55948,
+        55933
+      ],
+      "median_us": 56297.5,
+      "cv_pct": 0.7571700737997812,
+      "predicted_us": 56883.22181770714,
+      "residual_us": -585.7218177071409
+    }
+  ],
+  "status": "diagnostic_residuals_only_strategy_order_requires_distinct_observed_modes",
+  "finalization": {
+    "completion_sha256": "97eb8a2afdcd9f8d53490d0a5989c556d831cf4d59a6b1fefebde702d4ef967c",
+    "finalizer_sha256": "b8b7dc3f38371200b0c35a125ea66c2f7523e0e44dc64c8485f37f5be229dbce",
+    "terminal_sha256": "d02e3480e89209ee1fd2c65d68cdd947e4001292c7e4d4594b8fc9c8e70c2fdc"
+  }
+}

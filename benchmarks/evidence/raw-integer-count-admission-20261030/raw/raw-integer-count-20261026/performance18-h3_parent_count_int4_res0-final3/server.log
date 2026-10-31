@@ -1,0 +1,45 @@
+2026-10-26 02:18:27.200 MST [20149] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-26 02:18:27.200 MST [20149] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-26 02:18:27.240 MST [20149] LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-26 02:18:27.241 MST [20149] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/rawbench18/.s.PGSQL.33618"
+2026-10-26 02:18:27.250 MST [20155] LOG:  database system was shut down at 2026-10-26 02:18:27 MST
+2026-10-26 02:18:27.253 MST [20149] LOG:  database system is ready to accept connections
+2026-10-26 02:18:27.485 MST [20149] LOG:  received SIGHUP, reloading configuration files
+2026-10-26 02:18:27.486 MST [20149] LOG:  parameter "work_mem" changed to "512MB"
+2026-10-26 02:18:27.486 MST [20149] LOG:  parameter "effective_cache_size" changed to "48GB"
+2026-10-26 02:18:27.486 MST [20149] LOG:  parameter "max_parallel_workers_per_gather" changed to "8"
+2026-10-26 02:18:27.486 MST [20149] LOG:  parameter "max_parallel_workers" changed to "12"
+2026-10-26 02:18:27.486 MST [20149] LOG:  parameter "maintenance_work_mem" changed to "2GB"
+2026-10-26 02:18:27.486 MST [20149] LOG:  parameter "jit" changed to "off"
+2026-10-26 02:18:27.486 MST [20149] LOG:  parameter "random_page_cost" changed to "1.1"
+2026-10-26 02:18:27.486 MST [20149] LOG:  parameter "effective_io_concurrency" changed to "256"
+2026-10-26 02:18:27.486 MST [20149] LOG:  parameter "track_io_timing" changed to "on"
+2026-10-26 02:18:27.844 MST [20304] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/cache-performance18/apps/global/jit-cache/14698056579597285764.3579585920436312592.metalar.20332.4576205955366747806.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/cache-performance18/apps/global/jit-cache/8680283755492788044.8552054542954140739.metalar.20332.4787898222315149633.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/cache-performance18/apps/global/jit-cache/17075605042627645658.8959692158553657888.metalar.20332.17262673549475432743.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/cache-performance18/apps/global/jit-cache/7819755321666386692.4766705662962189518.metalar.20332.7643276631280561209.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/cache-performance18/apps/global/jit-cache/2574708908066720270.6384358307414985529.metalar.20332.4687373823509986838.tmp (kernels_added=1 skipped=0)
+2026-10-26 02:18:32.863 MST [20153] LOG:  checkpoint starting: immediate force wait
+2026-10-26 02:18:32.920 MST [20153] LOG:  checkpoint complete: wrote 5008 buffers (0.2%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 4 recycled; write=0.053 s, sync=0.004 s, total=0.057 s; sync files=80, longest=0.001 s, average=0.001 s; distance=67416 kB, estimate=67416 kB; lsn=0/58E5F28, redo lsn=0/58E5ED0
+2026-10-26 02:18:34.289 MST [20606] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 02:18:36.544 MST [20153] LOG:  checkpoint starting: immediate force wait
+2026-10-26 02:18:36.601 MST [20153] LOG:  checkpoint complete: wrote 9732 buffers (0.5%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 8 recycled; write=0.054 s, sync=0.002 s, total=0.058 s; sync files=34, longest=0.001 s, average=0.001 s; distance=133043 kB, estimate=133043 kB; lsn=0/DAD2D08, redo lsn=0/DAD2CB0
+2026-10-26 02:18:38.511 MST [20149] LOG:  received fast shutdown request
+2026-10-26 02:18:38.511 MST [20149] LOG:  aborting any active transactions
+2026-10-26 02:18:38.513 MST [20149] LOG:  background worker "logical replication launcher" (PID 20158) exited with exit code 1
+2026-10-26 02:18:38.513 MST [20153] LOG:  shutting down
+2026-10-26 02:18:38.513 MST [20153] LOG:  checkpoint starting: shutdown immediate
+2026-10-26 02:18:38.522 MST [20153] LOG:  checkpoint complete: wrote 7 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.009 s, sync=0.001 s, total=0.010 s; sync files=7, longest=0.001 s, average=0.001 s; distance=35 kB, estimate=119742 kB; lsn=0/DADB998, redo lsn=0/DADB998
+2026-10-26 02:18:38.536 MST [20149] LOG:  database system is shut down

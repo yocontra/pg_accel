@@ -1,0 +1,2526 @@
+{
+  "description": "Fixed ABBA pooled20/version; descriptive arithmetic, not provenance approval",
+  "all_six_no_median_slowdown": false,
+  "cells": [
+    {
+      "lane": "dense_int2_count_control",
+      "rows": 1000017,
+      "old_median_ms": 3.3640835,
+      "new_median_ms": 4.4190415000000005,
+      "old_over_new_median": 0.7612699496033245,
+      "no_median_slowdown": false,
+      "old_cv_pct": 11.326959593062757,
+      "new_cv_pct": 12.684762354915847,
+      "blocks": [
+        {
+          "block": 1,
+          "arm": "old",
+          "run": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-comparison-1-dense_int2_count_control",
+          "mode": "parallel_dense_count",
+          "accel_median_ms": 3.4408955,
+          "accel_cv_pct": 7.488964218967624,
+          "parallel_cv_pct": 1.2215700415273214,
+          "speedup_vs_parallel": 9.220631518742723,
+          "warm_summary": {
+            "cache_state": "warm",
+            "n": 10,
+            "accel_mean_ms": 3.3965334,
+            "accel_median_ms": 3.4408955,
+            "accel_stddev_ms": 0.2543651710112844,
+            "accel_p95_ms": 3.67136265,
+            "accel_cv_pct": 7.488964218967623,
+            "accel_ci_95": [
+              3.214584160034497,
+              3.578482639965503
+            ],
+            "parallel_mean_ms": 31.741158400000007,
+            "parallel_median_ms": 31.7272295,
+            "parallel_stddev_ms": 0.387740481848133,
+            "parallel_p95_ms": 32.28493155,
+            "parallel_cv_pct": 1.2215700415273214,
+            "parallel_ci_95": [
+              31.463804838993042,
+              32.01851196100697
+            ],
+            "speedup_mean_vs_parallel": 9.345163041823763,
+            "speedup_median_vs_parallel": 9.220631518742723,
+            "p_value_vs_parallel": 2.3274038633477097e-17,
+            "cohens_d_vs_parallel": 86.44138644879942,
+            "effect_size_meaningful": true
+          },
+          "artifact_lifecycle_probe": {
+            "phase": "lifecycle",
+            "iteration": {
+              "accel_ms": 52.01,
+              "parallel_ms": 31.776542,
+              "accel_first": false,
+              "cache_purge": "not_requested",
+              "cache_state": "warm"
+            },
+            "artifact": {
+              "hits": 0,
+              "builds": 1,
+              "rebuilds": 0,
+              "artifact_bytes_observed": 4000068,
+              "construction_bytes": 4000068,
+              "construction_us": 6673,
+              "preparation_us": 6673,
+              "raw_load_us": 0
+            },
+            "artifact_policy": "cached_reusable",
+            "refresh_us": 41938,
+            "refreshed_relations": 1,
+            "refreshed_rows": 1000017,
+            "dependencies_before": [
+              {
+                "relid": 16420,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16420,
+                "row_count": 1000017,
+                "raw_bytes": 5000085,
+                "derived_bytes": 4000068
+              }
+            ],
+            "dependencies_after": [
+              {
+                "relid": 16420,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16420,
+                "row_count": 1000017,
+                "raw_bytes": 5000085,
+                "derived_bytes": 4000068
+              }
+            ],
+            "queries_accelerated": 1,
+            "rows_dispatched": 1000017,
+            "batches_executed": 3,
+            "stock_exec_count": 0,
+            "gpu_rows_processed": 1000017,
+            "gpu_kernel_executions": 3,
+            "output_rows_consumed": 65
+          },
+          "accel_samples_ms": [
+            2.955958,
+            3.616125,
+            3.0955,
+            3.68175,
+            3.576459,
+            3.33775,
+            3.486833,
+            3.394958,
+            3.161334,
+            3.658667
+          ]
+        },
+        {
+          "block": 2,
+          "arm": "new",
+          "run": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-comparison-2-dense_int2_count_control",
+          "mode": "parallel_hash",
+          "accel_median_ms": 4.6051459999999995,
+          "accel_cv_pct": 14.332409611790634,
+          "parallel_cv_pct": 2.3834402947786915,
+          "speedup_vs_parallel": 7.399213401703226,
+          "warm_summary": {
+            "cache_state": "warm",
+            "n": 10,
+            "accel_mean_ms": 4.4686875,
+            "accel_median_ms": 4.6051459999999995,
+            "accel_stddev_ms": 0.6404705967708865,
+            "accel_p95_ms": 5.104678799999999,
+            "accel_cv_pct": 14.332409611790634,
+            "accel_ci_95": [
+              4.010554266431065,
+              4.926820733568935
+            ],
+            "parallel_mean_ms": 34.01230410000001,
+            "parallel_median_ms": 34.074458,
+            "parallel_stddev_ms": 0.810662961102065,
+            "parallel_p95_ms": 35.0438398,
+            "parallel_cv_pct": 2.3834402947786915,
+            "parallel_ci_95": [
+              33.43243104169455,
+              34.59217715830547
+            ],
+            "speedup_mean_vs_parallel": 7.61125142449545,
+            "speedup_median_vs_parallel": 7.399213401703226,
+            "p_value_vs_parallel": 6.368439556226431e-15,
+            "cohens_d_vs_parallel": 40.440799410183544,
+            "effect_size_meaningful": true
+          },
+          "artifact_lifecycle_probe": {
+            "phase": "lifecycle",
+            "iteration": {
+              "accel_ms": 49.621791,
+              "parallel_ms": 36.153625,
+              "accel_first": true,
+              "cache_purge": "not_requested",
+              "cache_state": "warm"
+            },
+            "artifact": {
+              "hits": 0,
+              "builds": 1,
+              "rebuilds": 0,
+              "artifact_bytes_observed": 0,
+              "construction_bytes": 0,
+              "construction_us": 6,
+              "preparation_us": 6,
+              "raw_load_us": 0
+            },
+            "artifact_policy": "ephemeral_fused",
+            "refresh_us": 45459,
+            "refreshed_relations": 1,
+            "refreshed_rows": 1000017,
+            "dependencies_before": [
+              {
+                "relid": 16420,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16420,
+                "row_count": 1000017,
+                "raw_bytes": 5000085,
+                "derived_bytes": 0
+              }
+            ],
+            "dependencies_after": [
+              {
+                "relid": 16420,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16420,
+                "row_count": 1000017,
+                "raw_bytes": 5000085,
+                "derived_bytes": 0
+              }
+            ],
+            "queries_accelerated": 1,
+            "rows_dispatched": 1000017,
+            "batches_executed": 1,
+            "stock_exec_count": 0,
+            "gpu_rows_processed": 1000017,
+            "gpu_kernel_executions": 1,
+            "output_rows_consumed": 65
+          },
+          "accel_samples_ms": [
+            4.934875,
+            4.771417,
+            4.26225,
+            5.126916,
+            4.438875,
+            5.0775,
+            3.585625,
+            3.250583,
+            4.955875,
+            4.282959
+          ]
+        },
+        {
+          "block": 3,
+          "arm": "new",
+          "run": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-comparison-3-dense_int2_count_control",
+          "mode": "parallel_hash",
+          "accel_median_ms": 4.3865,
+          "accel_cv_pct": 10.489365938939057,
+          "parallel_cv_pct": 1.3866136186940836,
+          "speedup_vs_parallel": 7.5817327026102825,
+          "warm_summary": {
+            "cache_state": "warm",
+            "n": 10,
+            "accel_mean_ms": 4.218204200000001,
+            "accel_median_ms": 4.3865,
+            "accel_stddev_ms": 0.44246287458969674,
+            "accel_p95_ms": 4.64030245,
+            "accel_cv_pct": 10.489365938939056,
+            "accel_ci_95": [
+              3.9017073170954797,
+              4.534701082904522
+            ],
+            "parallel_mean_ms": 33.3540415,
+            "parallel_median_ms": 33.257270500000004,
+            "parallel_stddev_ms": 0.46249168182387645,
+            "parallel_p95_ms": 34.11978925,
+            "parallel_cv_pct": 1.3866136186940836,
+            "parallel_ci_95": [
+              33.023217866938666,
+              33.68486513306134
+            ],
+            "speedup_mean_vs_parallel": 7.907166158527839,
+            "speedup_median_vs_parallel": 7.5817327026102825,
+            "p_value_vs_parallel": 3.7098775604330476e-17,
+            "cohens_d_vs_parallel": 64.37605894277102,
+            "effect_size_meaningful": true
+          },
+          "artifact_lifecycle_probe": {
+            "phase": "lifecycle",
+            "iteration": {
+              "accel_ms": 48.788125,
+              "parallel_ms": 33.534375,
+              "accel_first": true,
+              "cache_purge": "not_requested",
+              "cache_state": "warm"
+            },
+            "artifact": {
+              "hits": 0,
+              "builds": 1,
+              "rebuilds": 0,
+              "artifact_bytes_observed": 0,
+              "construction_bytes": 0,
+              "construction_us": 6,
+              "preparation_us": 6,
+              "raw_load_us": 0
+            },
+            "artifact_policy": "ephemeral_fused",
+            "refresh_us": 44565,
+            "refreshed_relations": 1,
+            "refreshed_rows": 1000017,
+            "dependencies_before": [
+              {
+                "relid": 16420,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16420,
+                "row_count": 1000017,
+                "raw_bytes": 5000085,
+                "derived_bytes": 0
+              }
+            ],
+            "dependencies_after": [
+              {
+                "relid": 16420,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16420,
+                "row_count": 1000017,
+                "raw_bytes": 5000085,
+                "derived_bytes": 0
+              }
+            ],
+            "queries_accelerated": 1,
+            "rows_dispatched": 1000017,
+            "batches_executed": 1,
+            "stock_exec_count": 0,
+            "gpu_rows_processed": 1000017,
+            "gpu_kernel_executions": 1,
+            "output_rows_consumed": 65
+          },
+          "accel_samples_ms": [
+            3.553416,
+            3.602208,
+            3.624083,
+            4.371375,
+            4.623,
+            4.399208,
+            4.440459,
+            4.540042,
+            4.654459,
+            4.373792
+          ]
+        },
+        {
+          "block": 4,
+          "arm": "old",
+          "run": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-comparison-4-dense_int2_count_control",
+          "mode": "parallel_dense_count",
+          "accel_median_ms": 3.2979585,
+          "accel_cv_pct": 14.46264919166535,
+          "parallel_cv_pct": 1.369584795823233,
+          "speedup_vs_parallel": 9.888756483745928,
+          "warm_summary": {
+            "cache_state": "warm",
+            "n": 10,
+            "accel_mean_ms": 3.2373376,
+            "accel_median_ms": 3.2979585,
+            "accel_stddev_ms": 0.4682047802378784,
+            "accel_p95_ms": 3.8055025999999996,
+            "accel_cv_pct": 14.46264919166535,
+            "accel_ci_95": [
+              2.9024273464703687,
+              3.5722478535296314
+            ],
+            "parallel_mean_ms": 32.604275,
+            "parallel_median_ms": 32.6127085,
+            "parallel_stddev_ms": 0.44654319318839547,
+            "parallel_p95_ms": 33.249542,
+            "parallel_cv_pct": 1.369584795823233,
+            "parallel_ci_95": [
+              32.28485943579608,
+              32.92369056420392
+            ],
+            "speedup_mean_vs_parallel": 10.071323732192775,
+            "speedup_median_vs_parallel": 9.888756483745928,
+            "p_value_vs_parallel": 1.693696545442734e-16,
+            "cohens_d_vs_parallel": 64.18971738842968,
+            "effect_size_meaningful": true
+          },
+          "artifact_lifecycle_probe": {
+            "phase": "lifecycle",
+            "iteration": {
+              "accel_ms": 54.082875,
+              "parallel_ms": 33.578083,
+              "accel_first": true,
+              "cache_purge": "not_requested",
+              "cache_state": "warm"
+            },
+            "artifact": {
+              "hits": 0,
+              "builds": 1,
+              "rebuilds": 0,
+              "artifact_bytes_observed": 4000068,
+              "construction_bytes": 4000068,
+              "construction_us": 7085,
+              "preparation_us": 7085,
+              "raw_load_us": 0
+            },
+            "artifact_policy": "cached_reusable",
+            "refresh_us": 43155,
+            "refreshed_relations": 1,
+            "refreshed_rows": 1000017,
+            "dependencies_before": [
+              {
+                "relid": 16420,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16420,
+                "row_count": 1000017,
+                "raw_bytes": 5000085,
+                "derived_bytes": 4000068
+              }
+            ],
+            "dependencies_after": [
+              {
+                "relid": 16420,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16420,
+                "row_count": 1000017,
+                "raw_bytes": 5000085,
+                "derived_bytes": 4000068
+              }
+            ],
+            "queries_accelerated": 1,
+            "rows_dispatched": 1000017,
+            "batches_executed": 3,
+            "stock_exec_count": 0,
+            "gpu_rows_processed": 1000017,
+            "gpu_kernel_executions": 3,
+            "output_rows_consumed": 65
+          },
+          "accel_samples_ms": [
+            3.642542,
+            3.133167,
+            3.2485,
+            2.944583,
+            3.938834,
+            3.347417,
+            2.224208,
+            3.38075,
+            2.97375,
+            3.539625
+          ]
+        }
+      ]
+    },
+    {
+      "lane": "dense_int2_count_control",
+      "rows": 2000017,
+      "old_median_ms": 4.2202705,
+      "new_median_ms": 4.674812,
+      "old_over_new_median": 0.90276796157792,
+      "no_median_slowdown": false,
+      "old_cv_pct": 11.99536757790327,
+      "new_cv_pct": 13.842038409816656,
+      "blocks": [
+        {
+          "block": 1,
+          "arm": "old",
+          "run": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-comparison-1-dense_int2_count_control",
+          "mode": "parallel_dense_count",
+          "accel_median_ms": 3.854604,
+          "accel_cv_pct": 11.687467393156128,
+          "parallel_cv_pct": 1.1923109155296197,
+          "speedup_vs_parallel": 15.38350307839664,
+          "warm_summary": {
+            "cache_state": "warm",
+            "n": 10,
+            "accel_mean_ms": 3.9007750000000003,
+            "accel_median_ms": 3.854604,
+            "accel_stddev_ms": 0.45590180620538595,
+            "accel_p95_ms": 4.51583155,
+            "accel_cv_pct": 11.687467393156128,
+            "accel_ci_95": [
+              3.574665152460024,
+              4.226884847539977
+            ],
+            "parallel_mean_ms": 59.5440417,
+            "parallel_median_ms": 59.297312500000004,
+            "parallel_stddev_ms": 0.7099501087366086,
+            "parallel_p95_ms": 60.75832705,
+            "parallel_cv_pct": 1.1923109155296197,
+            "parallel_ci_95": [
+              59.0362092708019,
+              60.051874129198104
+            ],
+            "speedup_mean_vs_parallel": 15.264669636162044,
+            "speedup_median_vs_parallel": 15.38350307839664,
+            "p_value_vs_parallel": 3.6428131193987645e-17,
+            "cohens_d_vs_parallel": 93.26647404184243,
+            "effect_size_meaningful": true
+          },
+          "artifact_lifecycle_probe": {
+            "phase": "lifecycle",
+            "iteration": {
+              "accel_ms": 99.105291,
+              "parallel_ms": 60.916042,
+              "accel_first": true,
+              "cache_purge": "not_requested",
+              "cache_state": "warm"
+            },
+            "artifact": {
+              "hits": 0,
+              "builds": 1,
+              "rebuilds": 0,
+              "artifact_bytes_observed": 8000068,
+              "construction_bytes": 8000068,
+              "construction_us": 13237,
+              "preparation_us": 13237,
+              "raw_load_us": 0
+            },
+            "artifact_policy": "cached_reusable",
+            "refresh_us": 81482,
+            "refreshed_relations": 1,
+            "refreshed_rows": 2000017,
+            "dependencies_before": [
+              {
+                "relid": 16440,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16440,
+                "row_count": 2000017,
+                "raw_bytes": 10000085,
+                "derived_bytes": 8000068
+              }
+            ],
+            "dependencies_after": [
+              {
+                "relid": 16440,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16440,
+                "row_count": 2000017,
+                "raw_bytes": 10000085,
+                "derived_bytes": 8000068
+              }
+            ],
+            "queries_accelerated": 1,
+            "rows_dispatched": 2000017,
+            "batches_executed": 4,
+            "stock_exec_count": 0,
+            "gpu_rows_processed": 2000017,
+            "gpu_kernel_executions": 4,
+            "output_rows_consumed": 65
+          },
+          "accel_samples_ms": [
+            4.462459,
+            4.078958,
+            4.241667,
+            3.9035,
+            3.552375,
+            3.043125,
+            4.5595,
+            3.750875,
+            3.805708,
+            3.609583
+          ]
+        },
+        {
+          "block": 2,
+          "arm": "new",
+          "run": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-comparison-2-dense_int2_count_control",
+          "mode": "parallel_hash",
+          "accel_median_ms": 4.674812,
+          "accel_cv_pct": 13.537990018685242,
+          "parallel_cv_pct": 2.5300980277143115,
+          "speedup_vs_parallel": 13.636421742735322,
+          "warm_summary": {
+            "cache_state": "warm",
+            "n": 10,
+            "accel_mean_ms": 4.474500000000001,
+            "accel_median_ms": 4.674812,
+            "accel_stddev_ms": 0.6057573633860711,
+            "accel_p95_ms": 5.16602705,
+            "accel_cv_pct": 13.537990018685239,
+            "accel_ci_95": [
+              4.041197392440128,
+              4.907802607559874
+            ],
+            "parallel_mean_ms": 63.51475429999999,
+            "parallel_median_ms": 63.747708,
+            "parallel_stddev_ms": 1.6069855458518907,
+            "parallel_p95_ms": 65.6804625,
+            "parallel_cv_pct": 2.5300980277143115,
+            "parallel_ci_95": [
+              62.365265957941055,
+              64.66424264205894
+            ],
+            "speedup_mean_vs_parallel": 14.19482719856967,
+            "speedup_median_vs_parallel": 13.636421742735322,
+            "p_value_vs_parallel": 3.2356233440545866e-15,
+            "cohens_d_vs_parallel": 48.618377726606816,
+            "effect_size_meaningful": true
+          },
+          "artifact_lifecycle_probe": {
+            "phase": "lifecycle",
+            "iteration": {
+              "accel_ms": 87.60600000000001,
+              "parallel_ms": 60.413,
+              "accel_first": false,
+              "cache_purge": "not_requested",
+              "cache_state": "warm"
+            },
+            "artifact": {
+              "hits": 0,
+              "builds": 1,
+              "rebuilds": 0,
+              "artifact_bytes_observed": 0,
+              "construction_bytes": 0,
+              "construction_us": 6,
+              "preparation_us": 6,
+              "raw_load_us": 0
+            },
+            "artifact_policy": "ephemeral_fused",
+            "refresh_us": 82389,
+            "refreshed_relations": 1,
+            "refreshed_rows": 2000017,
+            "dependencies_before": [
+              {
+                "relid": 16436,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16436,
+                "row_count": 2000017,
+                "raw_bytes": 10000085,
+                "derived_bytes": 0
+              }
+            ],
+            "dependencies_after": [
+              {
+                "relid": 16436,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16436,
+                "row_count": 2000017,
+                "raw_bytes": 10000085,
+                "derived_bytes": 0
+              }
+            ],
+            "queries_accelerated": 1,
+            "rows_dispatched": 2000017,
+            "batches_executed": 1,
+            "stock_exec_count": 0,
+            "gpu_rows_processed": 2000017,
+            "gpu_kernel_executions": 1,
+            "output_rows_consumed": 65
+          },
+          "accel_samples_ms": [
+            4.699041,
+            4.650583,
+            3.873375,
+            5.160917,
+            4.710375,
+            4.00725,
+            5.170208,
+            5.096625,
+            3.748917,
+            3.627709
+          ]
+        },
+        {
+          "block": 3,
+          "arm": "new",
+          "run": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-comparison-3-dense_int2_count_control",
+          "mode": "parallel_hash",
+          "accel_median_ms": 4.721313,
+          "accel_cv_pct": 14.873846508619701,
+          "parallel_cv_pct": 1.5540720857256618,
+          "speedup_vs_parallel": 12.934188963959814,
+          "warm_summary": {
+            "cache_state": "warm",
+            "n": 10,
+            "accel_mean_ms": 4.4725709,
+            "accel_median_ms": 4.721313,
+            "accel_stddev_ms": 0.6652433306551907,
+            "accel_p95_ms": 5.1205981000000005,
+            "accel_cv_pct": 14.873846508619701,
+            "accel_ci_95": [
+              3.996717551353216,
+              4.948424248646784
+            ],
+            "parallel_mean_ms": 61.51035829999999,
+            "parallel_median_ms": 61.0663545,
+            "parallel_stddev_ms": 0.9559153081701377,
+            "parallel_p95_ms": 62.79522705,
+            "parallel_cv_pct": 1.5540720857256618,
+            "parallel_ci_95": [
+              60.826585191042284,
+              62.1941314089577
+            ],
+            "speedup_mean_vs_parallel": 13.752796696861752,
+            "speedup_median_vs_parallel": 12.934188963959814,
+            "p_value_vs_parallel": 4.620168505187892e-17,
+            "cohens_d_vs_parallel": 69.26217770426732,
+            "effect_size_meaningful": true
+          },
+          "artifact_lifecycle_probe": {
+            "phase": "lifecycle",
+            "iteration": {
+              "accel_ms": 87.940125,
+              "parallel_ms": 61.964334,
+              "accel_first": false,
+              "cache_purge": "not_requested",
+              "cache_state": "warm"
+            },
+            "artifact": {
+              "hits": 0,
+              "builds": 1,
+              "rebuilds": 0,
+              "artifact_bytes_observed": 0,
+              "construction_bytes": 0,
+              "construction_us": 7,
+              "preparation_us": 7,
+              "raw_load_us": 0
+            },
+            "artifact_policy": "ephemeral_fused",
+            "refresh_us": 82469,
+            "refreshed_relations": 1,
+            "refreshed_rows": 2000017,
+            "dependencies_before": [
+              {
+                "relid": 16436,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16436,
+                "row_count": 2000017,
+                "raw_bytes": 10000085,
+                "derived_bytes": 0
+              }
+            ],
+            "dependencies_after": [
+              {
+                "relid": 16436,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16436,
+                "row_count": 2000017,
+                "raw_bytes": 10000085,
+                "derived_bytes": 0
+              }
+            ],
+            "queries_accelerated": 1,
+            "rows_dispatched": 2000017,
+            "batches_executed": 1,
+            "stock_exec_count": 0,
+            "gpu_rows_processed": 2000017,
+            "gpu_kernel_executions": 1,
+            "output_rows_consumed": 65
+          },
+          "accel_samples_ms": [
+            4.884584,
+            5.118375,
+            4.794292,
+            3.598791,
+            5.026625,
+            5.122417,
+            4.441375,
+            3.389083,
+            3.701833,
+            4.648334
+          ]
+        },
+        {
+          "block": 4,
+          "arm": "old",
+          "run": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-comparison-4-dense_int2_count_control",
+          "mode": "parallel_dense_count",
+          "accel_median_ms": 4.4842085,
+          "accel_cv_pct": 7.846404899452214,
+          "parallel_cv_pct": 1.1195992039311435,
+          "speedup_vs_parallel": 13.289562026386596,
+          "warm_summary": {
+            "cache_state": "warm",
+            "n": 10,
+            "accel_mean_ms": 4.5065957999999995,
+            "accel_median_ms": 4.4842085,
+            "accel_stddev_ms": 0.3536057536497077,
+            "accel_p95_ms": 5.02599185,
+            "accel_cv_pct": 7.8464048994522155,
+            "accel_ci_95": [
+              4.25365905607314,
+              4.759532543926859
+            ],
+            "parallel_mean_ms": 59.624600099999995,
+            "parallel_median_ms": 59.593167,
+            "parallel_stddev_ms": 0.6675565480667277,
+            "parallel_p95_ms": 60.669285599999995,
+            "parallel_cv_pct": 1.1195992039311435,
+            "parallel_ci_95": [
+              59.147092090268,
+              60.10210810973199
+            ],
+            "speedup_mean_vs_parallel": 13.230518721026634,
+            "speedup_median_vs_parallel": 13.289562026386596,
+            "p_value_vs_parallel": 5.591158785260928e-18,
+            "cohens_d_vs_parallel": 103.18496650911386,
+            "effect_size_meaningful": true
+          },
+          "artifact_lifecycle_probe": {
+            "phase": "lifecycle",
+            "iteration": {
+              "accel_ms": 99.82287500000001,
+              "parallel_ms": 61.450292,
+              "accel_first": false,
+              "cache_purge": "not_requested",
+              "cache_state": "warm"
+            },
+            "artifact": {
+              "hits": 0,
+              "builds": 1,
+              "rebuilds": 0,
+              "artifact_bytes_observed": 8000068,
+              "construction_bytes": 8000068,
+              "construction_us": 12933,
+              "preparation_us": 12933,
+              "raw_load_us": 0
+            },
+            "artifact_policy": "cached_reusable",
+            "refresh_us": 82234,
+            "refreshed_relations": 1,
+            "refreshed_rows": 2000017,
+            "dependencies_before": [
+              {
+                "relid": 16436,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16436,
+                "row_count": 2000017,
+                "raw_bytes": 10000085,
+                "derived_bytes": 8000068
+              }
+            ],
+            "dependencies_after": [
+              {
+                "relid": 16436,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16436,
+                "row_count": 2000017,
+                "raw_bytes": 10000085,
+                "derived_bytes": 8000068
+              }
+            ],
+            "queries_accelerated": 1,
+            "rows_dispatched": 2000017,
+            "batches_executed": 4,
+            "stock_exec_count": 0,
+            "gpu_rows_processed": 2000017,
+            "gpu_kernel_executions": 4,
+            "output_rows_consumed": 65
+          },
+          "accel_samples_ms": [
+            4.238583,
+            4.873,
+            4.104292,
+            4.461292,
+            4.121458,
+            4.600666,
+            4.507125,
+            4.201958,
+            4.806417,
+            5.151167
+          ]
+        }
+      ]
+    },
+    {
+      "lane": "dense_int4_count_control",
+      "rows": 1000017,
+      "old_median_ms": 3.2255835,
+      "new_median_ms": 3.6129165,
+      "old_over_new_median": 0.8927921528216886,
+      "no_median_slowdown": false,
+      "old_cv_pct": 12.33252001430086,
+      "new_cv_pct": 12.47489489998267,
+      "blocks": [
+        {
+          "block": 1,
+          "arm": "old",
+          "run": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-comparison-1-dense_int4_count_control",
+          "mode": "parallel_dense_count",
+          "accel_median_ms": 3.277396,
+          "accel_cv_pct": 8.280249121837574,
+          "parallel_cv_pct": 0.9459415951934568,
+          "speedup_vs_parallel": 9.587413300071153,
+          "warm_summary": {
+            "cache_state": "warm",
+            "n": 10,
+            "accel_mean_ms": 3.3165124999999995,
+            "accel_median_ms": 3.277396,
+            "accel_stddev_ms": 0.2746154971568834,
+            "accel_p95_ms": 3.7062578499999996,
+            "accel_cv_pct": 8.280249121837576,
+            "accel_ci_95": [
+              3.120078055803915,
+              3.512946944196084
+            ],
+            "parallel_mean_ms": 31.4125291,
+            "parallel_median_ms": 31.42175,
+            "parallel_stddev_ms": 0.29714417885914884,
+            "parallel_p95_ms": 31.84319375,
+            "parallel_cv_pct": 0.9459415951934568,
+            "parallel_ci_95": [
+              31.199979727424157,
+              31.625078472575844
+            ],
+            "speedup_mean_vs_parallel": 9.471554562209551,
+            "speedup_median_vs_parallel": 9.587413300071153,
+            "p_value_vs_parallel": 5.301425553086446e-17,
+            "cohens_d_vs_parallel": 98.20290922895963,
+            "effect_size_meaningful": true
+          },
+          "artifact_lifecycle_probe": {
+            "phase": "lifecycle",
+            "iteration": {
+              "accel_ms": 52.176166,
+              "parallel_ms": 31.8,
+              "accel_first": true,
+              "cache_purge": "not_requested",
+              "cache_state": "warm"
+            },
+            "artifact": {
+              "hits": 0,
+              "builds": 1,
+              "rebuilds": 0,
+              "artifact_bytes_observed": 4000068,
+              "construction_bytes": 4000068,
+              "construction_us": 6611,
+              "preparation_us": 6611,
+              "raw_load_us": 0
+            },
+            "artifact_policy": "cached_reusable",
+            "refresh_us": 42293,
+            "refreshed_relations": 1,
+            "refreshed_rows": 1000017,
+            "dependencies_before": [
+              {
+                "relid": 16420,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16420,
+                "row_count": 1000017,
+                "raw_bytes": 5000085,
+                "derived_bytes": 4000068
+              }
+            ],
+            "dependencies_after": [
+              {
+                "relid": 16420,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16420,
+                "row_count": 1000017,
+                "raw_bytes": 5000085,
+                "derived_bytes": 4000068
+              }
+            ],
+            "queries_accelerated": 1,
+            "rows_dispatched": 1000017,
+            "batches_executed": 3,
+            "stock_exec_count": 0,
+            "gpu_rows_processed": 1000017,
+            "gpu_kernel_executions": 3,
+            "output_rows_consumed": 65
+          },
+          "accel_samples_ms": [
+            3.135125,
+            3.096709,
+            2.839333,
+            3.263,
+            3.470833,
+            3.663541,
+            3.475417,
+            3.741208,
+            3.188167,
+            3.291792
+          ]
+        },
+        {
+          "block": 2,
+          "arm": "new",
+          "run": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-comparison-2-dense_int4_count_control",
+          "mode": "parallel_hash",
+          "accel_median_ms": 3.6320835000000002,
+          "accel_cv_pct": 13.403174755649063,
+          "parallel_cv_pct": 1.1763728911695976,
+          "speedup_vs_parallel": 8.700636287684466,
+          "warm_summary": {
+            "cache_state": "warm",
+            "n": 10,
+            "accel_mean_ms": 3.7772794000000003,
+            "accel_median_ms": 3.6320835000000002,
+            "accel_stddev_ms": 0.5062753589911324,
+            "accel_p95_ms": 4.514983699999999,
+            "accel_cv_pct": 13.403174755649061,
+            "accel_ci_95": [
+              3.4151369871237813,
+              4.139421812876219
+            ],
+            "parallel_mean_ms": 31.632270899999998,
+            "parallel_median_ms": 31.601437500000003,
+            "parallel_stddev_ms": 0.3721134597289293,
+            "parallel_p95_ms": 32.18635435,
+            "parallel_cv_pct": 1.1763728911695976,
+            "parallel_ci_95": [
+              31.36609546053463,
+              31.898446339465366
+            ],
+            "speedup_mean_vs_parallel": 8.374352953609943,
+            "speedup_median_vs_parallel": 8.700636287684466,
+            "p_value_vs_parallel": 2.9584903314004044e-17,
+            "cohens_d_vs_parallel": 62.69583853481624,
+            "effect_size_meaningful": true
+          },
+          "artifact_lifecycle_probe": {
+            "phase": "lifecycle",
+            "iteration": {
+              "accel_ms": 46.880958,
+              "parallel_ms": 31.4155,
+              "accel_first": false,
+              "cache_purge": "not_requested",
+              "cache_state": "warm"
+            },
+            "artifact": {
+              "hits": 0,
+              "builds": 1,
+              "rebuilds": 0,
+              "artifact_bytes_observed": 0,
+              "construction_bytes": 0,
+              "construction_us": 4,
+              "preparation_us": 4,
+              "raw_load_us": 0
+            },
+            "artifact_policy": "ephemeral_fused",
+            "refresh_us": 41706,
+            "refreshed_relations": 1,
+            "refreshed_rows": 1000017,
+            "dependencies_before": [
+              {
+                "relid": 16420,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16420,
+                "row_count": 1000017,
+                "raw_bytes": 5000085,
+                "derived_bytes": 0
+              }
+            ],
+            "dependencies_after": [
+              {
+                "relid": 16420,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16420,
+                "row_count": 1000017,
+                "raw_bytes": 5000085,
+                "derived_bytes": 0
+              }
+            ],
+            "queries_accelerated": 1,
+            "rows_dispatched": 1000017,
+            "batches_executed": 1,
+            "stock_exec_count": 0,
+            "gpu_rows_processed": 1000017,
+            "gpu_kernel_executions": 1,
+            "output_rows_consumed": 65
+          },
+          "accel_samples_ms": [
+            3.334458,
+            3.250417,
+            3.233333,
+            3.923709,
+            3.71975,
+            4.669709,
+            4.325875,
+            4.296334,
+            3.544417,
+            3.474792
+          ]
+        },
+        {
+          "block": 3,
+          "arm": "new",
+          "run": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-comparison-3-dense_int4_count_control",
+          "mode": "parallel_hash",
+          "accel_median_ms": 3.609708,
+          "accel_cv_pct": 12.203198285706835,
+          "parallel_cv_pct": 1.5239017436984292,
+          "speedup_vs_parallel": 8.99231904630513,
+          "warm_summary": {
+            "cache_state": "warm",
+            "n": 10,
+            "accel_mean_ms": 3.7940083000000002,
+            "accel_median_ms": 3.609708,
+            "accel_stddev_ms": 0.462990355825175,
+            "accel_p95_ms": 4.551241999999999,
+            "accel_cv_pct": 12.203198285706833,
+            "accel_ci_95": [
+              3.4628279618317253,
+              4.125188638168275
+            ],
+            "parallel_mean_ms": 32.4576667,
+            "parallel_median_ms": 32.459646,
+            "parallel_stddev_ms": 0.4946229488051244,
+            "parallel_p95_ms": 33.256775,
+            "parallel_cv_pct": 1.5239017436984292,
+            "parallel_ci_95": [
+              32.10385934010561,
+              32.81147405989439
+            ],
+            "speedup_mean_vs_parallel": 8.554980414776635,
+            "speedup_median_vs_parallel": 8.99231904630513,
+            "p_value_vs_parallel": 5.475380608354088e-16,
+            "cohens_d_vs_parallel": 59.832152916071955,
+            "effect_size_meaningful": true
+          },
+          "artifact_lifecycle_probe": {
+            "phase": "lifecycle",
+            "iteration": {
+              "accel_ms": 47.916834,
+              "parallel_ms": 32.914875,
+              "accel_first": true,
+              "cache_purge": "not_requested",
+              "cache_state": "warm"
+            },
+            "artifact": {
+              "hits": 0,
+              "builds": 1,
+              "rebuilds": 0,
+              "artifact_bytes_observed": 0,
+              "construction_bytes": 0,
+              "construction_us": 5,
+              "preparation_us": 5,
+              "raw_load_us": 0
+            },
+            "artifact_policy": "ephemeral_fused",
+            "refresh_us": 43271,
+            "refreshed_relations": 1,
+            "refreshed_rows": 1000017,
+            "dependencies_before": [
+              {
+                "relid": 16420,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16420,
+                "row_count": 1000017,
+                "raw_bytes": 5000085,
+                "derived_bytes": 0
+              }
+            ],
+            "dependencies_after": [
+              {
+                "relid": 16420,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16420,
+                "row_count": 1000017,
+                "raw_bytes": 5000085,
+                "derived_bytes": 0
+              }
+            ],
+            "queries_accelerated": 1,
+            "rows_dispatched": 1000017,
+            "batches_executed": 1,
+            "stock_exec_count": 0,
+            "gpu_rows_processed": 1000017,
+            "gpu_kernel_executions": 1,
+            "output_rows_consumed": 65
+          },
+          "accel_samples_ms": [
+            3.422875,
+            4.576667,
+            4.129208,
+            4.520167,
+            3.445875,
+            3.31675,
+            3.46325,
+            3.538,
+            3.681416,
+            3.845875
+          ]
+        },
+        {
+          "block": 4,
+          "arm": "old",
+          "run": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-comparison-4-dense_int4_count_control",
+          "mode": "parallel_dense_count",
+          "accel_median_ms": 2.9952285,
+          "accel_cv_pct": 15.218096544081694,
+          "parallel_cv_pct": 0.9906214175016078,
+          "speedup_vs_parallel": 10.568357472560107,
+          "warm_summary": {
+            "cache_state": "warm",
+            "n": 10,
+            "accel_mean_ms": 3.0701831,
+            "accel_median_ms": 2.9952285,
+            "accel_stddev_ms": 0.4672234282380803,
+            "accel_p95_ms": 3.5462625,
+            "accel_cv_pct": 15.218096544081696,
+            "accel_ci_95": [
+              2.7359748146281633,
+              3.4043913853718366
+            ],
+            "parallel_mean_ms": 31.7011874,
+            "parallel_median_ms": 31.6546455,
+            "parallel_stddev_ms": 0.3140387519867211,
+            "parallel_p95_ms": 32.20886265,
+            "parallel_cv_pct": 0.9906214175016078,
+            "parallel_ci_95": [
+              31.476553217511373,
+              31.925821582488624
+            ],
+            "speedup_mean_vs_parallel": 10.325503843728407,
+            "speedup_median_vs_parallel": 10.568357472560107,
+            "p_value_vs_parallel": 5.323853380508109e-18,
+            "cohens_d_vs_parallel": 71.92470330078886,
+            "effect_size_meaningful": true
+          },
+          "artifact_lifecycle_probe": {
+            "phase": "lifecycle",
+            "iteration": {
+              "accel_ms": 52.524292,
+              "parallel_ms": 31.825708,
+              "accel_first": true,
+              "cache_purge": "not_requested",
+              "cache_state": "warm"
+            },
+            "artifact": {
+              "hits": 0,
+              "builds": 1,
+              "rebuilds": 0,
+              "artifact_bytes_observed": 4000068,
+              "construction_bytes": 4000068,
+              "construction_us": 6707,
+              "preparation_us": 6707,
+              "raw_load_us": 0
+            },
+            "artifact_policy": "cached_reusable",
+            "refresh_us": 42252,
+            "refreshed_relations": 1,
+            "refreshed_rows": 1000017,
+            "dependencies_before": [
+              {
+                "relid": 16420,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16420,
+                "row_count": 1000017,
+                "raw_bytes": 5000085,
+                "derived_bytes": 4000068
+              }
+            ],
+            "dependencies_after": [
+              {
+                "relid": 16420,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16420,
+                "row_count": 1000017,
+                "raw_bytes": 5000085,
+                "derived_bytes": 4000068
+              }
+            ],
+            "queries_accelerated": 1,
+            "rows_dispatched": 1000017,
+            "batches_executed": 3,
+            "stock_exec_count": 0,
+            "gpu_rows_processed": 1000017,
+            "gpu_kernel_executions": 3,
+            "output_rows_consumed": 65
+          },
+          "accel_samples_ms": [
+            3.520458,
+            2.964041,
+            2.401375,
+            2.281875,
+            2.988916,
+            3.566625,
+            3.521375,
+            2.9355,
+            3.520125,
+            3.001541
+          ]
+        }
+      ]
+    },
+    {
+      "lane": "dense_int4_count_control",
+      "rows": 2000017,
+      "old_median_ms": 4.572333,
+      "new_median_ms": 4.795687,
+      "old_over_new_median": 0.9534260680482276,
+      "no_median_slowdown": false,
+      "old_cv_pct": 13.894153381276503,
+      "new_cv_pct": 16.612999759581605,
+      "blocks": [
+        {
+          "block": 1,
+          "arm": "old",
+          "run": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-comparison-1-dense_int4_count_control",
+          "mode": "parallel_dense_count",
+          "accel_median_ms": 4.4908125000000005,
+          "accel_cv_pct": 15.144262245203693,
+          "parallel_cv_pct": 1.4843154733234947,
+          "speedup_vs_parallel": 13.287420149471837,
+          "warm_summary": {
+            "cache_state": "warm",
+            "n": 10,
+            "accel_mean_ms": 4.4847165,
+            "accel_median_ms": 4.4908125000000005,
+            "accel_stddev_ms": 0.6791772277139205,
+            "accel_p95_ms": 5.3465187499999995,
+            "accel_cv_pct": 15.144262245203693,
+            "accel_ci_95": [
+              3.9988961343692715,
+              4.970536865630729
+            ],
+            "parallel_mean_ms": 59.70413350000001,
+            "parallel_median_ms": 59.6713125,
+            "parallel_stddev_ms": 0.8861976917542164,
+            "parallel_p95_ms": 60.98547295,
+            "parallel_cv_pct": 1.4843154733234947,
+            "parallel_ci_95": [
+              59.07022990450065,
+              60.338037095499374
+            ],
+            "speedup_mean_vs_parallel": 13.312799928378976,
+            "speedup_median_vs_parallel": 13.287420149471837,
+            "p_value_vs_parallel": 7.490306757919945e-17,
+            "cohens_d_vs_parallel": 69.94205150586517,
+            "effect_size_meaningful": true
+          },
+          "artifact_lifecycle_probe": {
+            "phase": "lifecycle",
+            "iteration": {
+              "accel_ms": 100.085375,
+              "parallel_ms": 59.038791,
+              "accel_first": true,
+              "cache_purge": "not_requested",
+              "cache_state": "warm"
+            },
+            "artifact": {
+              "hits": 0,
+              "builds": 1,
+              "rebuilds": 0,
+              "artifact_bytes_observed": 8000068,
+              "construction_bytes": 8000068,
+              "construction_us": 12544,
+              "preparation_us": 12544,
+              "raw_load_us": 0
+            },
+            "artifact_policy": "cached_reusable",
+            "refresh_us": 82355,
+            "refreshed_relations": 1,
+            "refreshed_rows": 2000017,
+            "dependencies_before": [
+              {
+                "relid": 16436,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16436,
+                "row_count": 2000017,
+                "raw_bytes": 10000085,
+                "derived_bytes": 8000068
+              }
+            ],
+            "dependencies_after": [
+              {
+                "relid": 16436,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16436,
+                "row_count": 2000017,
+                "raw_bytes": 10000085,
+                "derived_bytes": 8000068
+              }
+            ],
+            "queries_accelerated": 1,
+            "rows_dispatched": 2000017,
+            "batches_executed": 4,
+            "stock_exec_count": 0,
+            "gpu_rows_processed": 2000017,
+            "gpu_kernel_executions": 4,
+            "output_rows_consumed": 65
+          },
+          "accel_samples_ms": [
+            4.583417,
+            5.05275,
+            4.256958,
+            4.40775,
+            2.959833,
+            4.418875,
+            4.56275,
+            4.832791,
+            4.185166,
+            5.586875
+          ]
+        },
+        {
+          "block": 2,
+          "arm": "new",
+          "run": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-comparison-2-dense_int4_count_control",
+          "mode": "parallel_hash",
+          "accel_median_ms": 4.795687,
+          "accel_cv_pct": 18.994439751789844,
+          "parallel_cv_pct": 0.623883305120958,
+          "speedup_vs_parallel": 12.31333831836815,
+          "warm_summary": {
+            "cache_state": "warm",
+            "n": 10,
+            "accel_mean_ms": 4.3191163,
+            "accel_median_ms": 4.795687,
+            "accel_stddev_ms": 0.8203919434132348,
+            "accel_p95_ms": 5.09469375,
+            "accel_cv_pct": 18.994439751789844,
+            "accel_ci_95": [
+              3.7322840305332114,
+              4.905948569466789
+            ],
+            "parallel_mean_ms": 59.0800041,
+            "parallel_median_ms": 59.0509165,
+            "parallel_stddev_ms": 0.3685902822446775,
+            "parallel_p95_ms": 59.60542515,
+            "parallel_cv_pct": 0.623883305120958,
+            "parallel_ci_95": [
+              58.8163488147797,
+              59.34365938522029
+            ],
+            "speedup_mean_vs_parallel": 13.678724997518588,
+            "speedup_median_vs_parallel": 12.31333831836815,
+            "p_value_vs_parallel": 4.77194092588017e-18,
+            "cohens_d_vs_parallel": 86.10682864736938,
+            "effect_size_meaningful": true
+          },
+          "artifact_lifecycle_probe": {
+            "phase": "lifecycle",
+            "iteration": {
+              "accel_ms": 86.851625,
+              "parallel_ms": 58.636791,
+              "accel_first": false,
+              "cache_purge": "not_requested",
+              "cache_state": "warm"
+            },
+            "artifact": {
+              "hits": 0,
+              "builds": 1,
+              "rebuilds": 0,
+              "artifact_bytes_observed": 0,
+              "construction_bytes": 0,
+              "construction_us": 7,
+              "preparation_us": 7,
+              "raw_load_us": 0
+            },
+            "artifact_policy": "ephemeral_fused",
+            "refresh_us": 81382,
+            "refreshed_relations": 1,
+            "refreshed_rows": 2000017,
+            "dependencies_before": [
+              {
+                "relid": 16436,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16436,
+                "row_count": 2000017,
+                "raw_bytes": 10000085,
+                "derived_bytes": 0
+              }
+            ],
+            "dependencies_after": [
+              {
+                "relid": 16436,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16436,
+                "row_count": 2000017,
+                "raw_bytes": 10000085,
+                "derived_bytes": 0
+              }
+            ],
+            "queries_accelerated": 1,
+            "rows_dispatched": 2000017,
+            "batches_executed": 1,
+            "stock_exec_count": 0,
+            "gpu_rows_processed": 2000017,
+            "gpu_kernel_executions": 1,
+            "output_rows_consumed": 65
+          },
+          "accel_samples_ms": [
+            3.322708,
+            5.01075,
+            5.163375,
+            4.956458,
+            3.208041,
+            4.924041,
+            4.695541,
+            3.699708,
+            3.314708,
+            4.895833
+          ]
+        },
+        {
+          "block": 3,
+          "arm": "new",
+          "run": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-comparison-3-dense_int4_count_control",
+          "mode": "parallel_hash",
+          "accel_median_ms": 4.802687,
+          "accel_cv_pct": 14.696263986077593,
+          "parallel_cv_pct": 1.2144157715918604,
+          "speedup_vs_parallel": 12.742727768851061,
+          "warm_summary": {
+            "cache_state": "warm",
+            "n": 10,
+            "accel_mean_ms": 4.528103999999999,
+            "accel_median_ms": 4.802687,
+            "accel_stddev_ms": 0.6654621174041389,
+            "accel_p95_ms": 5.1068497,
+            "accel_cv_pct": 14.696263986077597,
+            "accel_ci_95": [
+              4.052094151614955,
+              5.004113848385043
+            ],
+            "parallel_mean_ms": 61.187795599999994,
+            "parallel_median_ms": 61.199332999999996,
+            "parallel_stddev_ms": 0.7430742400557904,
+            "parallel_p95_ms": 62.1798516,
+            "parallel_cv_pct": 1.2144157715918604,
+            "parallel_ci_95": [
+              60.656269240952604,
+              61.719321959047384
+            ],
+            "speedup_mean_vs_parallel": 13.512895375194564,
+            "speedup_median_vs_parallel": 12.742727768851061,
+            "p_value_vs_parallel": 8.813535937258163e-17,
+            "cohens_d_vs_parallel": 80.33001498588341,
+            "effect_size_meaningful": true
+          },
+          "artifact_lifecycle_probe": {
+            "phase": "lifecycle",
+            "iteration": {
+              "accel_ms": 88.623125,
+              "parallel_ms": 61.441291,
+              "accel_first": false,
+              "cache_purge": "not_requested",
+              "cache_state": "warm"
+            },
+            "artifact": {
+              "hits": 0,
+              "builds": 1,
+              "rebuilds": 0,
+              "artifact_bytes_observed": 0,
+              "construction_bytes": 0,
+              "construction_us": 6,
+              "preparation_us": 6,
+              "raw_load_us": 0
+            },
+            "artifact_policy": "ephemeral_fused",
+            "refresh_us": 83954,
+            "refreshed_relations": 1,
+            "refreshed_rows": 2000017,
+            "dependencies_before": [
+              {
+                "relid": 16436,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16436,
+                "row_count": 2000017,
+                "raw_bytes": 10000085,
+                "derived_bytes": 0
+              }
+            ],
+            "dependencies_after": [
+              {
+                "relid": 16436,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16436,
+                "row_count": 2000017,
+                "raw_bytes": 10000085,
+                "derived_bytes": 0
+              }
+            ],
+            "queries_accelerated": 1,
+            "rows_dispatched": 2000017,
+            "batches_executed": 1,
+            "stock_exec_count": 0,
+            "gpu_rows_processed": 2000017,
+            "gpu_kernel_executions": 1,
+            "output_rows_consumed": 65
+          },
+          "accel_samples_ms": [
+            3.67925,
+            4.9495,
+            4.686791,
+            5.055792,
+            5.144125,
+            4.687416,
+            3.432917,
+            3.666,
+            4.917958,
+            5.061291
+          ]
+        },
+        {
+          "block": 4,
+          "arm": "old",
+          "run": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-comparison-4-dense_int4_count_control",
+          "mode": "parallel_dense_count",
+          "accel_median_ms": 4.613061999999999,
+          "accel_cv_pct": 13.347923939430812,
+          "parallel_cv_pct": 0.6946841870903286,
+          "speedup_vs_parallel": 12.808349096543687,
+          "warm_summary": {
+            "cache_state": "warm",
+            "n": 10,
+            "accel_mean_ms": 4.4823206,
+            "accel_median_ms": 4.613061999999999,
+            "accel_stddev_ms": 0.5982967444094388,
+            "accel_p95_ms": 5.038708,
+            "accel_cv_pct": 13.347923939430812,
+            "accel_ci_95": [
+              4.05435462696078,
+              4.910286573039221
+            ],
+            "parallel_mean_ms": 59.253604100000004,
+            "parallel_median_ms": 59.0857085,
+            "parallel_stddev_ms": 0.4116254179638067,
+            "parallel_p95_ms": 59.95792255,
+            "parallel_cv_pct": 0.6946841870903286,
+            "parallel_ci_95": [
+              58.95916547205721,
+              59.5480427279428
+            ],
+            "speedup_mean_vs_parallel": 13.21940338225695,
+            "speedup_median_vs_parallel": 12.808349096543687,
+            "p_value_vs_parallel": 2.65374749215389e-19,
+            "cohens_d_vs_parallel": 106.65964318412841,
+            "effect_size_meaningful": true
+          },
+          "artifact_lifecycle_probe": {
+            "phase": "lifecycle",
+            "iteration": {
+              "accel_ms": 102.8715,
+              "parallel_ms": 60.977042,
+              "accel_first": true,
+              "cache_purge": "not_requested",
+              "cache_state": "warm"
+            },
+            "artifact": {
+              "hits": 0,
+              "builds": 1,
+              "rebuilds": 0,
+              "artifact_bytes_observed": 8000068,
+              "construction_bytes": 8000068,
+              "construction_us": 13216,
+              "preparation_us": 13216,
+              "raw_load_us": 0
+            },
+            "artifact_policy": "cached_reusable",
+            "refresh_us": 84762,
+            "refreshed_relations": 1,
+            "refreshed_rows": 2000017,
+            "dependencies_before": [
+              {
+                "relid": 16436,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16436,
+                "row_count": 2000017,
+                "raw_bytes": 10000085,
+                "derived_bytes": 8000068
+              }
+            ],
+            "dependencies_after": [
+              {
+                "relid": 16436,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16436,
+                "row_count": 2000017,
+                "raw_bytes": 10000085,
+                "derived_bytes": 8000068
+              }
+            ],
+            "queries_accelerated": 1,
+            "rows_dispatched": 2000017,
+            "batches_executed": 4,
+            "stock_exec_count": 0,
+            "gpu_rows_processed": 2000017,
+            "gpu_kernel_executions": 4,
+            "output_rows_consumed": 65
+          },
+          "accel_samples_ms": [
+            4.294542,
+            2.98925,
+            5.197333,
+            4.787833,
+            4.778625,
+            4.581916,
+            4.174291,
+            4.644208,
+            4.530375,
+            4.844833
+          ]
+        }
+      ]
+    },
+    {
+      "lane": "dense_int8_count_control",
+      "rows": 1000017,
+      "old_median_ms": 3.4915835,
+      "new_median_ms": 4.2383545,
+      "old_over_new_median": 0.8238063852374784,
+      "no_median_slowdown": false,
+      "old_cv_pct": 53.130719525993584,
+      "new_cv_pct": 12.845135089474555,
+      "blocks": [
+        {
+          "block": 1,
+          "arm": "old",
+          "run": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-comparison-1-dense_int8_count_control",
+          "mode": "parallel_dense_count",
+          "accel_median_ms": 4.3975625,
+          "accel_cv_pct": 51.100641417841786,
+          "parallel_cv_pct": 11.17420108095823,
+          "speedup_vs_parallel": 8.271599323488864,
+          "warm_summary": {
+            "cache_state": "warm",
+            "n": 10,
+            "accel_mean_ms": 5.5809291000000005,
+            "accel_median_ms": 4.3975625,
+            "accel_stddev_ms": 2.8518905671749843,
+            "accel_p95_ms": 10.522603799999995,
+            "accel_cv_pct": 51.10064141784177,
+            "accel_ci_95": [
+              3.540951224494178,
+              7.620906975505823
+            ],
+            "parallel_mean_ms": 37.9264959,
+            "parallel_median_ms": 36.374875,
+            "parallel_stddev_ms": 4.237982914827379,
+            "parallel_p95_ms": 45.053962649999995,
+            "parallel_cv_pct": 11.17420108095823,
+            "parallel_ci_95": [
+              34.89503617902499,
+              40.95795562097501
+            ],
+            "speedup_mean_vs_parallel": 6.795731538678747,
+            "speedup_median_vs_parallel": 8.271599323488864,
+            "p_value_vs_parallel": 1.1362985795911858e-08,
+            "cohens_d_vs_parallel": 8.954910997540416,
+            "effect_size_meaningful": true
+          },
+          "artifact_lifecycle_probe": {
+            "phase": "lifecycle",
+            "iteration": {
+              "accel_ms": 85.17958300000001,
+              "parallel_ms": 32.36,
+              "accel_first": false,
+              "cache_purge": "not_requested",
+              "cache_state": "warm"
+            },
+            "artifact": {
+              "hits": 0,
+              "builds": 1,
+              "rebuilds": 0,
+              "artifact_bytes_observed": 4000068,
+              "construction_bytes": 4000068,
+              "construction_us": 29417,
+              "preparation_us": 29417,
+              "raw_load_us": 0
+            },
+            "artifact_policy": "cached_reusable",
+            "refresh_us": 48450,
+            "refreshed_relations": 1,
+            "refreshed_rows": 1000017,
+            "dependencies_before": [
+              {
+                "relid": 16420,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16420,
+                "row_count": 1000017,
+                "raw_bytes": 9000153,
+                "derived_bytes": 4000068
+              }
+            ],
+            "dependencies_after": [
+              {
+                "relid": 16420,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16420,
+                "row_count": 1000017,
+                "raw_bytes": 9000153,
+                "derived_bytes": 4000068
+              }
+            ],
+            "queries_accelerated": 1,
+            "rows_dispatched": 1000017,
+            "batches_executed": 3,
+            "stock_exec_count": 0,
+            "gpu_rows_processed": 1000017,
+            "gpu_kernel_executions": 3,
+            "output_rows_consumed": 65
+          },
+          "accel_samples_ms": [
+            6.253583,
+            7.69675,
+            4.323417,
+            3.578833,
+            4.221167,
+            3.446083,
+            12.834666,
+            4.334417,
+            4.460708,
+            4.659667
+          ]
+        },
+        {
+          "block": 2,
+          "arm": "new",
+          "run": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-comparison-2-dense_int8_count_control",
+          "mode": "parallel_hash",
+          "accel_median_ms": 4.0274375000000004,
+          "accel_cv_pct": 10.283987551328487,
+          "parallel_cv_pct": 1.8546934487460573,
+          "speedup_vs_parallel": 8.057361784012786,
+          "warm_summary": {
+            "cache_state": "warm",
+            "n": 10,
+            "accel_mean_ms": 3.9835749999999996,
+            "accel_median_ms": 4.0274375000000004,
+            "accel_stddev_ms": 0.40967035709783384,
+            "accel_p95_ms": 4.4267294999999995,
+            "accel_cv_pct": 10.28398755132849,
+            "accel_ci_95": [
+              3.6905348411842307,
+              4.276615158815769
+            ],
+            "parallel_mean_ms": 32.4773958,
+            "parallel_median_ms": 32.450520999999995,
+            "parallel_stddev_ms": 0.6023561322259271,
+            "parallel_p95_ms": 33.36199565,
+            "parallel_cv_pct": 1.8546934487460573,
+            "parallel_ci_95": [
+              32.04652611760073,
+              32.908265482399266
+            ],
+            "speedup_mean_vs_parallel": 8.152826493790126,
+            "speedup_median_vs_parallel": 8.057361784012786,
+            "p_value_vs_parallel": 2.7182662197208117e-17,
+            "cohens_d_vs_parallel": 55.316717432934226,
+            "effect_size_meaningful": true
+          },
+          "artifact_lifecycle_probe": {
+            "phase": "lifecycle",
+            "iteration": {
+              "accel_ms": 48.608334000000006,
+              "parallel_ms": 32.391708,
+              "accel_first": true,
+              "cache_purge": "not_requested",
+              "cache_state": "warm"
+            },
+            "artifact": {
+              "hits": 0,
+              "builds": 1,
+              "rebuilds": 0,
+              "artifact_bytes_observed": 0,
+              "construction_bytes": 0,
+              "construction_us": 4,
+              "preparation_us": 4,
+              "raw_load_us": 0
+            },
+            "artifact_policy": "ephemeral_fused",
+            "refresh_us": 44230,
+            "refreshed_relations": 1,
+            "refreshed_rows": 1000017,
+            "dependencies_before": [
+              {
+                "relid": 16420,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16420,
+                "row_count": 1000017,
+                "raw_bytes": 9000153,
+                "derived_bytes": 0
+              }
+            ],
+            "dependencies_after": [
+              {
+                "relid": 16420,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16420,
+                "row_count": 1000017,
+                "raw_bytes": 9000153,
+                "derived_bytes": 0
+              }
+            ],
+            "queries_accelerated": 1,
+            "rows_dispatched": 1000017,
+            "batches_executed": 1,
+            "stock_exec_count": 0,
+            "gpu_rows_processed": 1000017,
+            "gpu_kernel_executions": 1,
+            "output_rows_consumed": 65
+          },
+          "accel_samples_ms": [
+            4.377292,
+            4.220792,
+            4.393042,
+            4.454292,
+            4.285833,
+            3.834083,
+            3.398125,
+            3.41475,
+            3.722708,
+            3.734833
+          ]
+        },
+        {
+          "block": 3,
+          "arm": "new",
+          "run": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-comparison-3-dense_int8_count_control",
+          "mode": "parallel_hash",
+          "accel_median_ms": 4.265563,
+          "accel_cv_pct": 15.54123159683648,
+          "parallel_cv_pct": 5.4678997600582555,
+          "speedup_vs_parallel": 7.763292325069398,
+          "warm_summary": {
+            "cache_state": "warm",
+            "n": 10,
+            "accel_mean_ms": 4.0079417,
+            "accel_median_ms": 4.265563,
+            "accel_stddev_ms": 0.6228835018631852,
+            "accel_p95_ms": 4.6541042,
+            "accel_cv_pct": 15.54123159683648,
+            "accel_ci_95": [
+              3.56238864216399,
+              4.45349475783601
+            ],
+            "parallel_mean_ms": 34.1692583,
+            "parallel_median_ms": 33.1148125,
+            "parallel_stddev_ms": 1.8683407925993858,
+            "parallel_p95_ms": 37.04004405,
+            "parallel_cv_pct": 5.4678997600582555,
+            "parallel_ci_95": [
+              32.83282066642586,
+              35.505695933574145
+            ],
+            "speedup_mean_vs_parallel": 8.525388056418088,
+            "speedup_median_vs_parallel": 7.763292325069398,
+            "p_value_vs_parallel": 7.984742117841646e-12,
+            "cohens_d_vs_parallel": 21.658244497672207,
+            "effect_size_meaningful": true
+          },
+          "artifact_lifecycle_probe": {
+            "phase": "lifecycle",
+            "iteration": {
+              "accel_ms": 47.231292,
+              "parallel_ms": 33.747417,
+              "accel_first": true,
+              "cache_purge": "not_requested",
+              "cache_state": "warm"
+            },
+            "artifact": {
+              "hits": 0,
+              "builds": 1,
+              "rebuilds": 0,
+              "artifact_bytes_observed": 0,
+              "construction_bytes": 0,
+              "construction_us": 7,
+              "preparation_us": 7,
+              "raw_load_us": 0
+            },
+            "artifact_policy": "ephemeral_fused",
+            "refresh_us": 43517,
+            "refreshed_relations": 1,
+            "refreshed_rows": 1000017,
+            "dependencies_before": [
+              {
+                "relid": 16420,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16420,
+                "row_count": 1000017,
+                "raw_bytes": 9000153,
+                "derived_bytes": 0
+              }
+            ],
+            "dependencies_after": [
+              {
+                "relid": 16420,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16420,
+                "row_count": 1000017,
+                "raw_bytes": 9000153,
+                "derived_bytes": 0
+              }
+            ],
+            "queries_accelerated": 1,
+            "rows_dispatched": 1000017,
+            "batches_executed": 1,
+            "stock_exec_count": 0,
+            "gpu_rows_processed": 1000017,
+            "gpu_kernel_executions": 1,
+            "output_rows_consumed": 65
+          },
+          "accel_samples_ms": [
+            4.275209,
+            4.476625,
+            4.255917,
+            4.496208,
+            3.791292,
+            3.022333,
+            4.783292,
+            4.342208,
+            2.988,
+            3.648333
+          ]
+        },
+        {
+          "block": 4,
+          "arm": "old",
+          "run": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-comparison-4-dense_int8_count_control",
+          "mode": "parallel_dense_count",
+          "accel_median_ms": 3.2770625,
+          "accel_cv_pct": 9.528018222098462,
+          "parallel_cv_pct": 4.980750927883059,
+          "speedup_vs_parallel": 9.986064806514982,
+          "warm_summary": {
+            "cache_state": "warm",
+            "n": 10,
+            "accel_mean_ms": 3.1785417000000002,
+            "accel_median_ms": 3.2770625,
+            "accel_stddev_ms": 0.30285203237299824,
+            "accel_p95_ms": 3.4722273,
+            "accel_cv_pct": 9.528018222098462,
+            "accel_ci_95": [
+              2.961909458670741,
+              3.3951739413292596
+            ],
+            "parallel_mean_ms": 33.4709459,
+            "parallel_median_ms": 32.7249585,
+            "parallel_stddev_ms": 1.6671044484854864,
+            "parallel_p95_ms": 36.25519375,
+            "parallel_cv_pct": 4.980750927883059,
+            "parallel_ci_95": [
+              32.27845407362654,
+              34.66343772637345
+            ],
+            "speedup_mean_vs_parallel": 10.530283714698472,
+            "speedup_median_vs_parallel": 9.986064806514982,
+            "p_value_vs_parallel": 5.757155339303546e-13,
+            "cohens_d_vs_parallel": 25.283397208126985,
+            "effect_size_meaningful": true
+          },
+          "artifact_lifecycle_probe": {
+            "phase": "lifecycle",
+            "iteration": {
+              "accel_ms": 76.503,
+              "parallel_ms": 32.109042,
+              "accel_first": false,
+              "cache_purge": "not_requested",
+              "cache_state": "warm"
+            },
+            "artifact": {
+              "hits": 0,
+              "builds": 1,
+              "rebuilds": 0,
+              "artifact_bytes_observed": 4000068,
+              "construction_bytes": 4000068,
+              "construction_us": 28625,
+              "preparation_us": 28625,
+              "raw_load_us": 0
+            },
+            "artifact_policy": "cached_reusable",
+            "refresh_us": 43607,
+            "refreshed_relations": 1,
+            "refreshed_rows": 1000017,
+            "dependencies_before": [
+              {
+                "relid": 16420,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16420,
+                "row_count": 1000017,
+                "raw_bytes": 9000153,
+                "derived_bytes": 4000068
+              }
+            ],
+            "dependencies_after": [
+              {
+                "relid": 16420,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16420,
+                "row_count": 1000017,
+                "raw_bytes": 9000153,
+                "derived_bytes": 4000068
+              }
+            ],
+            "queries_accelerated": 1,
+            "rows_dispatched": 1000017,
+            "batches_executed": 3,
+            "stock_exec_count": 0,
+            "gpu_rows_processed": 1000017,
+            "gpu_kernel_executions": 3,
+            "output_rows_consumed": 65
+          },
+          "accel_samples_ms": [
+            3.363292,
+            2.476375,
+            3.537084,
+            2.985708,
+            3.308375,
+            3.210583,
+            3.267625,
+            3.392958,
+            2.956917,
+            3.2865
+          ]
+        }
+      ]
+    },
+    {
+      "lane": "dense_int8_count_control",
+      "rows": 2000017,
+      "old_median_ms": 4.5714585,
+      "new_median_ms": 4.767625,
+      "old_over_new_median": 0.9588544610786294,
+      "no_median_slowdown": false,
+      "old_cv_pct": 10.32466525129648,
+      "new_cv_pct": 13.221565911295743,
+      "blocks": [
+        {
+          "block": 1,
+          "arm": "old",
+          "run": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-comparison-1-dense_int8_count_control",
+          "mode": "parallel_dense_count",
+          "accel_median_ms": 4.5714585,
+          "accel_cv_pct": 11.927387798437143,
+          "parallel_cv_pct": 4.551399362830457,
+          "speedup_vs_parallel": 10.612208663821404,
+          "warm_summary": {
+            "cache_state": "warm",
+            "n": 10,
+            "accel_mean_ms": 4.7684499,
+            "accel_median_ms": 4.5714585,
+            "accel_stddev_ms": 0.5687515115471882,
+            "accel_p95_ms": 5.680135299999999,
+            "accel_cv_pct": 11.927387798437143,
+            "accel_ci_95": [
+              4.361617844951666,
+              5.175281955048335
+            ],
+            "parallel_mean_ms": 49.3195377,
+            "parallel_median_ms": 48.5132715,
+            "parallel_stddev_ms": 2.244729124628727,
+            "parallel_p95_ms": 53.29130189999999,
+            "parallel_cv_pct": 4.551399362830457,
+            "parallel_ci_95": [
+              47.71386677999615,
+              50.92520862000384
+            ],
+            "speedup_mean_vs_parallel": 10.342886836244205,
+            "speedup_median_vs_parallel": 10.612208663821404,
+            "p_value_vs_parallel": 1.2310922426334497e-13,
+            "cohens_d_vs_parallel": 27.208103947506675,
+            "effect_size_meaningful": true
+          },
+          "artifact_lifecycle_probe": {
+            "phase": "lifecycle",
+            "iteration": {
+              "accel_ms": 148.984792,
+              "parallel_ms": 49.232125,
+              "accel_first": false,
+              "cache_purge": "not_requested",
+              "cache_state": "warm"
+            },
+            "artifact": {
+              "hits": 0,
+              "builds": 1,
+              "rebuilds": 0,
+              "artifact_bytes_observed": 8000068,
+              "construction_bytes": 8000068,
+              "construction_us": 57649,
+              "preparation_us": 57649,
+              "raw_load_us": 0
+            },
+            "artifact_policy": "cached_reusable",
+            "refresh_us": 85931,
+            "refreshed_relations": 1,
+            "refreshed_rows": 2000017,
+            "dependencies_before": [
+              {
+                "relid": 16436,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16436,
+                "row_count": 2000017,
+                "raw_bytes": 18000153,
+                "derived_bytes": 8000068
+              }
+            ],
+            "dependencies_after": [
+              {
+                "relid": 16436,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16436,
+                "row_count": 2000017,
+                "raw_bytes": 18000153,
+                "derived_bytes": 8000068
+              }
+            ],
+            "queries_accelerated": 1,
+            "rows_dispatched": 2000017,
+            "batches_executed": 4,
+            "stock_exec_count": 0,
+            "gpu_rows_processed": 2000017,
+            "gpu_kernel_executions": 4,
+            "output_rows_consumed": 65
+          },
+          "accel_samples_ms": [
+            4.382667,
+            4.642375,
+            4.830083,
+            4.495458,
+            4.500542,
+            4.930416,
+            4.482333,
+            6.293542,
+            4.761666,
+            4.365417
+          ]
+        },
+        {
+          "block": 2,
+          "arm": "new",
+          "run": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-comparison-2-dense_int8_count_control",
+          "mode": "parallel_hash",
+          "accel_median_ms": 4.536021,
+          "accel_cv_pct": 12.103311010396453,
+          "parallel_cv_pct": 0.6229710498337202,
+          "speedup_vs_parallel": 10.453724200130466,
+          "warm_summary": {
+            "cache_state": "warm",
+            "n": 10,
+            "accel_mean_ms": 4.5130377,
+            "accel_median_ms": 4.536021,
+            "accel_stddev_ms": 0.5462269888474428,
+            "accel_p95_ms": 5.14147965,
+            "accel_cv_pct": 12.103311010396453,
+            "accel_ci_95": [
+              4.122317598366949,
+              4.903757801633051
+            ],
+            "parallel_mean_ms": 47.3919876,
+            "parallel_median_ms": 47.4183125,
+            "parallel_stddev_ms": 0.2952383626887865,
+            "parallel_p95_ms": 47.736377149999996,
+            "parallel_cv_pct": 0.6229710498337202,
+            "parallel_ci_95": [
+              47.18080147146552,
+              47.60317372853448
+            ],
+            "speedup_mean_vs_parallel": 10.501128231213313,
+            "speedup_median_vs_parallel": 10.453724200130466,
+            "p_value_vs_parallel": 9.177450539800901e-18,
+            "cohens_d_vs_parallel": 97.66304638044939,
+            "effect_size_meaningful": true
+          },
+          "artifact_lifecycle_probe": {
+            "phase": "lifecycle",
+            "iteration": {
+              "accel_ms": 89.9195,
+              "parallel_ms": 47.709625,
+              "accel_first": false,
+              "cache_purge": "not_requested",
+              "cache_state": "warm"
+            },
+            "artifact": {
+              "hits": 0,
+              "builds": 1,
+              "rebuilds": 0,
+              "artifact_bytes_observed": 0,
+              "construction_bytes": 0,
+              "construction_us": 6,
+              "preparation_us": 6,
+              "raw_load_us": 0
+            },
+            "artifact_policy": "ephemeral_fused",
+            "refresh_us": 84640,
+            "refreshed_relations": 1,
+            "refreshed_rows": 2000017,
+            "dependencies_before": [
+              {
+                "relid": 16436,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16436,
+                "row_count": 2000017,
+                "raw_bytes": 18000153,
+                "derived_bytes": 0
+              }
+            ],
+            "dependencies_after": [
+              {
+                "relid": 16436,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16436,
+                "row_count": 2000017,
+                "raw_bytes": 18000153,
+                "derived_bytes": 0
+              }
+            ],
+            "queries_accelerated": 1,
+            "rows_dispatched": 2000017,
+            "batches_executed": 1,
+            "stock_exec_count": 0,
+            "gpu_rows_processed": 2000017,
+            "gpu_kernel_executions": 1,
+            "output_rows_consumed": 65
+          },
+          "accel_samples_ms": [
+            4.568125,
+            5.060584,
+            4.822,
+            4.503917,
+            5.059958,
+            5.207667,
+            3.832167,
+            3.990292,
+            3.638959,
+            4.446708
+          ]
+        },
+        {
+          "block": 3,
+          "arm": "new",
+          "run": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-comparison-3-dense_int8_count_control",
+          "mode": "parallel_hash",
+          "accel_median_ms": 4.810957999999999,
+          "accel_cv_pct": 14.9150994747196,
+          "parallel_cv_pct": 1.7706667935752498,
+          "speedup_vs_parallel": 10.041966485677074,
+          "warm_summary": {
+            "cache_state": "warm",
+            "n": 10,
+            "accel_mean_ms": 4.518116599999999,
+            "accel_median_ms": 4.810957999999999,
+            "accel_stddev_ms": 0.6738815852738191,
+            "accel_p95_ms": 5.03549595,
+            "accel_cv_pct": 14.915099474719607,
+            "accel_ci_95": [
+              4.03608424557094,
+              5.000148954429058
+            ],
+            "parallel_mean_ms": 48.048100000000005,
+            "parallel_median_ms": 48.311479,
+            "parallel_stddev_ms": 0.8507717516438297,
+            "parallel_p95_ms": 49.15160015,
+            "parallel_cv_pct": 1.7706667935752498,
+            "parallel_ci_95": [
+              47.43953683476679,
+              48.65666316523322
+            ],
+            "speedup_mean_vs_parallel": 10.634541835418771,
+            "speedup_median_vs_parallel": 10.041966485677074,
+            "p_value_vs_parallel": 3.632443334810648e-15,
+            "cohens_d_vs_parallel": 56.72100914379633,
+            "effect_size_meaningful": true
+          },
+          "artifact_lifecycle_probe": {
+            "phase": "lifecycle",
+            "iteration": {
+              "accel_ms": 91.913334,
+              "parallel_ms": 46.939,
+              "accel_first": false,
+              "cache_purge": "not_requested",
+              "cache_state": "warm"
+            },
+            "artifact": {
+              "hits": 0,
+              "builds": 1,
+              "rebuilds": 0,
+              "artifact_bytes_observed": 0,
+              "construction_bytes": 0,
+              "construction_us": 9,
+              "preparation_us": 9,
+              "raw_load_us": 0
+            },
+            "artifact_policy": "ephemeral_fused",
+            "refresh_us": 86954,
+            "refreshed_relations": 1,
+            "refreshed_rows": 2000017,
+            "dependencies_before": [
+              {
+                "relid": 16436,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16436,
+                "row_count": 2000017,
+                "raw_bytes": 18000153,
+                "derived_bytes": 0
+              }
+            ],
+            "dependencies_after": [
+              {
+                "relid": 16436,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16436,
+                "row_count": 2000017,
+                "raw_bytes": 18000153,
+                "derived_bytes": 0
+              }
+            ],
+            "queries_accelerated": 1,
+            "rows_dispatched": 2000017,
+            "batches_executed": 1,
+            "stock_exec_count": 0,
+            "gpu_rows_processed": 2000017,
+            "gpu_kernel_executions": 1,
+            "output_rows_consumed": 65
+          },
+          "accel_samples_ms": [
+            3.308667,
+            4.805,
+            4.977334,
+            4.816916,
+            4.188125,
+            4.959041,
+            4.73025,
+            4.9665,
+            3.34625,
+            5.083083
+          ]
+        },
+        {
+          "block": 4,
+          "arm": "old",
+          "run": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-comparison-4-dense_int8_count_control",
+          "mode": "parallel_dense_count",
+          "accel_median_ms": 4.5683125,
+          "accel_cv_pct": 7.8043420808002555,
+          "parallel_cv_pct": 7.424714761804838,
+          "speedup_vs_parallel": 10.429790431368255,
+          "warm_summary": {
+            "cache_state": "warm",
+            "n": 10,
+            "accel_mean_ms": 4.5103875,
+            "accel_median_ms": 4.5683125,
+            "accel_stddev_ms": 0.35200606966965464,
+            "accel_p95_ms": 4.904734899999999,
+            "accel_cv_pct": 7.8043420808002555,
+            "accel_ci_95": [
+              4.258595021552563,
+              4.7621799784474375
+            ],
+            "parallel_mean_ms": 49.2923751,
+            "parallel_median_ms": 47.646542,
+            "parallel_stddev_ms": 3.6598182504939123,
+            "parallel_p95_ms": 55.36215899999999,
+            "parallel_cv_pct": 7.424714761804838,
+            "parallel_ci_95": [
+              46.674480730099404,
+              51.9102694699006
+            ],
+            "speedup_mean_vs_parallel": 10.928634202715399,
+            "speedup_median_vs_parallel": 10.429790431368255,
+            "p_value_vs_parallel": 4.030446162508901e-11,
+            "cohens_d_vs_parallel": 17.22500213678027,
+            "effect_size_meaningful": true
+          },
+          "artifact_lifecycle_probe": {
+            "phase": "lifecycle",
+            "iteration": {
+              "accel_ms": 147.471291,
+              "parallel_ms": 47.767708,
+              "accel_first": false,
+              "cache_purge": "not_requested",
+              "cache_state": "warm"
+            },
+            "artifact": {
+              "hits": 0,
+              "builds": 1,
+              "rebuilds": 0,
+              "artifact_bytes_observed": 8000068,
+              "construction_bytes": 8000068,
+              "construction_us": 57239,
+              "preparation_us": 57239,
+              "raw_load_us": 0
+            },
+            "artifact_policy": "cached_reusable",
+            "refresh_us": 85079,
+            "refreshed_relations": 1,
+            "refreshed_rows": 2000017,
+            "dependencies_before": [
+              {
+                "relid": 16436,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16436,
+                "row_count": 2000017,
+                "raw_bytes": 18000153,
+                "derived_bytes": 8000068
+              }
+            ],
+            "dependencies_after": [
+              {
+                "relid": 16436,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 16436,
+                "row_count": 2000017,
+                "raw_bytes": 18000153,
+                "derived_bytes": 8000068
+              }
+            ],
+            "queries_accelerated": 1,
+            "rows_dispatched": 2000017,
+            "batches_executed": 4,
+            "stock_exec_count": 0,
+            "gpu_rows_processed": 2000017,
+            "gpu_kernel_executions": 4,
+            "output_rows_consumed": 65
+          },
+          "accel_samples_ms": [
+            4.316625,
+            4.744708,
+            4.687792,
+            4.483583,
+            4.323667,
+            3.714833,
+            4.653042,
+            4.669209,
+            4.47475,
+            5.035666
+          ]
+        }
+      ]
+    }
+  ]
+}

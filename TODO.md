@@ -69,8 +69,9 @@ complete objective is implemented and verified.
   builds and passes H3 plus actual dense-result parity on PG18/19; native
   metadata/hash/H3 suites pass 60,310/10,366,112/1,176 checks. Inventory tests
   recognize 134 source ABI entries while keeping the new query unproved.
-  The broader raw admission/cost milestone still fails two dense no-slowdown
-  controls and is not completed by this item; hosted/release gates remain open.
+  This foundation did not itself qualify raw admission/costing. The later
+  narrow raw COUNT milestone below passes all six dense no-slowdown controls;
+  its earlier two failures remain retained. Hosted/release gates remain open.
   Evidence: `benchmarks/evidence/native-count-foundation-20261030/README.md`.
 
 - [x] Correct integration observer address extraction without weakening strict
@@ -2012,7 +2013,30 @@ complete objective is implemented and verified.
     expression predicates, cache reuse, performance, static-proof and normal
     SQL admission gates. Evidence:
     `benchmarks/evidence/hash-live-20261012/README.md`.
-  - [ ] Qualify direct BIGINT fact-key hash aggregation. The staged Rust raw-key
+  - [ ] Qualify direct BIGINT fact-key hash aggregation.
+
+    - [x] Normally admit and qualify one COUNT(*) or fixed-width COUNT(column)
+      over nullable INT2/INT4/INT8 fact keys, optionally with a direct same-fact
+      Boolean FILTER. Preserve independent dense/raw selection, native comparison,
+      exact residency/budget/currentness, cancellation and capacity learning.
+      PG18/19 correctness covers all nine supported COUNT column types and
+      filtered/unfiltered shapes. Shared per-hook shape extraction and lazy
+      unused catalog estimation reduce measured planner time without sharing
+      mutable residency evidence. The final focused suite passes 18 tests per
+      major; direct follow-up proves actual five-column residency rather than
+      a silent hardware-detection skip. The test-only mixed-source fix is on main.
+      All 22 PG18/M2 Max warm-resident matrix cells pass, including 12 raw cells
+      at 1,000,017/2,000,017 rows with 4.83–11.15x median gains against parallel
+      PostgreSQL. All six fixed old/new dense no-slowdown comparisons pass;
+      the separate G4096 control passes full parity at both scales. Retain all
+      prior failures, control variance flags and every sample. Every current
+      refresh-inclusive matrix comparison loses: this is not OS-cold, first-use,
+      cross-device or release qualification. WHERE, general FILTER expressions,
+      multiple measures, SUM/AVG and static source proofs remain open. Evidence:
+      `benchmarks/evidence/raw-integer-count-admission-20261030/README.md`.
+
+    Historical foundations below are superseded only for that narrow COUNT scope.
+    The staged Rust raw-key
     owner now binds resident INT64 values/NULLs directly, with no H3 extension,
     key copy, dictionary or host distinct scan. Query-owned metadata uses the
     generation-checked ephemeral resolver and cleanup-before-interrupt-service

@@ -1,0 +1,8 @@
+e9904144d542debe5e638d6ebd243a97baa8c378577cdd208a02c5c5cf61de13  /Users/contra/Projects/pg_accel/.pgaccel/acpp/current/lib/libacpp-rt.dylib
+ee5b4e214f26e327c63abcf42d33b159e41ea09739164a290ce1297e1c65e2db  /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-baseline-build2/postgres18/lib/libpq.5.dylib
+ee5b4e214f26e327c63abcf42d33b159e41ea09739164a290ce1297e1c65e2db  /Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/18.4/lib/libpq.5.dylib
+ee5b4e214f26e327c63abcf42d33b159e41ea09739164a290ce1297e1c65e2db  /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/production18/postgres/lib/libpq.5.dylib
+6e219570f02cdc6898a0b4f5bbb4fed98cbb81fc780f675b706040fab5ef7c09  /Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/18.4/lib/pg_accel.dylib
+5ace201c55ebfc30b83626c80ec016de837f2145f56817ed4e69480aa91cf0ae  /Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/19beta1/lib/pg_accel.dylib
+6e219570f02cdc6898a0b4f5bbb4fed98cbb81fc780f675b706040fab5ef7c09  /Users/contra/Projects/pg_accel/target/release/libpg_accel.dylib
+e987241e92a18b678655647f518eeddd3a29b68c06760c595f64ee894ed0484c  /Users/contra/Projects/pg_accel/target/release/pg_accel_bench

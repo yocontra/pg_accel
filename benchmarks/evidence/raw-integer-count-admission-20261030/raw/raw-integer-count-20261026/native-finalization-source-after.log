@@ -1,0 +1,3 @@
+pgaccel-kernels/src/grouped_agg.cpp: OK
+pgaccel-kernels/test/test_grouped_agg_hash.cpp: OK
+pgaccel-kernels/include/pgaccel_olap.h: OK

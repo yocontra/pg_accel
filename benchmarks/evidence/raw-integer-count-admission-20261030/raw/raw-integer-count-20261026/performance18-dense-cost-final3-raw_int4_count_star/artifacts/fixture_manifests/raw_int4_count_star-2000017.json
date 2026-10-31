@@ -1,0 +1,21 @@
+{
+  "generator": "arithmetic-v1 (independent of PRNG seed)",
+  "iterations": 10,
+  "mandatory_scales": [
+    1000017,
+    2000017
+  ],
+  "non_null_groups": 16388,
+  "null_group": true,
+  "query_sql": "SELECT k, count(*) AS n FROM bench_raw_integer_count GROUP BY k",
+  "rows": 2000017,
+  "seed": 42,
+  "setup_sql": [
+    "DROP TABLE IF EXISTS bench_raw_integer_count",
+    "CREATE TABLE bench_raw_integer_count (k int4, value boolean, qualifies boolean)",
+    "INSERT INTO bench_raw_integer_count SELECT CASE WHEN i % 97 = 0 THEN NULL::int4 ELSE (g * 200003 - 1638844582)::int4 END, CASE WHEN i % 7 = 0 THEN NULL::boolean ELSE i % 2 = 0 END, CASE WHEN g = 0 THEN false WHEN i % 11 = 0 THEN NULL::boolean ELSE i % 3 <> 0 END FROM (SELECT i, CASE WHEN i > 16388 AND i % 5 = 0 THEN 0 ELSE (i - 1) % 16388 END AS g FROM generate_series(1::bigint, 2000017) AS s(i)) AS fixture",
+    "ANALYZE bench_raw_integer_count"
+  ],
+  "warmups": 5,
+  "workload": "raw_int4_count_star"
+}

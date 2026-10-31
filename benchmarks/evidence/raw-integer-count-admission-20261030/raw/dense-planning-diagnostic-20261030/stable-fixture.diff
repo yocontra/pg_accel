@@ -1,0 +1,52 @@
+--- .codex/scratch/dense-planning-diagnostic-20261030/probe.py	2026-10-30 18:57:00
++++ .codex/scratch/dense-planning-diagnostic-20261030/probe-stable-fixture.py	2026-10-30 19:30:58
+@@ -125,6 +125,22 @@
+     assert first == second, 'counter observer must be cached and nonperturbing'
+ 
+ 
++def corpus_state(native):
++    # Fixed-width INT/BOOL fixture has no TOAST relation. Flush setup-backend
++    # counters before reading them; only this backend ever writes the fixture.
++    native.query('SELECT pg_stat_force_next_flush()')
++    native.query('SELECT pg_stat_clear_snapshot()')
++    state = native.query("""SELECT c.oid,c.relfilenode,c.reltoastrelid,c.reloptions::text,
++      s.n_tup_ins,s.n_tup_upd,s.n_tup_del,s.n_tup_hot_upd,s.autovacuum_count,s.autoanalyze_count
++      FROM pg_class c JOIN pg_stat_all_tables s ON s.relid=c.oid
++      WHERE c.oid='bench_raw_integer_count'::regclass""")
++    assert len(state) == 1
++    assert state[0][2] == '0', 'fixed-width fixture must have no TOAST relation'
++    assert state[0][3] == '{autovacuum_enabled=false}'
++    assert state[0][4:] == ['2000017','0','0','0','0','0'], 'no DML or autonomous maintenance'
++    return state
++
++
+ def run_cell(pq, connection, sql_type):
+     conns = []
+     try:
+@@ -137,7 +153,7 @@
+             for name, value in SETTINGS.items():
+                 assert db.query('SHOW ' + name)[0][0] == value, f'observed setting {name}'
+         native.query('SET pg_accel.enabled = off')
+-        native.query(f'CREATE TABLE bench_raw_integer_count (k {sql_type}, value boolean, qualifies boolean)')
++        native.query(f'CREATE TABLE bench_raw_integer_count (k {sql_type}, value boolean, qualifies boolean) WITH (autovacuum_enabled=false)')
+         native.query(f"""INSERT INTO bench_raw_integer_count
+           SELECT CASE WHEN i % 97 = 0 THEN NULL::{sql_type} ELSE (g-32)::{sql_type} END,
+           CASE WHEN i % 7 = 0 THEN NULL::boolean ELSE i % 2 = 0 END,
+@@ -169,12 +185,17 @@
+             emit('plan', sql_type=sql_type, prepared=is_prepared, rows=explain)
+             assert 'GPU Physical Kernel Mode: parallel_dense_count' in text and 'GPU Kernel Dispatched: true' in text
+             setup_snapshot(db)
++        corpus_before = corpus_state(native)
++        emit('corpus_before', sql_type=sql_type, state=corpus_before)
+         for phase, schedule in [('warmup', ORDER[:5]), ('measured', ORDER)]:
+             for index, direct_first in enumerate(schedule):
+                 emit('pair', sql_type=sql_type, phase=phase, index=index, direct_first=direct_first)
+                 modes = [(direct, False), (prepared, True)]
+                 for db, is_prepared in modes if direct_first else reversed(modes):
+                     measure(db, is_prepared, expected, phase, index, sql_type)
++        corpus_after = corpus_state(native)
++        emit('corpus_after', sql_type=sql_type, state=corpus_after)
++        assert corpus_after == corpus_before, 'immutable fixture maintenance/DML state'
+     finally:
+         for db in conns:
+             db.close()

@@ -1,0 +1,72 @@
+[32m[1m       Using[0m[39m [37m[1mCliArgument("pg18")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/18.4/bin/pg_config[39m
+CARGO_PGRX_TEST_PGDATA="/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/partition18-observer1/pgdata" CARGO_TARGET_DIR="/Users/contra/Projects/pg_accel/target" PGRX_ALL_FEATURES="false" PGRX_BUILD_PROFILE="dev" PGRX_FEATURES="pg18 pg_test" PGRX_MANIFEST_PATH="/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" PGRX_NO_DEFAULT_FEATURES="true" PGRX_NO_SCHEMA="false" "/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "test" "--manifest-path" "/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" "--features" "pg18 pg_test" "--no-default-features" "pg_raw_count_dense_controls_preserve_independent_candidates"
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 25.08s
+     Running unittests src/lib.rs (target/debug/deps/pg_accel-ed206a68dc782b00)
+
+running 1 test
+test engine::ffi::planner_hooks::generic_groupagg::candidate_observation_tests::pg_pg_raw_count_dense_controls_preserve_independent_candidates ... [32m[1m       Using[0m[39m [37m[1mPgConfig("pg18")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/18.4/bin/pg_config[39m
+[32m[1m    Building[0m[39m extension with features [36mpg18 pg_test[39m
+[32m[1m     Running[0m[39m command [36m"/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "rustc" "--lib" "--manifest-path" "/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" "--features" "pg18 pg_test" "--no-default-features" "--message-format=json-render-diagnostics"[39m
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.06s
+[32m[1m  Installing[0m[39m extension
+[32m[1m     Copying[0m[39m control file to [36m.codex/scratch/uniform-budget-live-20261012/postgres/18.4/share/extension/pg_accel.control[39m
+[32m[1m     Copying[0m[39m shared library to [36m.codex/scratch/uniform-budget-live-20261012/postgres/18.4/lib/pg_accel.dylib[39m
+[32m[1m  Discovered[0m[39m [36m[1m361[0m[39m SQL entities: [36m[1m30[0m[39m schemas ([36m[1m4[0m[39m unique), [36m[1m329[0m[39m functions, [36m[1m0[0m[39m types, [36m[1m0[0m[39m enums, [36m[1m1[0m[39m sqls, [36m[1m0[0m[39m ords, [36m[1m0[0m[39m hashes, [36m[1m0[0m[39m aggregates, [36m[1m1[0m[39m triggers
+[32m[1m     Writing[0m[39m SQL entities to /Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/18.4/share/extension/pg_accel--1.0.0-rc1.sql
+[32m[1m    Finished[0m[39m installing pg_accel
+FAILED
+
+failures:
+
+---- engine::ffi::planner_hooks::generic_groupagg::candidate_observation_tests::pg_pg_raw_count_dense_controls_preserve_independent_candidates stdout ----
+[32m[1m     Running[0m[39m cd "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/partition18-observer1/pgdata" && "/Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/18.4/bin/initdb" "--locale=C" "--lc-ctype=UTF-8" "-D" "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/partition18-observer1/pgdata/18-36027"
+[32m[1m    Finished[0m[39m initializing database
+[32m[1m    Starting[0m[39m test Postgres on port [36m[1m58536[0m[39m
+[36m[2026-10-26 02:38:09.301 MST] [36228] [6adf1f80.8d84]: LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)[39m
+[36m[2026-10-26 02:38:09.301 MST] [36228] [6adf1f80.8d84]: LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query[39m
+[36m[2026-10-26 02:38:09.303 MST] [36228] [6adf1f80.8d84]: LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit[39m
+[36m[2026-10-26 02:38:09.304 MST] [36228] [6adf1f80.8d84]: LOG:  listening on IPv6 address "::1", port 58536[39m
+[36m[2026-10-26 02:38:09.304 MST] [36228] [6adf1f80.8d84]: LOG:  listening on IPv4 address "127.0.0.1", port 58536[39m
+[36m[2026-10-26 02:38:09.305 MST] [36228] [6adf1f80.8d84]: LOG:  listening on Unix socket "/tmp/pgrx-test-sockets-18-36027/.s.PGSQL.58536"[39m
+[36m[2026-10-26 02:38:09.310 MST] [36234] [6adf1f81.8d8a]: LOG:  database system was shut down at 2026-10-26 02:38:08 MST[39m
+[32m[1m    Creating[0m[39m database [36m[1mpgrx_tests[0m[39m
+
+thread 'engine::ffi::planner_hooks::generic_groupagg::candidate_observation_tests::pg_pg_raw_count_dense_controls_preserve_independent_candidates' (45648095) panicked at /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-tests-0.19.1/src/framework.rs:195:9:
+
+
+Postgres Messages:
+[37m[2m[2026-10-26 02:38:09.301 MST] [36228] [6adf1f80.8d84]: LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+[2026-10-26 02:38:09.301 MST] [36228] [6adf1f80.8d84]: LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+[2026-10-26 02:38:09.303 MST] [36228] [6adf1f80.8d84]: LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+[2026-10-26 02:38:09.304 MST] [36228] [6adf1f80.8d84]: LOG:  listening on IPv6 address "::1", port 58536
+[2026-10-26 02:38:09.304 MST] [36228] [6adf1f80.8d84]: LOG:  listening on IPv4 address "127.0.0.1", port 58536
+[2026-10-26 02:38:09.305 MST] [36228] [6adf1f80.8d84]: LOG:  listening on Unix socket "/tmp/pgrx-test-sockets-18-36027/.s.PGSQL.58536"
+[2026-10-26 02:38:09.311 MST] [36228] [6adf1f80.8d84]: LOG:  database system is ready to accept connections
+[0m[39m
+
+Test Function Messages:
+[36m[2026-10-26 02:38:09.440 MST] [36250] [6adf1f81.8d9a]: LOG:  statement: START TRANSACTION
+[2026-10-26 02:38:09.441 MST] [36250] [6adf1f81.8d9a]: LOG:  statement: SELECT "tests"."pg_raw_count_dense_controls_preserve_independent_candidates"();
+[2026-10-26 02:38:09.441 MST] [36250] [6adf1f81.8d9a]: ERROR:  function tests.pg_raw_count_dense_controls_preserve_independent_candidates() does not exist at character 8
+[2026-10-26 02:38:09.441 MST] [36250] [6adf1f81.8d9a]: HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+[2026-10-26 02:38:09.441 MST] [36250] [6adf1f81.8d9a]: STATEMENT:  SELECT "tests"."pg_raw_count_dense_controls_preserve_independent_candidates"();
+[2026-10-26 02:38:09.441 MST] [36250] [6adf1f81.8d9a]: LOG:  statement: ROLLBACK
+[39m
+
+Client Error:
+[31m[1mfunction tests.pg_raw_count_dense_controls_preserve_independent_candidates() does not exist[0m[39m
+postgres location: [37m[2mparse_func.c:636[0m[39m
+rust location: [33m<unknown>[39m
+
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    engine::ffi::planner_hooks::generic_groupagg::candidate_observation_tests::pg_pg_raw_count_dense_controls_preserve_independent_candidates
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1897 filtered out; finished in 10.77s
+
+error: test failed, to rerun pass `--lib`

@@ -1,0 +1,6 @@
+/Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/run-lazy-full-gates.sh: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/run-lazy-benchmark.sh: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/run-lazy-control-comparison.sh: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/verify-retained-bench.sh: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/check-lazy-matrix.py: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/summarize-control-comparison.py: OK

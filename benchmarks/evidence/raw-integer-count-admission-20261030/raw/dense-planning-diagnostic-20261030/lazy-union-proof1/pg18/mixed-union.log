@@ -1,0 +1,9 @@
+BEGIN
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/lazy-union-proof.sql:3: NOTICE:  skipping Residency v2 generic aggregate test: no hardware-derived GPU device
+ t17_test_loaded_raw_quote_keeps_full_union_and_selected_type_me 
+-----------------------------------------------------------------
+ 
+(1 row)
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/lazy-union-proof.sql:17: ERROR:  mixed-union test returned before creating its fixture
+CONTEXT:  PL/pgSQL function inline_code_block line 4 at RAISE

@@ -1,0 +1,51 @@
+2026-10-26 05:02:34.856 MST [83555] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-26 05:02:34.856 MST [83555] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-26 05:02:35.034 MST [83555] LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-26 05:02:35.035 MST [83555] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/counttrainnew/.s.PGSQL.33920"
+2026-10-26 05:02:35.050 MST [83562] LOG:  database system was shut down at 2026-10-26 05:02:34 MST
+2026-10-26 05:02:35.053 MST [83555] LOG:  database system is ready to accept connections
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/dense-count-validation1/servers/current/jit-cache/apps/global/jit-cache/9746615646409597690.16754967598334385811.metalar.83585.14954140711247673259.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/dense-count-validation1/servers/current/jit-cache/apps/global/jit-cache/17075605042627645658.8959692158553657888.metalar.83585.6695958336374696750.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/dense-count-validation1/servers/current/jit-cache/apps/global/jit-cache/2993083400042206172.17454522549048840548.metalar.83585.8959171539509966352.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/dense-count-validation1/servers/current/jit-cache/apps/global/jit-cache/10813227848175954278.16754967598334385811.metalar.83585.3223390180327376759.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/dense-count-validation1/servers/current/jit-cache/apps/global/jit-cache/71121235393808374.8722717395299248347.metalar.83585.11536879830736525013.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/dense-count-validation1/servers/current/jit-cache/apps/global/jit-cache/4939212832255122260.3502967889256749554.metalar.85817.8410311241919325312.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/dense-count-validation1/servers/current/jit-cache/apps/global/jit-cache/18304861154564092634.8959692158553657888.metalar.85817.12786973601714921185.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/dense-count-validation1/servers/current/jit-cache/apps/global/jit-cache/14690400167917884164.14889703823197423.metalar.85817.867913587602252542.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/dense-count-validation1/servers/current/jit-cache/apps/global/jit-cache/9605769421955569320.16754967598334385811.metalar.85817.11588536576531371836.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/dense-count-validation1/servers/current/jit-cache/apps/global/jit-cache/8425344857425537224.17454522549048840548.metalar.85817.1704242029491255291.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/dense-count-validation1/servers/current/jit-cache/apps/global/jit-cache/17128233800462945510.17454522549048840548.metalar.85817.10876839809990569198.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/dense-count-validation1/servers/current/jit-cache/apps/global/jit-cache/14690400167917884164.11095969224968294271.metalar.85817.12462518220385182286.tmp (kernels_added=1 skipped=0)
+2026-10-26 05:05:41.983 MST [83555] LOG:  received fast shutdown request
+2026-10-26 05:05:41.983 MST [83555] LOG:  aborting any active transactions
+2026-10-26 05:05:41.985 MST [83555] LOG:  background worker "logical replication launcher" (PID 83565) exited with exit code 1
+2026-10-26 05:05:41.985 MST [83560] LOG:  shutting down
+2026-10-26 05:05:41.985 MST [83560] LOG:  checkpoint starting: shutdown immediate
+2026-10-26 05:05:42.027 MST [83560] LOG:  checkpoint complete: wrote 150 buffers (0.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.040 s, sync=0.002 s, total=0.043 s; sync files=56, longest=0.001 s, average=0.001 s; distance=1060 kB, estimate=1060 kB; lsn=0/1818C08, redo lsn=0/1818C08
+2026-10-26 05:05:42.036 MST [83555] LOG:  database system is shut down

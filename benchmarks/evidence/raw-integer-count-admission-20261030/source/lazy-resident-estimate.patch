@@ -1,0 +1,299 @@
+diff --git a/pg_accel/src/engine/residency/store.rs b/pg_accel/src/engine/residency/store.rs
+index 7dbefd29..c1ad7f47 100644
+--- a/pg_accel/src/engine/residency/store.rs
++++ b/pg_accel/src/engine/residency/store.rs
+@@ -2855,41 +2855,69 @@ pub fn estimate_selected_relation(
+     let columns = required_columns_for(request)?;
+     let fixed_width =
+         loader::columns_have_fixed_width_load(&columns).map_err(ResidentLoadError::Loader)?;
+-    let estimated_bytes = loader::estimate_resident_bytes(request.relid, &columns)
+-        .map_err(ResidentLoadError::Loader)?;
++    estimate_resolved_selected_relation(request, &columns, fixed_width, || {
++        loader::estimate_resident_bytes(request.relid, &columns).map_err(ResidentLoadError::Loader)
++    })
++}
++
++/// Preserve catalog validation at the caller while avoiding a discarded byte
++/// estimate for exact resident ownership. No store borrow spans the estimator.
++fn estimate_resolved_selected_relation(
++    request: &SelectedRelation,
++    columns: &[ColumnRequest],
++    fixed_width: bool,
++    estimate_bytes: impl FnOnce() -> Result<u64, ResidentLoadError>,
++) -> Result<ResidentLoadEstimate, ResidentLoadError> {
++    let snapshot = || {
++        STORE.with(|store| {
++            let store = store.borrow();
++            let entry = store
++                .entries
++                .iter()
++                .find(|entry| entry.relid == request.relid);
++            // The resolved request includes pinned and already-loaded columns.
++            // Only complete coverage permits replacing a catalog estimate with the
++            // actual retained charge. A selected subset must not hide other owners.
++            let loaded_entry = entry.filter(|entry| covers_planner_column_union(entry, columns));
++            (
++                loaded_entry.map(|entry| {
++                    (
++                        ResidentDependencyStamp::from_relation(entry),
++                        entry.row_count,
++                        selected_columns_have_no_null_sidecars(entry, &request.columns)
++                            .expect("loaded entry covers every selected column"),
++                        entry.raw_bytes(),
++                        retained_column_identity(entry),
++                    )
++                }),
++                loaded_entry
++                    .and_then(|entry| selected_numeric_column_stats(entry, &request.columns)),
++                loaded_entry.and_then(|entry| selected_nullable_columns(entry, &request.columns)),
++                store.pins.contains_key(&u32::from(request.relid)),
++                entry.map(|entry| entry.load_ms),
++            )
++        })
++    };
++    let mut evidence = snapshot();
++    let estimated_bytes = if let Some(resident) = evidence.0.as_ref() {
++        // Actual retained ownership does not depend on catalog row estimates
++        // or their overflow checks. All structural validation still precedes
++        // this branch, and candidate currentness is independently revalidated.
++        resident.3
++    } else {
++        let estimated = estimate_bytes()?;
++        // SPI can process invalidations or reenter extension code. Preserve
++        // the original fallback ordering: capture ALL metadata after it runs.
++        evidence = snapshot();
++        evidence.0.as_ref().map_or(estimated, |resident| resident.3)
++    };
+     let (
+         resident_evidence,
+         resident_numeric_columns,
+         resident_nullable_columns,
+         pinned,
+         last_load_ms,
+-    ) = STORE.with(|store| {
+-        let store = store.borrow();
+-        let entry = store
+-            .entries
+-            .iter()
+-            .find(|entry| entry.relid == request.relid);
+-        // The resolved request includes pinned and already-loaded columns.
+-        // Only complete coverage permits replacing a catalog estimate with the
+-        // actual retained charge. A selected subset must not hide other owners.
+-        let loaded_entry = entry.filter(|entry| covers_planner_column_union(entry, &columns));
+-        (
+-            loaded_entry.map(|entry| {
+-                (
+-                    ResidentDependencyStamp::from_relation(entry),
+-                    entry.row_count,
+-                    selected_columns_have_no_null_sidecars(entry, &request.columns)
+-                        .expect("loaded entry covers every selected column"),
+-                    entry.raw_bytes(),
+-                    retained_column_identity(entry),
+-                )
+-            }),
+-            loaded_entry.and_then(|entry| selected_numeric_column_stats(entry, &request.columns)),
+-            loaded_entry.and_then(|entry| selected_nullable_columns(entry, &request.columns)),
+-            store.pins.contains_key(&u32::from(request.relid)),
+-            entry.map(|entry| entry.load_ms),
+-        )
+-    });
++    ) = evidence;
+     Ok(ResidentLoadEstimate {
+         relid: request.relid,
+         loaded: resident_evidence.is_some(),
+@@ -2905,7 +2933,7 @@ pub fn estimate_selected_relation(
+         resident_numeric_columns,
+         resident_nullable_columns,
+         pinned,
+-        estimated_bytes: resident_evidence.map_or(estimated_bytes, |evidence| evidence.3),
++        estimated_bytes,
+         fixed_width,
+         last_load_ms,
+         amortization_queries: crate::engine::cost::device_limits().auto_load_amortization_queries,
+@@ -6655,6 +6683,112 @@ pub(super) mod tests {
+         });
+     }
+ 
++    #[test]
++    fn planner_resident_byte_estimation_is_lazy_and_preserves_fallback_order() {
++        let request = SelectedRelation {
++            relid: pg_sys::Oid::from(1455_u32),
++            columns: vec![1],
++        };
++        let required = [ColumnRequest {
++            attno: 1,
++            type_oid: pg_sys::INT4OID,
++        }];
++        install_planner_evidence_relation(1455, 17);
++        let warm = estimate_resolved_selected_relation(&request, &required, true, || {
++            panic!("exact resident ownership must not invoke the catalog estimator")
++        })
++        .expect("exact warm estimate");
++        assert!(warm.loaded);
++        assert_eq!(warm.resident_rows, Some(17));
++        assert!(revalidate_loaded_estimates(
++            std::slice::from_ref(&request),
++            &[warm]
++        ));
++
++        for columns in [
++            vec![ColumnRequest {
++                attno: 1,
++                type_oid: pg_sys::INT8OID,
++            }],
++            vec![
++                required[0],
++                ColumnRequest {
++                    attno: 2,
++                    type_oid: pg_sys::INT4OID,
++                },
++            ],
++        ] {
++            let calls = Cell::new(0);
++            let partial = estimate_resolved_selected_relation(&request, &columns, true, || {
++                calls.set(calls.get() + 1);
++                Ok(91)
++            })
++            .expect("partial estimate");
++            assert_eq!(calls.get(), 1);
++            assert!(!partial.loaded);
++            assert_eq!(partial.estimated_bytes, 91);
++            let error = estimate_resolved_selected_relation(&request, &columns, true, || {
++                Err(ResidentLoadError::Loader(
++                    "sentinel estimate failure".into(),
++                ))
++            })
++            .expect_err("partial estimate error must propagate");
++            assert_eq!(
++                error,
++                ResidentLoadError::Loader("sentinel estimate failure".into())
++            );
++        }
++
++        STORE.with(|store| store.borrow_mut().remove_relation(request.relid));
++        let calls = Cell::new(0);
++        let cold = estimate_resolved_selected_relation(&request, &required, true, || {
++            calls.set(calls.get() + 1);
++            Ok(73)
++        })
++        .expect("cold estimate");
++        assert_eq!(calls.get(), 1);
++        assert!(!cold.loaded);
++        assert_eq!(cold.estimated_bytes, 73);
++        assert!(
++            estimate_resolved_selected_relation(&request, &required, true, || {
++                Err(ResidentLoadError::Loader("cold sentinel".into()))
++            })
++            .is_err()
++        );
++
++        let recaptured = estimate_resolved_selected_relation(&request, &required, true, || {
++            // A mutable borrow here proves the helper released its initial
++            // borrow before the callback; installation models SPI reentrancy.
++            install_planner_evidence_relation(1455, 29);
++            STORE.with(|store| {
++                let mut store = store.borrow_mut();
++                store.entries[0].load_ms = 12.5;
++                store.entries[0].raw_charge =
++                    LedgerCharge::reserve(123, u64::MAX).expect("test retained charge");
++                store.pins.insert(
++                    1455,
++                    PinSpec {
++                        columns: required.to_vec(),
++                    },
++                );
++            });
++            Ok(999)
++        })
++        .expect("post-estimator snapshot");
++        assert!(recaptured.loaded);
++        assert!(recaptured.pinned);
++        assert_eq!(recaptured.last_load_ms, Some(12.5));
++        assert_eq!(recaptured.resident_rows, Some(29));
++        assert_eq!(recaptured.estimated_bytes, 123);
++        assert!(revalidate_loaded_estimates(
++            std::slice::from_ref(&request),
++            &[recaptured]
++        ));
++        STORE.with(|store| {
++            store.borrow_mut().pins.remove(&1455);
++        });
++    }
++
+     #[test]
+     fn planner_raw_owner_requires_complete_typed_union_and_preserves_selected_metadata() {
+         let request = SelectedRelation {
+@@ -6705,7 +6839,10 @@ pub(super) mod tests {
+                 },
+             );
+         });
+-        let estimate = planner_evidence_estimate(&request);
++        let estimate = estimate_resolved_selected_relation(&request, &required, false, || {
++            panic!("full retained union must bypass catalog byte estimation")
++        })
++        .expect("full retained union estimate");
+         assert_eq!(estimate.estimated_bytes, 123);
+         assert_eq!(estimate.resident_selected_columns, Some(vec![1]));
+         assert_eq!(
+@@ -10068,6 +10205,61 @@ mod pg_tests {
+             }
+         }
+ 
++        #[pg_test]
++        fn live_resident_estimate_keeps_catalog_and_invalidation_guards() {
++            use super::super::{SelectedRelation, estimate_selected_relation};
++
++            cleanup_backend();
++            Spi::run("CREATE TEMP TABLE pgaccel_lazy_estimate (value int4)")
++                .expect("estimate fixture creation");
++            let relid = test_relation_oid("pgaccel_lazy_estimate");
++            let count_request = SelectedRelation {
++                relid,
++                columns: vec![],
++            };
++            assert!(
++                !estimate_selected_relation(&count_request)
++                    .expect("cold count")
++                    .loaded
++            );
++            install_catalog_backed_entry(relid);
++            assert!(
++                estimate_selected_relation(&count_request)
++                    .expect("exact warm count")
++                    .loaded
++            );
++            Spi::run("TRUNCATE pgaccel_lazy_estimate").expect("invalidate retained ownership");
++            assert!(
++                !estimate_selected_relation(&count_request)
++                    .expect("invalidated count")
++                    .loaded
++            );
++
++            let column_request = SelectedRelation {
++                relid,
++                columns: vec![1],
++            };
++            assert!(
++                !estimate_selected_relation(&column_request)
++                    .expect("supported column")
++                    .loaded
++            );
++            Spi::run(
++                "ALTER TABLE pgaccel_lazy_estimate ALTER COLUMN value TYPE jsonb USING NULL::jsonb",
++            )
++            .expect("unsupported type change");
++            assert!(estimate_selected_relation(&column_request).is_err());
++            Spi::run("ALTER TABLE pgaccel_lazy_estimate DROP COLUMN value")
++                .expect("drop requested attribute");
++            assert!(estimate_selected_relation(&column_request).is_err());
++            Spi::run("ALTER TABLE pgaccel_lazy_estimate ENABLE ROW LEVEL SECURITY")
++                .expect("enable RLS");
++            assert!(estimate_selected_relation(&count_request).is_err());
++            Spi::run("DROP TABLE pgaccel_lazy_estimate").expect("drop relation");
++            assert!(estimate_selected_relation(&count_request).is_err());
++            cleanup_backend();
++        }
++
+         #[pg_test]
+         fn live_analyze_relcache_invalidation_keeps_unchanged_pinned_entry() {
+             cleanup_backend();

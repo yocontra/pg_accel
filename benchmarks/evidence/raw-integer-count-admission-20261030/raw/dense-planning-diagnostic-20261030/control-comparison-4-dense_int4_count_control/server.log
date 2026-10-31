@@ -1,0 +1,27 @@
+2026-10-30 20:09:21.380 MST [1480] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-30 20:09:21.380 MST [1480] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-30 20:09:21.411 MST [1480] LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-30 20:09:21.412 MST [1480] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/rawcontrol18/.s.PGSQL.33618"
+2026-10-30 20:09:21.418 MST [1508] LOG:  database system was shut down at 2026-10-30 20:09:21 MST
+2026-10-30 20:09:21.419 MST [1480] LOG:  database system is ready to accept connections
+2026-10-30 20:09:21.546 MST [1480] LOG:  received SIGHUP, reloading configuration files
+2026-10-30 20:09:21.547 MST [1480] LOG:  parameter "work_mem" changed to "512MB"
+2026-10-30 20:09:21.547 MST [1480] LOG:  parameter "effective_cache_size" changed to "48GB"
+2026-10-30 20:09:21.547 MST [1480] LOG:  parameter "max_parallel_workers_per_gather" changed to "8"
+2026-10-30 20:09:21.547 MST [1480] LOG:  parameter "max_parallel_workers" changed to "12"
+2026-10-30 20:09:21.547 MST [1480] LOG:  parameter "maintenance_work_mem" changed to "2GB"
+2026-10-30 20:09:21.547 MST [1480] LOG:  parameter "jit" changed to "off"
+2026-10-30 20:09:21.547 MST [1480] LOG:  parameter "random_page_cost" changed to "1.1"
+2026-10-30 20:09:21.547 MST [1480] LOG:  parameter "effective_io_concurrency" changed to "256"
+2026-10-30 20:09:21.547 MST [1480] LOG:  parameter "track_io_timing" changed to "on"
+2026-10-30 20:09:22.845 MST [1499] LOG:  checkpoint starting: immediate force wait
+2026-10-30 20:09:22.883 MST [1499] LOG:  checkpoint complete: wrote 4516 buffers (0.2%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 4 recycled; write=0.034 s, sync=0.003 s, total=0.038 s; sync files=52, longest=0.001 s, average=0.001 s; distance=63397 kB, estimate=63397 kB; lsn=0/54F9338, redo lsn=0/54F92E0
+2026-10-30 20:09:25.594 MST [1499] LOG:  checkpoint starting: immediate force wait
+2026-10-30 20:09:25.639 MST [1499] LOG:  checkpoint complete: wrote 8899 buffers (0.4%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 8 recycled; write=0.043 s, sync=0.002 s, total=0.046 s; sync files=34, longest=0.001 s, average=0.001 s; distance=126154 kB, estimate=126154 kB; lsn=0/D02BCD0, redo lsn=0/D02BC78
+2026-10-30 20:09:26.988 MST [1480] LOG:  received fast shutdown request
+2026-10-30 20:09:26.988 MST [1480] LOG:  aborting any active transactions
+2026-10-30 20:09:26.990 MST [1480] LOG:  background worker "logical replication launcher" (PID 1511) exited with exit code 1
+2026-10-30 20:09:26.990 MST [1499] LOG:  shutting down
+2026-10-30 20:09:26.990 MST [1499] LOG:  checkpoint starting: shutdown immediate
+2026-10-30 20:09:26.999 MST [1499] LOG:  checkpoint complete: wrote 9 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.008 s, sync=0.001 s, total=0.009 s; sync files=8, longest=0.001 s, average=0.001 s; distance=49 kB, estimate=113543 kB; lsn=0/D0382E0, redo lsn=0/D0382E0
+2026-10-30 20:09:27.007 MST [1480] LOG:  database system is shut down

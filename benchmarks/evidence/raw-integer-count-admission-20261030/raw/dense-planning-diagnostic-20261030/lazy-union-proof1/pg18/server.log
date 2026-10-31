@@ -1,0 +1,29 @@
+2026-10-30 19:51:47.404 MST [76463] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-30 19:51:47.404 MST [76463] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-30 19:51:47.438 MST [76463] LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-30 19:51:47.438 MST [76463] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/leup18-20261030/.s.PGSQL.34418"
+2026-10-30 19:51:47.444 MST [76469] LOG:  database system was shut down at 2026-10-30 19:51:47 MST
+2026-10-30 19:51:47.446 MST [76463] LOG:  database system is ready to accept connections
+2026-10-30 19:51:47.819 MST [76489] ERROR:  mixed-union test returned before creating its fixture
+2026-10-30 19:51:47.819 MST [76489] CONTEXT:  PL/pgSQL function inline_code_block line 4 at RAISE
+2026-10-30 19:51:47.819 MST [76489] STATEMENT:  DO $$
+	BEGIN
+	  IF to_regclass('phase2_raw_quote_t') IS NULL THEN
+	    RAISE EXCEPTION 'mixed-union test returned before creating its fixture';
+	  END IF;
+	  IF NOT EXISTS (
+	    SELECT 1 FROM pg_accel_resident_status()
+	    WHERE relid = 'phase2_raw_quote_t'::regclass
+	      AND columns = ARRAY[1,2,3,4,5] AND pinned AND raw_bytes > 0
+	  ) THEN
+	    RAISE EXCEPTION 'mixed-union test did not retain its complete five-column owner';
+	  END IF;
+	  RAISE NOTICE 'mixed_union_positive_coverage=PASS columns=5';
+	END $$;
+2026-10-30 19:51:47.826 MST [76463] LOG:  received fast shutdown request
+2026-10-30 19:51:47.826 MST [76463] LOG:  aborting any active transactions
+2026-10-30 19:51:47.828 MST [76463] LOG:  background worker "logical replication launcher" (PID 76473) exited with exit code 1
+2026-10-30 19:51:47.828 MST [76467] LOG:  shutting down
+2026-10-30 19:51:47.828 MST [76467] LOG:  checkpoint starting: shutdown immediate
+2026-10-30 19:51:47.848 MST [76467] LOG:  checkpoint complete: wrote 126 buffers (0.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.018 s, sync=0.002 s, total=0.021 s; sync files=23, longest=0.001 s, average=0.001 s; distance=971 kB, estimate=971 kB; lsn=0/18029A0, redo lsn=0/18029A0
+2026-10-30 19:51:47.858 MST [76463] LOG:  database system is shut down

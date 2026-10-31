@@ -1,0 +1,51 @@
+[artifacts] writing benchmark artifacts to /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-cost-comparison-1-dense_int2_count_control/artifacts
+[diagnostics] RUST_BACKTRACE=1 (set-by-runner)
+[gucs] applying profile: GucProfile { shared_buffers: "16GB", work_mem: "512MB", effective_cache_size: "48GB", max_parallel_workers_per_gather: 8, max_worker_processes: 16, max_parallel_workers: 12, maintenance_work_mem: "2GB", jit: "off", jit_above_cost: "100000", random_page_cost: "1.1", effective_io_concurrency: 256, track_io_timing: "on", parallel_leader_participation: "on" }
+[gucs] observed snapshot captured (13 settings)
+[gucs] pg_postmaster_start_time = 2026-10-26 06:30:46.37316-07
+[setup] installing extensions: pg_accel
+[setup] pg_accel: ok
+[detect] installed extensions: plpgsql, pg_accel
+[provenance] pg_accel extension provenance accepted
+
+[scale] dense_int2_count_control @ 1000017 rows
+[setup] dense_int2_count_control -- seed 42 (setseed=0.000042), 1000017 rows
+[quiescence] setup checkpoint completed at 2026-10-26 06:30:48.033021-07 (wal_lsn=0/54F9338)
+[dense_int2_count_control] warmup 1/5 [warm]: accel=16.34ms  parallel=35.44ms
+[dense_int2_count_control] warmup 2/5 [warm]: accel=4.40ms  parallel=35.98ms
+[dense_int2_count_control] warmup 3/5 [warm]: accel=4.16ms  parallel=33.05ms
+[dense_int2_count_control] warmup 4/5 [warm]: accel=3.80ms  parallel=34.17ms
+[dense_int2_count_control] warmup 5/5 [warm]: accel=3.83ms  parallel=33.68ms
+[dense_int2_count_control] bench 1/10 [warm]: accel=2.44ms  parallel=34.08ms
+[dense_int2_count_control] bench 2/10 [warm]: accel=3.54ms  parallel=37.24ms
+[dense_int2_count_control] bench 3/10 [warm]: accel=4.54ms  parallel=40.19ms
+[dense_int2_count_control] bench 4/10 [warm]: accel=3.56ms  parallel=37.67ms
+[dense_int2_count_control] bench 5/10 [warm]: accel=3.62ms  parallel=33.44ms
+[dense_int2_count_control] bench 6/10 [warm]: accel=3.93ms  parallel=33.31ms
+[dense_int2_count_control] bench 7/10 [warm]: accel=4.18ms  parallel=34.15ms
+[dense_int2_count_control] bench 8/10 [warm]: accel=3.98ms  parallel=33.89ms
+[dense_int2_count_control] bench 9/10 [warm]: accel=4.05ms  parallel=33.41ms
+[dense_int2_count_control] bench 10/10 [warm]: accel=3.53ms  parallel=33.40ms
+[quiescence] checkpointer counters remained unchanged through 2026-10-26 06:30:48.866699-07
+[cleanup] dense_int2_count_control -- tables dropped
+
+[scale] dense_int2_count_control @ 2000017 rows
+[setup] dense_int2_count_control -- seed 42 (setseed=0.000042), 2000017 rows
+[quiescence] setup checkpoint completed at 2026-10-26 06:30:51.396372-07 (wal_lsn=0/D0315C0)
+[dense_int2_count_control] warmup 1/5 [warm]: accel=26.11ms  parallel=72.99ms
+[dense_int2_count_control] warmup 2/5 [warm]: accel=4.80ms  parallel=65.32ms
+[dense_int2_count_control] warmup 3/5 [warm]: accel=4.27ms  parallel=64.30ms
+[dense_int2_count_control] warmup 4/5 [warm]: accel=8.76ms  parallel=62.13ms
+[dense_int2_count_control] warmup 5/5 [warm]: accel=4.99ms  parallel=66.54ms
+[dense_int2_count_control] bench 1/10 [warm]: accel=5.17ms  parallel=67.13ms
+[dense_int2_count_control] bench 2/10 [warm]: accel=4.32ms  parallel=66.23ms
+[dense_int2_count_control] bench 3/10 [warm]: accel=3.85ms  parallel=66.11ms
+[dense_int2_count_control] bench 4/10 [warm]: accel=4.06ms  parallel=75.11ms
+[dense_int2_count_control] bench 5/10 [warm]: accel=5.96ms  parallel=64.95ms
+[dense_int2_count_control] bench 6/10 [warm]: accel=9.52ms  parallel=64.52ms
+[dense_int2_count_control] bench 7/10 [warm]: accel=3.85ms  parallel=67.61ms
+[dense_int2_count_control] bench 8/10 [warm]: accel=3.06ms  parallel=63.73ms
+[dense_int2_count_control] bench 9/10 [warm]: accel=6.35ms  parallel=62.19ms
+[dense_int2_count_control] bench 10/10 [warm]: accel=4.72ms  parallel=64.55ms
+[quiescence] checkpointer counters remained unchanged through 2026-10-26 06:30:52.965212-07
+[cleanup] dense_int2_count_control -- tables dropped

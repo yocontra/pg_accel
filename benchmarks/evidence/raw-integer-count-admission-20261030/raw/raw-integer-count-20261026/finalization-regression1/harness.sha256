@@ -1,0 +1,9 @@
+35bc376a59d13f2ce7670eab17c830fe82657189db9ecd2ec85e012782989580  /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/run-finalization-regression.sh
+d519dd34a3ca625a39097ad9db55e862a438e38d2a43b4f714c778367a3aa995  /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/measure-finalization-regression.py
+1c1a0351109042a2105f508aba1269c9aeb54df908a7fecf352eb54ae26a5a0a  /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/acquire-dense-count-validation.py
+2dd1c6270edf796b0cfd49472876bab41270936209192d603b2b2fa8bb597c78  /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/qualify-companion.py
+dc6f607cda8eaa1ed1810029f4899dabdff1b8e9d1445b9af47ab50493889b5a  /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/dense-count-calibration.py
+961a3c8c637933e3c3a3a58fbe02bbfb465dd5bef2d44b02f323b679e14ebb2b  /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/dense-count-training3/manifest.json
+dbb172a90feba8671f2318307778eca722b306ec01332947c89a09d69cef05b9  /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/dense-count-validation1/validation-results.json
+bce8f8a6143f575ccec9a7ee7f031d63876f2bc7382df97f8970a0cdbd2f6187  /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/dense-count-validation1/n1000017-g4096-current.json
+a3fa01d6e4d51c53c1f172c24f8872d65736bbe5cb3fea0537ca6b8bfe8c40d7  /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/dense-count-validation1/n2000017-g4096-current.json

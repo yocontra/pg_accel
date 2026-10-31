@@ -1,0 +1,24 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.23s
+     Running unittests src/lib.rs (target/debug/deps/pg_accel-4b4c215d478719d0)
+
+running 1 test
+test engine::ffi::planner_hooks::shape::tests::raw_count_is_an_additional_candidate_with_independent_capacity_and_digest ... FAILED
+
+failures:
+
+---- engine::ffi::planner_hooks::shape::tests::raw_count_is_an_additional_candidate_with_independent_capacity_and_digest stdout ----
+
+thread 'engine::ffi::planner_hooks::shape::tests::raw_count_is_an_additional_candidate_with_independent_capacity_and_digest' (44282367) panicked at pg_accel/src/engine/ffi/planner_hooks/shape/tests.rs:2105:9:
+assertion `left == right` failed: no new discount coefficient
+  left: PgCost(100020.17)
+ right: PgCost(20000.034)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    engine::ffi::planner_hooks::shape::tests::raw_count_is_an_additional_candidate_with_independent_capacity_and_digest
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1348 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p pg_accel --lib`

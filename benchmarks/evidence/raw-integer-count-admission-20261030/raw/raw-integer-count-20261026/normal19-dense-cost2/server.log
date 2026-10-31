@@ -1,0 +1,17 @@
+2026-10-26 06:19:20.553 MST [72181] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-26 06:19:20.553 MST [72181] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-26 06:19:20.582 MST [72181] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-26 06:19:20.583 MST [72181] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/raw19/.s.PGSQL.33519"
+2026-10-26 06:19:20.589 MST [72186] LOG:  database system was shut down at 2026-10-26 06:19:20 MST
+2026-10-26 06:19:20.591 MST [72181] LOG:  database system is ready to accept connections
+2026-10-26 06:19:32.135 MST [72184] LOG:  checkpoints are occurring too frequently (12 seconds apart)
+2026-10-26 06:19:32.135 MST [72184] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-26 06:19:32.135 MST [72184] LOG:  checkpoint starting: wal
+2026-10-26 06:19:37.018 MST [72181] LOG:  received fast shutdown request
+2026-10-26 06:19:37.018 MST [72181] LOG:  aborting any active transactions
+2026-10-26 06:19:37.020 MST [72181] LOG:  background worker "logical replication launcher" (PID 72189) exited with exit code 1
+2026-10-26 06:19:37.026 MST [72184] LOG:  checkpoint complete: wal: wrote 1344 buffers (0.1%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=4.884 s, sync=0.002 s, total=4.891 s; sync files=48, longest=0.001 s, average=0.001 s; distance=539265 kB, estimate=539265 kB; lsn=0/31976C80, redo lsn=0/225E33D8
+2026-10-26 06:19:37.027 MST [72184] LOG:  shutting down
+2026-10-26 06:19:37.027 MST [72184] LOG:  checkpoint starting: shutdown fast
+2026-10-26 06:19:37.043 MST [72184] LOG:  checkpoint complete: shutdown fast: wrote 41 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 15 recycled; write=0.013 s, sync=0.001 s, total=0.017 s; sync files=21, longest=0.001 s, average=0.001 s; distance=249422 kB, estimate=510281 kB; lsn=0/31976D00, redo lsn=0/31976D00
+2026-10-26 06:19:37.056 MST [72181] LOG:  database system is shut down

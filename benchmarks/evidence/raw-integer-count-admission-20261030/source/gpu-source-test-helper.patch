@@ -1,0 +1,117 @@
+diff --git a/pg_accel/src/tests/active_engine.rs b/pg_accel/src/tests/active_engine.rs
+index dc8d6935..6c857021 100644
+--- a/pg_accel/src/tests/active_engine.rs
++++ b/pg_accel/src/tests/active_engine.rs
+@@ -6,12 +6,7 @@ mod tests {
+     use pgrx::prelude::*;
+ 
+     fn gpu_device_available() -> bool {
+-        Spi::get_one::<String>("SELECT DISTINCT source FROM pg_accel_device_limits()")
+-            .ok()
+-            .flatten()
+-            .is_some_and(|source| {
+-                source == "hardware_derived" || source == "hosted_compatibility_calibrated"
+-            })
++        crate::tests::gpu_sources_available("SELECT source FROM pg_accel_device_limits()")
+     }
+ 
+     fn begin_gpu_test() -> bool {
+diff --git a/pg_accel/src/tests/mod.rs b/pg_accel/src/tests/mod.rs
+index 30a44b4b..2224a046 100644
+--- a/pg_accel/src/tests/mod.rs
++++ b/pg_accel/src/tests/mod.rs
+@@ -23,6 +23,17 @@ mod phase2_window;
+ mod phase6_spatial;
+ mod scalar_lowering;
+ 
++#[cfg(any(test, feature = "pg_test"))]
++fn gpu_sources_available(source_query: &str) -> bool {
++    pgrx::Spi::get_one::<bool>(&format!(
++        "SELECT EXISTS (SELECT 1 FROM ({source_query}) AS inventory(source) \
++         WHERE source IN ('hardware_derived','hosted_compatibility_calibrated'))"
++    ))
++    .ok()
++    .flatten()
++    .unwrap_or(false)
++}
++
+ #[cfg(any(test, feature = "pg_test"))]
+ #[pgrx::pg_schema]
+ mod tests {
+@@ -140,12 +151,7 @@ mod tests {
+     }
+ 
+     fn gpu_device_available() -> bool {
+-        Spi::get_one::<String>("SELECT DISTINCT source FROM pg_accel_device_limits()")
+-            .ok()
+-            .flatten()
+-            .is_some_and(|source| {
+-                source == "hardware_derived" || source == "hosted_compatibility_calibrated"
+-            })
++        crate::tests::gpu_sources_available("SELECT source FROM pg_accel_device_limits()")
+     }
+ 
+     fn qualifying_device_rows(limit_name: &str, floor: i64) -> i64 {
+diff --git a/pg_accel/src/tests/phase2_cache.rs b/pg_accel/src/tests/phase2_cache.rs
+index e75e48a4..a0ce2628 100644
+--- a/pg_accel/src/tests/phase2_cache.rs
++++ b/pg_accel/src/tests/phase2_cache.rs
+@@ -22,12 +22,34 @@ mod tests {
+     }
+ 
+     fn gpu_device_available() -> bool {
+-        Spi::get_one::<String>("SELECT DISTINCT source FROM pg_accel_device_limits()")
+-            .ok()
+-            .flatten()
+-            .is_some_and(|source| {
+-                source == "hardware_derived" || source == "hosted_compatibility_calibrated"
+-            })
++        crate::tests::gpu_sources_available("SELECT source FROM pg_accel_device_limits()")
++    }
++
++    #[pg_test]
++    fn test_gpu_device_source_inventory_is_order_independent() {
++        for (sources, expected) in [
++            (
++                "VALUES ('reference_device_calibrated'),('hardware_derived')",
++                true,
++            ),
++            (
++                "VALUES ('hardware_derived'),('reference_device_calibrated')",
++                true,
++            ),
++            (
++                "VALUES ('reference_device_calibrated'),('hosted_compatibility_calibrated')",
++                true,
++            ),
++            ("VALUES ('reference_device_calibrated')", false),
++            ("VALUES ('unknown')", false),
++            ("SELECT NULL::text WHERE false", false),
++        ] {
++            assert_eq!(
++                crate::tests::gpu_sources_available(sources),
++                expected,
++                "{sources}"
++            );
++        }
+     }
+ 
+     fn serialize_gpu_tests() {
+diff --git a/pg_accel/src/tests/phase6_spatial.rs b/pg_accel/src/tests/phase6_spatial.rs
+index eb647b2b..551ae8c7 100644
+--- a/pg_accel/src/tests/phase6_spatial.rs
++++ b/pg_accel/src/tests/phase6_spatial.rs
+@@ -21,12 +21,7 @@ mod tests {
+     }
+ 
+     fn gpu_device_available() -> bool {
+-        Spi::get_one::<String>("SELECT DISTINCT source FROM pg_accel_device_limits()")
+-            .ok()
+-            .flatten()
+-            .is_some_and(|source| {
+-                source == "hardware_derived" || source == "hosted_compatibility_calibrated"
+-            })
++        crate::tests::gpu_sources_available("SELECT source FROM pg_accel_device_limits()")
+     }
+ 
+     fn serialize_gpu_tests() {

@@ -1,0 +1,9 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.33s
+     Running unittests src/lib.rs (target/debug/deps/pg_accel-4b4c215d478719d0)
+
+running 1 test
+test engine::ffi::planner_hooks::generic_groupagg::tests::nonmatching_raw_candidate_does_not_replace_legacy_diagnostics ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1347 filtered out; finished in 0.00s
+

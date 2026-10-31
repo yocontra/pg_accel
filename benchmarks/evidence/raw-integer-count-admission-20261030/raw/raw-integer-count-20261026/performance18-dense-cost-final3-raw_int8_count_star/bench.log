@@ -1,0 +1,51 @@
+[artifacts] writing benchmark artifacts to /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/performance18-dense-cost-final3-raw_int8_count_star/artifacts
+[diagnostics] RUST_BACKTRACE=1 (set-by-runner)
+[gucs] applying profile: GucProfile { shared_buffers: "16GB", work_mem: "512MB", effective_cache_size: "48GB", max_parallel_workers_per_gather: 8, max_worker_processes: 16, max_parallel_workers: 12, maintenance_work_mem: "2GB", jit: "off", jit_above_cost: "100000", random_page_cost: "1.1", effective_io_concurrency: 256, track_io_timing: "on", parallel_leader_participation: "on" }
+[gucs] observed snapshot captured (13 settings)
+[gucs] pg_postmaster_start_time = 2026-10-26 06:29:21.214841-07
+[setup] installing extensions: pg_accel
+[setup] pg_accel: ok
+[detect] installed extensions: plpgsql, pg_accel
+[provenance] pg_accel extension provenance accepted
+
+[scale] raw_int8_count_star @ 1000017 rows
+[setup] raw_int8_count_star -- seed 42 (setseed=0.000042), 1000017 rows
+[quiescence] setup checkpoint completed at 2026-10-26 06:29:22.929799-07 (wal_lsn=0/5B0EFC8)
+[raw_int8_count_star] warmup 1/5 [warm]: accel=14.50ms  parallel=44.46ms
+[raw_int8_count_star] warmup 2/5 [warm]: accel=5.83ms  parallel=44.65ms
+[raw_int8_count_star] warmup 3/5 [warm]: accel=5.72ms  parallel=43.87ms
+[raw_int8_count_star] warmup 4/5 [warm]: accel=5.56ms  parallel=42.78ms
+[raw_int8_count_star] warmup 5/5 [warm]: accel=5.68ms  parallel=42.98ms
+[raw_int8_count_star] bench 1/10 [warm]: accel=5.49ms  parallel=42.10ms
+[raw_int8_count_star] bench 2/10 [warm]: accel=5.70ms  parallel=43.57ms
+[raw_int8_count_star] bench 3/10 [warm]: accel=6.15ms  parallel=42.85ms
+[raw_int8_count_star] bench 4/10 [warm]: accel=5.55ms  parallel=45.72ms
+[raw_int8_count_star] bench 5/10 [warm]: accel=5.47ms  parallel=43.14ms
+[raw_int8_count_star] bench 6/10 [warm]: accel=5.97ms  parallel=46.95ms
+[raw_int8_count_star] bench 7/10 [warm]: accel=5.63ms  parallel=46.80ms
+[raw_int8_count_star] bench 8/10 [warm]: accel=6.02ms  parallel=47.53ms
+[raw_int8_count_star] bench 9/10 [warm]: accel=6.10ms  parallel=45.47ms
+[raw_int8_count_star] bench 10/10 [warm]: accel=6.05ms  parallel=44.75ms
+[quiescence] checkpointer counters remained unchanged through 2026-10-26 06:29:23.923929-07
+[cleanup] raw_int8_count_star -- tables dropped
+
+[scale] raw_int8_count_star @ 2000017 rows
+[setup] raw_int8_count_star -- seed 42 (setseed=0.000042), 2000017 rows
+[quiescence] setup checkpoint completed at 2026-10-26 06:29:26.39034-07 (wal_lsn=0/E266E58)
+[raw_int8_count_star] warmup 1/5 [warm]: accel=13.11ms  parallel=64.62ms
+[raw_int8_count_star] warmup 2/5 [warm]: accel=7.82ms  parallel=65.38ms
+[raw_int8_count_star] warmup 3/5 [warm]: accel=8.15ms  parallel=69.34ms
+[raw_int8_count_star] warmup 4/5 [warm]: accel=6.70ms  parallel=65.42ms
+[raw_int8_count_star] warmup 5/5 [warm]: accel=6.67ms  parallel=60.56ms
+[raw_int8_count_star] bench 1/10 [warm]: accel=6.80ms  parallel=60.32ms
+[raw_int8_count_star] bench 2/10 [warm]: accel=6.06ms  parallel=63.04ms
+[raw_int8_count_star] bench 3/10 [warm]: accel=12.44ms  parallel=86.80ms
+[raw_int8_count_star] bench 4/10 [warm]: accel=6.31ms  parallel=68.75ms
+[raw_int8_count_star] bench 5/10 [warm]: accel=6.00ms  parallel=62.84ms
+[raw_int8_count_star] bench 6/10 [warm]: accel=6.45ms  parallel=61.14ms
+[raw_int8_count_star] bench 7/10 [warm]: accel=6.57ms  parallel=61.56ms
+[raw_int8_count_star] bench 8/10 [warm]: accel=6.08ms  parallel=62.94ms
+[raw_int8_count_star] bench 9/10 [warm]: accel=5.93ms  parallel=79.12ms
+[raw_int8_count_star] bench 10/10 [warm]: accel=8.67ms  parallel=88.78ms
+[quiescence] checkpointer counters remained unchanged through 2026-10-26 06:29:27.895693-07
+[cleanup] raw_int8_count_star -- tables dropped

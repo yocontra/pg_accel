@@ -1,0 +1,47 @@
+{
+  "status": "pass",
+  "files": 8,
+  "bytes": 173450,
+  "entries": [
+    {
+      "path": "raw/dense-planning-diagnostic-20261030/ordinary-final1/harness-after.log",
+      "bytes": 108,
+      "sha256": "7a7b25c1754db2ea857020ddba1b951393f525a6ee94ad3396401103b5e78d73"
+    },
+    {
+      "path": "raw/dense-planning-diagnostic-20261030/ordinary-final1/harness.sha256",
+      "bytes": 170,
+      "sha256": "c34e32f7c434b5893e40ac966156c1ddb6fd6c8b9f6e5a2e013a725e095a7019"
+    },
+    {
+      "path": "raw/dense-planning-diagnostic-20261030/ordinary-final1/module-after.log",
+      "bytes": 522,
+      "sha256": "cd299f989d3d26a27abe482af2dcbfeca46d42d72bce8ac34dfe7ad689edb710"
+    },
+    {
+      "path": "raw/dense-planning-diagnostic-20261030/ordinary-final1/source-after.log",
+      "bytes": 17236,
+      "sha256": "e22113cd0ccc36e14fe68fe97e880e820871c06ac62b3316bcc8506aa9f1bab3"
+    },
+    {
+      "path": "raw/dense-planning-diagnostic-20261030/ordinary-final1/source-before.log",
+      "bytes": 17236,
+      "sha256": "e22113cd0ccc36e14fe68fe97e880e820871c06ac62b3316bcc8506aa9f1bab3"
+    },
+    {
+      "path": "raw/dense-planning-diagnostic-20261030/ordinary-final1/terminal.log",
+      "bytes": 11,
+      "sha256": "d02e3480e89209ee1fd2c65d68cdd947e4001292c7e4d4594b8fc9c8e70c2fdc"
+    },
+    {
+      "path": "raw/dense-planning-diagnostic-20261030/ordinary-final1/tests.log",
+      "bytes": 136874,
+      "sha256": "80e8f178625e9a3748c1a3b38c7c919bca22f5cbdd7a1f41bead8bd8dddc986a"
+    },
+    {
+      "path": "raw/dense-planning-diagnostic-20261030/run-ordinary-final.sh",
+      "bytes": 1293,
+      "sha256": "855aee6170afa2885ce6146d4d055ccb9ec687a2c213bc2fd39e7f3dbdf85dc1"
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+2026-10-26 06:22:07.621 MST [73619] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-26 06:22:07.621 MST [73619] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-26 06:22:07.682 MST [73619] LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-26 06:22:07.682 MST [73619] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/rawbench18/.s.PGSQL.33618"
+2026-10-26 06:22:07.691 MST [73625] LOG:  database system was shut down at 2026-10-26 06:22:07 MST
+2026-10-26 06:22:07.693 MST [73619] LOG:  database system is ready to accept connections
+2026-10-26 06:22:08.047 MST [73619] LOG:  received SIGHUP, reloading configuration files
+2026-10-26 06:22:08.048 MST [73619] LOG:  parameter "work_mem" changed to "512MB"
+2026-10-26 06:22:08.048 MST [73619] LOG:  parameter "effective_cache_size" changed to "48GB"
+2026-10-26 06:22:08.048 MST [73619] LOG:  parameter "max_parallel_workers_per_gather" changed to "8"
+2026-10-26 06:22:08.048 MST [73619] LOG:  parameter "max_parallel_workers" changed to "12"
+2026-10-26 06:22:08.048 MST [73619] LOG:  parameter "maintenance_work_mem" changed to "2GB"
+2026-10-26 06:22:08.048 MST [73619] LOG:  parameter "jit" changed to "off"
+2026-10-26 06:22:08.048 MST [73619] LOG:  parameter "random_page_cost" changed to "1.1"
+2026-10-26 06:22:08.048 MST [73619] LOG:  parameter "effective_io_concurrency" changed to "256"
+2026-10-26 06:22:08.048 MST [73619] LOG:  parameter "track_io_timing" changed to "on"
+2026-10-26 06:22:08.270 MST [73619] LOG:  received fast shutdown request
+2026-10-26 06:22:08.270 MST [73619] LOG:  aborting any active transactions
+2026-10-26 06:22:08.272 MST [73619] LOG:  background worker "logical replication launcher" (PID 73628) exited with exit code 1
+2026-10-26 06:22:08.272 MST [73623] LOG:  shutting down
+2026-10-26 06:22:08.272 MST [73623] LOG:  checkpoint starting: shutdown immediate
+2026-10-26 06:22:08.291 MST [73623] LOG:  checkpoint complete: wrote 43 buffers (0.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.018 s, sync=0.002 s, total=0.020 s; sync files=19, longest=0.001 s, average=0.001 s; distance=241 kB, estimate=241 kB; lsn=0/174C1B0, redo lsn=0/174C1B0
+2026-10-26 06:22:08.303 MST [73619] LOG:  database system is shut down

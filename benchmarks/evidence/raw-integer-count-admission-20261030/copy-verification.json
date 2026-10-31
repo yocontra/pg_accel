@@ -1,0 +1,10 @@
+{
+  "status": "pass",
+  "files": 5044,
+  "bytes": 62610977,
+  "source_root": "/Users/contra/Projects/pg_accel/.codex/scratch",
+  "destination_root": "/Users/contra/Projects/pg_accel/benchmarks/evidence/raw-integer-count-admission-20261030/raw",
+  "inventory_sha256": "bf70e12cee12a0fd033dbfd1fc2657b886fc941573bf7deecebaefc079e584a9",
+  "ordered_copied_content_manifest_sha256": "229bbcbac06370381714b09fc190da129d54c77d3207e6e7ee311f8cdc5df563",
+  "verification": "Every listed source and destination file has equal byte size and SHA256; no extra copied files; no symlinks."
+}

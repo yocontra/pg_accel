@@ -1,0 +1,57 @@
+{
+  "settings": [
+    [
+      "shared_buffers",
+      "16GB"
+    ],
+    [
+      "work_mem",
+      "512MB"
+    ],
+    [
+      "effective_cache_size",
+      "48GB"
+    ],
+    [
+      "max_parallel_workers_per_gather",
+      "8"
+    ],
+    [
+      "max_worker_processes",
+      "16"
+    ],
+    [
+      "max_parallel_workers",
+      "12"
+    ],
+    [
+      "maintenance_work_mem",
+      "2GB"
+    ],
+    [
+      "jit",
+      "off"
+    ],
+    [
+      "jit_above_cost",
+      "100000"
+    ],
+    [
+      "random_page_cost",
+      "1.1"
+    ],
+    [
+      "effective_io_concurrency",
+      "256"
+    ],
+    [
+      "track_io_timing",
+      "on"
+    ],
+    [
+      "parallel_leader_participation",
+      "on"
+    ]
+  ],
+  "postmaster_start_time": "2026-10-30 20:08:11.787276-07"
+}

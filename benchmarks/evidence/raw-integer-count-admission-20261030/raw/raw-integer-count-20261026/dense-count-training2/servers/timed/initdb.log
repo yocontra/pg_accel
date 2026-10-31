@@ -1,0 +1,23 @@
+The files belonging to this database system will be owned by user "contra".
+This user must also own the server process.
+
+The database cluster will be initialized with locale "C".
+The default text search configuration will be set to "english".
+
+Data page checksums are enabled.
+
+creating directory /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/dense-count-training2/servers/timed/pgdata ... ok
+creating subdirectories ... ok
+selecting dynamic shared memory implementation ... posix
+selecting default "max_connections" ... 100
+selecting default "shared_buffers" ... 128MB
+selecting default time zone ... America/Phoenix
+creating configuration files ... ok
+running bootstrap script ... ok
+performing post-bootstrap initialization ... ok
+syncing data to disk ... ok
+
+Success. You can now start the database server using:
+
+    /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-baseline-build2/postgres18/bin/pg_ctl -D /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/dense-count-training2/servers/timed/pgdata -l logfile start
+

@@ -1,0 +1,56 @@
+2026-10-26 06:21:03.904 MST [72777] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-26 06:21:03.904 MST [72777] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-26 06:21:03.932 MST [72777] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-26 06:21:03.932 MST [72777] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/rawh319/.s.PGSQL.33819"
+2026-10-26 06:21:03.937 MST [72782] LOG:  database system was shut down at 2026-10-26 06:21:03 MST
+2026-10-26 06:21:03.939 MST [72777] LOG:  database system is ready to accept connections
+2026-10-26 06:21:04.677 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:04.678 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:04.678 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:08.896 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:08.896 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:08.896 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:10.645 MST [72780] LOG:  checkpoints are occurring too frequently (7 seconds apart)
+2026-10-26 06:21:10.645 MST [72780] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-26 06:21:10.648 MST [72780] LOG:  checkpoint starting: wal
+2026-10-26 06:21:12.108 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:12.108 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:12.108 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:16.383 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:16.383 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:16.383 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:16.815 MST [72780] LOG:  checkpoint complete: wal: wrote 2659 buffers (0.1%), wrote 3 SLRU buffers; 0 WAL file(s) added, 1 removed, 33 recycled; write=6.146 s, sync=0.003 s, total=6.171 s; sync files=77, longest=0.001 s, average=0.001 s; distance=549622 kB, estimate=549622 kB; lsn=0/410CBB80, redo lsn=0/23000610
+2026-10-26 06:21:17.333 MST [72780] LOG:  checkpoints are occurring too frequently (7 seconds apart)
+2026-10-26 06:21:17.333 MST [72780] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-26 06:21:17.333 MST [72780] LOG:  checkpoint starting: wal
+2026-10-26 06:21:19.059 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:19.059 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:19.059 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:21.713 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:21.713 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:21.713 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:21.946 MST [72780] LOG:  checkpoint complete: wal: wrote 2920 buffers (0.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=4.602 s, sync=0.002 s, total=4.614 s; sync files=26, longest=0.001 s, average=0.001 s; distance=548565 kB, estimate=549516 kB; lsn=0/62AF4040, redo lsn=0/447B5A88
+2026-10-26 06:21:22.359 MST [72780] LOG:  checkpoints are occurring too frequently (5 seconds apart)
+2026-10-26 06:21:22.359 MST [72780] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-26 06:21:22.359 MST [72780] LOG:  checkpoint starting: wal
+2026-10-26 06:21:24.530 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:24.530 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:24.530 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:27.604 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:27.604 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:27.604 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:27.693 MST [72780] LOG:  checkpoint complete: wal: wrote 2171 buffers (0.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=5.316 s, sync=0.002 s, total=5.335 s; sync files=30, longest=0.001 s, average=0.001 s; distance=540515 kB, estimate=548616 kB; lsn=0/83446E38, redo lsn=0/6578E7A0
+2026-10-26 06:21:28.097 MST [72780] LOG:  checkpoints are occurring too frequently (6 seconds apart)
+2026-10-26 06:21:28.097 MST [72780] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-26 06:21:28.097 MST [72780] LOG:  checkpoint starting: wal
+2026-10-26 06:21:30.292 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:30.292 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:30.292 MST [72798] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:21:32.711 MST [72780] LOG:  checkpoint complete: wal: wrote 1757 buffers (0.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=4.604 s, sync=0.001 s, total=4.615 s; sync files=27, longest=0.001 s, average=0.001 s; distance=533423 kB, estimate=547097 kB; lsn=0/A46483D0, redo lsn=0/8607A3A8
+2026-10-26 06:21:33.203 MST [72777] LOG:  received fast shutdown request
+2026-10-26 06:21:33.203 MST [72777] LOG:  aborting any active transactions
+2026-10-26 06:21:33.204 MST [72777] LOG:  background worker "logical replication launcher" (PID 72785) exited with exit code 1
+2026-10-26 06:21:33.206 MST [72780] LOG:  shutting down
+2026-10-26 06:21:33.206 MST [72780] LOG:  checkpoint starting: shutdown fast
+2026-10-26 06:21:33.225 MST [72780] LOG:  checkpoint complete: shutdown fast: wrote 31 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 31 recycled; write=0.014 s, sync=0.001 s, total=0.019 s; sync files=23, longest=0.001 s, average=0.001 s; distance=509031 kB, estimate=543290 kB; lsn=0/A5194238, redo lsn=0/A5194238
+2026-10-26 06:21:33.272 MST [72777] LOG:  database system is shut down

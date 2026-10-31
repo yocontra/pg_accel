@@ -1,0 +1,11 @@
+[32m[1m       Using[0m[39m [37m[1mPgConfig("pg19")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/19beta1/bin/pg_config[39m
+[32m[1m    Building[0m[39m extension with features [36mpg19[39m
+[32m[1m     Running[0m[39m command [36m"/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "rustc" "--lib" "--package" "pg_accel" "--release" "--features" "pg19" "--no-default-features" "--message-format=json-render-diagnostics"[39m
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `release` profile [optimized] target(s) in 50.73s
+[32m[1m  Installing[0m[39m extension
+[32m[1m     Copying[0m[39m control file to [36m.codex/scratch/uniform-budget-live-20261012/postgres/19beta1/share/extension/pg_accel.control[39m
+[32m[1m     Copying[0m[39m shared library to [36m.codex/scratch/uniform-budget-live-20261012/postgres/19beta1/lib/pg_accel.dylib[39m
+[32m[1m  Discovered[0m[39m [36m[1m32[0m[39m SQL entities: [36m[1m0[0m[39m schemas ([36m[1m0[0m[39m unique), [36m[1m30[0m[39m functions, [36m[1m0[0m[39m types, [36m[1m0[0m[39m enums, [36m[1m1[0m[39m sqls, [36m[1m0[0m[39m ords, [36m[1m0[0m[39m hashes, [36m[1m0[0m[39m aggregates, [36m[1m1[0m[39m triggers
+[32m[1m     Writing[0m[39m SQL entities to /Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/19beta1/share/extension/pg_accel--1.0.0-rc1.sql
+[32m[1m    Finished[0m[39m installing pg_accel

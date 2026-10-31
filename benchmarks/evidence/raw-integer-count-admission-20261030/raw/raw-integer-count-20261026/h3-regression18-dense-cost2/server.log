@@ -1,0 +1,30 @@
+2026-10-26 06:20:35.303 MST [72622] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-26 06:20:35.303 MST [72622] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-26 06:20:35.352 MST [72622] LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-26 06:20:35.353 MST [72622] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/rawh318/.s.PGSQL.33818"
+2026-10-26 06:20:35.366 MST [72628] LOG:  database system was shut down at 2026-10-26 06:20:35 MST
+2026-10-26 06:20:35.369 MST [72622] LOG:  database system is ready to accept connections
+2026-10-26 06:20:35.925 MST [72639] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-26 06:20:41.444 MST [72626] LOG:  checkpoints are occurring too frequently (6 seconds apart)
+2026-10-26 06:20:41.444 MST [72626] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-26 06:20:41.444 MST [72626] LOG:  checkpoint starting: wal
+2026-10-26 06:20:46.491 MST [72626] LOG:  checkpoint complete: wrote 2718 buffers (0.1%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=5.026 s, sync=0.009 s, total=5.047 s; sync files=77, longest=0.006 s, average=0.001 s; distance=537225 kB, estimate=537225 kB; lsn=0/400FC8C0, redo lsn=0/223B2088
+2026-10-26 06:20:46.897 MST [72626] LOG:  checkpoints are occurring too frequently (5 seconds apart)
+2026-10-26 06:20:46.897 MST [72626] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-26 06:20:46.897 MST [72626] LOG:  checkpoint starting: wal
+2026-10-26 06:20:51.298 MST [72626] LOG:  checkpoint complete: wrote 2734 buffers (0.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=4.390 s, sync=0.003 s, total=4.401 s; sync files=26, longest=0.002 s, average=0.001 s; distance=540080 kB, estimate=540080 kB; lsn=0/61372500, redo lsn=0/4331E100
+2026-10-26 06:20:51.702 MST [72626] LOG:  checkpoints are occurring too frequently (5 seconds apart)
+2026-10-26 06:20:51.702 MST [72626] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-26 06:20:51.703 MST [72626] LOG:  checkpoint starting: wal
+2026-10-26 06:20:55.797 MST [72626] LOG:  checkpoint complete: wrote 2067 buffers (0.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=4.084 s, sync=0.003 s, total=4.095 s; sync files=27, longest=0.002 s, average=0.001 s; distance=539408 kB, estimate=540012 kB; lsn=0/81EA54F0, redo lsn=0/641E2170
+2026-10-26 06:20:56.698 MST [72626] LOG:  checkpoints are occurring too frequently (5 seconds apart)
+2026-10-26 06:20:56.698 MST [72626] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-26 06:20:56.698 MST [72626] LOG:  checkpoint starting: wal
+2026-10-26 06:21:01.405 MST [72626] LOG:  checkpoint complete: wrote 2178 buffers (0.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 34 recycled; write=4.698 s, sync=0.002 s, total=4.708 s; sync files=27, longest=0.002 s, average=0.001 s; distance=555127 kB, estimate=555127 kB; lsn=0/A3D1A320, redo lsn=0/86000148
+2026-10-26 06:21:01.855 MST [72622] LOG:  received fast shutdown request
+2026-10-26 06:21:01.855 MST [72622] LOG:  aborting any active transactions
+2026-10-26 06:21:01.857 MST [72622] LOG:  background worker "logical replication launcher" (PID 72631) exited with exit code 1
+2026-10-26 06:21:01.857 MST [72626] LOG:  shutting down
+2026-10-26 06:21:01.857 MST [72626] LOG:  checkpoint starting: shutdown immediate
+2026-10-26 06:21:01.870 MST [72626] LOG:  checkpoint complete: wrote 33 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 29 recycled; write=0.008 s, sync=0.001 s, total=0.014 s; sync files=21, longest=0.001 s, average=0.001 s; distance=490808 kB, estimate=548696 kB; lsn=0/A3F4E328, redo lsn=0/A3F4E328
+2026-10-26 06:21:01.885 MST [72622] LOG:  database system is shut down

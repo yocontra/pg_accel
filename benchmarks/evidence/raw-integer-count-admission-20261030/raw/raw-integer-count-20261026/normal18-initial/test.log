@@ -1,0 +1,64 @@
+   Compiling pg_accel_bench v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel_bench)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.63s
+     Running unittests src/main.rs (target/debug/deps/pg_accel_bench-55e77d1a663b8eeb)
+
+running 1 test
+test plan_shape_test::plan_shape_raw_integer_count_all_fixed_width_types ... 
+thread 'plan_shape_test::plan_shape_raw_integer_count_all_fixed_width_types' (44349957) panicked at pg_accel_bench/src/plan_shape_test.rs:77:17:
+raw_int2_count_star/*/false: custom scan (gpuaccelagg) (actual time=4841.208..4842.366 rows=16389.00 loops=1)
+  output: k, (count(*))
+  strategy: gpuagg
+  plan selected: true
+  batch size: 65536
+  expected threads: 1
+  gpu resident pipeline: true
+  gpu resident proof version: 2
+  gpu resident operator class: resident_groupagg
+  gpu physical kernel mode: parallel_hash
+  gpu dispatched physical kernel mode: parallel_hash
+  gpu physical kernel mode verified: true
+  gpu planned lifecycle calls: 1
+  gpu lifecycle calls verified: true
+  gpu descriptor strategy: descriptor_grouped_aggregate
+  gpu descriptor specialization: hash_count
+  gpu descriptor specialization cache: miss
+  gpu descriptor artifact policy: ephemeral_fused reason=zero_retained_bytes construction_bytes=0 ephemeral_bytes=0 construction_time_us=1 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=0 ephemeral_build_launches=0 consumer_launches=1 budget_headroom_bytes=8584934507
+  gpu descriptor group keys: k0:fact(16420.1:type=21) type=21 collation=0 encoding=hash
+  gpu descriptor aggregates: m0:count_star -> value.count
+  gpu descriptor filter: fact=none; measures=[m0=none]; dimensions=[none]
+  gpu descriptor star dimensions: none
+  gpu descriptor output: slot0:group[k0] source_type=21 result_type=21 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  gpu descriptor residency state: resident (1 relations; loaded/reloaded=16420)
+  gpu descriptor artifact: built
+  gpu descriptor generations: rel=16420 generation=1 global=1 relfilenode=16420
+  gpu descriptor bytes: raw=5000085 derived=0 artifact=0 total=5000085
+  gpu resident stage mask: 16393
+  gpu resident device columns: 1
+  gpu resident boundary: none: no cpu boundary
+  gpu kernel dispatched: true
+  rows returned to cpu: 0
+  rows dispatched: 1000017
+  batches: 1
+  rows per batch: 1000017.000
+  dispatch time: 4841.104 ms
+  avg dispatch time per batch: 4841.104 ms
+  counter scope: local backend
+  gpu dispatched: true
+  raw relation load time: 90.876 ms
+  total residency preparation time: 94.394 ms
+planning:
+  buffers: shared hit=224 read=9
+planning time: 50.660 ms
+execution time: 4937.506 ms
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    plan_shape_test::plan_shape_raw_integer_count_all_fixed_width_types
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 666 filtered out; finished in 7.54s
+
+error: test failed, to rerun pass `-p pg_accel_bench --bin pg_accel_bench`

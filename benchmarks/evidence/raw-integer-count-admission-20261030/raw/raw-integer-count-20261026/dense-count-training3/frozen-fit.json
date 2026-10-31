@@ -1,0 +1,770 @@
+{
+  "schema_version": 1,
+  "kind": "training_fit",
+  "manifest_sha256": "961a3c8c637933e3c3a3a58fbe02bbfb465dd5bef2d44b02f323b679e14ebb2b",
+  "solver_sha256": "dc6f607cda8eaa1ed1810029f4899dabdff1b8e9d1445b9af47ab50493889b5a",
+  "frozen_at": "2026-10-26T11:57:44.265744+00:00",
+  "run_completion": {
+    "path": "dense-count-training3/completion.json",
+    "sha256": "96c950bf3eff7c40b4f3e8b80c820d202451893fc2ff5a0399d36aa0f7474611"
+  },
+  "cells": [
+    {
+      "id": "n500017-g64",
+      "role": "train",
+      "path": "dense-count-training3/n500017-g64.json",
+      "sha256": "00b68a9fa917ead1f67915dff7094a854fc65ecf731e07885b5b86ba2c7a3b58",
+      "acquisition_started_at": "2026-10-26T11:53:31.140040+00:00",
+      "acquisition_completed_at": "2026-10-26T11:56:16.787427+00:00",
+      "acquisition_receipt": {
+        "path": "dense-count-training3/n500017-g64-acquisition.json",
+        "sha256": "401e5723b26ce3293bda61bd7895c1bb5226c71702be6d9fd85305111b87bdee"
+      },
+      "heldout_fit_sha256": null,
+      "features": [
+        255.041,
+        715,
+        1.0
+      ],
+      "work": {
+        "P": 500082,
+        "Q": 0,
+        "S": 715,
+        "L": 1,
+        "actual_capacity": 65
+      },
+      "warmup_us": [
+        8212,
+        2075,
+        1924,
+        1891,
+        1607
+      ],
+      "samples_us": [
+        1614,
+        1818,
+        2783,
+        1218,
+        1221,
+        1184,
+        1194,
+        1351,
+        1351,
+        1202
+      ],
+      "median_us": 1286.0,
+      "cv_pct": 33.43047527756268
+    },
+    {
+      "id": "n500017-g1024",
+      "role": "train",
+      "path": "dense-count-training3/n500017-g1024.json",
+      "sha256": "2d5a7695ab10c2ae0adc34816ad7221b079b2a8cfd699e8da249fe86736908f9",
+      "acquisition_started_at": "2026-10-26T11:56:16.805233+00:00",
+      "acquisition_completed_at": "2026-10-26T11:56:18.524485+00:00",
+      "acquisition_receipt": {
+        "path": "dense-count-training3/n500017-g1024-acquisition.json",
+        "sha256": "171467a554a0e3a56ee786383d5b1e6ea9b44c07143910827c4e7d1a6fe7c79e"
+      },
+      "heldout_fit_sha256": null,
+      "features": [
+        255.52100000000002,
+        11275,
+        1.0
+      ],
+      "work": {
+        "P": 501042,
+        "Q": 0,
+        "S": 11275,
+        "L": 1,
+        "actual_capacity": 1025
+      },
+      "warmup_us": [
+        4838,
+        4140,
+        4143,
+        4293,
+        4330
+      ],
+      "samples_us": [
+        6329,
+        5492,
+        5210,
+        5899,
+        6695,
+        6911,
+        5457,
+        3998,
+        4218,
+        4042
+      ],
+      "median_us": 5474.5,
+      "cv_pct": 19.738917011487615
+    },
+    {
+      "id": "n500017-g8192",
+      "role": "train",
+      "path": "dense-count-training3/n500017-g8192.json",
+      "sha256": "2cb96397e28ad3aade855fbff3c84480d617928860f89da63a35abbf90b75dfd",
+      "acquisition_started_at": "2026-10-26T11:56:18.537656+00:00",
+      "acquisition_completed_at": "2026-10-26T11:56:20.863923+00:00",
+      "acquisition_receipt": {
+        "path": "dense-count-training3/n500017-g8192-acquisition.json",
+        "sha256": "734266ad093080af2325324188c52e2ee4dc0257d90a042573b17d0e5613e5b9"
+      },
+      "heldout_fit_sha256": null,
+      "features": [
+        259.105,
+        90123,
+        1.0
+      ],
+      "work": {
+        "P": 508210,
+        "Q": 0,
+        "S": 90123,
+        "L": 1,
+        "actual_capacity": 8193
+      },
+      "warmup_us": [
+        17289,
+        17328,
+        17023,
+        18217,
+        17173
+      ],
+      "samples_us": [
+        17749,
+        16759,
+        16715,
+        16724,
+        16634,
+        16654,
+        16671,
+        16684,
+        16871,
+        16735
+      ],
+      "median_us": 16719.5,
+      "cv_pct": 1.9814941831915578
+    },
+    {
+      "id": "n500017-g32768",
+      "role": "train",
+      "path": "dense-count-training3/n500017-g32768.json",
+      "sha256": "318062d21b6682195e8699e3daa4d03e81ef3b4b3fd8205b3ac0ed1f9ab3ff74",
+      "acquisition_started_at": "2026-10-26T11:56:20.876040+00:00",
+      "acquisition_completed_at": "2026-10-26T11:56:25.015455+00:00",
+      "acquisition_receipt": {
+        "path": "dense-count-training3/n500017-g32768-acquisition.json",
+        "sha256": "1aeadb0d993ccb9c8c2309223d74c3a70668839a8d54355c7ccdc8c8a7028486"
+      },
+      "heldout_fit_sha256": null,
+      "features": [
+        271.39300000000003,
+        360459,
+        1.0
+      ],
+      "work": {
+        "P": 532786,
+        "Q": 0,
+        "S": 360459,
+        "L": 1,
+        "actual_capacity": 32769
+      },
+      "warmup_us": [
+        63825,
+        63995,
+        63766,
+        63542,
+        63872
+      ],
+      "samples_us": [
+        63798,
+        67501,
+        63598,
+        63903,
+        63878,
+        65440,
+        63457,
+        63818,
+        63563,
+        63331
+      ],
+      "median_us": 63808.0,
+      "cv_pct": 2.010047692190369
+    },
+    {
+      "id": "n1000017-g64",
+      "role": "train",
+      "path": "dense-count-training3/n1000017-g64.json",
+      "sha256": "de1cb7652a3c8bef7e4b282c3aafae1cdc26bd9d6ea4d786fff67ff6845bb804",
+      "acquisition_started_at": "2026-10-26T11:56:25.028710+00:00",
+      "acquisition_completed_at": "2026-10-26T11:56:32.566103+00:00",
+      "acquisition_receipt": {
+        "path": "dense-count-training3/n1000017-g64-acquisition.json",
+        "sha256": "9a1b02c0b99d0247e1bf26a0e68860cd0c1dda14eb52262b4ef35252426f667c"
+      },
+      "heldout_fit_sha256": null,
+      "features": [
+        515.0735,
+        975,
+        1.0
+      ],
+      "work": {
+        "P": 1000147,
+        "Q": 0,
+        "S": 975,
+        "L": 3,
+        "actual_capacity": 65
+      },
+      "warmup_us": [
+        32764,
+        3119,
+        3424,
+        2850,
+        2796
+      ],
+      "samples_us": [
+        2812,
+        2690,
+        2894,
+        2983,
+        3435,
+        3073,
+        2822,
+        2775,
+        2801,
+        2576
+      ],
+      "median_us": 2817.0,
+      "cv_pct": 8.243841234854925
+    },
+    {
+      "id": "n1000017-g1024",
+      "role": "train",
+      "path": "dense-count-training3/n1000017-g1024.json",
+      "sha256": "004d1ae7b88d39bfad0f301f4f73ce39891959c9ea4a505f8fc4f068ecd1db30",
+      "acquisition_started_at": "2026-10-26T11:56:32.578683+00:00",
+      "acquisition_completed_at": "2026-10-26T11:56:35.542277+00:00",
+      "acquisition_receipt": {
+        "path": "dense-count-training3/n1000017-g1024-acquisition.json",
+        "sha256": "735fdda467a2fd316a990944e9690de91458affe6a8ee4d0ec4447a77a7def80"
+      },
+      "heldout_fit_sha256": null,
+      "features": [
+        516.0335,
+        15375,
+        1.0
+      ],
+      "work": {
+        "P": 1002067,
+        "Q": 0,
+        "S": 15375,
+        "L": 3,
+        "actual_capacity": 1025
+      },
+      "warmup_us": [
+        4381,
+        4006,
+        4146,
+        5125,
+        4754
+      ],
+      "samples_us": [
+        4985,
+        4478,
+        6427,
+        4346,
+        4386,
+        4289,
+        4332,
+        4376,
+        4439,
+        5077
+      ],
+      "median_us": 4412.5,
+      "cv_pct": 14.063451618364322
+    },
+    {
+      "id": "n1000017-g8192",
+      "role": "train",
+      "path": "dense-count-training3/n1000017-g8192.json",
+      "sha256": "f8dc03340892498b709991487a0043cfab41f70a9501043e8ef4dd04261e3367",
+      "acquisition_started_at": "2026-10-26T11:56:35.556541+00:00",
+      "acquisition_completed_at": "2026-10-26T11:56:40.483974+00:00",
+      "acquisition_receipt": {
+        "path": "dense-count-training3/n1000017-g8192-acquisition.json",
+        "sha256": "483c92048ef798154a3712aa4f733dc87f6b01e15c0dd2c67db0d4fed80b084e"
+      },
+      "heldout_fit_sha256": null,
+      "features": [
+        523.2015,
+        122895,
+        1.0
+      ],
+      "work": {
+        "P": 1016403,
+        "Q": 0,
+        "S": 122895,
+        "L": 3,
+        "actual_capacity": 8193
+      },
+      "warmup_us": [
+        21547,
+        39335,
+        21425,
+        21297,
+        21202
+      ],
+      "samples_us": [
+        21254,
+        21366,
+        21355,
+        21073,
+        21098,
+        21377,
+        21186,
+        20977,
+        21166,
+        21350
+      ],
+      "median_us": 21220.0,
+      "cv_pct": 0.6698805808754928
+    },
+    {
+      "id": "n1000017-g32768",
+      "role": "train",
+      "path": "dense-count-training3/n1000017-g32768.json",
+      "sha256": "aac3da1523570e1829742b2c60ef45557f1fdf429c02dcc6d32c76832601e4ff",
+      "acquisition_started_at": "2026-10-26T11:56:40.498989+00:00",
+      "acquisition_completed_at": "2026-10-26T11:56:45.778080+00:00",
+      "acquisition_receipt": {
+        "path": "dense-count-training3/n1000017-g32768-acquisition.json",
+        "sha256": "c1661eda66a7c2ae935a86caf0141d83c8ad4315bd3840af4f9bad86e4a0791f"
+      },
+      "heldout_fit_sha256": null,
+      "features": [
+        547.7775,
+        491535,
+        1.0
+      ],
+      "work": {
+        "P": 1065555,
+        "Q": 0,
+        "S": 491535,
+        "L": 3,
+        "actual_capacity": 32769
+      },
+      "warmup_us": [
+        83805,
+        85527,
+        85848,
+        87501,
+        87033
+      ],
+      "samples_us": [
+        85123,
+        86913,
+        91238,
+        84796,
+        90509,
+        90298,
+        87120,
+        93290,
+        86566,
+        82880
+      ],
+      "median_us": 87016.5,
+      "cv_pct": 3.7677164574026762
+    },
+    {
+      "id": "n2000017-g64",
+      "role": "train",
+      "path": "dense-count-training3/n2000017-g64.json",
+      "sha256": "6eee748cdb59681537e23a5eb7eb137280286d7515871a52b3471b3d7b77f7e7",
+      "acquisition_started_at": "2026-10-26T11:56:45.796642+00:00",
+      "acquisition_completed_at": "2026-10-26T11:56:51.838199+00:00",
+      "acquisition_receipt": {
+        "path": "dense-count-training3/n2000017-g64-acquisition.json",
+        "sha256": "4b2db97f4882d26bd877c47d4bb1449751cca84ab3246a68359061a8c094d738"
+      },
+      "heldout_fit_sha256": null,
+      "features": [
+        1020.106,
+        1235,
+        1.0
+      ],
+      "work": {
+        "P": 2000212,
+        "Q": 0,
+        "S": 1235,
+        "L": 4,
+        "actual_capacity": 65
+      },
+      "warmup_us": [
+        6124,
+        6484,
+        5948,
+        32089,
+        4892
+      ],
+      "samples_us": [
+        9258,
+        7240,
+        10097,
+        8712,
+        5333,
+        5607,
+        10348,
+        5466,
+        6529,
+        4185
+      ],
+      "median_us": 6884.5,
+      "cv_pct": 30.152375729940523
+    },
+    {
+      "id": "n2000017-g1024",
+      "role": "train",
+      "path": "dense-count-training3/n2000017-g1024.json",
+      "sha256": "27e86a1864966465c0562a4f79d668c99e1ba2549fd4aa34509952f62917fabf",
+      "acquisition_started_at": "2026-10-26T11:56:51.851446+00:00",
+      "acquisition_completed_at": "2026-10-26T11:56:56.790626+00:00",
+      "acquisition_receipt": {
+        "path": "dense-count-training3/n2000017-g1024-acquisition.json",
+        "sha256": "0279002d21a971ae317e38c7068f5d2da299993fee8e5673eb091b49c633c1d5"
+      },
+      "heldout_fit_sha256": null,
+      "features": [
+        1021.546,
+        19475,
+        1.0
+      ],
+      "work": {
+        "P": 2003092,
+        "Q": 0,
+        "S": 19475,
+        "L": 4,
+        "actual_capacity": 1025
+      },
+      "warmup_us": [
+        9713,
+        6323,
+        5509,
+        5536,
+        5459
+      ],
+      "samples_us": [
+        5415,
+        5328,
+        5452,
+        4934,
+        9097,
+        5641,
+        5690,
+        5848,
+        6338,
+        5903
+      ],
+      "median_us": 5665.5,
+      "cv_pct": 19.504750408908034
+    },
+    {
+      "id": "n2000017-g8192",
+      "role": "train",
+      "path": "dense-count-training3/n2000017-g8192.json",
+      "sha256": "9b0845c78f3a32ec29ba3ca22005f8a9f2c77fdb4286427c1b55466fac6d783c",
+      "acquisition_started_at": "2026-10-26T11:56:56.805620+00:00",
+      "acquisition_completed_at": "2026-10-26T11:57:03.985197+00:00",
+      "acquisition_receipt": {
+        "path": "dense-count-training3/n2000017-g8192-acquisition.json",
+        "sha256": "09626849e21d6eb139600ef48da3105a5ec4ce72f0808be3cf7884c469143176"
+      },
+      "heldout_fit_sha256": null,
+      "features": [
+        1032.298,
+        155667,
+        1.0
+      ],
+      "work": {
+        "P": 2024596,
+        "Q": 0,
+        "S": 155667,
+        "L": 4,
+        "actual_capacity": 8193
+      },
+      "warmup_us": [
+        29411,
+        29116,
+        29121,
+        29524,
+        29519
+      ],
+      "samples_us": [
+        29394,
+        29205,
+        29506,
+        29335,
+        29515,
+        29328,
+        29195,
+        28962,
+        29179,
+        29565
+      ],
+      "median_us": 29331.5,
+      "cv_pct": 0.6383913090124013
+    },
+    {
+      "id": "n2000017-g32768",
+      "role": "train",
+      "path": "dense-count-training3/n2000017-g32768.json",
+      "sha256": "b1ea52b27668a0f4f54de23d7f6d0c2212f8d0cd337b9504ae21b338859b8baa",
+      "acquisition_started_at": "2026-10-26T11:57:03.999197+00:00",
+      "acquisition_completed_at": "2026-10-26T11:57:10.787123+00:00",
+      "acquisition_receipt": {
+        "path": "dense-count-training3/n2000017-g32768-acquisition.json",
+        "sha256": "cdc48522058949055edaf2d7f0fa63ac31d2d8dc53d2746018a894117a5a01ec"
+      },
+      "heldout_fit_sha256": null,
+      "features": [
+        1069.162,
+        622611,
+        1.0
+      ],
+      "work": {
+        "P": 2098324,
+        "Q": 0,
+        "S": 622611,
+        "L": 4,
+        "actual_capacity": 32769
+      },
+      "warmup_us": [
+        110262,
+        110337,
+        110572,
+        109782,
+        109824
+      ],
+      "samples_us": [
+        109959,
+        112090,
+        110740,
+        110030,
+        109736,
+        109709,
+        111002,
+        110731,
+        109999,
+        109662
+      ],
+      "median_us": 110014.5,
+      "cv_pct": 0.7010106797136736
+    }
+  ],
+  "solution": {
+    "rank": 3,
+    "rank_tolerance": 1e-10,
+    "rss_tie_tolerance": 1e-12,
+    "candidates": [
+      {
+        "mask": 0,
+        "eligible": true,
+        "coefficients": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rss": 25475213141.0,
+        "residuals": [
+          1286.0,
+          5474.5,
+          16719.5,
+          63808.0,
+          2817.0,
+          4412.5,
+          21220.0,
+          87016.5,
+          6884.5,
+          5665.5,
+          29331.5,
+          110014.5
+        ]
+      },
+      {
+        "mask": 1,
+        "eligible": true,
+        "coefficients": [
+          43.4936714496748,
+          0.0,
+          0.0
+        ],
+        "rss": 14750342702.22342,
+        "residuals": [
+          -9806.66946019651,
+          -5639.046422492354,
+          5450.072259032011,
+          52004.12202425841,
+          -19585.43758143407,
+          -18031.69150602576,
+          -1535.9541429770288,
+          63191.64538747576,
+          -37483.65520784196,
+          -38765.2860947295,
+          -15566.9300501564,
+          63512.71924552279
+        ]
+      },
+      {
+        "mask": 2,
+        "eligible": true,
+        "coefficients": [
+          0.0,
+          0.17736358549175374,
+          0.0
+        ],
+        "rss": 76619592.76506938,
+        "residuals": [
+          1159.185036373396,
+          3474.7255735804765,
+          734.9615847266778,
+          -124.3006627720606,
+          2644.0705041455403,
+          1685.5348730642863,
+          -577.097839009075,
+          -163.90999468918017,
+          6665.455971917684,
+          2211.344172548096,
+          1721.8427372551705,
+          -414.0193266062852
+        ]
+      },
+      {
+        "mask": 3,
+        "eligible": true,
+        "coefficients": [
+          3.843256435663759,
+          0.17110997333112932,
+          0.0
+        ],
+        "rss": 24453443.973271262,
+        "residuals": [
+          183.46840446012175,
+          2563.2023229942774,
+          302.7489147159722,
+          1086.8372291903652,
+          670.6082322872917,
+          -201.56490985920755,
+          -1819.3577045530692,
+          804.7098564965418,
+          2752.6502333768403,
+          -1592.9299694503143,
+          -1272.0621505597337,
+          -629.5153429348866
+        ]
+      },
+      {
+        "mask": 4,
+        "eligible": true,
+        "coefficients": [
+          0.0,
+          0.0,
+          29554.166666666675
+        ],
+        "rss": 14993827932.666668,
+        "residuals": [
+          -28268.166666666675,
+          -24079.666666666675,
+          -12834.666666666675,
+          34253.83333333333,
+          -26737.166666666675,
+          -25141.666666666675,
+          -8334.166666666675,
+          57462.33333333333,
+          -22669.666666666675,
+          -23888.666666666675,
+          -222.66666666667516,
+          80460.33333333333
+        ]
+      },
+      {
+        "mask": 5,
+        "eligible": true,
+        "coefficients": [
+          25.090466348189196,
+          0.0,
+          14319.532403897976
+        ],
+        "rss": 14209867868.508299,
+        "residuals": [
+          -19432.630031806497,
+          -15256.173455653628,
+          -4101.097687045538,
+          42679.09066246791,
+          -24425.966722492005,
+          -22854.55357018627,
+          -6226.902032970087,
+          58952.97466605682,
+          -33029.96766848386,
+          -34285.097940025255,
+          -10888.87063420099,
+          68869.19441433936
+        ]
+      },
+      {
+        "mask": 6,
+        "eligible": true,
+        "coefficients": [
+          0.0,
+          0.17147130182270395,
+          2513.9997257353734
+        ],
+        "rss": 28808867.307812594,
+        "residuals": [
+          -1350.6017065386068,
+          1027.1613462136393,
+          -1248.007859902922,
+          -514.3737094454191,
+          135.81575498749044,
+          -737.8709912594468,
+          -2366.9653632365735,
+          218.35393284184102,
+          4158.733216513587,
+          -187.90332873253283,
+          125.07713342976785,
+          740.5815751290938
+        ]
+      },
+      {
+        "mask": 7,
+        "eligible": true,
+        "coefficients": [
+          2.51408909865024,
+          0.17065755089234147,
+          1115.7990280527877
+        ],
+        "rss": 21274761.151533652,
+        "residuals": [
+          -593.0149747496678,
+          1792.1345250598542,
+          -427.882543029049,
+          494.8446520947109,
+          239.8691884735549,
+          -624.5130699108668,
+          -2184.1339325145454,
+          639.3802528442757,
+          2993.301522527469,
+          -1342.1124940508962,
+          -945.3371511693549,
+          -42.53597557549074
+        ]
+      }
+    ],
+    "selected_mask": 7,
+    "a_us_per_cost": 2.51408909865024,
+    "b_us_per_serial_work": 0.17065755089234147,
+    "c_us": 1115.7990280527877,
+    "serial_cost_per_work": 0.06788047049882354
+  },
+  "status": "diagnostic_coefficient_only_not_production_approval"
+}

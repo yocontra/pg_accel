@@ -1,0 +1,9 @@
+CREATE EXTENSION
+CREATE EXTENSION
+ extname  
+----------
+ h3
+ pg_accel
+ plpgsql
+(3 rows)
+

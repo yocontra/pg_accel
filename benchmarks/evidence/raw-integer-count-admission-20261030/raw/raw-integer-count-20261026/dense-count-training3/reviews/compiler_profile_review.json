@@ -1,0 +1,62 @@
+{
+  "kind": "work_equivalence_review",
+  "reviewer": "compiler_profile_review",
+  "recorded_at": "2026-10-26T11:35:14Z",
+  "recorded_by": "root",
+  "decision": "conditional_static_work_equivalence_accepted",
+  "scope": "Reviewed diagnostic companion source equivalence and completed non-calibration untimed qualification; transferred diagnostic facts only.",
+  "conditions": [
+    "Timed baseline and companion source/binary identities remain sealed and unchanged.",
+    "Each cell uses identical deterministic fixture/catalog preparation and observed settings, device limits, and budgets.",
+    "Complete successful companion traces bracketing each timed cell agree on every work-bearing field.",
+    "Per-cell lifecycle counts, result consumption, and full native parity pass.",
+    "Facts are labeled transferred by reviewed work equivalence, not directly observed in the uninstrumented timed binary."
+  ],
+  "not_approved": [
+    "Calibration acquisition wrapper execution",
+    "Fitting any unqualified receipts",
+    "Production pricing coefficients",
+    "Full feature or release qualification"
+  ],
+  "reviewed_artifacts": [
+    {
+      "path": ".codex/scratch/raw-integer-count-20261026/calibration-diagnostic-ce24/DIAGNOSTIC-WORK-EQUIVALENCE.md",
+      "sha256": "5c624bfbc9773171bc87b840b5f7f4681f030dab94efec40c6833c2ce240b159"
+    }
+  ],
+  "evidence_refs": [
+    {
+      "path": ".codex/scratch/raw-integer-count-20261026/companion-qualification1/qualification.json",
+      "sha256": "5360b8ad214b4beb3c4a425a7ceb5e668d80e39c5d589d082c8732221d1ca74f"
+    },
+    {
+      "path": ".codex/scratch/raw-integer-count-20261026/companion-qualification1/canonical-qualification.json",
+      "sha256": "cb0b67c2f2fc9be27cb2e6cc8aa50d0201982681c360dfa24dea8d827bf5b34f"
+    },
+    {
+      "path": ".codex/scratch/raw-integer-count-20261026/companion-qualification1/raw-traces.json",
+      "sha256": "33c3165f535f21dd130f564870f075013d1d1e9117ea568da9984ac696d4a74d"
+    },
+    {
+      "path": ".codex/scratch/raw-integer-count-20261026/companion-qualification1/source-after.log",
+      "sha256": "1f265856e323b9af0497f3f3d5b3570b5f25c4ca0f0ef9a1e0e393e600161a2f"
+    },
+    {
+      "path": ".codex/scratch/raw-integer-count-20261026/companion-qualification1/module-after.log",
+      "sha256": "db563cd33ca74405911ae6d7dd2e0602f4b60eb49b6fdd4a759b4a211ea6dbf6"
+    },
+    {
+      "path": ".codex/scratch/raw-integer-count-20261026/companion-qualification1/harness-after.log",
+      "sha256": "f3ea32692643fbbcd8892d4162cbd3df3a76bfd95ded867dfd29bd1f82e407f1"
+    },
+    {
+      "path": ".codex/scratch/raw-integer-count-20261026/companion-qualification1/terminal.log",
+      "sha256": "d02e3480e89209ee1fd2c65d68cdd947e4001292c7e4d4594b8fc9c8e70c2fdc"
+    },
+    {
+      "path": ".codex/scratch/raw-integer-count-20261026/companion-qualification1/status.log",
+      "sha256": "e138ccb54fdb08283c6eb21159c53207bbbbf07077246e2804e18d22efe6e250"
+    }
+  ],
+  "statement": "Root recorded this review from the named independent reviewer's explicit tool-thread conclusion. This is a manual review record, not cryptographic attestation. Untimed qualification reported 258 groups, three calls, P=1250547, Q=0, S=3870, L=3, normalized ledger=11250279, full parity, identical traces, negative trace rejection, and clean shutdown."
+}

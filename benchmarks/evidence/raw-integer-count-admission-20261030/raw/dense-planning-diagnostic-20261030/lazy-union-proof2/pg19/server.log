@@ -1,0 +1,13 @@
+2026-10-30 19:58:35.674 MST [81811] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-30 19:58:35.674 MST [81811] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-30 19:58:35.702 MST [81811] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-30 19:58:35.702 MST [81811] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/leup19-20261030/.s.PGSQL.34419"
+2026-10-30 19:58:35.707 MST [81816] LOG:  database system was shut down at 2026-10-30 19:58:35 MST
+2026-10-30 19:58:35.709 MST [81811] LOG:  database system is ready to accept connections
+2026-10-30 19:58:35.995 MST [81811] LOG:  received fast shutdown request
+2026-10-30 19:58:35.995 MST [81811] LOG:  aborting any active transactions
+2026-10-30 19:58:35.997 MST [81811] LOG:  background worker "logical replication launcher" (PID 81819) exited with exit code 1
+2026-10-30 19:58:35.997 MST [81814] LOG:  shutting down
+2026-10-30 19:58:35.997 MST [81814] LOG:  checkpoint starting: shutdown fast
+2026-10-30 19:58:36.021 MST [81814] LOG:  checkpoint complete: shutdown fast: wrote 144 buffers (0.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.022 s, sync=0.002 s, total=0.025 s; sync files=52, longest=0.001 s, average=0.001 s; distance=987 kB, estimate=987 kB; lsn=0/01839A00, redo lsn=0/01839A00
+2026-10-30 19:58:36.029 MST [81811] LOG:  database system is shut down

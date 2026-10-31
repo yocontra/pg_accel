@@ -1,0 +1,28 @@
+{
+  "workload": "dense_int2_count_control",
+  "rows": 2000017,
+  "seed": 42,
+  "iterations": 10,
+  "warmup": 5,
+  "timing_mode": "raw",
+  "cache_mode": "warm",
+  "realistic_gucs": true,
+  "skip_guc_verify": false,
+  "capture_plans": false,
+  "capture_planner_stages": false,
+  "native_parity_pairing": false,
+  "backend_pid": 87050,
+  "backend_pid_error": null,
+  "setup_sql": [
+    "DROP TABLE IF EXISTS bench_raw_integer_count",
+    "CREATE TABLE bench_raw_integer_count (k int2, value boolean, qualifies boolean)",
+    "INSERT INTO bench_raw_integer_count SELECT CASE WHEN i % 97 = 0 THEN NULL::int2 ELSE (g - 32)::int2 END, CASE WHEN i % 7 = 0 THEN NULL::boolean ELSE i % 2 = 0 END, CASE WHEN g = 0 THEN false WHEN i % 11 = 0 THEN NULL::boolean ELSE i % 3 <> 0 END FROM (SELECT i, CASE WHEN i > 64 AND i % 5 = 0 THEN 0 ELSE (i - 1) % 64 END AS g FROM generate_series(1::bigint, 2000017) AS s(i)) AS fixture",
+    "ANALYZE bench_raw_integer_count"
+  ],
+  "pre_query_sql": [],
+  "accel_query_sql": "SELECT k, count(*) AS n FROM bench_raw_integer_count GROUP BY k",
+  "baseline_query_sql": "SELECT k, count(*) AS n FROM bench_raw_integer_count GROUP BY k",
+  "explain_sql": "EXPLAIN (VERBOSE, COSTS OFF) SELECT k, count(*) AS n FROM bench_raw_integer_count GROUP BY k",
+  "explain": "Custom Scan (GpuAccelAgg)\n  Output: k, (count(*))\n  Strategy: GpuAgg\n  Plan Selected: true\n  Batch Size: 65536\n  Expected Threads: 1\n  GPU Resident Pipeline: true\n  GPU Resident Proof Version: 2\n  GPU Resident Operator Class: resident_groupagg\n  GPU Physical Kernel Mode: parallel_dense_count\n  GPU Descriptor Strategy: descriptor_grouped_aggregate\n  GPU Descriptor Specialization: dense_count_plain\n  GPU Descriptor Specialization Cache: miss\n  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)\n  GPU Descriptor Group Keys: k0:fact(16436.1:type=21) type=21 collation=0 encoding=hash\n  GPU Descriptor Aggregates: m0:count_star -> value.count\n  GPU Descriptor Filter: fact=none; measures=[m0=none]; dimensions=[none]\n  GPU Descriptor Star Dimensions: none\n  GPU Descriptor Output: slot0:group[k0] source_type=21 result_type=21 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false\n  GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)\n  GPU Descriptor Artifact: not initialized\n  GPU Descriptor Generations: not inspected\n  GPU Descriptor Bytes: not inspected\n  GPU Resident Stage Mask: 16393\n  GPU Resident Device Columns: 1\n  GPU Resident Boundary: none: no CPU boundary\n",
+  "explain_error": null
+}

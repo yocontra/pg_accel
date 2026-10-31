@@ -1,0 +1,17 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.49s
+     Running unittests src/lib.rs (target/debug/deps/pg_accel-281e54909764ca85)
+
+running 9 tests
+test engine::executor::agg::descriptor::tests::dense_count_one_shot_honors_explicit_limit ... ok
+test engine::executor::agg::descriptor::tests::dense_count_pricing_envelope_preserves_types_aliases_and_exclusions ... ok
+test engine::executor::agg::descriptor::tests::dense_count_work_accounts_where_mask_aliases_without_pricing_or_dispatch ... ok
+test engine::executor::agg::descriptor::tests::dense_count_work_matches_actual_call_multiplicity_and_empty_phases ... ok
+test engine::executor::agg::descriptor::tests::dense_count_work_products_are_checked_and_include_each_phase ... ok
+test engine::executor::agg::descriptor::tests::dense_count_work_repetition_checks_overflow_and_static_shape ... ok
+test engine::ffi::planner_hooks::generic_groupagg::unit_tests::dense_count_aggregate_prices_only_checked_work ... ok
+test engine::ffi::planner_hooks::generic_groupagg::unit_tests::dense_count_forecast_covers_loaded_and_conservative_cold_inputs ... ok
+test gpu::grouped_agg::tests::dense_count_work_forecast_rejects_overflow_and_pointer_rich_shapes ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 1347 filtered out; finished in 0.01s
+

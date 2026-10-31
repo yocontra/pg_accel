@@ -1,0 +1,51 @@
+[artifacts] writing benchmark artifacts to /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/performance18-raw_int4_count_bool_filter-final3/artifacts
+[diagnostics] RUST_BACKTRACE=1 (set-by-runner)
+[gucs] applying profile: GucProfile { shared_buffers: "16GB", work_mem: "512MB", effective_cache_size: "48GB", max_parallel_workers_per_gather: 8, max_worker_processes: 16, max_parallel_workers: 12, maintenance_work_mem: "2GB", jit: "off", jit_above_cost: "100000", random_page_cost: "1.1", effective_io_concurrency: 256, track_io_timing: "on", parallel_leader_participation: "on" }
+[gucs] observed snapshot captured (13 settings)
+[gucs] pg_postmaster_start_time = 2026-10-26 02:17:35.317384-07
+[setup] installing extensions: pg_accel
+[setup] pg_accel: ok
+[detect] installed extensions: plpgsql, pg_accel
+[provenance] pg_accel extension provenance accepted
+
+[scale] raw_int4_count_bool_filter @ 1000017 rows
+[setup] raw_int4_count_bool_filter -- seed 42 (setseed=0.000042), 1000017 rows
+[quiescence] setup checkpoint completed at 2026-10-26 02:17:37.113286-07 (wal_lsn=0/54F92B8)
+[raw_int4_count_bool_filter] warmup 1/5 [warm]: accel=22.89ms  parallel=50.72ms
+[raw_int4_count_bool_filter] warmup 2/5 [warm]: accel=9.29ms  parallel=48.90ms
+[raw_int4_count_bool_filter] warmup 3/5 [warm]: accel=22.78ms  parallel=49.88ms
+[raw_int4_count_bool_filter] warmup 4/5 [warm]: accel=10.43ms  parallel=51.33ms
+[raw_int4_count_bool_filter] warmup 5/5 [warm]: accel=9.96ms  parallel=49.80ms
+[raw_int4_count_bool_filter] bench 1/10 [warm]: accel=24.19ms  parallel=82.66ms
+[raw_int4_count_bool_filter] bench 2/10 [warm]: accel=12.13ms  parallel=48.18ms
+[raw_int4_count_bool_filter] bench 3/10 [warm]: accel=12.15ms  parallel=47.43ms
+[raw_int4_count_bool_filter] bench 4/10 [warm]: accel=13.10ms  parallel=49.83ms
+[raw_int4_count_bool_filter] bench 5/10 [warm]: accel=9.64ms  parallel=48.48ms
+[raw_int4_count_bool_filter] bench 6/10 [warm]: accel=10.90ms  parallel=48.23ms
+[raw_int4_count_bool_filter] bench 7/10 [warm]: accel=12.43ms  parallel=47.20ms
+[raw_int4_count_bool_filter] bench 8/10 [warm]: accel=12.70ms  parallel=103.13ms
+[raw_int4_count_bool_filter] bench 9/10 [warm]: accel=70.97ms  parallel=73.50ms
+[raw_int4_count_bool_filter] bench 10/10 [warm]: accel=10.96ms  parallel=47.43ms
+[quiescence] checkpointer counters remained unchanged through 2026-10-26 02:17:38.541333-07
+[cleanup] raw_int4_count_bool_filter -- tables dropped
+
+[scale] raw_int4_count_bool_filter @ 2000017 rows
+[setup] raw_int4_count_bool_filter -- seed 42 (setseed=0.000042), 2000017 rows
+[quiescence] setup checkpoint completed at 2026-10-26 02:17:41.030385-07 (wal_lsn=0/D031570)
+[raw_int4_count_bool_filter] warmup 1/5 [warm]: accel=26.97ms  parallel=84.50ms
+[raw_int4_count_bool_filter] warmup 2/5 [warm]: accel=16.47ms  parallel=82.75ms
+[raw_int4_count_bool_filter] warmup 3/5 [warm]: accel=15.95ms  parallel=82.73ms
+[raw_int4_count_bool_filter] warmup 4/5 [warm]: accel=16.59ms  parallel=82.46ms
+[raw_int4_count_bool_filter] warmup 5/5 [warm]: accel=15.70ms  parallel=82.66ms
+[raw_int4_count_bool_filter] bench 1/10 [warm]: accel=16.07ms  parallel=82.14ms
+[raw_int4_count_bool_filter] bench 2/10 [warm]: accel=15.10ms  parallel=82.45ms
+[raw_int4_count_bool_filter] bench 3/10 [warm]: accel=13.64ms  parallel=82.80ms
+[raw_int4_count_bool_filter] bench 4/10 [warm]: accel=15.76ms  parallel=82.63ms
+[raw_int4_count_bool_filter] bench 5/10 [warm]: accel=15.89ms  parallel=82.53ms
+[raw_int4_count_bool_filter] bench 6/10 [warm]: accel=15.21ms  parallel=82.94ms
+[raw_int4_count_bool_filter] bench 7/10 [warm]: accel=14.81ms  parallel=82.52ms
+[raw_int4_count_bool_filter] bench 8/10 [warm]: accel=19.45ms  parallel=82.71ms
+[raw_int4_count_bool_filter] bench 9/10 [warm]: accel=14.01ms  parallel=82.26ms
+[raw_int4_count_bool_filter] bench 10/10 [warm]: accel=16.74ms  parallel=82.42ms
+[quiescence] checkpointer counters remained unchanged through 2026-10-26 02:17:42.955786-07
+[cleanup] raw_int4_count_bool_filter -- tables dropped

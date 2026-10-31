@@ -1,0 +1,415 @@
+{
+  "schema_version": 1,
+  "status": "pass",
+  "expected_extension_version": "1.0.0-rc1",
+  "postgres": {
+    "backend_pid": 93727,
+    "server_version": "18.4",
+    "data_directory": "/Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/performance18-dense_int8_count_control/pgdata",
+    "config_file": "/Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/performance18-dense_int8_count_control/pgdata/postgresql.conf",
+    "shared_preload_libraries": "pg_accel",
+    "postmaster_start_time": "2026-10-30 20:06:39.329384-07",
+    "postmaster_start_unix_seconds": 1793415999
+  },
+  "sql": {
+    "extversion": "1.0.0-rc1",
+    "pg_accel_version": "1.0.0-rc1",
+    "function_probin": "pg_accel",
+    "function_prosrc": "pg_accel_version_wrapper"
+  },
+  "live_smoke": {
+    "backend_pid": 93727,
+    "pg_accel_version": "1.0.0-rc1",
+    "kernel_executions": 0,
+    "stats_rows": 1,
+    "error": null
+  },
+  "pg_config": {
+    "command": "/Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/lazy-production18/postgres/bin/pg_config",
+    "pkglibdir": "/Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/lazy-production18/postgres/lib",
+    "sharedir": "/Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/lazy-production18/postgres/share",
+    "error": null,
+    "control_file": {
+      "path": "/Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/lazy-production18/postgres/share/extension/pg_accel.control",
+      "exists": true,
+      "sha256": "79599b7d8d15a0390b5651ba7cb5dd5838d04b8db0242db25989e9abdda5b2e7",
+      "len_bytes": 181,
+      "modified_unix_seconds": 1793415607,
+      "mapping_deleted": false,
+      "error": null
+    },
+    "control_default_version": "1.0.0-rc1",
+    "sql_files": [
+      {
+        "path": "/Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/lazy-production18/postgres/share/extension/pg_accel--0.1.0.sql",
+        "exists": true,
+        "sha256": "60bbc0d23e06afd070bfa9326356064c807811795da1fddbae52bded161698cc",
+        "len_bytes": 15986,
+        "modified_unix_seconds": 1793415524,
+        "mapping_deleted": false,
+        "error": null
+      },
+      {
+        "path": "/Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/lazy-production18/postgres/share/extension/pg_accel--1.0.0-rc1.sql",
+        "exists": true,
+        "sha256": "e67a8e6b44f808f5ba48f70cb654aff31a89288b0cf37ca0b982deb43fa1bd36",
+        "len_bytes": 15986,
+        "modified_unix_seconds": 1793415607,
+        "mapping_deleted": false,
+        "error": null
+      }
+    ]
+  },
+  "expected_binary": {
+    "path": "/Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/lazy-production18/postgres/lib/pg_accel.dylib",
+    "exists": true,
+    "sha256": "dde4b9950928f3f9fd74588e3460d584a9625ca400ced179cb1f8c46b34c2b7e",
+    "len_bytes": 9234160,
+    "modified_unix_seconds": 1793415607,
+    "mapping_deleted": false,
+    "error": null
+  },
+  "installed_binary": {
+    "path": "/Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/lazy-production18/postgres/lib/pg_accel.dylib",
+    "exists": true,
+    "sha256": "dde4b9950928f3f9fd74588e3460d584a9625ca400ced179cb1f8c46b34c2b7e",
+    "len_bytes": 9234160,
+    "modified_unix_seconds": 1793415607,
+    "mapping_deleted": false,
+    "error": null
+  },
+  "loaded_binaries": [
+    {
+      "path": "/Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/lazy-production18/postgres/lib/pg_accel.dylib",
+      "exists": true,
+      "sha256": "dde4b9950928f3f9fd74588e3460d584a9625ca400ced179cb1f8c46b34c2b7e",
+      "len_bytes": 9234160,
+      "modified_unix_seconds": 1793415607,
+      "mapping_deleted": false,
+      "error": null
+    }
+  ],
+  "mapped_library_discovery": {
+    "method": "lsof",
+    "mapped_paths": [
+      "/Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/lazy-production18/postgres/lib/pg_accel.dylib"
+    ],
+    "warning": null
+  },
+  "device_limits_sources": [
+    "hardware_derived",
+    "reference_device_calibrated"
+  ],
+  "device_limits_source_rows": [
+    {
+      "name": "auto_load_amortization_queries",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "custom_scan_yield_per_row",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "expr_min_predicate_complexity_x_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "fused_interrupt_interval",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_agg_cost_ratio",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_dense_count_serial_work_cost",
+      "source": "reference_device_calibrated"
+    },
+    {
+      "name": "gpu_expr_min_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_grouped_agg_one_shot_max_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_h3_group_min_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_h3_max_chunk_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_h3_max_groups",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_hash_agg_max_groups",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_hash_agg_min_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_hash_agg_unsafe_input_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_hash_join_build_max_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_hashjoin_build_per_row",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_hashjoin_probe_per_row",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_join_max_output_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_min_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_nlj_max_output_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_nlj_min_inner_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_nlj_min_outer_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_nlj_per_pair_cost",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_op_cost_filter",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_op_cost_h3_parent_resident",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_op_cost_hash_agg",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_op_cost_reduce",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_op_cost_sort",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_op_cost_window",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_partial_agg_per_row",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_pipeline_fusion_min_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_preagg_cost_ratio",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_preagg_max_dim_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_preagg_min_fact_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_raster_max_chunk_pixels",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_raster_min_pixels",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_reduce_max_chunk",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_reduce_min_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_sort_heap_topk_max_fraction",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_sort_heap_topk_max_width_bytes",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_sort_max_elements",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_sort_min_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_sort_planner_min_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_sort_topk_max_limit",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_spatial_max_output_fraction",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_spatial_max_recheck_fraction",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_spatial_max_vertices_per_row",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_spatial_min_vertices",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_spatial_pairwise_chunk_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_window_cost_ratio",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "gpu_window_min_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "has_native_fp64",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "hashagg_max_state_bytes_per_group",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "hashagg_min_rows_per_group",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "hashjoin_min_build_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "optimal_batch_max",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "optimal_batch_min",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "preagg_agg_cost",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "preagg_dim_materialize_cost",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "preagg_fact_scan_cost",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "preagg_probe_cost",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "preagg_yield_cost",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "reduce_bit_break_even_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "reduce_bool_break_even_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "reduce_f32_break_even_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "reduce_f64_break_even_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "reduce_i64_break_even_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "resident_domain_max_exact_value_bytes",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "resident_load_per_byte_cost",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "resident_load_scan_per_row_cost",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "resident_memory_budget_bytes",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "soft_fp64_cost_multiplier",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "sort_break_even_rows_float",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "sort_break_even_rows_int",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "spatial_point_in_ring_break_even_verts_x_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "spatial_point_in_ring_max_verts_x_rows",
+      "source": "hardware_derived"
+    },
+    {
+      "name": "window_min_partition_rows",
+      "source": "hardware_derived"
+    }
+  ],
+  "warnings": [],
+  "errors": []
+}

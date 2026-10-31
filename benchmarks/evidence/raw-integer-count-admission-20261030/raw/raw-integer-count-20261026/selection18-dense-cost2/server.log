@@ -1,0 +1,17 @@
+2026-10-26 06:17:34.691 MST [70806] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-26 06:17:34.691 MST [70806] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-26 06:17:34.802 MST [70806] LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-26 06:17:34.803 MST [70806] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/rawselection18/.s.PGSQL.33818"
+2026-10-26 06:17:34.821 MST [70812] LOG:  database system was shut down at 2026-10-26 06:17:34 MST
+2026-10-26 06:17:34.825 MST [70806] LOG:  database system is ready to accept connections
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/cache-production18/apps/global/jit-cache/2993083400042206172.16777302068134248360.metalar.70834.9299546796883236774.tmp (kernels_added=1 skipped=0)
+2026-10-26 06:17:49.128 MST [70806] LOG:  received fast shutdown request
+2026-10-26 06:17:49.128 MST [70806] LOG:  aborting any active transactions
+2026-10-26 06:17:49.129 MST [70806] LOG:  background worker "logical replication launcher" (PID 70815) exited with exit code 1
+2026-10-26 06:17:49.130 MST [70810] LOG:  shutting down
+2026-10-26 06:17:49.130 MST [70810] LOG:  checkpoint starting: shutdown immediate
+2026-10-26 06:17:49.163 MST [70810] LOG:  checkpoint complete: wrote 101 buffers (0.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.031 s, sync=0.002 s, total=0.034 s; sync files=47, longest=0.001 s, average=0.001 s; distance=678 kB, estimate=678 kB; lsn=0/17B9420, redo lsn=0/17B9420
+2026-10-26 06:17:49.171 MST [70806] LOG:  database system is shut down

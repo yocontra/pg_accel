@@ -1,0 +1,92 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 21.06s
+     Running unittests src/lib.rs (target/debug/deps/pg_accel-4b4c215d478719d0)
+
+running 78 tests
+test engine::residency::store::tests::artifact_hit_requires_the_exact_requested_dependency_set ... ok
+test engine::residency::store::tests::artifact_idle_recovery_is_pressure_only_and_refuses_active_leases ... ok
+test engine::residency::store::tests::artifact_idle_recovery_keeps_active_owners_and_retries_exactly_once ... ok
+test engine::residency::store::tests::batch_first_use_scope_normalizes_multiple_new_relations ... ok
+test engine::residency::store::tests::benign_relcache_invalidation_keeps_exact_pinned_residency ... ok
+test engine::residency::store::tests::budget_eviction_can_reclaim_artifacts_owned_by_pinned_relations ... ok
+test engine::residency::store::tests::budget_eviction_drops_derived_before_raw_and_respects_pin ... ok
+test engine::residency::store::tests::byte_mismatch_drops_artifact_and_reserved_charge ... ok
+test engine::residency::store::tests::cheap_resident_rows_require_exact_selected_column_coverage ... ok
+test engine::residency::store::tests::clear_all_revalidates_and_keeps_an_exact_fingerprint ... ok
+test engine::residency::store::tests::commit_generation_bump_evicts_snapshot_but_preserves_pin_intent ... ok
+test engine::residency::store::tests::count_only_request_accepts_a_zero_column_resident_snapshot ... ok
+test engine::residency::store::tests::current_capacity_inspection_is_read_only_exact_and_lease_checked ... ok
+test engine::residency::store::tests::dependency_change_during_finalize_prevents_reserved_publication ... ok
+test engine::residency::store::tests::dependency_stamps_detect_non_owner_changes ... ok
+test engine::residency::store::tests::dispatch_resolver_valid_and_error_paths_allocate_nothing ... ok
+test engine::residency::store::tests::ensure_report_returns_exact_evidence_and_accounting_for_build_hit_and_rebuild ... ok
+test engine::residency::store::tests::ephemeral_artifact_is_charged_dependency_bound_and_never_published ... ok
+test engine::residency::store::tests::exact_geometry_selection_bounds_million_row_scratch_to_one_chunk ... ok
+test engine::residency::store::tests::exact_geometry_selection_copies_all_subsets_without_allocating ... ok
+test engine::residency::store::tests::exact_geometry_selection_rejects_bad_metadata_and_hides_stale_results ... ok
+test engine::residency::store::tests::exact_geometry_selection_revalidation_rejects_eviction_and_generation_changes ... ok
+test engine::residency::store::tests::exact_geometry_snapshot_accounts_padded_storage_bit_exactly ... ok
+test engine::residency::store::tests::exact_identity_disambiguates_digest_collisions ... ok
+test engine::residency::store::tests::exact_probe_distinguishes_miss_hit_and_evicted_stale_state ... ok
+test engine::residency::store::tests::execution_idle_credit_preserves_active_foreign_and_pinned_owners ... ok
+test engine::residency::store::tests::execution_reclamation_protects_full_artifact_identity_and_raw_pins ... ok
+test engine::residency::store::tests::execution_reclamation_refuses_active_borrow_and_checks_exact_boundary ... ok
+test engine::residency::store::tests::execution_reclamation_releases_only_enough_unprotected_owners ... ok
+test engine::residency::store::tests::explicit_load_drains_new_trigger_invalidations_before_continuing ... ok
+test engine::residency::store::tests::explicit_pin_promotes_existing_scoped_auto_load ... ok
+test engine::residency::store::tests::finite_budget_batch_keeps_the_fact_or_returns_budget_exceeded ... ok
+test engine::residency::store::tests::finite_budget_replaces_owner_artifact_without_evicting_raw_dependencies ... ok
+test engine::residency::store::tests::forced_digest_collisions_build_and_resolve_distinct_artifacts ... ok
+test engine::residency::store::tests::geometry_selection_dispatch_revalidates_without_exact_rechecks ... ok
+test engine::residency::store::tests::geometry_snapshot_rejects_invalid_storage_and_offsets ... ok
+test engine::residency::store::tests::host_device_artifact_failures_release_both_reservations_without_publication ... ok
+test engine::residency::store::tests::host_device_artifacts_reserve_before_copy_and_transfer_charges_to_cache_or_query ... ok
+test engine::residency::store::tests::host_retaining_artifacts_require_the_reserve_first_builder ... ok
+test engine::residency::store::tests::interrupted_device_preparation_releases_charge_and_borrow_before_retry ... ok
+test engine::residency::store::tests::invalidation_clear_all_evicts_a_fingerprint_mismatch ... ok
+test engine::residency::store::tests::invalidation_prunes_pending_generation_relfilenode_and_scope_changes ... ok
+test engine::residency::store::tests::new_trigger_scope_is_only_selected_for_unpinned_auto_load ... ok
+test engine::residency::store::tests::next_command_prunes_scoped_auto_load_but_preserves_durable_pin ... ok
+test engine::residency::store::tests::nonzero_charge_dependency_race_drops_charge_and_built_artifact ... ok
+test engine::residency::store::tests::numeric_planner_metadata_is_selected_and_revalidated ... ok
+test engine::residency::store::tests::pending_relcache_overflow_fails_closed ... ok
+test engine::residency::store::tests::pin_intent_authorizes_missing_reload_when_auto_load_is_disabled ... ok
+test engine::residency::store::tests::planner_budget_projection_counts_only_surviving_local_bytes ... ok
+test engine::residency::store::tests::planner_budget_projection_fails_closed_on_overflow ... ok
+test engine::residency::store::tests::planner_dependency_revalidation_detects_generation_and_row_changes ... ok
+test engine::residency::store::tests::planner_loaded_evidence_revalidation_drains_pending_invalidation_once_for_batch ... ok
+test engine::residency::store::tests::planner_loaded_evidence_revalidation_rejects_every_mutable_fact ... ok
+test engine::residency::store::tests::planner_raw_owner_requires_complete_typed_union_and_preserves_selected_metadata ... ok
+test engine::residency::store::tests::planner_resident_byte_estimation_is_lazy_and_preserves_fallback_order ... ok
+test engine::residency::store::tests::protected_execution_quote_matches_reclamation_without_double_credit ... ok
+test engine::residency::store::tests::protected_execution_quote_preserves_ephemeral_full_dependencies_and_currentness ... ok
+test engine::residency::store::tests::protected_raw_dependencies_can_release_derived_artifacts ... ok
+test engine::residency::store::tests::raw_dispatch_requires_complete_current_canonical_dependencies ... ok
+test engine::residency::store::tests::relation_fingerprint_detects_every_structural_mismatch_lane ... ok
+test engine::residency::store::tests::reserve_first_device_build_charges_device_and_retained_host_bytes ... ok
+test engine::residency::store::tests::reserve_first_device_build_rejects_category_mismatch_and_releases_charge ... ok
+test engine::residency::store::tests::resident_column_variants_report_exact_views_lengths_and_accounting ... ok
+test engine::residency::store::tests::resident_identity_decoders_and_accounting_helpers_preserve_contracts ... ok
+test engine::residency::store::tests::resident_load_errors_render_actionable_variant_specific_messages ... ok
+test engine::residency::store::tests::shape_digest_is_stable_and_order_sensitive ... ok
+test engine::residency::store::tests::staged_composite_accounting_matches_device_and_host_categories_exactly ... ok
+test engine::residency::store::tests::staged_device_lifecycle_failures_release_charge_without_publication ... ok
+test engine::residency::store::tests::staged_device_lifecycle_prepares_only_on_miss_and_outside_raw_dispatch_borrow ... ok
+test engine::residency::store::tests::staged_device_lifecycle_rejects_dispatch_generation_mismatch ... ok
+test engine::residency::store::tests::staged_geometry_snapshot_uses_supplied_borrow_and_captured_dependency ... ok
+test engine::residency::store::tests::staged_transform_accounting_overflow_prevents_reservation_and_callbacks ... ok
+test engine::residency::store::tests::staged_transform_failures_release_both_charges_without_publication ... ok
+test engine::residency::store::tests::staged_transform_lifecycle_holds_distinct_exact_charges_and_publishes_only_persistent ... ok
+test engine::residency::store::tests::stale_artifact_is_removed_before_use ... ok
+test engine::residency::store::tests::successful_catalog_revalidation_rescopes_first_use_relation ... ok
+test engine::residency::store::tests::transform_charges_evict_without_removing_protected_dependencies_and_release_on_failure ... ok
+test engine::residency::store::tests::trigger_contract_rejects_row_and_before_misuse ... ok
+
+test result: ok. 78 passed; 0 failed; 0 ignored; 0 measured; 1281 filtered out; finished in 2.79s
+
+     Running tests/correctness_tests.rs (target/debug/deps/correctness_tests-92199c3e9c824b5d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+

@@ -1,0 +1,6 @@
+1e4869579b282ae555d3c9d237e7338b2470cea31fe649f491ae526d67a06c94  /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/run-lazy-full-gates.sh
+39c71e87193b70964f5f9ebc2fc70b4f8ba911ea9f515ce9785ecca02285aaaa  /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/run-lazy-benchmark.sh
+763d5a4c15eb4b83b785f5e5c15e2c867615d9521c5acd866fc39026a1f1fe69  /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/run-lazy-control-comparison.sh
+f48d4849aa46a8dac67870bf1166b40017d47682c2d43272e6a0f3e1c72ded34  /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/verify-retained-bench.sh
+052f954d9122031c3324a2df4c3fc96abece2758042093ae861a67253b699906  /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/check-lazy-matrix.py
+7ac3185be434facdc09d2c80e6194630bca8d3d56b39614887344ae989c76f47  /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/summarize-control-comparison.py

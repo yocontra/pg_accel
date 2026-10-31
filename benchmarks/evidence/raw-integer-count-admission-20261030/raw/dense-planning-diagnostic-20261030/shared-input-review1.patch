@@ -1,0 +1,469 @@
+diff --git a/pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs b/pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs
+index f8f03ee9..6e9c7b14 100644
+--- a/pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs
++++ b/pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs
+@@ -2316,6 +2316,12 @@ pub(super) unsafe fn try_inject(
+     // Both candidates run even if one declines or succeeds. Their caches and
+     // cost checks are independent; PostgreSQL chooses the cheapest added path.
+     // SAFETY: all pointers remain live across both synchronous candidate checks.
++    let mut candidate_inputs = super::shape::CandidateShapeInputs::default();
++    #[cfg(feature = "pg_test")]
++    {
++        candidate_inputs.verify_fresh_equivalence =
++            CANDIDATE_INPUT_OBSERVATIONS.with(|slot| slot.borrow().is_some());
++    }
+     let legacy = unsafe {
+         try_inject_candidate(
+             root,
+@@ -2325,6 +2331,7 @@ pub(super) unsafe fn try_inject(
+             native_cost,
+             false,
+             query_fingerprint.clone(),
++            &mut candidate_inputs,
+         )
+     };
+     // SAFETY: same planner lifetime; native comparator was captured above.
+@@ -2337,8 +2344,15 @@ pub(super) unsafe fn try_inject(
+             native_cost,
+             true,
+             query_fingerprint,
++            &mut candidate_inputs,
+         )
+     };
++    #[cfg(feature = "pg_test")]
++    CANDIDATE_INPUT_OBSERVATIONS.with(|slot| {
++        if let Some(observations) = slot.borrow_mut().as_mut() {
++            observations.push(candidate_inputs.observations);
++        }
++    });
+     legacy || raw
+ }
+ 
+@@ -2350,6 +2364,7 @@ unsafe fn try_inject_candidate(
+     native_cost: Option<f64>,
+     raw_count: bool,
+     query_fingerprint: Option<Rc<QueryFingerprint>>,
++    candidate_inputs: &mut super::shape::CandidateShapeInputs,
+ ) -> bool {
+     let structural_cache_key = query_fingerprint.as_ref().map(|fingerprint| {
+         decline_cache_key(
+@@ -2412,12 +2427,13 @@ unsafe fn try_inject_candidate(
+         // SAFETY: root and output_rel are the live planner-owned pointers supplied
+         // together to this upper-path callback.
+         let mut shape = unsafe {
+-            super::shape::extract_selected_shape(
++            super::shape::extract_selected_shape_with_inputs(
+                 root,
+                 output_rel,
+                 group_estimate.output_rows,
+                 &model,
+                 raw_count,
++                Some(candidate_inputs),
+             )
+         }
+         .map_err(AdmissionDecline::Shape)?;
+@@ -2606,12 +2622,13 @@ thread_local! {
+     static CANDIDATE_OBSERVATIONS: std::cell::RefCell<Option<Vec<CandidateObservation>>> = const {
+         std::cell::RefCell::new(None)
+     };
++    static CANDIDATE_INPUT_OBSERVATIONS: std::cell::RefCell<Option<Vec<super::shape::CandidateInputObservations>>> = const { std::cell::RefCell::new(None) };
+ }
+ 
+ #[cfg(feature = "pg_test")]
+ #[pgrx::pg_schema]
+ mod tests {
+-    use super::CANDIDATE_OBSERVATIONS;
++    use super::{CANDIDATE_INPUT_OBSERVATIONS, CANDIDATE_OBSERVATIONS};
+     use pgrx::prelude::*;
+     use std::fmt::Write as _;
+ 
+@@ -2619,6 +2636,7 @@ mod tests {
+     impl Drop for ResetObserver {
+         fn drop(&mut self) {
+             CANDIDATE_OBSERVATIONS.with(|slot| *slot.borrow_mut() = None);
++            CANDIDATE_INPUT_OBSERVATIONS.with(|slot| *slot.borrow_mut() = None);
+         }
+     }
+ 
+@@ -2632,6 +2650,110 @@ mod tests {
+         observe_count_candidates(true);
+     }
+ 
++    #[pg_test]
++    fn pg_raw_count_shared_inputs_equivalence_and_nonshareable_filters_having() {
++        let _reset = ResetObserver;
++        Spi::run("SET pg_accel.enabled=on; SET pg_accel.gpu_enabled=on; CREATE TEMP TABLE shared_input_fixture AS SELECT CASE WHEN i%97=0 THEN NULL ELSE (i%64)::int4 END k, (i%2)::int4 k2, CASE WHEN i%7=0 THEN NULL ELSE i%2=0 END value, CASE WHEN i%11=0 THEN NULL ELSE i%3<>0 END qualifies FROM generate_series(1,1000017)i; ANALYZE shared_input_fixture; SELECT pg_accel_pin('shared_input_fixture',ARRAY['k','k2','value','qualifies'])")
++            .expect("shared-input fixture");
++        for (query, shared) in [
++            (
++                "SELECT k AS key_alias,count(*) AS n FROM shared_input_fixture GROUP BY k",
++                true,
++            ),
++            (
++                "SELECT k,count(k) AS n FROM shared_input_fixture GROUP BY k",
++                true,
++            ),
++            (
++                "SELECT k,count(*) AS n FROM shared_input_fixture WHERE k>=0 GROUP BY k",
++                true,
++            ),
++            (
++                "SELECT k,count(value) FILTER(WHERE qualifies) AS n FROM shared_input_fixture GROUP BY k",
++                false,
++            ),
++            (
++                "SELECT k,count(*) FILTER(WHERE qualifies) AS n FROM shared_input_fixture GROUP BY k",
++                false,
++            ),
++            (
++                "SELECT k,count(k) FILTER(WHERE k>0) AS n FROM shared_input_fixture GROUP BY k",
++                false,
++            ),
++            (
++                "SELECT k,count(*) AS n FROM shared_input_fixture GROUP BY k HAVING count(*)>0",
++                false,
++            ),
++            (
++                "SELECT k FROM shared_input_fixture GROUP BY k HAVING count(*)>0",
++                false,
++            ),
++            (
++                "SELECT k,count(*) AS n FROM shared_input_fixture GROUP BY k HAVING count(*)::text LIKE '%'",
++                false,
++            ),
++        ] {
++            CANDIDATE_INPUT_OBSERVATIONS.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
++            Spi::run(&format!("EXPLAIN {query}")).expect("candidate extraction");
++            let inputs = CANDIDATE_INPUT_OBSERVATIONS
++                .with(|slot| slot.borrow_mut().take().expect("input observer"));
++            assert_eq!(inputs.len(), 1, "{query}: {inputs:?}");
++            assert_eq!(inputs[0].fresh_legacy, 1, "{query}: {inputs:?}");
++            assert_eq!(inputs[0].clones, usize::from(shared), "{query}: {inputs:?}");
++            assert_eq!(
++                inputs[0].reused_raw,
++                usize::from(shared),
++                "{query}: {inputs:?}"
++            );
++            assert_eq!(
++                inputs[0].fresh_raw,
++                usize::from(!shared),
++                "{query}: {inputs:?}"
++            );
++            // Full two-way native parity, independent of descriptor lowering.
++            Spi::run(&format!("CREATE TEMP TABLE shared_actual AS {query}; SET pg_accel.enabled=off; CREATE TEMP TABLE shared_native AS {query}"))
++                .expect("result materializations");
++            let differences = Spi::get_one::<i64>("SELECT count(*) FROM ((TABLE shared_actual EXCEPT ALL TABLE shared_native) UNION ALL (TABLE shared_native EXCEPT ALL TABLE shared_actual)) d")
++                .expect("full parity query").expect("difference count");
++            assert_eq!(differences, 0, "{query}");
++            Spi::run("DROP TABLE shared_actual,shared_native; SET pg_accel.enabled=on")
++                .expect("case cleanup");
++        }
++        // LIKE's catalog support function is nonzero: this HAVING really takes
++        // the cost_qual_eval support-callback path excluded from reuse.
++        assert!(Spi::get_one::<bool>("SELECT prosupport<>0 AND provolatile<>'v' FROM pg_proc WHERE oid='textlike(text,text)'::regprocedure")
++            .expect("support catalog").expect("textlike identity"));
++        Spi::run("SELECT pg_accel_unpin('shared_input_fixture'); DROP TABLE shared_input_fixture")
++            .expect("fixture cleanup");
++    }
++
++    #[pg_test]
++    fn pg_raw_count_shared_inputs_keep_raw_cache_hit_independent() {
++        let _reset = ResetObserver;
++        Spi::run("SET pg_accel.enabled=on; SET pg_accel.gpu_enabled=on; CREATE TEMP TABLE shared_cache_fixture AS SELECT (i%64)::int4 k,(i%3)::int4 k2 FROM generate_series(1,1000017)i; ANALYZE shared_cache_fixture; SELECT pg_accel_pin('shared_cache_fixture',ARRAY['k','k2'])")
++            .expect("cache fixture");
++        for repeat in 0..2 {
++            CANDIDATE_INPUT_OBSERVATIONS.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
++            CANDIDATE_OBSERVATIONS.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
++            Spi::run("EXPLAIN SELECT k,k2,count(*) FROM shared_cache_fixture GROUP BY k,k2")
++                .expect("two-key legacy candidate");
++            let inputs = CANDIDATE_INPUT_OBSERVATIONS
++                .with(|slot| slot.borrow_mut().take().expect("input observer"));
++            let candidates = CANDIDATE_OBSERVATIONS
++                .with(|slot| slot.borrow_mut().take().expect("candidate observer"));
++            assert_eq!(inputs.len(), 1, "{inputs:?}");
++            assert_eq!(inputs[0].clones, 1, "{inputs:?}");
++            assert_eq!(inputs[0].fresh_legacy, 1, "{inputs:?}");
++            assert_eq!(inputs[0].fresh_raw, 0, "{inputs:?}");
++            assert_eq!(inputs[0].reused_raw, usize::from(repeat == 0), "{inputs:?}");
++            assert!(!candidates[0].raw_count);
++            assert_eq!(candidates[0].outcome, "added", "{candidates:?}");
++            assert_eq!(candidates.len(), if repeat == 0 { 2 } else { 1 });
++        }
++        Spi::run("SELECT pg_accel_unpin('shared_cache_fixture'); DROP TABLE shared_cache_fixture")
++            .expect("cache fixture cleanup");
++    }
++
+     fn observe_count_candidates(sparse: bool) {
+         let _reset = ResetObserver;
+         let mut receipts = String::new();
+@@ -2655,12 +2777,22 @@ mod tests {
+                     .expect("exact low-cardinality control fixture");
+                 for repeat in 0..if sparse { 1 } else { 3 } {
+                     CANDIDATE_OBSERVATIONS.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
++                    CANDIDATE_INPUT_OBSERVATIONS.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
+                     Spi::run(
+                         "EXPLAIN SELECT k,count(*) AS n FROM bench_raw_integer_count GROUP BY k",
+                     )
+                     .expect("default repeated planning");
+                     let observations = CANDIDATE_OBSERVATIONS
+                         .with(|slot| slot.borrow_mut().take().expect("active observer"));
++                    let inputs = CANDIDATE_INPUT_OBSERVATIONS
++                        .with(|slot| slot.borrow_mut().take().expect("active input observer"));
++                    assert_eq!(inputs.len(), 1, "{inputs:?}");
++                    if !sparse || repeat == 0 {
++                        assert_eq!(inputs[0].clones, 1, "{inputs:?}");
++                        assert_eq!(inputs[0].fresh_legacy, 1, "{inputs:?}");
++                        assert_eq!(inputs[0].reused_raw, 1, "{inputs:?}");
++                        assert_eq!(inputs[0].fresh_raw, 0, "{inputs:?}");
++                    }
+                     pgrx::notice!(
+                         "candidate control kind={kind} rows={rows} repeat={repeat}: {observations:?}"
+                     );
+diff --git a/pg_accel/src/engine/ffi/planner_hooks/shape/mod.rs b/pg_accel/src/engine/ffi/planner_hooks/shape/mod.rs
+index 11519959..006bacbd 100644
+--- a/pg_accel/src/engine/ffi/planner_hooks/shape/mod.rs
++++ b/pg_accel/src/engine/ffi/planner_hooks/shape/mod.rs
+@@ -755,6 +755,82 @@ pub unsafe fn extract_shape(
+     unsafe { extract_selected_shape(root, output_rel, estimated_output_rows, model, false) }
+ }
+ 
++/// Owned neutral input reuse, limited to one synchronous upper-path hook.
++/// Physical/residency/cost decisions are never stored here.
++#[derive(Default)]
++pub(crate) struct CandidateShapeInputs {
++    legacy: Option<ShapeInput>,
++    #[cfg(any(test, feature = "pg_test"))]
++    pub(crate) observations: CandidateInputObservations,
++    #[cfg(feature = "pg_test")]
++    pub(crate) verify_fresh_equivalence: bool,
++}
++
++#[cfg(any(test, feature = "pg_test"))]
++#[derive(Debug, Default, Clone, PartialEq, Eq)]
++pub(crate) struct CandidateInputObservations {
++    pub(crate) clones: usize,
++    pub(crate) fresh_legacy: usize,
++    pub(crate) fresh_raw: usize,
++    pub(crate) reused_raw: usize,
++}
++
++impl CandidateShapeInputs {
++    fn remember(&mut self, input: &ShapeInput, eligible: bool) {
++        if eligible {
++            self.legacy = Some(input.clone());
++            #[cfg(any(test, feature = "pg_test"))]
++            {
++                self.observations.clones += 1;
++            }
++        } else {
++            self.legacy = None;
++        }
++    }
++
++    fn take(&mut self, expected_reuses: NonZeroU32) -> Option<ShapeInput> {
++        self.legacy
++            .take()
++            .filter(|input| input.expected_reuses == expected_reuses)
++    }
++}
++
++#[test]
++fn candidate_inputs_are_hook_local_single_take_and_model_checked() {
++    let input = ShapeInput {
++        relations: vec![],
++        joins: vec![],
++        group_keys: vec![],
++        aggregates: vec![],
++        projections: vec![],
++        relation_filters: vec![],
++        estimated_output_rows: 65,
++        expected_reuses: NonZeroU32::new(8).expect("nonzero"),
++        modifiers: ShapeModifiers::default(),
++    };
++    let mut inputs = CandidateShapeInputs::default();
++    assert!(inputs.take(input.expected_reuses).is_none());
++    inputs.remember(&input, false);
++    assert_eq!(inputs.observations.clones, 0);
++    inputs.remember(&input, true);
++    assert_eq!(inputs.observations.clones, 1);
++    assert_eq!(inputs.take(input.expected_reuses), Some(input.clone()));
++    assert!(inputs.take(input.expected_reuses).is_none());
++    inputs.remember(&input, true);
++    assert!(inputs.take(NonZeroU32::new(9).expect("nonzero")).is_none());
++    assert!(inputs.take(input.expected_reuses).is_none());
++    inputs.remember(&input, true);
++    inputs.remember(&input, false);
++    assert!(inputs.take(input.expected_reuses).is_none());
++    // A raw early cache hit may leave one bounded clone unused until hook end.
++    let mut cache_hit = CandidateShapeInputs::default();
++    cache_hit.remember(&input, true);
++    assert_eq!(cache_hit.observations.clones, 1);
++    assert_eq!(cache_hit.observations.fresh_raw, 0);
++    assert_eq!(cache_hit.observations.reused_raw, 0);
++    drop(cache_hit);
++}
++
+ /// Extract a separately costed raw candidate without changing legacy lowering.
+ /// # Safety
+ /// Same live planner/main-backend contract as `extract_shape`.
+@@ -765,17 +841,90 @@ pub(crate) unsafe fn extract_selected_shape(
+     model: &TypedCostModel,
+     raw_count: bool,
+ ) -> Result<ShapePlan, ShapeDecline> {
+-    // SAFETY: forwarded unchanged under this function's planner-pointer and
+-    // backend-thread contract.
+-    let input = unsafe {
+-        postgres::extract_selected_input(
++    // SAFETY: preserve the caller's live planner/main-backend contract.
++    unsafe {
++        extract_selected_shape_with_inputs(
+             root,
+             output_rel,
+             estimated_output_rows,
+-            model.planner.auto_load_amortization_queries,
++            model,
+             raw_count,
++            None,
+         )
+-    }?;
++    }
++}
++
++/// Same extraction, with optional hook-local unfiltered input reuse.
++/// # Safety
++/// Inputs must be used only with the same live planner arguments within one
++/// synchronous hook; no PostgreSQL pointer is retained in the owned holder.
++pub(crate) unsafe fn extract_selected_shape_with_inputs(
++    root: *mut pg_sys::PlannerInfo,
++    output_rel: *mut pg_sys::RelOptInfo,
++    estimated_output_rows: u64,
++    model: &TypedCostModel,
++    raw_count: bool,
++    mut inputs: Option<&mut CandidateShapeInputs>,
++) -> Result<ShapePlan, ShapeDecline> {
++    let reused = if raw_count {
++        inputs
++            .as_deref_mut()
++            .and_then(|inputs| inputs.take(model.planner.auto_load_amortization_queries))
++    } else {
++        None
++    };
++    let input = if let Some(input) = reused {
++        #[cfg(any(test, feature = "pg_test"))]
++        if let Some(inputs) = inputs.as_deref_mut() {
++            inputs.observations.reused_raw += 1;
++        }
++        #[cfg(feature = "pg_test")]
++        if inputs
++            .as_ref()
++            .is_some_and(|inputs| inputs.verify_fresh_equivalence)
++        {
++            // SAFETY: test oracle uses the same still-live planner arguments.
++            let fresh = unsafe {
++                postgres::extract_selected_input(
++                    root,
++                    output_rel,
++                    estimated_output_rows,
++                    model.planner.auto_load_amortization_queries,
++                    true,
++                )
++            }?;
++            assert!(fresh.raw_equivalent_unfiltered);
++            assert_eq!(
++                input, fresh.input,
++                "shared input must equal independent raw extraction"
++            );
++        }
++        input
++    } else {
++        #[cfg(any(test, feature = "pg_test"))]
++        if let Some(inputs) = inputs.as_deref_mut() {
++            if raw_count {
++                inputs.observations.fresh_raw += 1;
++            } else {
++                inputs.observations.fresh_legacy += 1;
++            }
++        }
++        // SAFETY: forwarded unchanged under this function's planner-pointer and
++        // backend-thread contract.
++        let extracted = unsafe {
++            postgres::extract_selected_input(
++                root,
++                output_rel,
++                estimated_output_rows,
++                model.planner.auto_load_amortization_queries,
++                raw_count,
++            )
++        }?;
++        if !raw_count && let Some(inputs) = inputs {
++            inputs.remember(&extracted.input, extracted.raw_equivalent_unfiltered);
++        }
++        extracted.input
++    };
+     let mut shape = builder::build_selected_shape(input, model, raw_count)?;
+     if needs_dense_key_estimate(&shape.spec, &shape.descriptor_resolution) {
+         let rows = shape
+diff --git a/pg_accel/src/engine/ffi/planner_hooks/shape/postgres.rs b/pg_accel/src/engine/ffi/planner_hooks/shape/postgres.rs
+index 42729ebf..0dad14c3 100644
+--- a/pg_accel/src/engine/ffi/planner_hooks/shape/postgres.rs
++++ b/pg_accel/src/engine/ffi/planner_hooks/shape/postgres.rs
+@@ -2639,6 +2639,11 @@ pub(super) unsafe fn preflight_base_relations(
+     Ok(())
+ }
+ 
++pub(super) struct ExtractedShapeInput {
++    pub input: ShapeInput,
++    pub raw_equivalent_unfiltered: bool,
++}
++
+ /// Adapt planner-owned PostgreSQL nodes into the pure [`ShapeInput`].
+ ///
+ /// # Safety
+@@ -2651,7 +2656,7 @@ pub(super) unsafe fn extract_selected_input(
+     estimated_output_rows: u64,
+     expected_reuses: NonZeroU32,
+     raw_count: bool,
+-) -> Result<ShapeInput, ShapeDecline> {
++) -> Result<ExtractedShapeInput, ShapeDecline> {
+     // SAFETY: root is read only after the explicit null guard; caller owns
+     // the planner-pointer validity contract.
+     if root.is_null() || unsafe { (*root).parse }.is_null() {
+@@ -2735,16 +2740,28 @@ pub(super) unsafe fn extract_selected_input(
+     if output_rel.is_null() || estimated_output_rows == 0 {
+         return Err(ShapeDecline::NoAggregate);
+     }
+-    Ok(ShapeInput {
+-        relations,
+-        joins,
+-        group_keys: groups,
+-        aggregates,
+-        projections,
+-        relation_filters,
+-        estimated_output_rows,
+-        expected_reuses,
+-        modifiers,
++    // Raw context only changes direct FILTER parsing. Check original nodes:
++    // scalar lowering can embed a FILTER in bytecode and erase its neutral
++    // filter. HAVING costing can invoke user support callbacks between the
++    // candidates, so even otherwise equivalent HAVING inputs stay independent.
++    let raw_equivalent_unfiltered = query.havingQual.is_null()
++        && inventory.aggregate_nodes.iter().all(|aggregate| {
++            // SAFETY: inventory_query collected these live Aggref pointers.
++            unsafe { (**aggregate).aggfilter.is_null() }
++        });
++    Ok(ExtractedShapeInput {
++        input: ShapeInput {
++            relations,
++            joins,
++            group_keys: groups,
++            aggregates,
++            projections,
++            relation_filters,
++            estimated_output_rows,
++            expected_reuses,
++            modifiers,
++        },
++        raw_equivalent_unfiltered,
+     })
+ }
+ 

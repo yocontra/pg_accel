@@ -1,0 +1,3 @@
+b9678f6742208ff96400643412937403336ecf2adfb6e55424d8336d6023548a  pgaccel-kernels/src/grouped_agg.cpp
+823c7c2a39c54fe406f3e401a0d56ec590bbe05dfbac64d9590318872e41f590  pgaccel-kernels/test/test_grouped_agg_hash.cpp
+77f7300e64af332e21f4521d0e7e8a522c7080d4f8bd58b4e5b738f6a38a49a7  pgaccel-kernels/include/pgaccel_olap.h

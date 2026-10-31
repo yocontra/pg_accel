@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "generated_unix_seconds": 1793005951,
+  "root": "/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/performance18-raw_int2_count_star/artifacts",
+  "entry_count": 17,
+  "total_size_bytes": 144322,
+  "entries": [
+    {
+      "path": "README.md",
+      "size_bytes": 2167,
+      "modified_unix_seconds": 1793005950
+    },
+    {
+      "path": "crashes.json",
+      "size_bytes": 2,
+      "modified_unix_seconds": 1793005950
+    },
+    {
+      "path": "crashes.md",
+      "size_bytes": 45,
+      "modified_unix_seconds": 1793005950
+    },
+    {
+      "path": "failure-provenance.txt",
+      "size_bytes": 338,
+      "modified_unix_seconds": 1793005951
+    },
+    {
+      "path": "log_tails/provenance/00-18.log.delta",
+      "size_bytes": 201,
+      "modified_unix_seconds": 1793005951
+    },
+    {
+      "path": "log_tails/provenance/00-18.log.tail",
+      "size_bytes": 63485,
+      "modified_unix_seconds": 1793005951
+    },
+    {
+      "path": "log_tails/provenance/01-pg_accel_panic.log.delta",
+      "size_bytes": 203,
+      "modified_unix_seconds": 1793005951
+    },
+    {
+      "path": "log_tails/provenance/01-pg_accel_panic.log.tail",
+      "size_bytes": 78,
+      "modified_unix_seconds": 1793005951
+    },
+    {
+      "path": "log_tails/provenance/02-pg_accel_traces.jsonl.delta",
+      "size_bytes": 221,
+      "modified_unix_seconds": 1793005951
+    },
+    {
+      "path": "log_tails/provenance/02-pg_accel_traces.jsonl.tail",
+      "size_bytes": 65588,
+      "modified_unix_seconds": 1793005951
+    },
+    {
+      "path": "log_tails/provenance/03-pg_accel_otel.jsonl.delta",
+      "size_bytes": 204,
+      "modified_unix_seconds": 1793005951
+    },
+    {
+      "path": "log_tails/provenance/03-pg_accel_otel.jsonl.tail",
+      "size_bytes": 79,
+      "modified_unix_seconds": 1793005951
+    },
+    {
+      "path": "manifest.json",
+      "size_bytes": 2634,
+      "modified_unix_seconds": 1793005950
+    },
+    {
+      "path": "provenance-warnings.txt",
+      "size_bytes": 531,
+      "modified_unix_seconds": 1793005951
+    },
+    {
+      "path": "provenance.json",
+      "size_bytes": 4526,
+      "modified_unix_seconds": 1793005951
+    },
+    {
+      "path": "resume_audit_manifest.json",
+      "size_bytes": 3829,
+      "modified_unix_seconds": 1793005951
+    },
+    {
+      "path": "rust_backtrace.txt",
+      "size_bytes": 191,
+      "modified_unix_seconds": 1793005950
+    }
+  ]
+}

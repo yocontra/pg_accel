@@ -1,0 +1,24 @@
+    Checking pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error: `format!(..)` appended to existing `String`
+    --> pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs:2601:21
+     |
+2601 | /                     receipts.push_str(&format!(
+2602 | |                         "kind={kind} rows={rows} repeat={repeat}: {observations:?}\n"
+2603 | |                     ));
+     | |______________________^
+     |
+     = note: you may need to import the `std::fmt::Write` trait
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#format_push_string
+     = note: `-D clippy::format-push-string` implied by `-D clippy::pedantic`
+     = help: to override `-D clippy::pedantic` add `#[allow(clippy::format_push_string)]`
+help: consider using `write!` to avoid the extra allocation
+     |
+2601 -                     receipts.push_str(&format!(
+2602 -                         "kind={kind} rows={rows} repeat={repeat}: {observations:?}\n"
+2603 -                     ));
+2601 +                     let _ = write!(receipts, "kind={kind} rows={rows} repeat={repeat}: {observations:?}\n");
+     |
+
+error: could not compile `pg_accel` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `pg_accel` (lib test) due to 1 previous error

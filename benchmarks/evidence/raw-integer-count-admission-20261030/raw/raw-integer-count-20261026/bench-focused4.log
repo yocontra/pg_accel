@@ -1,0 +1,13 @@
+   Compiling pg_accel_bench v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel_bench)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.57s
+     Running unittests src/main.rs (target/debug/deps/pg_accel_bench-d43b414edbd15989)
+
+running 5 tests
+test report::tests::raw_integer_count_receipt_requires_verbatim_node_header ... ok
+test report::tests::raw_integer_count_lifecycle_requires_explicit_ephemeral_policy ... ok
+test report::tests::raw_integer_count_gate_never_accepts_unproven_summary ... ok
+test report::tests::raw_integer_count_proof_rejects_dense_h3_wrong_filter_and_cross_node ... ok
+test workloads::raw_integer_count::tests::predeclared_cells_have_exact_cardinality_and_no_h3_or_overrides ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 613 filtered out; finished in 0.52s
+

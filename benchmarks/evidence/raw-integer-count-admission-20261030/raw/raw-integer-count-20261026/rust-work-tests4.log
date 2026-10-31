@@ -1,0 +1,11 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.03s
+     Running unittests src/lib.rs (target/debug/deps/pg_accel-4b4c215d478719d0)
+
+running 3 tests
+test engine::executor::agg::descriptor::tests::dense_count_work_matches_actual_call_multiplicity_and_empty_phases ... ok
+test engine::executor::agg::descriptor::tests::dense_count_work_repetition_checks_overflow_and_static_shape ... ok
+test gpu::grouped_agg::tests::dense_count_work_forecast_rejects_overflow_and_pointer_rich_shapes ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1349 filtered out; finished in 0.00s
+

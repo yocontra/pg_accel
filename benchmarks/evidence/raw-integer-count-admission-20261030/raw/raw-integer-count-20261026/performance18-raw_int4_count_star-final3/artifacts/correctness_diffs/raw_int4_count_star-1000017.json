@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "workload": "raw_int4_count_star",
+  "rows": 1000017,
+  "status": "pass",
+  "order_sensitive": false,
+  "accel_rows": 16389,
+  "baseline_rows": 16389,
+  "accel_minus_baseline_count": 0,
+  "baseline_minus_accel_count": 0,
+  "sample_limit": 20,
+  "accel_minus_baseline_samples": [],
+  "baseline_minus_accel_samples": [],
+  "accel_query_sql": "SELECT k, count(*) AS n FROM bench_raw_integer_count GROUP BY k",
+  "baseline_query_sql": "SELECT k, count(*) AS n FROM bench_raw_integer_count GROUP BY k",
+  "error": null
+}

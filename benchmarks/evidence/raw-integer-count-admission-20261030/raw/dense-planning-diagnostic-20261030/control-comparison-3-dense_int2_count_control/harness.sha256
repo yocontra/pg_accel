@@ -1,0 +1,3 @@
+763d5a4c15eb4b83b785f5e5c15e2c867615d9521c5acd866fc39026a1f1fe69  /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/run-lazy-control-comparison.sh
+f48d4849aa46a8dac67870bf1166b40017d47682c2d43272e6a0f3e1c72ded34  /Users/contra/Projects/pg_accel/.codex/scratch/dense-planning-diagnostic-20261030/verify-retained-bench.sh
+e987241e92a18b678655647f518eeddd3a29b68c06760c595f64ee894ed0484c  target/release/pg_accel_bench
