@@ -2025,6 +2025,17 @@ complete objective is implemented and verified.
       planner admission, PG18/19 integration, performance and release gates
       remain open. Evidence:
       `benchmarks/evidence/hash-count-where-native-20261030/README.md`.
+    - [ ] Finish adaptive WHERE COUNT Rust/planner qualification. Checkpoint
+      `89da8dba` wires partition-v2 population conservation, query-owned masks,
+      fused H3 admission and direct Boolean WHERE into normal planning. It also
+      accounts for previously omitted dense WHERE consumer reads without changing
+      coefficients or suppressing competing dense paths. The matching source
+      passes 1,365 ordinary tests, strict Clippy, formatting and PG18/PG19 test
+      builds. Earlier live tests selected dense execution instead of the required
+      raw path; preserve those failures. Final source review, corrected-source
+      live tests, paired candidate measurements, the full WHERE performance
+      matrix and unchanged released-workload controls remain open. Compilation
+      and this checkpoint do not establish live or performance qualification.
   - [ ] Qualify direct BIGINT fact-key hash aggregation.
 
     - [x] Normally admit and qualify one COUNT(*) or fixed-width COUNT(column)
