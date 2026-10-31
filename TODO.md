@@ -3537,11 +3537,17 @@ redesigned and independently requalified.
   characterization only because unrelated CPU load made the host ineligible
   for performance claims.
 - [ ] Pass hosted release CI on macOS arm64 Metal and Linux x86_64 no-GPU, with
-  durable artifacts from the exact candidate. Exact-candidate run
+  durable artifacts from the exact candidate. Historical exact-candidate run
   `31550632369` reached GitHub Actions, but every hosted job was rejected before
   its first step because the account has a failed payment or exceeded spending
-  limit. Restore Actions billing, then rerun that SHA; the zero-step failure is
-  not project execution evidence.
+  limit; that zero-step failure is not project execution evidence. Hosted
+  execution has since resumed: run `41174545419` on `20557a05` passed Linux
+  PG18/19, but does not yet establish complete macOS/Metal qualification.
+  Release run `41174545415` failed the real CPU-cheat source gate with twelve
+  findings across 136 ABI exports. Its twelve ordered findings exactly match
+  run `41171910307`; this is an unresolved source-proof gate, not the historical
+  billing blocker. The current candidate still requires its own complete
+  passing CI and release evidence.
 - [ ] Verify public source-build, package, install, and `CREATE EXTENSION`
   instructions from a clean checkout on a fresh Apple Silicon machine.
 - [x] Accept the 1B-row scale gate as optional, environment-deferred
