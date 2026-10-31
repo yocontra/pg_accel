@@ -2316,15 +2316,21 @@ pub(super) unsafe fn try_inject(
     // Both candidates run even if one declines or succeeds. Their caches and
     // cost checks are independent; PostgreSQL chooses the cheapest added path.
     // SAFETY: all pointers remain live across both synchronous candidate checks.
+    let mut candidate_inputs = super::shape::CandidateShapeInputs::default();
+    #[cfg(feature = "pg_test")]
+    {
+        candidate_inputs.verify_fresh_equivalence =
+            CANDIDATE_INPUT_OBSERVATIONS.with(|slot| slot.borrow().is_some());
+    }
     let legacy = unsafe {
         try_inject_candidate(
             root,
             input_rel,
             output_rel,
-            group_estimate,
-            native_cost,
+            (group_estimate, native_cost),
             false,
             query_fingerprint.clone(),
+            &mut candidate_inputs,
         )
     };
     // SAFETY: same planner lifetime; native comparator was captured above.
@@ -2333,12 +2339,18 @@ pub(super) unsafe fn try_inject(
             root,
             input_rel,
             output_rel,
-            group_estimate,
-            native_cost,
+            (group_estimate, native_cost),
             true,
             query_fingerprint,
+            &mut candidate_inputs,
         )
     };
+    #[cfg(feature = "pg_test")]
+    CANDIDATE_INPUT_OBSERVATIONS.with(|slot| {
+        if let Some(observations) = slot.borrow_mut().as_mut() {
+            observations.push(candidate_inputs.observations);
+        }
+    });
     legacy || raw
 }
 
@@ -2346,11 +2358,12 @@ unsafe fn try_inject_candidate(
     root: *mut pg_sys::PlannerInfo,
     input_rel: *mut RelOptInfo,
     output_rel: *mut RelOptInfo,
-    group_estimate: Option<AggGroupEstimate>,
-    native_cost: Option<f64>,
+    native_estimate: (Option<AggGroupEstimate>, Option<f64>),
     raw_count: bool,
     query_fingerprint: Option<Rc<QueryFingerprint>>,
+    candidate_inputs: &mut super::shape::CandidateShapeInputs,
 ) -> bool {
+    let (group_estimate, native_cost) = native_estimate;
     let structural_cache_key = query_fingerprint.as_ref().map(|fingerprint| {
         decline_cache_key(
             Rc::clone(fingerprint),
@@ -2412,12 +2425,13 @@ unsafe fn try_inject_candidate(
         // SAFETY: root and output_rel are the live planner-owned pointers supplied
         // together to this upper-path callback.
         let mut shape = unsafe {
-            super::shape::extract_selected_shape(
+            super::shape::extract_selected_shape_with_inputs(
                 root,
                 output_rel,
                 group_estimate.output_rows,
                 &model,
                 raw_count,
+                Some(candidate_inputs),
             )
         }
         .map_err(AdmissionDecline::Shape)?;
@@ -2606,12 +2620,13 @@ thread_local! {
     static CANDIDATE_OBSERVATIONS: std::cell::RefCell<Option<Vec<CandidateObservation>>> = const {
         std::cell::RefCell::new(None)
     };
+    static CANDIDATE_INPUT_OBSERVATIONS: std::cell::RefCell<Option<Vec<super::shape::CandidateInputObservations>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(feature = "pg_test")]
 #[pgrx::pg_schema]
 mod tests {
-    use super::CANDIDATE_OBSERVATIONS;
+    use super::{CANDIDATE_INPUT_OBSERVATIONS, CANDIDATE_OBSERVATIONS};
     use pgrx::prelude::*;
     use std::fmt::Write as _;
 
@@ -2619,6 +2634,7 @@ mod tests {
     impl Drop for ResetObserver {
         fn drop(&mut self) {
             CANDIDATE_OBSERVATIONS.with(|slot| *slot.borrow_mut() = None);
+            CANDIDATE_INPUT_OBSERVATIONS.with(|slot| *slot.borrow_mut() = None);
         }
     }
 
@@ -2632,9 +2648,133 @@ mod tests {
         observe_count_candidates(true);
     }
 
+    #[pg_test]
+    fn pg_raw_count_shared_inputs_equivalence_and_nonshareable_filters_having() {
+        let _reset = ResetObserver;
+        Spi::run("SET pg_accel.enabled=on; SET pg_accel.gpu_enabled=on; CREATE TEMP TABLE shared_input_fixture AS SELECT CASE WHEN i%97=0 THEN NULL ELSE (i%64)::int4 END k, (i%2)::int4 k2, CASE WHEN i%7=0 THEN NULL ELSE i%2=0 END value, CASE WHEN i%11=0 THEN NULL ELSE i%3<>0 END qualifies FROM generate_series(1,1000017)i; ANALYZE shared_input_fixture; SELECT pg_accel_pin('shared_input_fixture',ARRAY['k','k2','value','qualifies'])")
+            .expect("shared-input fixture");
+        for (query, shared) in [
+            (
+                "SELECT k AS key_alias,count(*) AS n FROM shared_input_fixture GROUP BY k",
+                true,
+            ),
+            (
+                "SELECT k,count(k) AS n FROM shared_input_fixture GROUP BY k",
+                true,
+            ),
+            (
+                "SELECT k,count(*) AS n FROM shared_input_fixture WHERE k>=0 GROUP BY k",
+                true,
+            ),
+            (
+                "SELECT k,count(value) FILTER(WHERE qualifies) AS n FROM shared_input_fixture GROUP BY k",
+                false,
+            ),
+            (
+                "SELECT k,count(*) FILTER(WHERE qualifies) AS n FROM shared_input_fixture GROUP BY k",
+                false,
+            ),
+            (
+                "SELECT k,count(k) FILTER(WHERE k>0) AS n FROM shared_input_fixture GROUP BY k",
+                false,
+            ),
+            (
+                "SELECT k,count(*) AS n FROM shared_input_fixture GROUP BY k HAVING count(*)>0",
+                false,
+            ),
+            (
+                "SELECT k FROM shared_input_fixture GROUP BY k HAVING count(*)>0",
+                false,
+            ),
+            (
+                "SELECT k,count(*) AS n FROM shared_input_fixture GROUP BY k HAVING count(*)::text LIKE '%'",
+                false,
+            ),
+        ] {
+            CANDIDATE_INPUT_OBSERVATIONS.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
+            CANDIDATE_OBSERVATIONS.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
+            Spi::run(&format!("EXPLAIN {query}")).expect("candidate extraction");
+            let inputs = CANDIDATE_INPUT_OBSERVATIONS
+                .with(|slot| slot.borrow_mut().take().expect("input observer"));
+            let candidates = CANDIDATE_OBSERVATIONS
+                .with(|slot| slot.borrow_mut().take().expect("candidate observer"));
+            pgrx::notice!("shared-input query={query} inputs={inputs:?} candidates={candidates:?}");
+            assert_eq!(candidates.len(), 2, "{query}: {candidates:?}");
+            assert!(!candidates[0].raw_count && candidates[1].raw_count);
+            assert_eq!(candidates[0].native_cost, candidates[1].native_cost);
+            if query.contains("FILTER(WHERE qualifies)") {
+                assert_eq!(candidates[1].outcome, "added", "{query}: {candidates:?}");
+                if query.contains("count(value)") {
+                    assert!(
+                        inputs[0].legacy_bytecode_without_filter,
+                        "original SQL FILTER must remain nonshareable even after bytecode lowering: {inputs:?}"
+                    );
+                }
+            } else if !query.contains("FILTER") {
+                assert_eq!(candidates[0].outcome, "added", "{query}: {candidates:?}");
+            }
+            assert_eq!(inputs.len(), 1, "{query}: {inputs:?}");
+            assert_eq!(inputs[0].fresh_legacy, 1, "{query}: {inputs:?}");
+            assert_eq!(inputs[0].clones, usize::from(shared), "{query}: {inputs:?}");
+            assert_eq!(
+                inputs[0].reused_raw,
+                usize::from(shared),
+                "{query}: {inputs:?}"
+            );
+            assert_eq!(
+                inputs[0].fresh_raw,
+                usize::from(!shared),
+                "{query}: {inputs:?}"
+            );
+            // Full two-way native parity, independent of descriptor lowering.
+            Spi::run(&format!("CREATE TEMP TABLE shared_actual AS {query}; SET pg_accel.enabled=off; CREATE TEMP TABLE shared_native AS {query}"))
+                .expect("result materializations");
+            let differences = Spi::get_one::<i64>("SELECT count(*) FROM ((TABLE shared_actual EXCEPT ALL TABLE shared_native) UNION ALL (TABLE shared_native EXCEPT ALL TABLE shared_actual)) d")
+                .expect("full parity query").expect("difference count");
+            assert_eq!(differences, 0, "{query}");
+            Spi::run("DROP TABLE shared_actual,shared_native; SET pg_accel.enabled=on")
+                .expect("case cleanup");
+        }
+        // LIKE's catalog support function is nonzero: this HAVING really takes
+        // the cost_qual_eval support-callback path excluded from reuse.
+        assert!(Spi::get_one::<bool>("SELECT prosupport<>0 AND provolatile<>'v' FROM pg_proc WHERE oid='textlike(text,text)'::regprocedure")
+            .expect("support catalog").expect("textlike identity"));
+        Spi::run("SELECT pg_accel_unpin('shared_input_fixture'); DROP TABLE shared_input_fixture")
+            .expect("fixture cleanup");
+    }
+
+    #[pg_test]
+    fn pg_raw_count_shared_inputs_keep_raw_cache_hit_independent() {
+        let _reset = ResetObserver;
+        Spi::run("SET pg_accel.enabled=on; SET pg_accel.gpu_enabled=on; CREATE TEMP TABLE shared_cache_fixture AS SELECT (i%64)::int4 k,(i%3)::int4 k2 FROM generate_series(1,1000017)i; ANALYZE shared_cache_fixture; SELECT pg_accel_pin('shared_cache_fixture',ARRAY['k','k2'])")
+            .expect("cache fixture");
+        for repeat in 0..2 {
+            CANDIDATE_INPUT_OBSERVATIONS.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
+            CANDIDATE_OBSERVATIONS.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
+            Spi::run("EXPLAIN SELECT k,k2,count(*) FROM shared_cache_fixture GROUP BY k,k2")
+                .expect("two-key legacy candidate");
+            let inputs = CANDIDATE_INPUT_OBSERVATIONS
+                .with(|slot| slot.borrow_mut().take().expect("input observer"));
+            let candidates = CANDIDATE_OBSERVATIONS
+                .with(|slot| slot.borrow_mut().take().expect("candidate observer"));
+            assert_eq!(inputs.len(), 1, "{inputs:?}");
+            assert_eq!(inputs[0].clones, 1, "{inputs:?}");
+            assert_eq!(inputs[0].fresh_legacy, 1, "{inputs:?}");
+            assert_eq!(inputs[0].fresh_raw, 0, "{inputs:?}");
+            assert_eq!(inputs[0].reused_raw, usize::from(repeat == 0), "{inputs:?}");
+            assert!(!candidates[0].raw_count);
+            assert_eq!(candidates[0].outcome, "added", "{candidates:?}");
+            assert_eq!(candidates.len(), if repeat == 0 { 2 } else { 1 });
+        }
+        Spi::run("SELECT pg_accel_unpin('shared_cache_fixture'); DROP TABLE shared_cache_fixture")
+            .expect("cache fixture cleanup");
+    }
+
     fn observe_count_candidates(sparse: bool) {
         let _reset = ResetObserver;
         let mut receipts = String::new();
+        let mut later_declines = 0;
+        let mut legacy_cache_hits = 0;
         Spi::run("RESET pg_accel.cost_multiplier; RESET pg_accel.min_batch_size; RESET pg_accel.resident_memory_budget_mb; SET pg_accel.enabled=on; SET pg_accel.gpu_enabled=on")
             .expect("default candidate admission");
         for kind in ["int2", "int4", "int8"] {
@@ -2653,14 +2793,40 @@ mod tests {
                 // unused Boolean columns and nullable skewed key distribution.
                 Spi::run(&format!("CREATE TEMP TABLE bench_raw_integer_count(k {kind},value boolean,qualifies boolean); INSERT INTO bench_raw_integer_count SELECT CASE WHEN i%97=0 THEN NULL::{kind} ELSE ({key})::{kind} END, CASE WHEN i%7=0 THEN NULL::boolean ELSE i%2=0 END, CASE WHEN g=0 THEN false WHEN i%11=0 THEN NULL::boolean ELSE i%3<>0 END FROM (SELECT i,CASE WHEN i>{groups} AND i%5=0 THEN 0 ELSE (i-1)%{groups} END g FROM generate_series(1::bigint,{rows})s(i))fixture; ANALYZE bench_raw_integer_count; SELECT pg_accel_pin('bench_raw_integer_count',ARRAY['k'])"))
                     .expect("exact low-cardinality control fixture");
-                for repeat in 0..if sparse { 1 } else { 3 } {
+                let mut first_legacy_cost_declined = false;
+                for repeat in 0..3 {
+                    // Costs are device-derived. Observe a genuine first-pass
+                    // decline instead of prescribing one from the row count.
+                    let cached_legacy_decline = first_legacy_cost_declined && repeat > 0;
                     CANDIDATE_OBSERVATIONS.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
+                    CANDIDATE_INPUT_OBSERVATIONS.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
                     Spi::run(
                         "EXPLAIN SELECT k,count(*) AS n FROM bench_raw_integer_count GROUP BY k",
                     )
                     .expect("default repeated planning");
                     let observations = CANDIDATE_OBSERVATIONS
                         .with(|slot| slot.borrow_mut().take().expect("active observer"));
+                    let inputs = CANDIDATE_INPUT_OBSERVATIONS
+                        .with(|slot| slot.borrow_mut().take().expect("active input observer"));
+                    assert_eq!(inputs.len(), 1, "{inputs:?}");
+                    if !cached_legacy_decline {
+                        assert_eq!(inputs[0].clones, 1, "{inputs:?}");
+                        assert_eq!(inputs[0].fresh_legacy, 1, "{inputs:?}");
+                        assert_eq!(inputs[0].reused_raw, 1, "{inputs:?}");
+                        assert_eq!(inputs[0].fresh_raw, 0, "{inputs:?}");
+                    } else {
+                        legacy_cache_hits += 1;
+                        assert_eq!(inputs[0].clones, 0, "{inputs:?}");
+                        assert_eq!(
+                            inputs[0].fresh_legacy, 0,
+                            "cached legacy decline: {inputs:?}"
+                        );
+                        assert_eq!(inputs[0].reused_raw, 0, "{inputs:?}");
+                        assert_eq!(
+                            inputs[0].fresh_raw, 1,
+                            "raw must still extract after legacy cache decline: {inputs:?}"
+                        );
+                    }
                     pgrx::notice!(
                         "candidate control kind={kind} rows={rows} repeat={repeat}: {observations:?}"
                     );
@@ -2669,10 +2835,24 @@ mod tests {
                         "kind={kind} rows={rows} repeat={repeat}: {observations:?}"
                     )
                     .expect("format candidate receipt");
-                    assert_eq!(observations.len(), 2, "{observations:?}");
-                    assert!(!observations[0].raw_count);
-                    assert!(observations[1].raw_count);
-                    assert_eq!(observations[0].native_cost, observations[1].native_cost);
+                    if cached_legacy_decline {
+                        assert_eq!(observations.len(), 1, "{observations:?}");
+                        assert!(observations[0].raw_count);
+                    } else {
+                        assert_eq!(observations.len(), 2, "{observations:?}");
+                        assert!(!observations[0].raw_count);
+                        assert!(observations[1].raw_count);
+                        assert_eq!(observations[0].native_cost, observations[1].native_cost);
+                        if repeat == 0 && observations[0].outcome == "generic_cost_not_competitive"
+                        {
+                            first_legacy_cost_declined = true;
+                            later_declines += 1;
+                            assert!(
+                                observations[0].cost.is_some(),
+                                "decline occurs after neutral extraction and independent costing"
+                            );
+                        }
+                    }
                     for observation in &observations {
                         if sparse && !observation.raw_count {
                             continue;
@@ -2694,6 +2874,10 @@ mod tests {
                     .expect("release exact control fixture");
             }
         }
+        pgrx::notice!(
+            "shared-input coverage: later_legacy_cost_declines={later_declines} cached_legacy_fresh_raw={legacy_cache_hits}"
+        );
+        writeln!(receipts, "shared-input coverage: later_legacy_cost_declines={later_declines} cached_legacy_fresh_raw={legacy_cache_hits}").expect("coverage receipt");
         if let Ok(path) = std::env::var("PG_ACCEL_CANDIDATE_OBSERVATION_PATH") {
             std::fs::write(path, receipts).expect("durable test-owned candidate receipt");
         }

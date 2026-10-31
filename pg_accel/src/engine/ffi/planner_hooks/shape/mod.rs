@@ -755,6 +755,83 @@ pub unsafe fn extract_shape(
     unsafe { extract_selected_shape(root, output_rel, estimated_output_rows, model, false) }
 }
 
+/// Owned neutral input reuse, limited to one synchronous upper-path hook.
+/// Physical/residency/cost decisions are never stored here.
+#[derive(Default)]
+pub(crate) struct CandidateShapeInputs {
+    legacy: Option<ShapeInput>,
+    #[cfg(any(test, feature = "pg_test"))]
+    pub(crate) observations: CandidateInputObservations,
+    #[cfg(feature = "pg_test")]
+    pub(crate) verify_fresh_equivalence: bool,
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct CandidateInputObservations {
+    pub(crate) clones: usize,
+    pub(crate) fresh_legacy: usize,
+    pub(crate) fresh_raw: usize,
+    pub(crate) reused_raw: usize,
+    pub(crate) legacy_bytecode_without_filter: bool,
+}
+
+impl CandidateShapeInputs {
+    fn remember(&mut self, input: &ShapeInput, eligible: bool) {
+        if eligible {
+            self.legacy = Some(input.clone());
+            #[cfg(any(test, feature = "pg_test"))]
+            {
+                self.observations.clones += 1;
+            }
+        } else {
+            self.legacy = None;
+        }
+    }
+
+    fn take(&mut self, expected_reuses: NonZeroU32) -> Option<ShapeInput> {
+        self.legacy
+            .take()
+            .filter(|input| input.expected_reuses == expected_reuses)
+    }
+}
+
+#[test]
+fn candidate_inputs_are_hook_local_single_take_and_model_checked() {
+    let input = ShapeInput {
+        relations: vec![],
+        joins: vec![],
+        group_keys: vec![],
+        aggregates: vec![],
+        projections: vec![],
+        relation_filters: vec![],
+        estimated_output_rows: 65,
+        expected_reuses: NonZeroU32::new(8).expect("nonzero"),
+        modifiers: ShapeModifiers::default(),
+    };
+    let mut inputs = CandidateShapeInputs::default();
+    assert!(inputs.take(input.expected_reuses).is_none());
+    inputs.remember(&input, false);
+    assert_eq!(inputs.observations.clones, 0);
+    inputs.remember(&input, true);
+    assert_eq!(inputs.observations.clones, 1);
+    assert_eq!(inputs.take(input.expected_reuses), Some(input.clone()));
+    assert!(inputs.take(input.expected_reuses).is_none());
+    inputs.remember(&input, true);
+    assert!(inputs.take(NonZeroU32::new(9).expect("nonzero")).is_none());
+    assert!(inputs.take(input.expected_reuses).is_none());
+    inputs.remember(&input, true);
+    inputs.remember(&input, false);
+    assert!(inputs.take(input.expected_reuses).is_none());
+    // A raw early cache hit may leave one bounded clone unused until hook end.
+    let mut cache_hit = CandidateShapeInputs::default();
+    cache_hit.remember(&input, true);
+    assert_eq!(cache_hit.observations.clones, 1);
+    assert_eq!(cache_hit.observations.fresh_raw, 0);
+    assert_eq!(cache_hit.observations.reused_raw, 0);
+    drop(cache_hit);
+}
+
 /// Extract a separately costed raw candidate without changing legacy lowering.
 /// # Safety
 /// Same live planner/main-backend contract as `extract_shape`.
@@ -765,17 +842,99 @@ pub(crate) unsafe fn extract_selected_shape(
     model: &TypedCostModel,
     raw_count: bool,
 ) -> Result<ShapePlan, ShapeDecline> {
-    // SAFETY: forwarded unchanged under this function's planner-pointer and
-    // backend-thread contract.
-    let input = unsafe {
-        postgres::extract_selected_input(
+    // SAFETY: preserve the caller's live planner/main-backend contract.
+    unsafe {
+        extract_selected_shape_with_inputs(
             root,
             output_rel,
             estimated_output_rows,
-            model.planner.auto_load_amortization_queries,
+            model,
             raw_count,
+            None,
         )
-    }?;
+    }
+}
+
+/// Same extraction, with optional hook-local unfiltered input reuse.
+/// # Safety
+/// Inputs must be used only with the same live planner arguments within one
+/// synchronous hook; no PostgreSQL pointer is retained in the owned holder.
+pub(crate) unsafe fn extract_selected_shape_with_inputs(
+    root: *mut pg_sys::PlannerInfo,
+    output_rel: *mut pg_sys::RelOptInfo,
+    estimated_output_rows: u64,
+    model: &TypedCostModel,
+    raw_count: bool,
+    mut inputs: Option<&mut CandidateShapeInputs>,
+) -> Result<ShapePlan, ShapeDecline> {
+    let reused = if raw_count {
+        inputs
+            .as_deref_mut()
+            .and_then(|inputs| inputs.take(model.planner.auto_load_amortization_queries))
+    } else {
+        None
+    };
+    let input = if let Some(input) = reused {
+        #[cfg(any(test, feature = "pg_test"))]
+        if let Some(inputs) = inputs.as_deref_mut() {
+            inputs.observations.reused_raw += 1;
+        }
+        #[cfg(feature = "pg_test")]
+        if inputs
+            .as_ref()
+            .is_some_and(|inputs| inputs.verify_fresh_equivalence)
+        {
+            // SAFETY: test oracle uses the same still-live planner arguments.
+            let fresh = unsafe {
+                postgres::extract_selected_input(
+                    root,
+                    output_rel,
+                    estimated_output_rows,
+                    model.planner.auto_load_amortization_queries,
+                    true,
+                )
+            }
+            .unwrap_or_else(|error| panic!("fresh raw equivalence oracle failed: {error:?}"));
+            assert!(fresh.raw_equivalent_unfiltered);
+            assert_eq!(
+                input, fresh.input,
+                "shared input must equal independent raw extraction"
+            );
+        }
+        input
+    } else {
+        #[cfg(any(test, feature = "pg_test"))]
+        if let Some(inputs) = inputs.as_deref_mut() {
+            if raw_count {
+                inputs.observations.fresh_raw += 1;
+            } else {
+                inputs.observations.fresh_legacy += 1;
+            }
+        }
+        // SAFETY: forwarded unchanged under this function's planner-pointer and
+        // backend-thread contract.
+        let extracted = unsafe {
+            postgres::extract_selected_input(
+                root,
+                output_rel,
+                estimated_output_rows,
+                model.planner.auto_load_amortization_queries,
+                raw_count,
+            )
+        }?;
+        #[cfg(any(test, feature = "pg_test"))]
+        if !raw_count && let Some(inputs) = inputs.as_deref_mut() {
+            inputs.observations.legacy_bytecode_without_filter =
+                extracted.input.aggregates.iter().any(|aggregate| {
+                    matches!(aggregate.expression, MeasureExpr::Bytecode { .. })
+                        && aggregate.filter == FilterSpec::None
+                });
+        }
+        if !raw_count && let Some(inputs) = inputs {
+            inputs.remember(&extracted.input, extracted.raw_equivalent_unfiltered);
+        }
+        extracted.input
+    };
     let mut shape = builder::build_selected_shape(input, model, raw_count)?;
     if needs_dense_key_estimate(&shape.spec, &shape.descriptor_resolution) {
         let rows = shape

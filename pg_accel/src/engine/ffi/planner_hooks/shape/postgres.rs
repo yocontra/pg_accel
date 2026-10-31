@@ -2639,6 +2639,11 @@ pub(super) unsafe fn preflight_base_relations(
     Ok(())
 }
 
+pub(super) struct ExtractedShapeInput {
+    pub input: ShapeInput,
+    pub raw_equivalent_unfiltered: bool,
+}
+
 /// Adapt planner-owned PostgreSQL nodes into the pure [`ShapeInput`].
 ///
 /// # Safety
@@ -2651,7 +2656,7 @@ pub(super) unsafe fn extract_selected_input(
     estimated_output_rows: u64,
     expected_reuses: NonZeroU32,
     raw_count: bool,
-) -> Result<ShapeInput, ShapeDecline> {
+) -> Result<ExtractedShapeInput, ShapeDecline> {
     // SAFETY: root is read only after the explicit null guard; caller owns
     // the planner-pointer validity contract.
     if root.is_null() || unsafe { (*root).parse }.is_null() {
@@ -2735,16 +2740,28 @@ pub(super) unsafe fn extract_selected_input(
     if output_rel.is_null() || estimated_output_rows == 0 {
         return Err(ShapeDecline::NoAggregate);
     }
-    Ok(ShapeInput {
-        relations,
-        joins,
-        group_keys: groups,
-        aggregates,
-        projections,
-        relation_filters,
-        estimated_output_rows,
-        expected_reuses,
-        modifiers,
+    // Raw context only changes direct FILTER parsing. Check original nodes:
+    // scalar lowering can embed a FILTER in bytecode and erase its neutral
+    // filter. HAVING costing can invoke user support callbacks between the
+    // candidates, so even otherwise equivalent HAVING inputs stay independent.
+    let raw_equivalent_unfiltered = query.havingQual.is_null()
+        && inventory.aggregate_nodes.iter().all(|aggregate| {
+            // SAFETY: inventory_query collected these live Aggref pointers.
+            unsafe { (**aggregate).aggfilter.is_null() }
+        });
+    Ok(ExtractedShapeInput {
+        input: ShapeInput {
+            relations,
+            joins,
+            group_keys: groups,
+            aggregates,
+            projections,
+            relation_filters,
+            estimated_output_rows,
+            expected_reuses,
+            modifiers,
+        },
+        raw_equivalent_unfiltered,
     })
 }
 
