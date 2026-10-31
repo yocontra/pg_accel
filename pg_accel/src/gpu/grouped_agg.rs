@@ -3216,6 +3216,162 @@ pub unsafe fn query_dense_grouped_layout_and_mode(
     ))
 }
 
+/// Query native work quantities without reading payloads or acquiring GPU owners.
+/// Canonical flags zero are normalized to the existing one-shot lifecycle.
+///
+/// # Safety
+/// The descriptor and its bounded host metadata must obey the native ABI.
+/// Row payload addresses need not be readable; no row bytes are accessed.
+#[cfg(test)]
+pub unsafe fn query_dense_count_work(
+    desc: &abi::PgaccelGroupedAggDesc,
+) -> GpuResult<abi::PgaccelGroupedAggCountWorkV1> {
+    // SAFETY: forwards the caller's metadata contract without changing pointers.
+    unsafe { query_dense_count_work_impl(desc, false) }
+}
+
+/// Work forecast for a private synthetic descriptor, never an executable owner.
+/// Unlike the actual-pointer query, this replaces synthetic row addresses with
+/// a checked range disjoint from every readable metadata object in this call.
+///
+/// # Safety
+/// `desc` must be query-private metadata; no execution or alias validation of
+/// real resident buffers may rely on this forecast.
+pub unsafe fn query_dense_count_work_forecast(
+    desc: &abi::PgaccelGroupedAggDesc,
+) -> GpuResult<abi::PgaccelGroupedAggCountWorkV1> {
+    // SAFETY: only the explicitly synthetic forecast path enables substitution.
+    unsafe { query_dense_count_work_impl(desc, true) }
+}
+
+unsafe fn query_dense_count_work_impl(
+    desc: &abi::PgaccelGroupedAggDesc,
+    synthetic: bool,
+) -> GpuResult<abi::PgaccelGroupedAggCountWorkV1> {
+    let mut query = workspace_query_descriptor(desc);
+    let mut facts = abi::PgaccelGroupedAggCountWorkV1 {
+        abi_version: 1,
+        size_bytes: 144,
+        ..Default::default()
+    };
+    if synthetic {
+        prepare_count_work_forecast_addresses(desc, &mut query, &facts)?;
+    }
+    // SAFETY: live, disjoint stack metadata; the native query validates the
+    // supported fixed-width envelope before consulting any nested metadata.
+    let status = unsafe {
+        bridge::pgaccel_grouped_agg_count_work_requirements_v1(&raw const query, &raw mut facts)
+    };
+    super::status_to_result(
+        status,
+        GpuErrorDomain::GroupedAgg,
+        GpuOperation::Kernel("count_work_requirements"),
+    )?;
+    if facts.abi_version != 1
+        || facts.size_bytes != 144
+        || facts.reserved0 != 0
+        || facts.reserved1 != 0
+    {
+        return Err(descriptor_error("invalid dense COUNT work envelope"));
+    }
+    Ok(facts)
+}
+
+fn prepare_count_work_forecast_addresses(
+    original: &abi::PgaccelGroupedAggDesc,
+    query: &mut abi::PgaccelGroupedAggDesc,
+    facts: &abi::PgaccelGroupedAggCountWorkV1,
+) -> GpuResult<()> {
+    let measure = &query.measures[0];
+    let fixed_column = measure.op == abi::PGACCEL_GROUPED_AGG_MEASURE_COLUMN
+        && matches!(
+            measure.value.physical_type,
+            abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL
+                | abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32
+                | abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT64
+                | abi::PGACCEL_GROUPED_AGG_PHYSICAL_DATE
+                | abi::PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP
+                | abi::PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT32
+                | abi::PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64
+        )
+        && matches!(measure.value.element_bytes, 1 | 4 | 8);
+    if query.dim_count != 0
+        || query.measure_count != 1
+        || query.key_count as usize > abi::PGACCEL_GROUPED_AGG_MAX_KEYS
+        || query.grouping_mode != abi::PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX
+        || query.output_mode != abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE
+        || !query.scratch.is_null()
+        || query.scratch_bytes != 0
+        || measure.flags != 0
+        || !measure.rhs.values.is_null()
+        || !measure.rhs.nulls.is_null()
+        || !(fixed_column || measure.op == abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR)
+        || query.keys[..query.key_count as usize].iter().any(|key| {
+            key.source != abi::PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT || !key.lookup_by_key.is_null()
+        })
+    {
+        return Err(descriptor_error(
+            "work forecast requires pointer-free direct COUNT metadata",
+        ));
+    }
+    // No retained nested host views exist in this envelope. The original,
+    // cloned descriptor and output are its complete readable metadata set.
+    let metadata_end = [
+        (
+            std::ptr::from_ref(original).addr(),
+            std::mem::size_of_val(original),
+        ),
+        (
+            std::ptr::from_ref(query).addr(),
+            std::mem::size_of_val(query),
+        ),
+        (
+            std::ptr::from_ref(facts).addr(),
+            std::mem::size_of_val(facts),
+        ),
+    ]
+    .into_iter()
+    .try_fold(0_usize, |end, (address, bytes)| {
+        address
+            .checked_add(bytes)
+            .map(|value| end.max(value))
+            .ok_or_else(|| capacity_error("work forecast metadata address overflow"))
+    })?;
+    let address = metadata_end
+        .checked_add(7)
+        .map(|end| end & !7)
+        .ok_or_else(|| capacity_error("work forecast alignment overflow"))?;
+    query
+        .row_count
+        .checked_mul(8)
+        .and_then(|bytes| address.checked_add(bytes))
+        .ok_or_else(|| capacity_error("work forecast row address overflow"))?;
+    let marker = std::ptr::without_provenance::<u8>(address);
+    for key in &mut query.keys[..query.key_count as usize] {
+        if !key.values.values.is_null() {
+            key.values.values = marker.cast();
+        }
+        if !key.values.nulls.is_null() {
+            key.values.nulls = marker;
+        }
+    }
+    if fixed_column {
+        if !query.measures[0].value.values.is_null() {
+            query.measures[0].value.values = marker.cast();
+        }
+        if !query.measures[0].value.nulls.is_null() {
+            query.measures[0].value.nulls = marker;
+        }
+    }
+    if !query.where_filter.mask.is_null() {
+        query.where_filter.mask = marker.cast();
+    }
+    if !query.measure_filters[0].mask.is_null() {
+        query.measure_filters[0].mask = marker.cast();
+    }
+    Ok(())
+}
+
 /// Query exact one-shot compact HASH bytes without constructing an executable
 /// plan, allocating charged metadata, checking out pools or reading input rows.
 ///
@@ -3506,6 +3662,37 @@ mod tests {
         desc.measures[0].accumulator_kind = abi::PGACCEL_GROUPED_AGG_ACCUM_I64;
         desc.measures[0].state_bytes = 8;
         desc
+    }
+
+    #[test]
+    fn dense_count_work_forecast_rejects_overflow_and_pointer_rich_shapes() {
+        let mut desc = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        desc.where_filter.value_cmp_opcode = crate::engine::expr_compiler::opcode::ALWAYS_TRUE;
+        for filter in &mut desc.measure_filters {
+            filter.value_cmp_opcode = crate::engine::expr_compiler::opcode::ALWAYS_TRUE;
+        }
+        desc.measures[0].op = abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR;
+        desc.measures[0].agg_mask = abi::PGACCEL_GROUPED_AGG_LANE_COUNT;
+        desc.keys[0].values.values = std::ptr::dangling::<i32>().cast();
+        desc.row_count = usize::MAX;
+        // SAFETY: synthetic descriptor is metadata-only and never dispatched.
+        assert!(unsafe { query_dense_count_work_forecast(&desc) }.is_err());
+        desc.row_count = 0;
+        // SAFETY: valid empty direct COUNT descriptor, canonical flags normalize.
+        let actual = unsafe { query_dense_count_work(&desc) }.expect("empty actual-pointer query");
+        // SAFETY: same metadata, now explicitly query-private synthetic pointers.
+        assert_eq!(
+            unsafe { query_dense_count_work_forecast(&desc) }.expect("forecast"),
+            actual
+        );
+        desc.measures[0].op = abi::PGACCEL_GROUPED_AGG_MEASURE_SCALAR;
+        desc.measures[0].value.values = std::ptr::dangling::<u8>().cast();
+        // SAFETY: pointer-rich tags must reject without following this address.
+        assert!(unsafe { query_dense_count_work_forecast(&desc) }.is_err());
+        desc.measures[0].op = abi::PGACCEL_GROUPED_AGG_MEASURE_COLUMN;
+        desc.measures[0].value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_NUMERIC;
+        // SAFETY: NUMERIC must likewise reject before dereferencing its view.
+        assert!(unsafe { query_dense_count_work_forecast(&desc) }.is_err());
     }
 
     fn plan(output_mode: i32) -> ResolvedGroupedAggPlan<'static> {

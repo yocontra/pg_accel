@@ -20,6 +20,43 @@ fn profile_no_gpu() -> PlatformProfile {
     }
 }
 
+#[test]
+fn dense_count_serial_reference_units_and_zero_validation() {
+    let mut profile = profile_with_gpu();
+    let baseline = DeviceLimits::from_profile(&profile);
+    profile.compute_units = 1;
+    let one_cu = DeviceLimits::from_profile(&profile);
+    assert_eq!(
+        baseline.gpu_dense_count_serial_work_cost.to_bits(),
+        one_cu.gpu_dense_count_serial_work_cost.to_bits()
+    );
+    assert_eq!(
+        baseline.gpu_dense_count_serial_work_cost.to_bits(),
+        0.067_880_470_498_823_54_f64.to_bits()
+    );
+    assert_eq!(
+        DeviceLimits::cpu_only()
+            .gpu_dense_count_serial_work_cost
+            .to_bits(),
+        baseline.gpu_dense_count_serial_work_cost.to_bits()
+    );
+    let coefficients = CostCoefficients::from(&baseline);
+    assert_eq!(
+        coefficients
+            .gpu_dense_count_serial_work_cost
+            .get()
+            .to_bits(),
+        baseline.gpu_dense_count_serial_work_cost.to_bits()
+    );
+    let mut limits = baseline;
+    limits.gpu_dense_count_serial_work_cost = 0.0;
+    assert!(limits.validate().is_ok());
+    for invalid in [-1.0, f64::INFINITY, f64::NAN] {
+        limits.gpu_dense_count_serial_work_cost = invalid;
+        assert!(limits.validate().is_err());
+    }
+}
+
 fn profile_with_gpu() -> PlatformProfile {
     PlatformProfile {
         cpu_cores: 8,

@@ -19,6 +19,38 @@ mod output;
 mod spatial;
 mod spool;
 
+/// Physical choice carried independently of logical AQS6 semantics. Legacy
+/// plans retain their existing dense/H3 inference; raw is never inferred from
+/// an unresolved Hash key alone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum AggExecutionSelection {
+    #[default]
+    Legacy,
+    RawIntegerCount,
+}
+
+impl AggExecutionSelection {
+    pub(crate) const SENTINEL: i32 = 0x4145_5331; // AES1
+
+    pub(crate) fn prefix(self) -> &'static [i32] {
+        match self {
+            Self::Legacy => &[],
+            Self::RawIntegerCount => &[Self::SENTINEL, 1, 1],
+        }
+    }
+
+    pub(crate) fn validate(
+        self,
+        spec: &crate::engine::spec::AggQuerySpec,
+        projection: &crate::engine::spec::AggOutputProjection,
+    ) -> Result<(), String> {
+        match self {
+            Self::Legacy => Ok(()),
+            Self::RawIntegerCount => descriptor::validate_raw_count_capability(spec, projection),
+        }
+    }
+}
+
 #[cfg(feature = "pg_test")]
 pub(crate) use descriptor::scalar_measure_column;
 #[cfg(feature = "pg_test")]
@@ -151,8 +183,10 @@ pub(crate) use artifact::descriptor_program_clone_bytes;
 pub(crate) use artifact::estimate_descriptor_artifact_bytes_upper_bound;
 pub(crate) use descriptor::canonical_h3_count;
 pub(crate) use descriptor::dense_descriptor_memory_requirements;
+pub(crate) use descriptor::{DenseCountWork, dense_count_work_requirements};
 pub(crate) use descriptor::{DenseExecutionDecision, select_dense_execution};
 pub(crate) use descriptor::{H3PlanningMemory, h3_planning_memory};
+pub(crate) use descriptor::{canonical_raw_integer_count, raw_count_planning_memory};
 // Keep the existing pg_test scalar-layout probes on the shared native quote.
 #[cfg(feature = "pg_test")]
 pub(crate) use descriptor::dense_descriptor_memory_requirements as scalar_descriptor_memory_requirements;

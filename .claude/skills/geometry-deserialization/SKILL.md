@@ -1,5 +1,5 @@
 ---
-name: Geometry Deserialization Guide
+name: geometry-deserialization
 description: How to read PostGIS GSERIALIZED v2 in pure Rust for bbox / point / linestring / polygon extraction without liblwgeom, as implemented in pg_accel/src/adapters/extractors/geometry/
 ---
 

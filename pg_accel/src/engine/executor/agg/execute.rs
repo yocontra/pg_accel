@@ -90,6 +90,9 @@ fn record_residency_lifecycle(report: &DescriptorResidencyReport) {
 
 fn raise_descriptor_execution_error(error: DescriptorAggExecutionError) -> ! {
     match error {
+        DescriptorAggExecutionError::PreparationInterrupted => {
+            pgrx::error!("pg_accel: adaptive preparation interrupt escaped its service boundary")
+        }
         DescriptorAggExecutionError::DateOutOfRange => {
             pgrx::ereport!(
                 ERROR,
@@ -151,13 +154,14 @@ impl AggExecState {
     /// preparation. The caller must install this state into its query-context
     /// cleanup owner before calling [`Self::prepare_descriptor`], because that
     /// method may raise a PostgreSQL ERROR or cancellation.
-    pub(crate) fn new_descriptor_unprepared(
+    pub(crate) fn new_selected_descriptor_unprepared(
         spec: AggQuerySpec,
         projection: AggOutputProjection,
         explain_only: bool,
+        selection: super::AggExecutionSelection,
     ) -> Result<Self, String> {
         let plan = stats::profile_descriptor_stage(stats::DescriptorExecStage::PlanBuild, || {
-            DescriptorAggPlan::new(spec, projection)
+            DescriptorAggPlan::new_selected(spec, projection, selection)
         })?;
         let adaptive = plan
             .uses_adaptive_hash_count()
@@ -452,16 +456,24 @@ impl AggExecState {
         if !self.descriptor.completed {
             loop {
                 pgrx::check_for_interrupts!();
-                let step = self
-                    .descriptor
-                    .plan
-                    .next_adaptive_hash(
-                        self.descriptor
-                            .adaptive
-                            .as_mut()
-                            .expect("adaptive owner installed"),
-                    )
-                    .unwrap_or_else(|error| raise_descriptor_execution_error(error));
+                let step = self.descriptor.plan.next_adaptive_hash(
+                    self.descriptor
+                        .adaptive
+                        .as_mut()
+                        .expect("adaptive owner installed"),
+                );
+                let step = match step {
+                    Ok(step) => step,
+                    Err(DescriptorAggExecutionError::PreparationInterrupted) => {
+                        // The descriptor callback and all STORE/ephemeral guards
+                        // have returned; its partial mask and charge are gone.
+                        // Deliver PostgreSQL's original error, or retry a benign
+                        // interrupt with fresh protected binding and real counts.
+                        pgrx::check_for_interrupts!();
+                        continue;
+                    }
+                    Err(error) => raise_descriptor_execution_error(error),
+                };
                 match step {
                     AdaptiveHashStep::Retry => {
                         #[cfg(feature = "pg_test")]

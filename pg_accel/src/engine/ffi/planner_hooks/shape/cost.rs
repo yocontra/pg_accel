@@ -51,7 +51,19 @@ impl ShapeCost {
         model: &TypedCostModel,
     ) {
         if !matches!(spec.group_keys.as_slice(), [key] if matches!(key.source, GroupKeySource::H3CellToParent { .. }))
-            || !matches!(spec.measures.as_slice(), [measure] if matches!(measure.filter, FilterSpec::Mask { kind: MaskKind::Sql, .. }))
+        {
+            return;
+        }
+        self.charge_hash_filter_conversion(spec, rows, model);
+    }
+
+    pub(crate) fn charge_hash_filter_conversion(
+        &mut self,
+        spec: &AggQuerySpec,
+        rows: u64,
+        model: &TypedCostModel,
+    ) {
+        if !matches!(spec.measures.as_slice(), [measure] if matches!(measure.filter, FilterSpec::Mask { kind: MaskKind::Sql, .. }))
         {
             return;
         }
@@ -545,6 +557,16 @@ pub fn estimate_shape_cost(
     residency: &ResidencyEstimate,
     model: &TypedCostModel,
 ) -> (ShapeCost, ShapeCostGate, u64) {
+    estimate_selected_shape_cost(input, spec, residency, model, false)
+}
+
+pub(super) fn estimate_selected_shape_cost(
+    input: &ShapeInput,
+    spec: &AggQuerySpec,
+    residency: &ResidencyEstimate,
+    model: &TypedCostModel,
+    raw_count: bool,
+) -> (ShapeCost, ShapeCostGate, u64) {
     let fact_rows = input
         .relations
         .iter()
@@ -703,7 +725,17 @@ pub fn estimate_shape_cost(
     // prefix traversal; execution reports actual scans rather than pretending
     // that this estimate is a guaranteed upper bound. Canonical one-shot cost
     // is unchanged, and every per-call workspace still obeys the same cap.
-    let retry_scans = if crate::engine::executor::agg::canonical_h3_count(spec) {
+    let retry_scans = if raw_count {
+        let capacity = model.memory.gpu_hash_agg_max_groups.get().max(1) as u64;
+        if input.estimated_output_rows > capacity {
+            input
+                .estimated_output_rows
+                .div_ceil(capacity)
+                .saturating_mul(2)
+        } else {
+            0
+        }
+    } else if crate::engine::executor::agg::canonical_h3_count(spec) {
         h3_group_rows_bound.map_or(0, |seed| {
             let capacity = model.memory.gpu_h3_max_groups.get().max(1) as u64;
             if seed > capacity {
@@ -720,7 +752,11 @@ pub fn estimate_shape_cost(
     let aggregate = aggregate
         + retry_scans as f64
             * (mul_cost(fact_rows, aggregate_coefficient)
-                + mul_cost(fact_rows, model.coefficients.gpu_op_cost_h3_parent_resident)
+                + if raw_count {
+                    0.0
+                } else {
+                    mul_cost(fact_rows, model.coefficients.gpu_op_cost_h3_parent_resident)
+                }
                 + GPU_LAUNCH_OVERHEAD);
     // Canonical distribution prior for costing only: arbitrary H3 bit patterns
     // may produce more groups, which the adaptive executor must still return.
@@ -846,6 +882,7 @@ pub fn estimate_shape_cost(
         if !spec.group_keys.is_empty()
             && estimated_groups > maximum
             && !crate::engine::executor::agg::canonical_h3_count(spec)
+            && !raw_count
         {
             ShapeCostGate::GroupsExceedDeviceMaximum {
                 estimated: estimated_groups,

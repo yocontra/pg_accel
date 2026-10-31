@@ -904,6 +904,9 @@ const PINS_CASE_NOT: &[ResidentPinSpec] = &[pin!(
 const PINS_REDUCE_F64: &[ResidentPinSpec] = &[pin!("bench_fp64_num", ["v_f64"])];
 const PINS_HASHAGG_F64: &[ResidentPinSpec] = &[pin!("bench_fp64_num", ["gk", "v_f64", "w_f64"])];
 const PINS_H3_PARENT: &[ResidentPinSpec] = &[pin!("bench_h3_parent", ["cell"])];
+const PINS_RAW_COUNT_STAR: &[ResidentPinSpec] = &[pin!("bench_raw_integer_count", ["k"])];
+const PINS_RAW_COUNT_FILTER: &[ResidentPinSpec] =
+    &[pin!("bench_raw_integer_count", ["k", "value", "qualifies"])];
 const PINS_H3_COUNT_COLUMN: &[ResidentPinSpec] =
     &[pin!("bench_h3_count_column", ["cell", "value"])];
 const PINS_H3_FILTER_STAR: &[ResidentPinSpec] =
@@ -1138,6 +1141,27 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
     workload("grouped_agg_int4", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_GROUPED_AGG_INT4)
         .evidence(WINNER),
+    workload("raw_int2_count_star", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_RAW_COUNT_STAR)
+        .evidence(WINNER),
+    workload("raw_int4_count_star", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_RAW_COUNT_STAR)
+        .evidence(WINNER),
+    workload("raw_int8_count_star", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_RAW_COUNT_STAR)
+        .evidence(WINNER),
+    workload("raw_int2_count_bool_filter", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_RAW_COUNT_FILTER)
+        .evidence(WINNER),
+    workload("raw_int4_count_bool_filter", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_RAW_COUNT_FILTER)
+        .evidence(WINNER),
+    workload("raw_int8_count_bool_filter", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_RAW_COUNT_FILTER)
+        .evidence(WINNER),
+    workload("dense_int2_count_control", C::GpuHashAgg, K::HashAgg).pins(PINS_RAW_COUNT_STAR),
+    workload("dense_int4_count_control", C::GpuHashAgg, K::HashAgg).pins(PINS_RAW_COUNT_STAR),
+    workload("dense_int8_count_control", C::GpuHashAgg, K::HashAgg).pins(PINS_RAW_COUNT_STAR),
     workload("grouped_count_bool_candidate", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_GROUPED_COUNT_BOOL)
         .evidence(WINNER),

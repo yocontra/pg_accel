@@ -1,0 +1,160 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error: constant `VERSION` is never used
+  --> pg_accel/src/gpu/join_rows.rs:15:7
+   |
+15 | const VERSION: u32 = 1;
+   |       ^^^^^^^
+   |
+   = note: `-D dead-code` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error: constant `JOIN_NULL_ROW` is never used
+  --> pg_accel/src/gpu/join_rows.rs:17:11
+   |
+17 | pub const JOIN_NULL_ROW: u64 = u64::MAX;
+   |           ^^^^^^^^^^^^^
+
+error: enum `ResidentJoinKind` is never used
+  --> pg_accel/src/gpu/join_rows.rs:60:10
+   |
+60 | pub enum ResidentJoinKind {
+   |          ^^^^^^^^^^^^^^^^
+
+error: enum `ResidentJoinKey` is never used
+  --> pg_accel/src/gpu/join_rows.rs:70:10
+   |
+70 | pub enum ResidentJoinKey<'a> {
+   |          ^^^^^^^^^^^^^^^
+
+error: function `contract_error` is never used
+  --> pg_accel/src/gpu/join_rows.rs:81:4
+   |
+81 | fn contract_error(detail: &'static str) -> GpuError {
+   |    ^^^^^^^^^^^^^^
+
+error: function `allocation_error` is never used
+  --> pg_accel/src/gpu/join_rows.rs:90:4
+   |
+90 | fn allocation_error(detail: &'static str) -> GpuError {
+   |    ^^^^^^^^^^^^^^^^
+
+error: function `bind_key` is never used
+  --> pg_accel/src/gpu/join_rows.rs:99:4
+   |
+99 | fn bind_key<T>(
+   |    ^^^^^^^^
+
+error: method `bind` is never used
+   --> pg_accel/src/gpu/join_rows.rs:125:8
+    |
+124 | impl ResidentJoinKey<'_> {
+    | ------------------------ method in this implementation
+125 |     fn bind(self) -> GpuResult<(NativeJoinKey, usize)> {
+    |        ^^^^
+
+error: struct `ResidentJoin` is never constructed
+   --> pg_accel/src/gpu/join_rows.rs:135:12
+    |
+135 | pub struct ResidentJoin<'a> {
+    |            ^^^^^^^^^^^^
+
+error: associated items `new`, `workspace_bytes`, and `execute` are never used
+   --> pg_accel/src/gpu/join_rows.rs:141:12
+    |
+140 | impl<'a> ResidentJoin<'a> {
+    | ------------------------- associated items in this implementation
+141 |     pub fn new(
+    |            ^^^
+...
+183 |     pub fn workspace_bytes(&self) -> GpuResult<usize> {
+    |            ^^^^^^^^^^^^^^^
+...
+202 |     pub fn execute(&self, capacity: usize) -> GpuResult<ResidentJoinOutcome> {
+    |            ^^^^^^^
+
+error: enum `ResidentJoinOutcome` is never used
+   --> pg_accel/src/gpu/join_rows.rs:267:10
+    |
+267 | pub enum ResidentJoinOutcome {
+    |          ^^^^^^^^^^^^^^^^^^^
+
+error: struct `ResidentJoinOutput` is never constructed
+   --> pg_accel/src/gpu/join_rows.rs:277:12
+    |
+277 | pub struct ResidentJoinOutput {
+    |            ^^^^^^^^^^^^^^^^^^
+
+error: methods `len`, `is_empty`, `kernel_launches`, `as_device_ptr`, and `copy_final_rows` are never used
+   --> pg_accel/src/gpu/join_rows.rs:285:12
+    |
+284 | impl ResidentJoinOutput {
+    | ----------------------- methods in this implementation
+285 |     pub fn len(&self) -> usize {
+    |            ^^^
+...
+289 |     pub fn is_empty(&self) -> bool {
+    |            ^^^^^^^^
+...
+293 |     pub fn kernel_launches(&self) -> u64 {
+    |            ^^^^^^^^^^^^^^^
+...
+299 |     pub fn as_device_ptr(&self) -> *const JoinRowPair {
+    |            ^^^^^^^^^^^^^
+...
+307 |     pub fn copy_final_rows(&self, output: &mut [JoinRowPair]) -> GpuResult<()> {
+    |            ^^^^^^^^^^^^^^^
+
+error: constant `JOIN_NULL_ROW` is never used
+  --> pg_accel/src/gpu/join_rows.rs:17:11
+   |
+17 | pub const JOIN_NULL_ROW: u64 = u64::MAX;
+   |           ^^^^^^^^^^^^^
+   |
+   = note: `-D dead-code` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error: method `execute` is never used
+   --> pg_accel/src/gpu/join_rows.rs:202:12
+    |
+140 | impl<'a> ResidentJoin<'a> {
+    | ------------------------- method in this implementation
+...
+202 |     pub fn execute(&self, capacity: usize) -> GpuResult<ResidentJoinOutcome> {
+    |            ^^^^^^^
+
+error: fields `buffer`, `rows`, and `kernel_launches` are never read
+   --> pg_accel/src/gpu/join_rows.rs:278:5
+    |
+277 | pub struct ResidentJoinOutput {
+    |            ------------------ fields in this struct
+278 |     buffer: Option<ExprDeviceBuffer<JoinRowPair>>,
+    |     ^^^^^^
+279 |     rows: usize,
+    |     ^^^^
+280 |     kernel_launches: u64,
+    |     ^^^^^^^^^^^^^^^
+
+error: could not compile `pg_accel` (lib) due to 13 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: used `unwrap()` on a `Result` value
+   --> pg_accel/src/gpu/join_rows.rs:361:24
+    |
+361 |             let plan = ResidentJoin::new(kind, &[empty, wide], &[empty, wide]).unwrap();
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: consider using `expect()` to provide a better panic message
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+    = note: requested on the command line with `-D clippy::unwrap-used`
+
+error: used `unwrap()` on a `Result` value
+   --> pg_accel/src/gpu/join_rows.rs:362:24
+    |
+362 |             assert_eq!(plan.workspace_bytes().unwrap(), 64);
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: if this value is an `Err`, it will panic
+    = help: consider using `expect()` to provide a better panic message
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_used
+
+error: could not compile `pg_accel` (lib test) due to 8 previous errors

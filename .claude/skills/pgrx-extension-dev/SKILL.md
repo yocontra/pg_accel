@@ -1,5 +1,5 @@
 ---
-name: pgrx Extension Development
+name: pgrx-extension-dev
 description: pgrx 0.19.1 entrypoints for pg_accel — _PG_init ordering, shmem LWLock thread budget, hook registration, GUCs, Custom Scan wiring. GPU-only, forked parallel workers, no CPU worker threads.
 ---
 

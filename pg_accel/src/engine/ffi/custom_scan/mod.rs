@@ -713,8 +713,8 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
         (*cscan).scan.plan.type_ = pg_sys::NodeTag::T_CustomScan;
 
         let path_priv = (*best_path).custom_private;
-        let (spec, projection) =
-            deserialize_agg_query_path_contract(path_priv).unwrap_or_else(|error| {
+        let (spec, projection, selection) = deserialize_agg_query_path_contract(path_priv)
+            .unwrap_or_else(|error| {
                 pgrx::error!("pg_accel: malformed aggregate AQS6/AOP2 path contract: {error}")
             });
         if !custom_plans.is_null() && pg_sys::list_length(custom_plans) != 0 {
@@ -769,7 +769,7 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
             list,
             pg_sys::makeInteger(AccelStrategy::GpuReduce as c_int).cast(),
         );
-        list = append_agg_query_plan(list, &spec, &projection, cscan);
+        list = append_agg_query_plan(list, &spec, &projection, selection, cscan);
 
         seal_custom_scan_private(cscan, list, path_priv, GpuStrategy::Agg);
     }
@@ -954,12 +954,17 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                     pgrx::error!("pg_accel: aggregate plan is missing its AQS6/AOP2 contract")
                 });
             let explain_only = (eflags as u32 & pg_sys::EXEC_FLAG_EXPLAIN_ONLY) != 0;
-            let exec = AggExecState::new_descriptor_unprepared(spec, projection, explain_only)
-                .unwrap_or_else(|error| {
-                    pgrx::error!(
-                        "pg_accel: generic aggregate Begin failed ({error}); refusing CPU fallback"
-                    )
-                });
+            let exec = AggExecState::new_selected_descriptor_unprepared(
+                spec,
+                projection,
+                explain_only,
+                private.agg_execution_selection,
+            )
+            .unwrap_or_else(|error| {
+                pgrx::error!(
+                    "pg_accel: generic aggregate Begin failed ({error}); refusing CPU fallback"
+                )
+            });
             // SAFETY: state is our live extended allocation.
             unsafe {
                 (*state).accel.executor_abort = Some(abandon_aggregate_transport);

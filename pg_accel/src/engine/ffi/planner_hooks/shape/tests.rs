@@ -2076,6 +2076,70 @@ fn h3_parent_input(estimated_rows: u64, resolution: i32) -> ShapeInput {
 }
 
 #[test]
+fn raw_count_is_an_additional_candidate_with_independent_capacity_and_digest() {
+    use crate::engine::executor::agg::AggExecutionSelection;
+    let model = model();
+    for key_type in [21, 23, 20] {
+        let mut input = h3_parent_input(10_000_017, 0);
+        let key = PlannerGroupKey::Column(column(1, 100, 1, key_type));
+        input.group_keys = vec![key.clone()];
+        input.projections[0] = InputProjection::Group {
+            key,
+            output: output(key_type, true),
+        };
+        input.estimated_output_rows = 16_388.min(model.memory.gpu_hash_agg_max_groups.get() as u64);
+        let dense = build_shape(input.clone(), &model).expect("legacy dense candidate retained");
+        let raw = super::builder::build_selected_shape(input.clone(), &model, true)
+            .expect("additional raw");
+        assert_eq!(
+            dense.spec, raw.spec,
+            "physical choice must not change logical SQL"
+        );
+        assert_eq!(dense.execution_selection(), AggExecutionSelection::Legacy);
+        assert_eq!(
+            raw.execution_selection(),
+            AggExecutionSelection::RawIntegerCount
+        );
+        assert_ne!(dense.digest_words, raw.digest_words);
+        assert_eq!(raw.cost_gate, ShapeCostGate::Eligible);
+        assert_eq!(
+            raw.cost.aggregate, dense.cost.aggregate,
+            "no new discount coefficient"
+        );
+        assert!(!raw.supports_budget_selected_dense());
+        input.estimated_output_rows = model.memory.gpu_hash_agg_max_groups.get() as u64 + 1;
+        let dense = build_shape(input.clone(), &model).expect("legacy bounded shape");
+        let raw = super::builder::build_selected_shape(input.clone(), &model, true)
+            .expect("partitionable raw");
+        assert!(matches!(
+            dense.cost_gate,
+            ShapeCostGate::GroupsExceedDeviceMaximum { .. }
+        ));
+        assert_eq!(raw.cost_gate, ShapeCostGate::Eligible);
+        assert!(
+            raw.cost.aggregate > dense.cost.aggregate,
+            "estimated partitions charge repeated scans"
+        );
+        input.aggregates[0].filter = FilterSpec::Mask {
+            input: column(1, 100, 4, 16).column,
+            kind: crate::engine::spec::MaskKind::Sql,
+        };
+        assert!(super::builder::build_selected_shape(input.clone(), &model, true).is_ok());
+        assert!(
+            build_shape(input.clone(), &model).is_err(),
+            "legacy direct-mask rule is unchanged"
+        );
+        input
+            .relation_filters
+            .push((100, input.aggregates[0].filter.clone()));
+        assert!(
+            super::builder::build_selected_shape(input, &model, true).is_err(),
+            "WHERE is not admitted"
+        );
+    }
+}
+
+#[test]
 fn h3_boolean_count_filter_builder_is_contextual_and_preserves_outputs() {
     for type_oid in [0, 16, 21, 23, 20, 700, 701, 1082, 1114, 1184] {
         let mut input = h3_parent_input(1_000_017, 0);

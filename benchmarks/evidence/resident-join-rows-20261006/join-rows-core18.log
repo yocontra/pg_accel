@@ -1,0 +1,65 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error: constant `JOIN_NULL_ROW` is never used
+  --> pg_accel/src/gpu/join_rows.rs:17:11
+   |
+17 | pub const JOIN_NULL_ROW: u64 = u64::MAX;
+   |           ^^^^^^^^^^^^^
+   |
+   = note: `-D dead-code` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error: function `allocation_error` is never used
+  --> pg_accel/src/gpu/join_rows.rs:90:4
+   |
+90 | fn allocation_error(detail: &'static str) -> GpuError {
+   |    ^^^^^^^^^^^^^^^^
+
+error: method `execute` is never used
+   --> pg_accel/src/gpu/join_rows.rs:202:12
+    |
+140 | impl<'a> ResidentJoin<'a> {
+    | ------------------------- method in this implementation
+...
+202 |     pub fn execute(&self, capacity: usize) -> GpuResult<ResidentJoinOutcome> {
+    |            ^^^^^^^
+
+error: enum `ResidentJoinOutcome` is never used
+   --> pg_accel/src/gpu/join_rows.rs:267:10
+    |
+267 | pub enum ResidentJoinOutcome {
+    |          ^^^^^^^^^^^^^^^^^^^
+
+error: fields `buffer`, `rows`, and `kernel_launches` are never read
+   --> pg_accel/src/gpu/join_rows.rs:278:5
+    |
+277 | pub struct ResidentJoinOutput {
+    |            ------------------ fields in this struct
+278 |     buffer: Option<ExprDeviceBuffer<JoinRowPair>>,
+    |     ^^^^^^
+279 |     rows: usize,
+    |     ^^^^
+280 |     kernel_launches: u64,
+    |     ^^^^^^^^^^^^^^^
+
+error: methods `len`, `is_empty`, `kernel_launches`, `as_device_ptr`, and `copy_final_rows` are never used
+   --> pg_accel/src/gpu/join_rows.rs:285:12
+    |
+284 | impl ResidentJoinOutput {
+    | ----------------------- methods in this implementation
+285 |     pub fn len(&self) -> usize {
+    |            ^^^
+...
+289 |     pub fn is_empty(&self) -> bool {
+    |            ^^^^^^^^
+...
+293 |     pub fn kernel_launches(&self) -> u64 {
+    |            ^^^^^^^^^^^^^^^
+...
+299 |     pub fn as_device_ptr(&self) -> *const JoinRowPair {
+    |            ^^^^^^^^^^^^^
+...
+307 |     pub fn copy_final_rows(&self, output: &mut [JoinRowPair]) -> GpuResult<()> {
+    |            ^^^^^^^^^^^^^^^
+
+error: could not compile `pg_accel` (lib test) due to 6 previous errors
+error: Recipe `test-standalone` failed with exit code 101

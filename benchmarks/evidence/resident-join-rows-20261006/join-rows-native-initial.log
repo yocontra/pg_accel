@@ -1,0 +1,238 @@
+Test project /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+    Start 26: test_join_rows
+1/1 Test #26: test_join_rows ...................***Failed    9.01 sec
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: output tail is untouched
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: output tail is untouched
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: output tail is untouched
+FAIL: output tail is untouched
+FAIL: output tail is untouched
+FAIL: output tail is untouched
+FAIL: output tail is untouched
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: output tail is untouched
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: invalid contract rejected
+FAIL: invalid contract leaves result untouched
+FAIL: invalid contract does not dispatch
+FAIL: output tail is untouched
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: output tail is untouched
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: output tail is untouched
+FAIL: output tail is untouched
+FAIL: output tail is untouched
+FAIL: output tail is untouched
+FAIL: output tail is untouched
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: output tail is untouched
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion fails explicitly
+FAIL: capacity failure returns exact required cardinality
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: capacity exhaustion never writes partial output
+FAIL: output tail is untouched
+FAIL: exact pair multiset matches independent SQL-equality oracle
+FAIL: exact pair multiset matches independent SQL-equality oracle
+resident join rows: 1299 passed, 213 failed
+gpu-noise[test_join_rows]: suppressed archive-write=25, kernel-cache=1; raw log: /Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs/test_join_rows-20261006-072955-33221.log
+gpu-test[test_join_rows]: failed with exit code 1
+--- failure summary from /Users/contra/Projects/pg_accel/pgaccel-kernels/../.pgaccel/logs/test_join_rows-20261006-072955-33221.log ---
+FAIL: capacity exhaustion never writes partial output (repeated 48x)
+FAIL: output tail is untouched (repeated 64x)
+FAIL: exact pair multiset matches independent SQL-equality oracle (repeated 96x)
+FAIL: invalid contract rejected
+FAIL: invalid contract leaves result untouched
+FAIL: invalid contract does not dispatch
+FAIL: capacity exhaustion fails explicitly
+FAIL: capacity failure returns exact required cardinality
+PGACCEL_TEST_RESULT name=test_join_rows exit_code=1 result=FAIL raw_lines=240 body_sha256=181c38aff55c28d1932046c349391a8a8d551ed644f1074f30bfa02987d617d4 binding_sha256=c02d18f8f14c812088e1cfaa54fb3b00795208cbea883e99681028920e0b4d90
+
+
+0% tests passed, 1 tests failed out of 1
+
+Total Test time (real) =   9.01 sec
+
+The following tests FAILED:
+	 26 - test_join_rows (Failed)
+Errors while running CTest

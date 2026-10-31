@@ -4,6 +4,15 @@ use std::{ffi::OsStr, fmt};
 
 use super::platform::PlatformProfile;
 
+const REFERENCE_REDUCE_COST: f64 = 0.000_5;
+// Immutable training fit 27a4219e...c20b84a (raw-integer-count-20261026).
+// Cost units per serial work unit, NOT measured cross-device throughput.
+const DENSE_COUNT_SERIAL_REFERENCE_COST: f64 = 0.067_880_470_498_823_54;
+
+const fn dense_count_serial_cost(reduce_cost: f64) -> f64 {
+    DENSE_COUNT_SERIAL_REFERENCE_COST * (reduce_cost / REFERENCE_REDUCE_COST)
+}
+
 /// Absolute proof bound for one synchronous atomic dense grouped aggregate.
 /// At this row count every accepted int4 term still fits an exact int64 SUM.
 pub(crate) const GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS: usize = 1_000_000;
@@ -166,6 +175,9 @@ pub struct DeviceLimits {
     /// GPU reduce (sum/min/max/count) per-row op cost.
     /// Includes kernel dispatch amortised over batch.
     pub gpu_op_cost_reduce: f64,
+    /// Reference-device calibrated serial dense COUNT work, in cost units.
+    /// No inverse-CU scaling: these are serial device loops.
+    pub gpu_dense_count_serial_work_cost: f64,
     /// GPU hash aggregation per-row op cost.
     /// Includes hash table build + probe + per-group accumulation.
     pub gpu_op_cost_hash_agg: f64,
@@ -356,6 +368,8 @@ pub enum DeviceLimitsValidationError {
     InvalidFraction { field: &'static str, value: f64 },
     /// A cost coefficient or ratio is non-finite or not strictly positive.
     InvalidPositiveFloat { field: &'static str, value: f64 },
+    /// A coefficient is non-finite or negative; zero is a valid calibration.
+    InvalidNonnegativeFloat { field: &'static str, value: f64 },
     /// The software fp64 multiplier is non-finite or outside `[1, 64]`.
     InvalidSoftFp64Multiplier { value: f64 },
     /// A configurable limit would expose a historically crash-prone retired
@@ -387,6 +401,10 @@ impl fmt::Display for DeviceLimitsValidationError {
             Self::InvalidPositiveFloat { field, value } => write!(
                 f,
                 "device limit {field} must be finite and positive, got {value}"
+            ),
+            Self::InvalidNonnegativeFloat { field, value } => write!(
+                f,
+                "device limit {field} must be finite and nonnegative, got {value}"
             ),
             Self::InvalidSoftFp64Multiplier { value } => write!(
                 f,
@@ -718,7 +736,8 @@ impl DeviceLimits {
             // Per-strategy GPU op costs include explicit staging overhead,
             // except the resident H3 parent transform. That integer-only D2D
             // kernel is conservatively priced like a resident GPU filter.
-            gpu_op_cost_reduce: 0.000_5,
+            gpu_op_cost_reduce: REFERENCE_REDUCE_COST,
+            gpu_dense_count_serial_work_cost: dense_count_serial_cost(REFERENCE_REDUCE_COST),
             gpu_op_cost_hash_agg: 0.002,
             gpu_op_cost_sort: 0.003,
             gpu_op_cost_window: 0.001,
@@ -875,7 +894,8 @@ impl DeviceLimits {
             optimal_batch_min: 256,
             optimal_batch_max: 8192,
             fused_interrupt_interval: 65_536,
-            gpu_op_cost_reduce: 0.000_5,
+            gpu_op_cost_reduce: REFERENCE_REDUCE_COST,
+            gpu_dense_count_serial_work_cost: dense_count_serial_cost(REFERENCE_REDUCE_COST),
             gpu_op_cost_hash_agg: 0.002,
             gpu_op_cost_sort: 0.003,
             gpu_op_cost_window: 0.001,
@@ -1115,6 +1135,15 @@ impl DeviceLimits {
             if !value.is_finite() || value <= 0.0 {
                 return Err(DeviceLimitsValidationError::InvalidPositiveFloat { field, value });
             }
+        }
+
+        if !self.gpu_dense_count_serial_work_cost.is_finite()
+            || self.gpu_dense_count_serial_work_cost < 0.0
+        {
+            return Err(DeviceLimitsValidationError::InvalidNonnegativeFloat {
+                field: "gpu_dense_count_serial_work_cost",
+                value: self.gpu_dense_count_serial_work_cost,
+            });
         }
 
         if !self.soft_fp64_cost_multiplier.is_finite()

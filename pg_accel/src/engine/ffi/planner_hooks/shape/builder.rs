@@ -12,7 +12,7 @@ use crate::engine::spec::{
     MeasureSpec,
 };
 
-use super::cost::{estimate_shape_cost, spatial_point_polygon_vertices};
+use super::cost::spatial_point_polygon_vertices;
 use super::{
     DerivedGroupKeyRequirement, DescriptorFilterBinding, DescriptorGroupingMode,
     DescriptorMeasurePlan, DescriptorResolution, DictionaryJoinRequirement,
@@ -280,6 +280,7 @@ fn validate_h3_contextual_measure(
     groups: &[GroupKeyRef],
     fact_rel: u32,
     single_measure: bool,
+    raw_count: bool,
 ) -> Result<(), ShapeDecline> {
     let h3_key = matches!(groups, [GroupKeyRef {
         source: GroupKeySource::H3CellToParent { cell, resolution },
@@ -295,7 +296,14 @@ fn validate_h3_contextual_measure(
         if input.relation_oid == fact_rel && input.type_oid == 16
             && input.attno > 0 && i16::try_from(input.attno).is_ok());
     if single_measure
-        && h3_key
+        && (h3_key
+            || (raw_count
+                && matches!(groups, [GroupKeyRef {
+            source: GroupKeySource::FactColumn(column), type_oid, collation_oid: 0,
+            encoding: GroupKeyEncoding::Hash,
+        }] if column.relation_oid == fact_rel && column.type_oid == *type_oid
+            && matches!(column.type_oid, 21 | 23 | 20) && column.attno > 0
+            && i16::try_from(column.attno).is_ok())))
         && count_input
         && predicate
         && aggregate.output.kind == AggregateKind::Count
@@ -970,6 +978,14 @@ fn build_residency(
 
 /// Convert catalog-normalized query facts into the unified planner bundle.
 pub fn build_shape(input: ShapeInput, model: &TypedCostModel) -> Result<ShapePlan, ShapeDecline> {
+    build_selected_shape(input, model, false)
+}
+
+pub(super) fn build_selected_shape(
+    input: ShapeInput,
+    model: &TypedCostModel,
+    raw_count: bool,
+) -> Result<ShapePlan, ShapeDecline> {
     reject_modifiers(input.modifiers)?;
     validate_relations(&input)?;
     if input.aggregates.is_empty() {
@@ -1102,6 +1118,7 @@ pub fn build_shape(input: ShapeInput, model: &TypedCostModel) -> Result<ShapePla
             &group_keys,
             fact.relation_oid,
             input.aggregates.len() == 1,
+            raw_count,
         )?;
         // COUNT(*) may consume an already-required scalar's COUNT lane when
         // that program is non-NULL on every successful path. Keep evaluation
@@ -1394,6 +1411,18 @@ pub fn build_shape(input: ShapeInput, model: &TypedCostModel) -> Result<ShapePla
         .encode_i32()
         .map_err(|error| ShapeDecline::Codec(error.to_string()))?;
     let projection = AggOutputProjection { slots: projections };
+    if raw_count {
+        crate::engine::executor::agg::AggExecutionSelection::RawIntegerCount
+            .validate(&spec, &projection)
+            .map_err(ShapeDecline::InvalidSpec)?;
+        digest_words.splice(
+            0..0,
+            crate::engine::executor::agg::AggExecutionSelection::RawIntegerCount
+                .prefix()
+                .iter()
+                .copied(),
+        );
+    }
     digest_words.extend(
         projection
             .encode_i32(&spec)
@@ -1401,7 +1430,7 @@ pub fn build_shape(input: ShapeInput, model: &TypedCostModel) -> Result<ShapePla
     );
 
     let (cost, cost_gate, estimated_output_rows) =
-        estimate_shape_cost(&input, &spec, &residency, model);
+        super::cost::estimate_selected_shape_cost(&input, &spec, &residency, model, raw_count);
     let dictionary_joins = spec
         .star_dims
         .iter()
@@ -1441,7 +1470,7 @@ pub fn build_shape(input: ShapeInput, model: &TypedCostModel) -> Result<ShapePla
     let descriptor_resolution = if spec.group_keys.is_empty() && dictionary_joins.is_empty() {
         DescriptorResolution::Ready
     } else {
-        let grouping_mode = if derived_keys.is_empty() {
+        let grouping_mode = if derived_keys.is_empty() && !raw_count {
             DescriptorGroupingMode::DenseDictionary
         } else {
             DescriptorGroupingMode::Hash

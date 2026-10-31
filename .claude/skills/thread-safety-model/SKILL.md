@@ -1,5 +1,5 @@
 ---
-name: pg_accel Thread Safety Model
+name: thread-safety-model
 description: Single-threaded main-backend execution model, SYCL-side device parallelism, shared-memory thread budget skeleton, fork safety on Apple Silicon, and PG process-model constraints
 ---
 

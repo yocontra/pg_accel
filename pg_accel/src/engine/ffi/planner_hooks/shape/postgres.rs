@@ -2645,11 +2645,12 @@ pub(super) unsafe fn preflight_base_relations(
 ///
 /// `root` and `output_rel` must remain valid throughout the call and must
 /// belong to the current main-backend planner invocation.
-pub(super) unsafe fn extract_input(
+pub(super) unsafe fn extract_selected_input(
     root: *mut pg_sys::PlannerInfo,
     output_rel: *mut pg_sys::RelOptInfo,
     estimated_output_rows: u64,
     expected_reuses: NonZeroU32,
+    raw_count: bool,
 ) -> Result<ShapeInput, ShapeDecline> {
     // SAFETY: root is read only after the explicit null guard; caller owns
     // the planner-pointer validity contract.
@@ -2708,6 +2709,11 @@ pub(super) unsafe fn extract_input(
                 ..
             },
         ] => Some(cell.relation_oid),
+        [PlannerGroupKey::Column(column)]
+            if raw_count && matches!(column.column.type_oid, 21 | 23 | 20) =>
+        {
+            Some(column.column.relation_oid)
+        }
         _ => None,
     };
     // SAFETY: inventory pointers were collected synchronously from query.

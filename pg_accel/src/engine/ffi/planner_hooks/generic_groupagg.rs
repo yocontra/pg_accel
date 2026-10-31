@@ -16,12 +16,12 @@ use super::shape::{
 use super::{PlannerSubstageGuard, add_gpu_path_with_resident_proof, rel_rows_estimate};
 use crate::engine::cost::{self, PgCost, Rows, TypedCostModel};
 use crate::engine::executor::agg::{
-    DenseExecutionDecision, H3PlanningMemory, dense_descriptor_memory_requirements,
-    descriptor_program_clone_bytes, estimate_descriptor_artifact_bytes_upper_bound,
-    h3_planning_memory, is_weighted_global_count_descriptor,
-    numeric_descriptor_memory_requirements, planned_descriptor_kernel_mode,
-    scalar_metadata_peak_bytes, select_dense_execution, validate_normal_descriptor_capability,
-    validate_normal_spatial_candidate_capability,
+    DenseCountWork, DenseExecutionDecision, H3PlanningMemory, dense_count_work_requirements,
+    dense_descriptor_memory_requirements, descriptor_program_clone_bytes,
+    estimate_descriptor_artifact_bytes_upper_bound, h3_planning_memory,
+    is_weighted_global_count_descriptor, numeric_descriptor_memory_requirements,
+    planned_descriptor_kernel_mode, scalar_metadata_peak_bytes, select_dense_execution,
+    validate_normal_descriptor_capability, validate_normal_spatial_candidate_capability,
 };
 use crate::engine::ffi::custom_scan;
 use crate::engine::gucs;
@@ -307,16 +307,30 @@ fn apply_exact_residency(
             .iter()
             .find(|relation| relation.relation_oid == shape.spec.fact_rel)
             .map_or(0, |relation| relation.estimated_rows);
-        h3_planning_memory(
-            &shape.spec,
-            &AggOutputProjection {
-                slots: shape.projections.clone(),
-            },
-            estimate,
-            estimated_rows,
-            model.memory.gpu_h3_max_groups.get(),
-        )
-        .map_err(|detail| AdmissionDecline::ScalarEstimateUnavailable { detail })?
+        if shape.execution_selection()
+            == crate::engine::executor::agg::AggExecutionSelection::RawIntegerCount
+        {
+            Some(
+                crate::engine::executor::agg::raw_count_planning_memory(
+                    &shape.spec,
+                    estimate,
+                    estimated_rows,
+                    model.memory.gpu_hash_agg_max_groups.get(),
+                )
+                .map_err(|detail| AdmissionDecline::ScalarEstimateUnavailable { detail })?,
+            )
+        } else {
+            h3_planning_memory(
+                &shape.spec,
+                &AggOutputProjection {
+                    slots: shape.projections.clone(),
+                },
+                estimate,
+                estimated_rows,
+                model.memory.gpu_h3_max_groups.get(),
+            )
+            .map_err(|detail| AdmissionDecline::ScalarEstimateUnavailable { detail })?
+        }
     } else {
         None
     };
@@ -328,6 +342,7 @@ fn apply_exact_residency(
         h3_memory,
         |shape, estimates, model, headroom| {
             let mut decision = None;
+            let mut count_work = None;
             let bytes = scalar_planning_memory_with(
                 shape,
                 estimates,
@@ -338,6 +353,15 @@ fn apply_exact_residency(
                             spec, nullable, groups, rows, max_chunk, one_shot, headroom,
                         )?;
                         if let Some(selected) = decision {
+                            if shape.execution_selection()
+                                == crate::engine::executor::agg::AggExecutionSelection::Legacy
+                                && selected.native_mode == GroupedAggKernelMode::ParallelDenseCount
+                                && DenseCountWork::supports(spec)
+                            {
+                                count_work = Some(dense_count_work_requirements(
+                                    spec, nullable, groups, rows, selected,
+                                )?);
+                            }
                             return Ok(selected.memory);
                         }
                         // Keep the existing complete budget-decline evidence
@@ -350,7 +374,7 @@ fn apply_exact_residency(
                     )
                 },
             )?;
-            Ok((bytes, decision))
+            Ok((bytes, decision, count_work))
         },
     )
 }
@@ -368,7 +392,9 @@ fn apply_exact_residency_with_scalar_memory(
         u64,
     ) -> Result<(u64, Option<DenseExecutionDecision>), AdmissionDecline>,
 ) -> Result<(), AdmissionDecline> {
-    apply_exact_residency_with_memory(shape, estimates, policy, model, None, scalar_memory)
+    apply_exact_residency_with_memory(shape, estimates, policy, model, None, |s, e, m, h| {
+        scalar_memory(s, e, m, h).map(|(bytes, decision)| (bytes, decision, None))
+    })
 }
 
 fn apply_exact_residency_with_memory(
@@ -382,7 +408,10 @@ fn apply_exact_residency_with_memory(
         &[ResidentLoadEstimate],
         &TypedCostModel,
         u64,
-    ) -> Result<(u64, Option<DenseExecutionDecision>), AdmissionDecline>,
+    ) -> Result<
+        (u64, Option<DenseExecutionDecision>, Option<DenseCountWork>),
+        AdmissionDecline,
+    >,
 ) -> Result<(), AdmissionDecline> {
     for estimate in estimates {
         let relation_oid = u32::from(estimate.relid);
@@ -466,14 +495,19 @@ fn apply_exact_residency_with_memory(
             (relation.relation_oid, rows)
         })
         .collect::<BTreeMap<_, _>>();
-    let derived_artifact_bytes =
+    let derived_artifact_bytes = if shape.execution_selection()
+        == crate::engine::executor::agg::AggExecutionSelection::RawIntegerCount
+    {
+        0 // Raw keys borrow resident lanes; FILTER is charged in execution memory.
+    } else {
         estimate_descriptor_artifact_bytes_upper_bound(&shape.spec, &relation_rows)
             .ok_or(AdmissionDecline::DerivedArtifactEstimateUnavailable)?
             .checked_add(
                 descriptor_program_clone_bytes(&shape.spec)
                     .map_err(|detail| AdmissionDecline::ScalarEstimateUnavailable { detail })?,
             )
-            .ok_or(AdmissionDecline::ResidencyBytesOverflow)?;
+            .ok_or(AdmissionDecline::ResidencyBytesOverflow)?
+    };
     let numeric_resources = numeric_planning_resources(shape, estimates, model)?;
     let owner_bytes = policy
         .budget_snapshot
@@ -482,8 +516,9 @@ fn apply_exact_residency_with_memory(
     // An already impossible fixed base still follows the exact decline path
     // below. It does not receive fake headroom through unsigned underflow.
     let headroom = policy.budget_bytes.saturating_sub(owner_bytes);
-    let (scalar_execution_bytes, dense_decision) = if let Some(memory) = h3_memory {
-        (memory.bytes, None)
+    let (scalar_execution_bytes, dense_decision, dense_count_work) = if let Some(memory) = h3_memory
+    {
+        (memory.bytes, None, None)
     } else {
         scalar_memory(shape, estimates, model, headroom)?
     };
@@ -560,12 +595,33 @@ fn apply_exact_residency_with_memory(
         shape.cost.replace_aggregate(aggregate);
     }
     let lifecycle_fact_rows = resident_fact_rows.unwrap_or(estimated_fact_rows);
+    if shape.execution_selection()
+        == crate::engine::executor::agg::AggExecutionSelection::RawIntegerCount
+    {
+        let estimated = Rows::new(usize::try_from(lifecycle_fact_rows).unwrap_or(usize::MAX));
+        shape.cost_gate = if estimated < model.planner.gpu_hash_agg_min_rows {
+            ShapeCostGate::FactRowsBelowDeviceMinimum {
+                estimated,
+                required: model.planner.gpu_hash_agg_min_rows,
+            }
+        } else {
+            ShapeCostGate::Eligible
+        };
+    }
     if let Some(memory) = h3_memory
         && !memory.cached_owner
     {
-        shape
-            .cost
-            .charge_h3_filter_conversion(&shape.spec, lifecycle_fact_rows, model);
+        if shape.execution_selection()
+            == crate::engine::executor::agg::AggExecutionSelection::RawIntegerCount
+        {
+            shape
+                .cost
+                .charge_hash_filter_conversion(&shape.spec, lifecycle_fact_rows, model);
+        } else {
+            shape
+                .cost
+                .charge_h3_filter_conversion(&shape.spec, lifecycle_fact_rows, model);
+        }
     }
     if let Some(resolution) = shape
         .spec
@@ -611,6 +667,16 @@ fn apply_exact_residency_with_memory(
             .cost
             .replace_additional_aggregate_launches(resources.launches);
     } else if let Some(decision) = dense_decision {
+        if let Some(work) = dense_count_work {
+            if work.calls != decision.calls || work.facts.rows != lifecycle_fact_rows {
+                return Err(AdmissionDecline::ScalarEstimateUnavailable {
+                    detail: "dense COUNT pricing disagrees with selected lifecycle".into(),
+                });
+            }
+            shape
+                .cost
+                .replace_aggregate(dense_count_aggregate_cost(work, model)?);
+        }
         shape
             .cost
             .replace_selected_dense_lifecycle_calls(decision.calls)
@@ -696,6 +762,26 @@ struct NumericPlanningResources {
     bytes: u64,
     aggregate: PgCost,
     launches: PgCost,
+}
+
+fn dense_count_aggregate_cost(
+    work: DenseCountWork,
+    model: &TypedCostModel,
+) -> Result<PgCost, AdmissionDecline> {
+    let unavailable = |detail| AdmissionDecline::ScalarEstimateUnavailable { detail };
+    let (parallel, checks, serial) = work.work_products().map_err(unavailable)?;
+    // Deliberately separate multiply/add rounding. Launches, mask construction,
+    // loading and output remain in their existing independent cost components.
+    #[allow(clippy::suboptimal_flops)]
+    let aggregate = parallel as f64 * model.coefficients.gpu_op_cost_reduce.get()
+        + checks as f64 * model.coefficients.gpu_op_cost_filter.get()
+        + serial as f64 * model.coefficients.gpu_dense_count_serial_work_cost.get();
+    if !aggregate.is_finite() || aggregate < 0.0 {
+        return Err(unavailable(
+            "dense COUNT aggregate cost is not finite/nonnegative".into(),
+        ));
+    }
+    Ok(PgCost::new(aggregate))
 }
 
 fn scalar_planning_memory_with(
@@ -1086,7 +1172,13 @@ fn validate_shape_capability(shape: &ShapePlan) -> Result<(), AdmissionDecline> 
     let projection = AggOutputProjection {
         slots: shape.projections.clone(),
     };
-    let result = if shape.spec.fact_filter.spatial().is_some() {
+    let result = if shape.execution_selection()
+        == crate::engine::executor::agg::AggExecutionSelection::RawIntegerCount
+    {
+        shape
+            .execution_selection()
+            .validate(&shape.spec, &projection)
+    } else if shape.spec.fact_filter.spatial().is_some() {
         validate_normal_spatial_candidate_capability(&shape.spec, &projection)
     } else {
         validate_normal_descriptor_capability(&shape.spec, &projection)
@@ -1163,6 +1255,8 @@ fn stable_device_cost_gate_before_residency(
         }
         ShapeCostGate::FactRowsBelowDeviceMinimum { .. }
             if shape_kernel_mode(shape) == GroupedAggKernelMode::ParallelDenseNumeric
+                || shape.execution_selection()
+                    == crate::engine::executor::agg::AggExecutionSelection::RawIntegerCount
                 || dense_atomic_sum_count_lifecycle(
                     &shape.spec,
                     &shape.descriptor_resolution,
@@ -1330,10 +1424,26 @@ fn maximum_cost_ratio(shape: &ShapePlan, model: &TypedCostModel) -> f64 {
     }
 }
 
+#[cfg(test)]
 fn encode_shape_path_private(
     spec: &crate::engine::spec::AggQuerySpec,
     projection: &AggOutputProjection,
 ) -> Result<Vec<c_int>, ShapeDecline> {
+    encode_selected_shape_path_private(
+        spec,
+        projection,
+        crate::engine::executor::agg::AggExecutionSelection::Legacy,
+    )
+}
+
+fn encode_selected_shape_path_private(
+    spec: &crate::engine::spec::AggQuerySpec,
+    projection: &AggOutputProjection,
+    selection: crate::engine::executor::agg::AggExecutionSelection,
+) -> Result<Vec<c_int>, ShapeDecline> {
+    selection
+        .validate(spec, projection)
+        .map_err(ShapeDecline::InvalidSpec)?;
     let spec_words = spec
         .encode_i32()
         .map_err(|error| ShapeDecline::Codec(error.to_string()))?;
@@ -1341,6 +1451,7 @@ fn encode_shape_path_private(
         .encode_i32(spec)
         .map_err(|error| ShapeDecline::Codec(error.to_string()))?;
     let mut words = Vec::with_capacity(spec_words.len() + projection_words.len() + 2);
+    words.extend_from_slice(selection.prefix());
     words.push(AGG_QUERY_SPEC_SENTINEL);
     words.extend(spec_words);
     words.push(AGG_OUTPUT_PROJECTION_SENTINEL);
@@ -1442,12 +1553,14 @@ unsafe fn inject_childless_shape_path(
     let projection = AggOutputProjection {
         slots: shape.projections.clone(),
     };
-    let words = encode_shape_path_private(&shape.spec, &projection)?;
-    let mut digest_words = shape.spec.encode_i32().map_err(|error| {
+    let selection = shape.execution_selection();
+    let words = encode_selected_shape_path_private(&shape.spec, &projection, selection)?;
+    let mut digest_words = selection.prefix().to_vec();
+    digest_words.extend(shape.spec.encode_i32().map_err(|error| {
         ShapeDecline::Codec(format!(
             "shape spec changed before path construction: {error}"
         ))
-    })?;
+    })?);
     digest_words.extend(projection.encode_i32(&shape.spec).map_err(|error| {
         ShapeDecline::Codec(format!(
             "shape projection changed before path construction: {error}"
@@ -2106,6 +2219,17 @@ fn record_cached_decline(reason: &'static str, output_rel: *mut RelOptInfo) {
     );
 }
 
+const RAW_CANDIDATE_NOT_APPLICABLE: &str = "raw_count_candidate_not_applicable";
+
+fn report_candidate_decline(raw_count: bool, decline: &AdmissionDecline) -> bool {
+    // A nonmatching additional raw shape is not a whole-query rejection.
+    // Keep the legacy candidate's diagnostic (notably H3 cost/budget declines).
+    // Once raw extraction succeeds, capability/resource/cost failures remain
+    // genuine candidate diagnostics and are always reported.
+    !raw_count
+        || !matches!(decline, AdmissionDecline::Shape(shape) if !matches!(shape, ShapeDecline::Codec(_)))
+}
+
 fn relation_rows_bits(rel: *mut RelOptInfo) -> u64 {
     if rel.is_null() {
         return f64::NAN.to_bits();
@@ -2143,11 +2267,90 @@ pub(super) unsafe fn try_inject(
     if !gucs::gpu_enabled() {
         return false;
     }
-    // SAFETY: preserve role-sensitive permission decisions before any decline
-    // cache can return early; root is the live hook planner state.
+    // Preserve the shared cheap rejection boundary before GPU discovery or
+    // native-cost reconstruction. Only actual shared shape errors cache both.
+    // SAFETY: root belongs to this live main-backend planner invocation.
     unsafe { super::shape::mark_permission_role_dependency(root) };
-    // SAFETY: root is the live PlannerInfo supplied to this hook.
+    // SAFETY: same live planner tree, observed before either candidate adds paths.
     let query_fingerprint = unsafe { decline_cache::query_fingerprint(root) };
+    let structural_keys = [false, true].map(|raw| {
+        query_fingerprint.as_ref().map(|fingerprint| {
+            decline_cache_key(
+                Rc::clone(fingerprint),
+                input_rel,
+                output_rel,
+                DeclinePolicyKey::structural(),
+            )
+            .with_raw_count_candidate(raw)
+        })
+    });
+    let structural_hits = structural_keys
+        .each_ref()
+        .map(|key| key.as_ref().and_then(decline_cache::lookup));
+    if let [Some(legacy), Some(_raw)] = structural_hits {
+        record_cached_decline(legacy, output_rel);
+        return false;
+    }
+    // SAFETY: shared relation preflight reads only live planner/catalog metadata.
+    if let Err(decline) = unsafe { super::shape::preflight_base_relations(root) } {
+        let decline = AdmissionDecline::Shape(decline);
+        for key in structural_keys.into_iter().flatten() {
+            decline_cache::insert(key, decline.code(), Vec::new());
+        }
+        record_decline(&decline, output_rel);
+        return false;
+    }
+    if !cost::gpu_is_usable() {
+        return false;
+    }
+    // Capture native estimates before either candidate mutates output paths.
+    // SAFETY: hook supplies planner-owned live relation/tree pointers.
+    let group_estimate = unsafe { consistent_agg_group_estimate(output_rel) };
+    let native_cost = {
+        let _profile = PlannerSubstageGuard::new(stats::PlannerSubstage::NativeCostReconstruction);
+        // SAFETY: same live upper-path hook arguments, before path injection.
+        group_estimate.and_then(|estimate| unsafe {
+            cheapest_native_cost(root, input_rel, output_rel, extra, estimate.num_groups)
+        })
+    };
+    // Both candidates run even if one declines or succeeds. Their caches and
+    // cost checks are independent; PostgreSQL chooses the cheapest added path.
+    // SAFETY: all pointers remain live across both synchronous candidate checks.
+    let legacy = unsafe {
+        try_inject_candidate(
+            root,
+            input_rel,
+            output_rel,
+            group_estimate,
+            native_cost,
+            false,
+            query_fingerprint.clone(),
+        )
+    };
+    // SAFETY: same planner lifetime; native comparator was captured above.
+    let raw = unsafe {
+        try_inject_candidate(
+            root,
+            input_rel,
+            output_rel,
+            group_estimate,
+            native_cost,
+            true,
+            query_fingerprint,
+        )
+    };
+    legacy || raw
+}
+
+unsafe fn try_inject_candidate(
+    root: *mut pg_sys::PlannerInfo,
+    input_rel: *mut RelOptInfo,
+    output_rel: *mut RelOptInfo,
+    group_estimate: Option<AggGroupEstimate>,
+    native_cost: Option<f64>,
+    raw_count: bool,
+    query_fingerprint: Option<Rc<QueryFingerprint>>,
+) -> bool {
     let structural_cache_key = query_fingerprint.as_ref().map(|fingerprint| {
         decline_cache_key(
             Rc::clone(fingerprint),
@@ -2155,24 +2358,15 @@ pub(super) unsafe fn try_inject(
             output_rel,
             DeclinePolicyKey::structural(),
         )
+        .with_raw_count_candidate(raw_count)
     });
     if let Some(reason) = structural_cache_key
         .as_ref()
         .and_then(decline_cache::lookup)
     {
-        record_cached_decline(reason, output_rel);
-        return false;
-    }
-    // SAFETY: root is the live PlannerInfo supplied to this upper-path callback.
-    if let Err(decline) = unsafe { super::shape::preflight_base_relations(root) } {
-        let decline = AdmissionDecline::Shape(decline);
-        if let Some(key) = structural_cache_key {
-            decline_cache::insert(key, decline.code(), Vec::new());
+        if reason != RAW_CANDIDATE_NOT_APPLICABLE {
+            record_cached_decline(reason, output_rel);
         }
-        record_decline(&decline, output_rel);
-        return false;
-    }
-    if !cost::gpu_is_usable() {
         return false;
     }
     let model = TypedCostModel::from_limits(cost::device_limits());
@@ -2183,6 +2377,7 @@ pub(super) unsafe fn try_inject(
             output_rel,
             DeclinePolicyKey::device(),
         )
+        .with_raw_count_candidate(raw_count)
     });
     if let Some(reason) = device_cache_key.as_ref().and_then(decline_cache::lookup) {
         record_cached_decline(reason, output_rel);
@@ -2191,17 +2386,10 @@ pub(super) unsafe fn try_inject(
     // Use the aggregate paths PostgreSQL just built as the single source of
     // truth for both admission and the injected path's output cardinality.
     // SAFETY: output_rel is the live planner-owned upper relation.
-    let group_estimate = unsafe { consistent_agg_group_estimate(output_rel) };
     // Include PostgreSQL's exact native comparator in the late cost-decline
     // identity. This retains planner-policy and parameter sensitivity while
     // allowing a hit to skip descriptor and residency reconstruction.
     // SAFETY: all pointers are the live upper-path hook arguments.
-    let native_cost = {
-        let _profile = PlannerSubstageGuard::new(stats::PlannerSubstage::NativeCostReconstruction);
-        group_estimate.and_then(|estimate| unsafe {
-            cheapest_native_cost(root, input_rel, output_rel, extra, estimate.num_groups)
-        })
-    };
     let cost_cache_key = device_cache_key
         .clone()
         .map(|key| key.with_native_cost(native_cost));
@@ -2209,6 +2397,8 @@ pub(super) unsafe fn try_inject(
         record_cached_decline(reason, output_rel);
         return false;
     }
+    #[cfg(feature = "pg_test")]
+    let mut observed_cost = None;
     let mut cache_dependencies = Vec::new();
     let mut cache_dependencies_valid = true;
     let result = (|| {
@@ -2222,7 +2412,13 @@ pub(super) unsafe fn try_inject(
         // SAFETY: root and output_rel are the live planner-owned pointers supplied
         // together to this upper-path callback.
         let mut shape = unsafe {
-            super::shape::extract_shape(root, output_rel, group_estimate.output_rows, &model)
+            super::shape::extract_selected_shape(
+                root,
+                output_rel,
+                group_estimate.output_rows,
+                &model,
+                raw_count,
+            )
         }
         .map_err(AdmissionDecline::Shape)?;
 
@@ -2325,6 +2521,14 @@ pub(super) unsafe fn try_inject(
                 effective_path_cost(&shape, gucs::cost_multiplier()),
             )
         };
+        #[cfg(feature = "pg_test")]
+        {
+            observed_cost = Some((
+                format!("{:?}", shape_kernel_mode(&shape)),
+                effective_cost.total,
+                shape.cost.additional_aggregate_launches.get(),
+            ));
+        }
         gate_cost(
             &shape,
             native_cost,
@@ -2340,6 +2544,19 @@ pub(super) unsafe fn try_inject(
         }
         Ok(())
     })();
+    #[cfg(feature = "pg_test")]
+    CANDIDATE_OBSERVATIONS.with(|observations| {
+        if let Some(observations) = observations.borrow_mut().as_mut() {
+            observations.push(CandidateObservation {
+                raw_count,
+                native_cost,
+                cost: observed_cost,
+                outcome: result
+                    .as_ref()
+                    .map_or_else(|error| error.code(), |()| "added"),
+            });
+        }
+    });
     match result {
         Ok(()) => true,
         Err(decline) => {
@@ -2358,16 +2575,133 @@ pub(super) unsafe fn try_inject(
                 _ => None,
             };
             if let Some((key, dependencies)) = cache_key {
-                decline_cache::insert(key, decline.code(), dependencies);
+                let reason = if report_candidate_decline(raw_count, &decline) {
+                    decline.code()
+                } else {
+                    RAW_CANDIDATE_NOT_APPLICABLE
+                };
+                decline_cache::insert(key, reason, dependencies);
             }
-            record_decline(&decline, output_rel);
+            if report_candidate_decline(raw_count, &decline) {
+                record_decline(&decline, output_rel);
+            }
             false
         }
     }
 }
 
-#[cfg(test)]
+// Test-only observation of real default admission; this does not alter candidate
+// order, costs, cache identities, path pruning, or production EXPLAIN output.
+#[cfg(feature = "pg_test")]
+#[derive(Debug)]
+struct CandidateObservation {
+    raw_count: bool,
+    native_cost: Option<f64>,
+    cost: Option<(String, f64, f64)>,
+    outcome: &'static str,
+}
+
+#[cfg(feature = "pg_test")]
+thread_local! {
+    static CANDIDATE_OBSERVATIONS: std::cell::RefCell<Option<Vec<CandidateObservation>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(feature = "pg_test")]
+#[pgrx::pg_schema]
 mod tests {
+    use super::CANDIDATE_OBSERVATIONS;
+    use pgrx::prelude::*;
+    use std::fmt::Write as _;
+
+    struct ResetObserver;
+    impl Drop for ResetObserver {
+        fn drop(&mut self) {
+            CANDIDATE_OBSERVATIONS.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+
+    #[pg_test]
+    fn pg_raw_count_dense_controls_preserve_independent_candidates() {
+        observe_count_candidates(false);
+    }
+
+    #[pg_test]
+    fn pg_raw_count_sparse_star_candidate_cost_observations() {
+        observe_count_candidates(true);
+    }
+
+    fn observe_count_candidates(sparse: bool) {
+        let _reset = ResetObserver;
+        let mut receipts = String::new();
+        Spi::run("RESET pg_accel.cost_multiplier; RESET pg_accel.min_batch_size; RESET pg_accel.resident_memory_budget_mb; SET pg_accel.enabled=on; SET pg_accel.gpu_enabled=on")
+            .expect("default candidate admission");
+        for kind in ["int2", "int4", "int8"] {
+            for rows in [1_000_017, 2_000_017] {
+                let groups = if sparse { 16_388 } else { 64 };
+                let key = if sparse {
+                    match kind {
+                        "int2" => "g*3-24582",
+                        "int4" => "g*200003-1638844582",
+                        _ => "g*100000000003-819400000024582",
+                    }
+                } else {
+                    "g-32"
+                };
+                // Exact arithmetic-v1 64-group benchmark control, including its
+                // unused Boolean columns and nullable skewed key distribution.
+                Spi::run(&format!("CREATE TEMP TABLE bench_raw_integer_count(k {kind},value boolean,qualifies boolean); INSERT INTO bench_raw_integer_count SELECT CASE WHEN i%97=0 THEN NULL::{kind} ELSE ({key})::{kind} END, CASE WHEN i%7=0 THEN NULL::boolean ELSE i%2=0 END, CASE WHEN g=0 THEN false WHEN i%11=0 THEN NULL::boolean ELSE i%3<>0 END FROM (SELECT i,CASE WHEN i>{groups} AND i%5=0 THEN 0 ELSE (i-1)%{groups} END g FROM generate_series(1::bigint,{rows})s(i))fixture; ANALYZE bench_raw_integer_count; SELECT pg_accel_pin('bench_raw_integer_count',ARRAY['k'])"))
+                    .expect("exact low-cardinality control fixture");
+                for repeat in 0..if sparse { 1 } else { 3 } {
+                    CANDIDATE_OBSERVATIONS.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
+                    Spi::run(
+                        "EXPLAIN SELECT k,count(*) AS n FROM bench_raw_integer_count GROUP BY k",
+                    )
+                    .expect("default repeated planning");
+                    let observations = CANDIDATE_OBSERVATIONS
+                        .with(|slot| slot.borrow_mut().take().expect("active observer"));
+                    pgrx::notice!(
+                        "candidate control kind={kind} rows={rows} repeat={repeat}: {observations:?}"
+                    );
+                    writeln!(
+                        receipts,
+                        "kind={kind} rows={rows} repeat={repeat}: {observations:?}"
+                    )
+                    .expect("format candidate receipt");
+                    assert_eq!(observations.len(), 2, "{observations:?}");
+                    assert!(!observations[0].raw_count);
+                    assert!(observations[1].raw_count);
+                    assert_eq!(observations[0].native_cost, observations[1].native_cost);
+                    for observation in &observations {
+                        if sparse && !observation.raw_count {
+                            continue;
+                        }
+                        assert_eq!(observation.outcome, "added", "{observations:?}");
+                        let (_, total, launches) =
+                            observation.cost.as_ref().expect("exact candidate cost");
+                        assert!(total.is_finite() && *total > 0.0);
+                        assert!(launches.is_finite() && *launches >= 0.0);
+                    }
+                    if !sparse {
+                        assert_ne!(
+                            observations[0].cost.as_ref().expect("legacy cost").0,
+                            observations[1].cost.as_ref().expect("raw cost").0
+                        );
+                    }
+                }
+                Spi::run("SELECT pg_accel_unpin('bench_raw_integer_count'); DROP TABLE bench_raw_integer_count")
+                    .expect("release exact control fixture");
+            }
+        }
+        if let Ok(path) = std::env::var("PG_ACCEL_CANDIDATE_OBSERVATION_PATH") {
+            std::fs::write(path, receipts).expect("durable test-owned candidate receipt");
+        }
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
     use super::*;
     use crate::engine::cost::{DeviceLimits, Rows, WorkProduct};
     use crate::engine::ffi::planner_hooks::shape::{
@@ -2380,6 +2714,30 @@ mod tests {
         AggregateSource, BinaryMeasureOp, ColumnRef, DimSpec, GroupKeyEncoding, GroupKeyRef,
         GroupKeySource, JoinMultiplicity, MaskKind, MeasureSpec, ScalarRange, ScalarValue,
     };
+
+    #[test]
+    fn nonmatching_raw_candidate_does_not_replace_legacy_diagnostics() {
+        let ineligible = AdmissionDecline::Shape(ShapeDecline::InvalidSpec("not a raw key".into()));
+        assert!(!report_candidate_decline(true, &ineligible));
+        assert!(report_candidate_decline(false, &ineligible));
+        assert!(report_candidate_decline(
+            true,
+            &AdmissionDecline::Shape(ShapeDecline::Codec("malformed path serialization".into()))
+        ));
+        let cost = AdmissionDecline::CostNotCompetitive {
+            gpu_cost: 2.0,
+            native_cost: 1.0,
+            required_cost: 0.8,
+        };
+        assert!(report_candidate_decline(true, &cost));
+        assert!(report_candidate_decline(
+            true,
+            &AdmissionDecline::DescriptorCapability {
+                detail: "eligible raw runtime contract failed".into(),
+            }
+        ));
+        assert_ne!(RAW_CANDIDATE_NOT_APPLICABLE, cost.code());
+    }
 
     fn test_leaf() -> pg_sys::Path {
         pg_sys::Path {
@@ -2960,6 +3318,122 @@ mod tests {
         limits.resident_load_scan_per_row_cost = 0.004;
         limits.resident_load_per_byte_cost = 0.001;
         TypedCostModel::from_limits(&limits)
+    }
+
+    #[test]
+    fn dense_count_placeholder_pricing_uses_selected_physical_candidate() {
+        let rows = 1_000_017;
+        let mut dense = dense_sum_count_shape(rows);
+        dense.spec.measures.remove(0);
+        dense.descriptor_measures.projected_measure_count = 1;
+        dense.descriptor_measures.descriptor_measure_count = 1;
+        dense.required_relations[0].attnos = vec![1];
+        dense.residency.relations[0].attnos = vec![1];
+        dense.estimated_dense_key_cardinalities = Some(vec![64]);
+        assert_eq!(dense.spec.group_keys[0].encoding, GroupKeyEncoding::Hash);
+        assert!(dense.supports_budget_selected_dense());
+        let mut raw = dense.clone();
+        raw.descriptor_resolution = DescriptorResolution::BeginTimeArtifacts {
+            dictionary_keys: Vec::new(),
+            derived_keys: Vec::new(),
+            joins: Vec::new(),
+            grouping_mode: DescriptorGroupingMode::Hash,
+            max_group_count: 100_000,
+        };
+        assert_eq!(dense.spec, raw.spec);
+        assert!(!raw.supports_budget_selected_dense());
+        assert_eq!(
+            raw.execution_selection(),
+            crate::engine::executor::agg::AggExecutionSelection::RawIntegerCount
+        );
+        let model = model();
+        let mut evidence = estimate(true, 4096);
+        evidence.resident_rows = Some(rows);
+        let selected = select_dense_execution(
+            &dense.spec,
+            &[],
+            64,
+            rows as usize,
+            model.executor.gpu_reduce_max_chunk.get(),
+            model.executor.gpu_grouped_agg_one_shot_max_rows.get(),
+            u64::MAX,
+        )
+        .expect("real metadata decision")
+        .expect("budget fits");
+        let expected = dense_count_aggregate_cost(
+            dense_count_work_requirements(&dense.spec, &[], 64, rows as usize, selected)
+                .expect("real selected work facts"),
+            &model,
+        )
+        .expect("bounded cost");
+        let old = dense.cost.aggregate;
+        let raw_old = raw.cost.aggregate;
+        let policy = AdmissionPolicy {
+            auto_load: false,
+            budget_bytes: u64::MAX,
+            budget_snapshot: budget_snapshot(0, 0, 0),
+        };
+        for _ in 0..2 {
+            apply_exact_residency(&mut dense, std::slice::from_ref(&evidence), policy, &model)
+                .expect("dense placeholder admission");
+            assert_eq!(dense.cost.aggregate, expected);
+            assert_ne!(dense.cost.aggregate, old);
+            apply_exact_residency(&mut raw, std::slice::from_ref(&evidence), policy, &model)
+                .expect("raw independent admission");
+            assert_eq!(raw.cost.aggregate, raw_old);
+        }
+        raw.descriptor_resolution = DescriptorResolution::Ready;
+        assert!(!raw.supports_budget_selected_dense());
+    }
+
+    #[test]
+    fn dense_count_aggregate_prices_only_checked_work() {
+        let work = DenseCountWork {
+            calls: 3,
+            facts: crate::engine::spec::abi::PgaccelGroupedAggCountWorkV1 {
+                row_counter_updates: 100,
+                value_null_checks: 20,
+                serial_partial_counter_reads: 7,
+                ..Default::default()
+            },
+        };
+        let mut limits = DeviceLimits::cpu_only();
+        limits.gpu_op_cost_reduce = 2.0;
+        limits.gpu_op_cost_filter = 3.0;
+        limits.gpu_dense_count_serial_work_cost = 5.0;
+        let model = TypedCostModel::from_limits(&limits);
+        assert_eq!(
+            dense_count_aggregate_cost(work, &model)
+                .expect("bounded cost")
+                .get(),
+            295.0
+        );
+        let mut more_calls = work;
+        more_calls.calls = 100;
+        assert_eq!(
+            dense_count_aggregate_cost(more_calls, &model)
+                .expect("calls are priced separately")
+                .get(),
+            295.0
+        );
+        limits.gpu_dense_count_serial_work_cost = 10.0;
+        assert_eq!(
+            dense_count_aggregate_cost(work, &TypedCostModel::from_limits(&limits))
+                .expect("doubled serial cost")
+                .get(),
+            330.0,
+            "doubling serial price changes only the seven serial work units"
+        );
+        limits.gpu_dense_count_serial_work_cost = 0.0;
+        assert_eq!(
+            dense_count_aggregate_cost(work, &TypedCostModel::from_limits(&limits))
+                .expect("zero serial cost")
+                .get(),
+            260.0
+        );
+        let mut overflowing = work;
+        overflowing.facts.global_counter_clear_entries = u64::MAX;
+        assert!(dense_count_aggregate_cost(overflowing, &model).is_err());
     }
 
     fn expected_exact_load(rows: u64, bytes: u64, fixed_width: bool) -> PgCost {

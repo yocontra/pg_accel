@@ -1,5 +1,5 @@
 ---
-name: Spatial Predicate Kernel Guide
+name: spatial-predicate-kernels
 description: GPU spatial predicate kernels (point_in_ring, sphere_distance, segment_intersects, bbox_intersects) and the DEFINITE/UNCERTAIN result contract that defers ambiguous rows to PG's native PostGIS predicate
 ---
 

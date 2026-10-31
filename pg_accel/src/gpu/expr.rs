@@ -48,6 +48,16 @@ pub fn write_sql_bool_mask_with_poll(
     output: &ExprDeviceBuffer<i8>,
     pending: impl FnMut() -> bool,
 ) -> GpuResult<bool> {
+    write_sql_bool_mask_counted(values, nulls, output, pending, &mut 0)
+}
+
+fn write_sql_bool_mask_counted(
+    values: &ExprDeviceBuffer<u8>,
+    nulls: Option<&ExprDeviceBuffer<u8>>,
+    output: &ExprDeviceBuffer<i8>,
+    pending: impl FnMut() -> bool,
+    submitted_calls: &mut u64,
+) -> GpuResult<bool> {
     let rows = values.len();
     if output.len() != rows || nulls.is_some_and(|nulls| nulls.len() != rows) {
         return Err(GpuError::with_detail(
@@ -58,6 +68,14 @@ pub fn write_sql_bool_mask_with_poll(
         ));
     }
     sql_bool_mask_chunks(rows, pending, |first, count| {
+        *submitted_calls = submitted_calls.checked_add(1).ok_or_else(|| {
+            GpuError::with_detail(
+                GpuErrorDomain::Expression,
+                GpuOperation::ValidateDeviceOutput,
+                GpuStatusDetail::ShapeMismatch,
+                "SQL Boolean mask submission counter overflow",
+            )
+        })?;
         // SAFETY: typed buffers span rows and each chunk is in bounds. Native
         // validation checks alignment and aliasing before writes. The call
         // waits before returning; all owners stay live throughout.
@@ -99,7 +117,19 @@ impl SqlBoolMask {
     pub fn from_resident_with_poll(
         values: &ExprDeviceBuffer<u8>,
         nulls: Option<&ExprDeviceBuffer<u8>>,
+        pending: impl FnMut() -> bool,
+    ) -> GpuResult<Option<Self>> {
+        Self::from_resident_with_poll_counted(values, nulls, pending, &mut 0)
+    }
+
+    /// Count submissions at the actual native call boundary, including the
+    /// completed prefix of an interrupted construction. Partial owners still
+    /// drop before returning None; callers independently verify native counters.
+    pub(crate) fn from_resident_with_poll_counted(
+        values: &ExprDeviceBuffer<u8>,
+        nulls: Option<&ExprDeviceBuffer<u8>>,
         mut pending: impl FnMut() -> bool,
+        submitted_calls: &mut u64,
     ) -> GpuResult<Option<Self>> {
         let rows = values.len();
         if nulls.is_some_and(|nulls| nulls.len() != rows) {
@@ -133,7 +163,7 @@ impl SqlBoolMask {
                 "could not allocate SQL Boolean mask",
             )
         })?;
-        if !write_sql_bool_mask_with_poll(values, nulls, &buffer, pending)? {
+        if !write_sql_bool_mask_counted(values, nulls, &buffer, pending, submitted_calls)? {
             return Ok(None);
         }
         Ok(Some(Self {

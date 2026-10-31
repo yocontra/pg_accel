@@ -564,6 +564,21 @@ impl std::fmt::Display for ShapeDecline {
 impl std::error::Error for ShapeDecline {}
 
 impl ShapePlan {
+    pub(crate) fn execution_selection(
+        &self,
+    ) -> crate::engine::executor::agg::AggExecutionSelection {
+        use crate::engine::executor::agg::{AggExecutionSelection, canonical_raw_integer_count};
+        if matches!(&self.descriptor_resolution,
+            DescriptorResolution::BeginTimeArtifacts { grouping_mode: DescriptorGroupingMode::Hash,
+                dictionary_keys, derived_keys, joins, .. }
+                if dictionary_keys.is_empty() && derived_keys.is_empty() && joins.is_empty())
+            && canonical_raw_integer_count(&self.spec)
+        {
+            AggExecutionSelection::RawIntegerCount
+        } else {
+            AggExecutionSelection::Legacy
+        }
+    }
     /// Budget chunk selection changes only ordinary, dimension-free dense
     /// integer/COUNT execution. Resolve grouping policy, not placeholder key
     /// encodings, and leave spatial producers and every other family alone.
@@ -736,17 +751,32 @@ pub unsafe fn extract_shape(
     estimated_output_rows: u64,
     model: &TypedCostModel,
 ) -> Result<ShapePlan, ShapeDecline> {
+    // SAFETY: forwarded unchanged under the caller's planner contract.
+    unsafe { extract_selected_shape(root, output_rel, estimated_output_rows, model, false) }
+}
+
+/// Extract a separately costed raw candidate without changing legacy lowering.
+/// # Safety
+/// Same live planner/main-backend contract as `extract_shape`.
+pub(crate) unsafe fn extract_selected_shape(
+    root: *mut pg_sys::PlannerInfo,
+    output_rel: *mut pg_sys::RelOptInfo,
+    estimated_output_rows: u64,
+    model: &TypedCostModel,
+    raw_count: bool,
+) -> Result<ShapePlan, ShapeDecline> {
     // SAFETY: forwarded unchanged under this function's planner-pointer and
     // backend-thread contract.
     let input = unsafe {
-        postgres::extract_input(
+        postgres::extract_selected_input(
             root,
             output_rel,
             estimated_output_rows,
             model.planner.auto_load_amortization_queries,
+            raw_count,
         )
     }?;
-    let mut shape = build_shape(input, model)?;
+    let mut shape = builder::build_selected_shape(input, model, raw_count)?;
     if needs_dense_key_estimate(&shape.spec, &shape.descriptor_resolution) {
         let rows = shape
             .residency

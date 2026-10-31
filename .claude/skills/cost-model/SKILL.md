@@ -1,5 +1,5 @@
 ---
-name: Cost Model Guide
+name: cost-model
 description: How pg_accel decides to inject a Custom Scan node, which GPU strategy to pick, and how DeviceLimits derives dispatch thresholds from hardware
 ---
 

@@ -746,6 +746,11 @@ bridge_status_fns! {
 
     /// Validate a grouped-aggregate descriptor and return its exact workspace
     /// requirement. The output struct must carry the frozen ABI version/size.
+    pub fn pgaccel_grouped_agg_count_work_requirements_v1(
+        desc: *const crate::engine::spec::abi::PgaccelGroupedAggDesc,
+        out: *mut crate::engine::spec::abi::PgaccelGroupedAggCountWorkV1,
+    ) -> PgaccelStatus;
+
     pub fn pgaccel_grouped_agg_workspace_requirements(
         desc: *const crate::engine::spec::abi::PgaccelGroupedAggDesc,
         out: *mut crate::engine::spec::abi::PgaccelGroupedAggWorkspaceReq,

@@ -1,5 +1,5 @@
 ---
-name: Adapter Development Guide
+name: adapter-development
 description: How to add a new extension adapter (PostGIS, h3-pg, raster, etc.) to pg_accel — registration, strategy selection, type extractors, and dispatch wiring.
 ---
 

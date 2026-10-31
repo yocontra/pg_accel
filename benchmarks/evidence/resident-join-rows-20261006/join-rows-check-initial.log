@@ -1,0 +1,39 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error[E0433]: cannot find `join_rows` in `super`
+   --> pg_accel/src/gpu/bridge.rs:143:32
+    |
+143 |         request: *const super::join_rows::NativeJoinRequest,
+    |                                ^^^^^^^^^ could not find `join_rows` in `super`
+    |
+    = help: consider importing this module:
+            crate::gpu::join_rows
+
+error[E0433]: cannot find `join_rows` in `super`
+   --> pg_accel/src/gpu/bridge.rs:148:32
+    |
+148 |         request: *const super::join_rows::NativeJoinRequest,
+    |                                ^^^^^^^^^ could not find `join_rows` in `super`
+    |
+    = help: consider importing this module:
+            crate::gpu::join_rows
+
+error[E0433]: cannot find `join_rows` in `super`
+   --> pg_accel/src/gpu/bridge.rs:151:29
+    |
+151 |         output: *mut super::join_rows::JoinRowPair,
+    |                             ^^^^^^^^^ could not find `join_rows` in `super`
+    |
+    = help: consider importing this module:
+            crate::gpu::join_rows
+
+error[E0433]: cannot find `join_rows` in `super`
+   --> pg_accel/src/gpu/bridge.rs:153:29
+    |
+153 |         result: *mut super::join_rows::NativeJoinResult,
+    |                             ^^^^^^^^^ could not find `join_rows` in `super`
+    |
+    = help: consider importing this module:
+            crate::gpu::join_rows
+
+For more information about this error, try `rustc --explain E0433`.
+error: could not compile `pg_accel` (lib) due to 4 previous errors

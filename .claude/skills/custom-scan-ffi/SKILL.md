@@ -1,5 +1,5 @@
 ---
-name: Custom Scan Provider FFI Guide
+name: custom-scan-ffi
 description: How to implement PostgreSQL Custom Scan Provider in Rust via unsafe pg_sys FFI — vtables, hooks, lifecycle, memory management
 ---
 

@@ -1316,6 +1316,10 @@ fn pg_accel_device_limits() -> TableIterator<
             limits.gpu_op_cost_reduce.to_string(),
         ),
         (
+            "gpu_dense_count_serial_work_cost".into(),
+            limits.gpu_dense_count_serial_work_cost.to_string(),
+        ),
+        (
             "gpu_op_cost_hash_agg".into(),
             limits.gpu_op_cost_hash_agg.to_string(),
         ),
@@ -1444,7 +1448,14 @@ fn pg_accel_device_limits() -> TableIterator<
         ),
     ];
 
-    TableIterator::new(rows.into_iter().map(move |(n, v)| (n, v, source.clone())))
+    TableIterator::new(rows.into_iter().map(move |(n, v)| {
+        let field_source = if n == "gpu_dense_count_serial_work_cost" {
+            "reference_device_calibrated".to_owned()
+        } else {
+            source.clone()
+        };
+        (n, v, field_source)
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1904,7 +1915,13 @@ mod tests {
         let count = Spi::get_one::<i64>("SELECT COUNT(*) FROM pg_accel_device_limits()")
             .expect("pg_accel_device_limits() should succeed")
             .expect("pg_accel_device_limits() should return a row count");
-        assert_eq!(count, 76, "expected one SRF row per DeviceLimits field");
+        assert_eq!(count, 77, "expected one SRF row per DeviceLimits field");
+        assert_eq!(
+            Spi::get_one::<String>(
+                "SELECT source FROM pg_accel_device_limits() WHERE name = 'gpu_dense_count_serial_work_cost'"
+            ).expect("reference source lookup"),
+            Some("reference_device_calibrated".to_owned())
+        );
         assert_eq!(
             Spi::get_one::<i64>("SELECT COUNT(DISTINCT name) FROM pg_accel_device_limits()")
                 .expect("device-limit names should be readable"),

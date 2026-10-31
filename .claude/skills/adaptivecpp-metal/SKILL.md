@@ -1,5 +1,5 @@
 ---
-name: AdaptiveCpp (SYCL compiler + runtime)
+name: adaptivecpp-metal
 description: AdaptiveCpp/SYCL is the sole GPU backend for pg_accel. Single-source code compiles to CUDA, ROCm, Level Zero, Metal, and CPU via the generic SSCP JIT compiler. This skill is a reference for compilation flows, environment variables, preprocessor macros, SYCL extensions, scoped parallelism, Metal constraints, performance tuning, and debugging the SSCP JIT — distilled from the AdaptiveCpp develop-branch docs.
 ---
 

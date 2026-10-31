@@ -21,6 +21,85 @@ use crate::integration_connection::test_connection;
 use crate::workloads::parallel_stress::bench_f32_10m_setup_sql;
 
 const DIRECT_COST_OVERRIDE_SOURCE: &str = "pg_accel/src/tests/phase2_cache.rs";
+
+/// Normal production planner, full materialized multiset comparison, no H3
+/// functions or type dependency. Engine regressions separately cover capacity,
+/// cancellation, retained plans and forced-small-cap SMALLINT partitions.
+#[cfg(feature = "integration_tests")]
+#[test]
+fn plan_shape_raw_integer_count_all_fixed_width_types() {
+    use crate::workloads::{
+        Workload,
+        raw_integer_count::{RawIntegerCount, contract},
+    };
+    let _guard = live_pg_test_lock();
+    let mut c = connect();
+    for name in [
+        "raw_int2_count_star",
+        "raw_int4_count_star",
+        "raw_int8_count_star",
+    ] {
+        let workload = RawIntegerCount(name);
+        for sql in workload.setup_sql(1_000_017) {
+            c.batch_execute(&sql).expect("raw fixture");
+        }
+        // Additional columns preserve k/value/qualifies attribute identities.
+        c.batch_execute("ALTER TABLE bench_raw_integer_count ADD COLUMN v2 int2, ADD COLUMN v4 int4, ADD COLUMN v8 int8, ADD COLUMN vf4 float4, ADD COLUMN vf8 float8, ADD COLUMN vd date, ADD COLUMN vt timestamp, ADD COLUMN vz timestamptz; \
+            UPDATE bench_raw_integer_count SET v2=CASE WHEN value IS NULL THEN NULL ELSE -123 END, v4=CASE WHEN value IS NULL THEN NULL ELSE -2000000000 END, v8=CASE WHEN value IS NULL THEN NULL ELSE -9000000000000000000 END, vf4=CASE WHEN value IS NULL THEN NULL ELSE 'NaN'::float4 END, vf8=CASE WHEN value IS NULL THEN NULL ELSE 'Infinity'::float8 END, vd=CASE WHEN value IS NULL THEN NULL ELSE DATE '1960-01-01' END, vt=CASE WHEN value IS NULL THEN NULL ELSE TIMESTAMP '1900-01-01' END, vz=CASE WHEN value IS NULL THEN NULL ELSE TIMESTAMPTZ '1900-01-01 00:00:00+00' END; ANALYZE bench_raw_integer_count").expect("all fixed width fixture values");
+        for (column, oid, attno) in [
+            ("*", 0, 0),
+            ("value", 16, 2),
+            ("v2", 21, 4),
+            ("v4", 23, 5),
+            ("v8", 20, 6),
+            ("vf4", 700, 7),
+            ("vf8", 701, 8),
+            ("vd", 1082, 9),
+            ("vt", 1114, 10),
+            ("vz", 1184, 11),
+        ] {
+            for filtered in [false, true] {
+                let filter = if filtered {
+                    " FILTER (WHERE qualifies)"
+                } else {
+                    ""
+                };
+                let query = format!(
+                    "SELECT k, count({column}){filter} AS n FROM bench_raw_integer_count GROUP BY k"
+                );
+                use_default_parallel_planner(&mut c);
+                c.batch_execute("RESET pg_accel.cost_multiplier; RESET pg_accel.min_batch_size; SET pg_accel.auto_load=on").expect("default admission");
+                let mut proof = contract(name).expect("registered raw fixture");
+                proof.count_type = (oid != 0).then_some(oid);
+                proof.count_attno = attno;
+                proof.predicate_attno = filtered.then_some(3);
+                let plan =
+                    explain_query_verbatim(&mut c, "EXPLAIN (ANALYZE, VERBOSE, COSTS OFF)", &query);
+                assert!(
+                    crate::report::plan_contains_raw_integer_count(&plan, proof),
+                    "{name}/{column}/{filtered}: {plan}"
+                );
+                let before = kernel_executions(&mut c);
+                c.batch_execute(&format!("CREATE TEMP TABLE raw_actual AS {query}"))
+                    .expect("materialize raw output");
+                assert!(kernel_executions(&mut c) > before);
+                c.batch_execute("SET pg_accel.enabled=off")
+                    .expect("disable baseline acceleration");
+                let before = kernel_executions(&mut c);
+                c.batch_execute(&format!("CREATE TEMP TABLE raw_expected AS {query}"))
+                    .expect("native output");
+                assert_eq!(kernel_executions(&mut c), before);
+                let mismatches: i64 = c.query_one("SELECT count(*) FROM ((TABLE raw_actual EXCEPT ALL TABLE raw_expected) UNION ALL (TABLE raw_expected EXCEPT ALL TABLE raw_actual)) AS diff", &[]).expect("full multiset diff").get(0);
+                assert_eq!(mismatches, 0, "{name}/{column}/{filtered}");
+                c.batch_execute("DROP TABLE raw_actual, raw_expected")
+                    .expect("drop comparison tables");
+            }
+        }
+        for sql in workload.cleanup_sql() {
+            c.batch_execute(&sql).expect("cleanup raw fixture");
+        }
+    }
+}
 const DIRECT_COST_OVERRIDE_ALLOW_MARKER: &str =
     "// admission-audit-allow: direct cost_multiplier executor contract test";
 const DIRECT_COST_DEFAULT_PROOF_LINE: &str =
@@ -825,6 +904,11 @@ fn use_default_parallel_planner(c: &mut Client) {
 /// Collect the full `EXPLAIN` output as one big lowercase string so
 /// substring assertions are robust to per-row formatting.
 fn explain_query(c: &mut Client, prefix: &str, sql: &str) -> String {
+    explain_query_verbatim(c, prefix, sql).to_lowercase()
+}
+
+/// Preserve the PostgreSQL node header for strict same-node report parsers.
+fn explain_query_verbatim(c: &mut Client, prefix: &str, sql: &str) -> String {
     let rows = c
         .simple_query(&format!("{prefix} {sql}"))
         .unwrap_or_else(|e| panic!("`{prefix} {sql}` failed: {e}"));
@@ -837,7 +921,7 @@ fn explain_query(c: &mut Client, prefix: &str, sql: &str) -> String {
             out.push('\n');
         }
     }
-    out.to_lowercase()
+    out
 }
 
 fn explain(c: &mut Client, sql: &str) -> String {

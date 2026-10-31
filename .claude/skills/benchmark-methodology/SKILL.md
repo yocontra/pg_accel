@@ -1,5 +1,5 @@
 ---
-name: Benchmark Methodology
+name: benchmark-methodology
 description: How to run and report pg_accel benchmarks — two-arm Accel vs PG-parallel comparison, statistical rigor, workload layout, honest reporting rules.
 ---
 

@@ -111,6 +111,8 @@ pub struct CostCoefficients {
     pub preagg_yield_cost: PgCost,
     /// GPU reduce per-row operation cost.
     pub gpu_op_cost_reduce: PgCost,
+    /// Reference-calibrated cost per serial dense COUNT work unit.
+    pub gpu_dense_count_serial_work_cost: PgCost,
     /// GPU hash-aggregation per-row operation cost.
     pub gpu_op_cost_hash_agg: PgCost,
     /// Historical GPU sort calibration coefficient.
@@ -146,6 +148,7 @@ impl From<&DeviceLimits> for CostCoefficients {
             preagg_agg_cost: PgCost::new(limits.preagg_agg_cost),
             preagg_yield_cost: PgCost::new(limits.preagg_yield_cost),
             gpu_op_cost_reduce: PgCost::new(limits.gpu_op_cost_reduce),
+            gpu_dense_count_serial_work_cost: PgCost::new(limits.gpu_dense_count_serial_work_cost),
             gpu_op_cost_hash_agg: PgCost::new(limits.gpu_op_cost_hash_agg),
             gpu_op_cost_sort: PgCost::new(limits.gpu_op_cost_sort),
             gpu_op_cost_window: PgCost::new(limits.gpu_op_cost_window),

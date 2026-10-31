@@ -125,6 +125,7 @@ pub(super) struct DeclineCacheKey {
     output_rows_bits: u64,
     native_cost_bits: Option<u64>,
     policy: DeclinePolicyKey,
+    raw_count_candidate: bool,
 }
 
 impl DeclineCacheKey {
@@ -140,11 +141,17 @@ impl DeclineCacheKey {
             output_rows_bits,
             native_cost_bits: None,
             policy,
+            raw_count_candidate: false,
         }
     }
 
     pub(super) fn with_native_cost(mut self, native_cost: Option<f64>) -> Self {
         self.native_cost_bits = native_cost.map(f64::to_bits);
+        self
+    }
+
+    pub(super) fn with_raw_count_candidate(mut self, raw_count: bool) -> Self {
+        self.raw_count_candidate = raw_count;
         self
     }
 }
@@ -504,6 +511,27 @@ mod tests {
         assert_eq!(lookup(&key(2)), None);
         invalidate();
         assert_eq!(lookup(&key(1)), None);
+    }
+
+    #[test]
+    fn raw_and_legacy_candidate_declines_are_isolated_in_both_directions() {
+        for reason in [
+            "shape_invalid_spec",
+            "generic_descriptor_capability",
+            "generic_cost_not_competitive",
+            "generic_residency_budget_exceeded",
+        ] {
+            for raw in [false, true] {
+                CACHE.with(|cache| cache.borrow_mut().clear());
+                let candidate = key(91).with_raw_count_candidate(raw);
+                let other = key(91).with_raw_count_candidate(!raw);
+                insert(candidate.clone(), reason, Vec::new());
+                for _ in 0..3 {
+                    assert_eq!(lookup(&candidate), Some(reason));
+                    assert_eq!(lookup(&other), None);
+                }
+            }
+        }
     }
 
     #[test]

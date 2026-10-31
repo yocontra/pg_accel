@@ -276,6 +276,39 @@ pub struct PgaccelGroupedAggWorkspaceReq {
     pub flags: u32,
 }
 
+/// Versioned metadata-only quantities for one dense COUNT lifecycle call.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PgaccelGroupedAggCountWorkV1 {
+    pub abi_version: u32,
+    pub size_bytes: u32,
+    pub reserved0: u32,
+    pub reserved1: u32,
+    pub rows: u64,
+    pub group_capacity: u64,
+    pub row_counter_updates: u64,
+    pub global_counter_clear_entries: u64,
+    pub local_counter_init_entries: u64,
+    pub local_reduction_additions: u64,
+    pub partial_counter_writes: u64,
+    pub serial_reset_group_visits: u64,
+    pub serial_merge_group_visits: u64,
+    pub serial_partial_counter_reads: u64,
+    pub serial_finalize_group_visits: u64,
+    pub persistent_counter_lanes: u64,
+    pub key_columns: u64,
+    pub nullable_key_columns: u64,
+    pub value_null_checks: u64,
+    pub sql_mask_checks: u64,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<PgaccelGroupedAggCountWorkV1>() == 144);
+    assert!(std::mem::align_of::<PgaccelGroupedAggCountWorkV1>() == 8);
+    assert!(std::mem::offset_of!(PgaccelGroupedAggCountWorkV1, rows) == 16);
+    assert!(std::mem::offset_of!(PgaccelGroupedAggCountWorkV1, sql_mask_checks) == 136);
+};
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct PgaccelGroupedAggMeasureOut {

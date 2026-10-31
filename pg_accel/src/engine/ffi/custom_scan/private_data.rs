@@ -8,6 +8,7 @@ use std::ffi::c_int;
 use pgrx::pg_sys;
 
 use super::{GpuStrategy, OutputShapeDisc};
+use crate::engine::executor::agg::AggExecutionSelection;
 use crate::engine::executor::raster::RasterExecPlan;
 use crate::engine::executor::window::{WINDOW_SPEC_INTS, WindowFunc};
 use crate::engine::gucs;
@@ -728,14 +729,103 @@ mod typed_private_tests {
     }
 
     #[test]
+    fn raw_selection_roundtrips_and_rejects_malformed_or_ineligible_payloads() {
+        use crate::engine::spec::{ColumnRef, GroupKeyEncoding, GroupKeyRef, GroupKeySource};
+        let legacy = generic_agg_frame();
+        let end = legacy.len() - PLAN_WIRE_FOOTER_INTS - RESIDENT_PROOF_TRAILER_INTS;
+        let (mut spec, mut projection, _) = decode_agg_query_contract_at(
+            &IntListReader::from_slice(&legacy),
+            PLAN_PAYLOAD_START,
+            end,
+        )
+        .expect("legacy");
+        spec.group_keys.push(GroupKeyRef {
+            source: GroupKeySource::FactColumn(ColumnRef {
+                relation_oid: 42,
+                attno: 1,
+                type_oid: 20,
+            }),
+            type_oid: 20,
+            collation_oid: 0,
+            encoding: GroupKeyEncoding::Hash,
+        });
+        projection.slots.insert(
+            0,
+            AggOutputSlot {
+                source: AggOutputSource::GroupKey { key_index: 0 },
+                source_type_oid: 20,
+                result_type_oid: 20,
+                result_typmod: -1,
+                result_collation_oid: 0,
+                nullable: true,
+            },
+        );
+        let mut contract = AggExecutionSelection::RawIntegerCount.prefix().to_vec();
+        contract.push(AGG_QUERY_SPEC_SENTINEL);
+        contract.extend(spec.encode_i32().expect("spec"));
+        contract.push(AGG_OUTPUT_PROJECTION_SENTINEL);
+        contract.extend(projection.encode_i32(&spec).expect("projection"));
+        let decode = |words: &[i32]| {
+            decode_agg_query_contract_at(&IntListReader::from_slice(words), 0, words.len())
+        };
+        let (decoded, output, selection) = decode(&contract).expect("raw path");
+        assert_eq!(decoded, spec);
+        assert_eq!(output, projection);
+        assert_eq!(selection, AggExecutionSelection::RawIntegerCount);
+        let mut words = header(GpuStrategy::Agg, AccelStrategy::GpuReduce);
+        words.extend_from_slice(&contract);
+        let framed = frame(words, GpuStrategy::Agg, PlanExecMethod::Agg);
+        let validated = validate_plan_wire_from_reader(
+            &IntListReader::from_slice(&framed),
+            Some(PlanExecMethod::Agg),
+        )
+        .expect("raw plan");
+        assert_eq!(validated.agg_execution_selection, selection);
+        for index in [1, 2] {
+            let mut invalid = contract.clone();
+            invalid[index] = 99;
+            assert!(decode(&invalid).is_err());
+            let mut invalid_frame = framed.clone();
+            invalid_frame[PLAN_PAYLOAD_START + index] = 99;
+            assert!(validate_plan_wire_slice(&invalid_frame, PlanExecMethod::Agg).is_err());
+        }
+        for len in 0..4 {
+            assert!(decode(&contract[..len]).is_err());
+        }
+        let mut duplicate = AggExecutionSelection::RawIntegerCount.prefix().to_vec();
+        duplicate.extend_from_slice(&contract);
+        assert!(decode(&duplicate).is_err());
+        let mut invalid = AggExecutionSelection::RawIntegerCount.prefix().to_vec();
+        invalid.extend_from_slice(&legacy[PLAN_PAYLOAD_START..end]);
+        assert!(
+            decode(&invalid).is_err(),
+            "global COUNT cannot be tagged raw grouped"
+        );
+        // A legitimate ordinary scalar OID equal to the marker is not a prefix.
+        spec.fact_rel = AggExecutionSelection::SENTINEL as u32;
+        if let GroupKeySource::FactColumn(column) = &mut spec.group_keys[0].source {
+            column.relation_oid = spec.fact_rel;
+        }
+        let mut ordinary = vec![AGG_QUERY_SPEC_SENTINEL];
+        ordinary.extend(spec.encode_i32().expect("marker-valued OID"));
+        ordinary.push(AGG_OUTPUT_PROJECTION_SENTINEL);
+        ordinary.extend(projection.encode_i32(&spec).expect("output"));
+        assert_eq!(
+            decode(&ordinary).expect("ordinary payload").2,
+            AggExecutionSelection::Legacy
+        );
+    }
+
+    #[test]
     fn neutral_aggregate_contract_roundtrips_to_proof_boundary() {
         let frame = generic_agg_frame();
         let reader = IntListReader::from_slice(&frame);
         let proof_start = frame.len() - PLAN_WIRE_FOOTER_INTS - RESIDENT_PROOF_TRAILER_INTS;
         assert_eq!(frame[PLAN_PAYLOAD_START], AGG_QUERY_SPEC_SENTINEL);
-        let (spec, projection) =
+        let (spec, projection, selection) =
             decode_agg_query_contract_at(&reader, PLAN_PAYLOAD_START, proof_start)
                 .expect("strict path contract decodes");
+        assert_eq!(selection, AggExecutionSelection::Legacy);
         assert_eq!(spec.fact_rel, 42);
         assert_eq!(spec.measures.len(), 1);
         assert_eq!(projection.slots.len(), 1);
@@ -1719,6 +1809,7 @@ pub(super) struct CustomPrivateData {
     pub(super) agg_query_spec: Option<AggQuerySpec>,
     /// Ordered PostgreSQL result slots for the neutral aggregate contract.
     pub(super) agg_output_projection: Option<AggOutputProjection>,
+    pub(super) agg_execution_selection: AggExecutionSelection,
     /// Exact canonical childless raster execution contract carried as RQS2.
     pub(super) raster_exec_plan: Option<RasterExecPlan>,
     /// Versioned resident-pipeline proof decoded from the plan trailer.
@@ -1731,6 +1822,7 @@ struct ValidatedPlanWire {
     resident_proof: ResidentProofSnapshot,
     agg_query_spec: Option<AggQuerySpec>,
     agg_output_projection: Option<AggOutputProjection>,
+    agg_execution_selection: AggExecutionSelection,
     raster_exec_plan: Option<RasterExecPlan>,
 }
 
@@ -1920,7 +2012,35 @@ fn decode_agg_query_contract_at(
     fields: &IntListReader<'_>,
     mut index: usize,
     contract_end: usize,
-) -> Result<(AggQuerySpec, AggOutputProjection), DecodeError> {
+) -> Result<(AggQuerySpec, AggOutputProjection, AggExecutionSelection), DecodeError> {
+    // Recognize a selection only at the aggregate payload boundary. AQS6
+    // values/OIDs may equal this marker and must never be searched for it.
+    let selection =
+        if index < contract_end && fields.get(index) == Some(AggExecutionSelection::SENTINEL) {
+            for (offset, expected, field) in [
+                (1, 1, "aggregate selection version"),
+                (2, 1, "aggregate selection kind"),
+            ] {
+                if index + offset >= contract_end {
+                    return Err(DecodeError::Truncated {
+                        index: index + offset,
+                        field,
+                    });
+                }
+                let raw = strict_word(fields, index + offset, field)?;
+                if raw != expected {
+                    return Err(DecodeError::InvalidValue {
+                        index: index + offset,
+                        field,
+                        raw,
+                    });
+                }
+            }
+            index += 3;
+            AggExecutionSelection::RawIntegerCount
+        } else {
+            AggExecutionSelection::Legacy
+        };
     if index >= contract_end {
         return Err(DecodeError::Truncated {
             index,
@@ -2007,7 +2127,14 @@ fn decode_agg_query_contract_at(
     )?;
     let projection = AggOutputProjection::decode_i32(&projection_words, &spec)?;
     require_payload_end(projection_end, contract_end)?;
-    Ok((spec, projection))
+    selection
+        .validate(&spec, &projection)
+        .map_err(|_| DecodeError::InvalidValue {
+            index,
+            field: "aggregate execution selection contract",
+            raw: 1,
+        })?;
+    Ok((spec, projection, selection))
 }
 
 /// Decode the strict AQS6/AOP2 trailer carried by a selected aggregate path.
@@ -2017,7 +2144,7 @@ fn decode_agg_query_contract_at(
 /// extension in the current planner context.
 pub(super) unsafe fn deserialize_agg_query_path_contract(
     path_private: *mut pg_sys::List,
-) -> Result<(AggQuerySpec, AggOutputProjection), DecodeError> {
+) -> Result<(AggQuerySpec, AggOutputProjection, AggExecutionSelection), DecodeError> {
     // SAFETY: caller supplies a planner-owned list; the reader validates every
     // node before any integer is interpreted.
     let fields = unsafe { IntListReader::from_pg_list(path_private) };
@@ -2319,9 +2446,16 @@ fn validate_agg_payload(
     fields: &IntListReader<'_>,
     start: usize,
     payload_end: usize,
-) -> Result<(Option<AggQuerySpec>, Option<AggOutputProjection>), DecodeError> {
-    let (spec, projection) = decode_agg_query_contract_at(fields, start, payload_end)?;
-    Ok((Some(spec), Some(projection)))
+) -> Result<
+    (
+        Option<AggQuerySpec>,
+        Option<AggOutputProjection>,
+        AggExecutionSelection,
+    ),
+    DecodeError,
+> {
+    let (spec, projection, selection) = decode_agg_query_contract_at(fields, start, payload_end)?;
+    Ok((Some(spec), Some(projection), selection))
 }
 
 fn decode_raster_exec_plan_at(
@@ -2445,6 +2579,7 @@ fn validate_plan_wire_from_reader(
     let proof_start = footer - RESIDENT_PROOF_TRAILER_INTS;
     let resident_proof = decode_resident_proof_at(fields, proof_start)?;
 
+    let mut agg_execution_selection = AggExecutionSelection::Legacy;
     let (agg_query_spec, agg_output_projection, raster_exec_plan) = match method {
         PlanExecMethod::Scan => {
             require_payload_end(PLAN_PAYLOAD_START, proof_start)?;
@@ -2455,7 +2590,9 @@ fn validate_plan_wire_from_reader(
             (None, None, None)
         }
         PlanExecMethod::Agg => {
-            let (spec, projection) = validate_agg_payload(fields, PLAN_PAYLOAD_START, proof_start)?;
+            let (spec, projection, selection) =
+                validate_agg_payload(fields, PLAN_PAYLOAD_START, proof_start)?;
+            agg_execution_selection = selection;
             (spec, projection, None)
         }
         PlanExecMethod::Window => {
@@ -2487,6 +2624,7 @@ fn validate_plan_wire_from_reader(
         resident_proof,
         agg_query_spec,
         agg_output_projection,
+        agg_execution_selection,
         raster_exec_plan,
     })
 }
@@ -2808,6 +2946,7 @@ pub(super) unsafe fn deserialize_custom_private(
         expected_threads,
         agg_query_spec: validated.agg_query_spec,
         agg_output_projection: validated.agg_output_projection,
+        agg_execution_selection: validated.agg_execution_selection,
         raster_exec_plan: validated.raster_exec_plan,
         resident_proof,
     }
@@ -2824,6 +2963,7 @@ pub(in crate::engine::ffi) unsafe fn append_agg_query_plan(
     list: *mut pg_sys::List,
     spec: &AggQuerySpec,
     projection: &AggOutputProjection,
+    selection: AggExecutionSelection,
     cscan: *mut pg_sys::CustomScan,
 ) -> *mut pg_sys::List {
     let spec_words = spec
@@ -2840,6 +2980,14 @@ pub(in crate::engine::ffi) unsafe fn append_agg_query_plan(
         pgrx::error!("pg_accel: aggregate output projection does not match plan lists: {error}");
     });
     let mut writer = PgListWriter::from_existing(list);
+    selection
+        .validate(spec, projection)
+        .unwrap_or_else(|error| {
+            pgrx::error!("pg_accel: invalid aggregate execution selection: {error}");
+        });
+    for word in selection.prefix() {
+        writer.push_int(*word);
+    }
     writer.push_int(AGG_QUERY_SPEC_SENTINEL);
     for word in spec_words {
         writer.push_int(word);

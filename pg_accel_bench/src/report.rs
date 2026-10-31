@@ -379,6 +379,15 @@ pub struct WorkloadResult {
     pub iterations: Vec<IterationResult>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub typed_h3_settings: Vec<TypedH3SettingsCapture>,
+    /// Same measured-backend default-settings contract for non-H3 integer COUNT.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub raw_integer_count_settings: Vec<TypedH3SettingsCapture>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub raw_integer_count_native_kernel_deltas: Vec<u64>,
+    /// Extra post-measurement EXPLAIN ANALYZE on a separate backend. Its
+    /// dispatch is excluded from all measured samples and counter windows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_integer_count_execution_proof: Option<RawIntegerCountExecutionProof>,
     /// Per-pair, off-clock planner-stage deltas for native-decline benchmark
     /// cells. Entries index `iterations`; absent for non-native cells.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1358,6 +1367,9 @@ impl WorkloadResult {
             cold_shared_buffers_resident: None,
             iterations,
             typed_h3_settings: Vec::new(),
+            raw_integer_count_settings: Vec::new(),
+            raw_integer_count_native_kernel_deltas: Vec::new(),
+            raw_integer_count_execution_proof: None,
             planner_stage_captures: Vec::new(),
             native_parity_pair_captures: Vec::new(),
             artifact_lifecycle_probe: None,
@@ -1949,6 +1961,7 @@ fn threshold_lane_requires_resident_groupagg_logical_spec(lane: &str) -> bool {
         || lane.starts_with("h3_latlng_to_cell_grouped_")
         || lane.starts_with("h3_cell_to_parent_grouped_count_")
         || crate::workloads::h3_count_contract(lane).is_some()
+        || crate::workloads::raw_integer_count::contract(lane).is_some()
         || lane == "hashjoin_filter_groupagg"
         || lane == "hashjoin_groupagg_exact_sum_count"
         || lane == "ssbm_resident_int4_year_size_revenue"
@@ -2042,6 +2055,9 @@ fn plan_contains_resident_groupagg_logical_evidence(plan: &str) -> bool {
 }
 
 fn plan_contains_required_groupagg_logical_evidence(plan: &str, lane: &str) -> bool {
+    if let Some(contract) = crate::workloads::raw_integer_count::contract(lane) {
+        return plan_contains_raw_integer_count_descriptor(plan, contract, false);
+    }
     crate::workloads::h3_count_contract(lane).map_or_else(
         || {
             if lane == "ssbm_resident_int4_year_size_revenue" {
@@ -2145,6 +2161,124 @@ pub fn plan_contains_h3_count_contract(
             ))
 }
 
+/// Raw integer keys must not be satisfied by H3, a dense dictionary, or
+/// descriptor properties borrowed from a child/sibling CustomScan.
+pub fn plan_contains_raw_integer_count(
+    plan: &str,
+    contract: crate::workloads::raw_integer_count::RawIntegerCountContract,
+) -> bool {
+    plan_contains_raw_integer_count_descriptor(plan, contract, true)
+}
+
+fn plan_contains_raw_integer_count_descriptor(
+    plan: &str,
+    contract: crate::workloads::raw_integer_count::RawIntegerCountContract,
+    executed: bool,
+) -> bool {
+    let blocks = pg_accel_custom_scan_blocks(plan);
+    let [block] = blocks.as_slice() else {
+        return false;
+    };
+    let direct = direct_custom_scan_property_lines(block).join("\n");
+    if !plan_contains_resident_groupagg_logical_evidence(&direct) {
+        return false;
+    }
+    let Some(key) = plan_text_property(&direct, &["gpu descriptor group keys"]) else {
+        return false;
+    };
+    let suffix = format!(") type={} collation=0 encoding=hash", contract.key_type);
+    let Some(column) = key
+        .strip_prefix("k0:fact(")
+        .and_then(|v| v.strip_suffix(&suffix))
+        .and_then(parse_descriptor_column)
+    else {
+        return false;
+    };
+    let aggregate = contract.count_type.map_or_else(
+        || "m0:count_star -> value.count".to_owned(),
+        |oid| {
+            format!(
+                "m0:column({}.{}:type={oid}) -> value.count",
+                column.relation_oid, contract.count_attno
+            )
+        },
+    );
+    let filter = contract.predicate_attno.map_or_else(
+        || "none".to_owned(),
+        |attno| format!("sql_mask(input={}.{attno}:type=16)", column.relation_oid),
+    );
+    column.relation_oid > 0
+        && column.attno == 1
+        && column.type_oid == contract.key_type
+        && matches!(contract.key_type, 20 | 21 | 23)
+        && !contract.dense_control
+        && plan_text_property(&direct, &["gpu descriptor specialization"])
+            == Some("hash_count".to_owned())
+        // Actual EXPLAIN appends policy cost evidence after the exact label.
+        // EXPLAIN ONLY is uninitialized and cannot prove execution policy.
+        && (!executed || plan_text_property(&direct, &["gpu descriptor artifact policy"])
+            .is_some_and(|policy| policy.split_whitespace().next() == Some("ephemeral_fused")))
+        && plan_text_property(&direct, &["gpu physical kernel mode"])
+            == Some("parallel_hash".to_owned())
+        && (!executed || (plan_text_property(&direct, &["gpu dispatched physical kernel mode"])
+            == Some("parallel_hash".to_owned())
+        && plan_text_property(&direct, &["gpu physical kernel mode verified"])
+            == Some("true".to_owned())))
+        && plan_text_property(&direct, &["gpu descriptor aggregates"]) == Some(aggregate)
+        && plan_text_property(&direct, &["gpu descriptor filter"])
+            == Some(format!(
+                "fact=none; measures=[m0={filter}]; dimensions=[none]"
+            ))
+        && plan_text_property(&direct, &["gpu descriptor output"])
+            == Some(format!(
+                "slot0:group[k0] source_type={} result_type={} typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type={} result_type=20 typmod=-1 collation=0 nullable=false",
+                contract.key_type,
+                contract.key_type,
+                contract.count_type.unwrap_or(0)
+            ))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawIntegerCountExecutionProof {
+    pub explain_analyze: String,
+    pub gpu_kernel_execution_delta: u64,
+    pub stock_exec_delta: u64,
+    pub settings: GucSettings,
+}
+
+fn raw_integer_count_plan_evidence_verified(
+    workload: &WorkloadResult,
+    contract: crate::workloads::raw_integer_count::RawIntegerCountContract,
+) -> bool {
+    workload
+        .plan_snippet
+        .as_deref()
+        .is_some_and(|plan| plan_contains_raw_integer_count_descriptor(plan, contract, false))
+        && workload
+            .raw_integer_count_execution_proof
+            .as_ref()
+            .is_some_and(|proof| {
+                proof.gpu_kernel_execution_delta > 0
+                    && proof.stock_exec_delta == 0
+                    && typed_h3_default_settings(Some(&proof.settings))
+                    && plan_contains_raw_integer_count(&proof.explain_analyze, contract)
+                    && [
+                        "gpu descriptor group keys",
+                        "gpu descriptor aggregates",
+                        "gpu descriptor filter",
+                        "gpu descriptor output",
+                    ]
+                    .iter()
+                    .all(|property| {
+                        workload
+                            .plan_snippet
+                            .as_deref()
+                            .and_then(|plan| plan_text_property(plan, &[*property]))
+                            == plan_text_property(&proof.explain_analyze, &[*property])
+                    })
+            })
+}
+
 fn typed_h3_default_settings(gucs: Option<&GucSettings>) -> bool {
     let Some(gucs) = gucs else {
         return false;
@@ -2162,6 +2296,10 @@ fn typed_h3_default_settings(gucs: Option<&GucSettings>) -> bool {
 }
 
 fn typed_h3_settings_verified(workload: &WorkloadResult) -> bool {
+    count_settings_verified(workload, &workload.typed_h3_settings)
+}
+
+fn count_settings_verified(workload: &WorkloadResult, captures: &[TypedH3SettingsCapture]) -> bool {
     let mut expected = Vec::new();
     for cache in [CacheState::Warm, CacheState::Cold] {
         for (phase, samples) in [
@@ -2180,14 +2318,12 @@ fn typed_h3_settings_verified(workload: &WorkloadResult) -> bool {
     if workload.artifact_lifecycle_probe.is_some() {
         expected.push(("lifecycle", 0, CacheState::Warm));
     }
-    workload.typed_h3_settings.len() == expected.len()
-        && workload
-            .typed_h3_settings
+    captures.len() == expected.len()
+        && captures
             .iter()
             .all(|capture| typed_h3_default_settings(Some(&capture.settings)))
         && expected.iter().all(|(phase, index, cache)| {
-            workload
-                .typed_h3_settings
+            captures
                 .iter()
                 .filter(|capture| {
                     capture.phase == *phase
@@ -5453,6 +5589,62 @@ impl BenchReport {
         for w in &report.workloads {
             let threshold_entry =
                 crate::workloads::benchmark_threshold_matrix_entry(&w.name, w.rows);
+            if let Some(contract) =
+                crate::workloads::raw_integer_count::contract(&w.name).filter(|c| !c.dense_control)
+            {
+                let pairs = w
+                    .iterations
+                    .iter()
+                    .filter(|p| p.cache_state == CacheState::Warm)
+                    .collect::<Vec<_>>();
+                let first = pairs.iter().filter(|p| p.accel_first).count();
+                let verified = crate::workloads::raw_integer_count::ROW_SCALES.contains(&w.rows)
+                    && report.methodology.timing_mode == "raw-wallclock"
+                    && report.methodology.warmup >= 5
+                    && report.methodology.iterations >= 10
+                    && w.warmup_iterations
+                        .iter()
+                        .filter(|p| p.cache_state == CacheState::Warm)
+                        .count()
+                        >= 5
+                    && pairs.len() >= 10
+                    && first.abs_diff(pairs.len() - first) <= 1
+                    && pairs.iter().all(|p| {
+                        p.accel_ms.is_finite()
+                            && p.accel_ms > 0.0
+                            && p.parallel_ms.is_finite()
+                            && p.parallel_ms > 0.0
+                    })
+                    && count_settings_verified(w, &w.raw_integer_count_settings)
+                    && w.raw_integer_count_native_kernel_deltas.len()
+                        == w.iterations.len() + w.warmup_iterations.len()
+                    && w.raw_integer_count_native_kernel_deltas
+                        .iter()
+                        .all(|delta| *delta == 0)
+                    && w.plan_selected
+                    && w.gpu_kernel_dispatched
+                    && w.dispatch_counter_captured
+                    && w.gpu_kernel_execution_delta > 0
+                    && w.pg_accel_stock_exec_delta == 0
+                    && w.accel_output_rows_consumed > 0
+                    && w.correctness_diff_artifact.is_some()
+                    && w.physical_kernel_mode_verified
+                    && w.physical_kernel_mode.as_deref() == Some("parallel_hash")
+                    && w.physical_kernel_mode_counts.parallel_hash > 0
+                    && w.physical_kernel_mode_counts.serial_generic == 0
+                    && raw_integer_count_plan_evidence_verified(w, contract)
+                    && raw_integer_count_lifecycle_evidence_error(w).is_none();
+                let speedup = warm_speedup_for_gate(w);
+                if !verified || !speedup.is_finite() || speedup < 1.15 {
+                    failures.push(BenchmarkShipGateFailure {
+                        workload: w.name.clone(), rows: w.rows,
+                        kind: if verified { BenchmarkShipGateFailureKind::ExpectedWinnerBelowThreshold } else { BenchmarkShipGateFailureKind::ExpectedWinnerMissingEvidence },
+                        speedup_median: speedup, gate_floor: 1.15,
+                        detail: "raw integer COUNT requires exact raw FactColumn/hash proof, default settings, complete parity/lifecycle artifacts, five warmups, ten balanced raw pairs and >=1.15x warm speedup".to_owned(),
+                    });
+                    continue;
+                }
+            }
             let is_native_decline =
                 crate::workloads::workload_metadata(&w.name).is_some_and(|metadata| {
                     metadata.evidence.threshold
@@ -5962,6 +6154,23 @@ fn derived_output_artifact_reuse_evidence_error(workload: &WorkloadResult) -> Op
         );
     }
     None
+}
+
+/// Raw integer COUNT owns query-local preparation, never a reusable dictionary
+/// or parent-transform artifact. Keep the generic dense/H3 policy contract intact.
+fn raw_integer_count_lifecycle_evidence_error(workload: &WorkloadResult) -> Option<String> {
+    if workload
+        .artifact_lifecycle_probe
+        .as_ref()
+        .is_none_or(|probe| probe.artifact_policy.as_deref() != Some("ephemeral_fused"))
+        || workload
+            .artifact_steady_state_captures
+            .iter()
+            .any(|capture| capture.artifact_policy.as_deref() != Some("ephemeral_fused"))
+    {
+        return Some("raw integer COUNT requires explicit ephemeral_fused policy in the lifecycle probe and every steady-state capture".to_owned());
+    }
+    selected_resident_lifecycle_evidence_error(workload)
 }
 
 fn selected_resident_lifecycle_evidence_error(workload: &WorkloadResult) -> Option<String> {
@@ -8433,6 +8642,219 @@ mod tests {
         assert!(!plan_contains_resident_groupagg_logical_evidence(
             &incomplete
         ));
+    }
+
+    #[test]
+    fn raw_integer_count_receipt_requires_verbatim_node_header() {
+        // Descriptor values copied from normal18-initial/test.log (2026-10-26).
+        // That failed test receipt was lowercased by explain_query: only the
+        // node header below restores PostgreSQL's original casing. This is a
+        // parser regression, not a claim that the failed live run proved parity.
+        let plan = "Custom Scan (GpuAccelAgg) (actual time=4841.208..4842.366 rows=16389.00 loops=1)
+  output: k, (count(*))
+  strategy: gpuagg
+  plan selected: true
+  gpu resident pipeline: true
+  gpu resident proof version: 2
+  gpu resident operator class: resident_groupagg
+  gpu physical kernel mode: parallel_hash
+  gpu dispatched physical kernel mode: parallel_hash
+  gpu physical kernel mode verified: true
+  gpu descriptor strategy: descriptor_grouped_aggregate
+  gpu descriptor specialization: hash_count
+  gpu descriptor artifact policy: ephemeral_fused reason=zero_retained_bytes construction_bytes=0 ephemeral_bytes=0 construction_time_us=1 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=0 ephemeral_build_launches=0 consumer_launches=1 budget_headroom_bytes=8584934507
+  gpu descriptor group keys: k0:fact(16420.1:type=21) type=21 collation=0 encoding=hash
+  gpu descriptor aggregates: m0:count_star -> value.count
+  gpu descriptor filter: fact=none; measures=[m0=none]; dimensions=[none]
+  gpu descriptor output: slot0:group[k0] source_type=21 result_type=21 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  gpu kernel dispatched: true";
+        let contract = crate::workloads::raw_integer_count::contract("raw_int2_count_star")
+            .expect("registered raw fixture");
+        assert!(plan_contains_raw_integer_count(plan, contract));
+        assert!(!plan_contains_raw_integer_count(
+            &plan.to_lowercase(),
+            contract
+        ));
+    }
+
+    #[test]
+    fn raw_integer_count_proof_rejects_dense_h3_wrong_filter_and_cross_node() {
+        for name in &crate::workloads::raw_integer_count::NAMES[..6] {
+            let c =
+                crate::workloads::raw_integer_count::contract(name).expect("registered contract");
+            let h3 = crate::workloads::H3CountContract {
+                measure: c
+                    .count_type
+                    .map_or(crate::workloads::H3CountMeasure::Star, |type_oid| {
+                        crate::workloads::H3CountMeasure::Column {
+                            type_oid,
+                            attno: c.count_attno,
+                        }
+                    }),
+                resolution: 0,
+                predicate_attno: c.predicate_attno,
+            };
+            let plan = h3_contract_plan(h3)
+                .replace(
+                    "k0:h3_cell_to_parent(100.1:type=90001, resolution=0)",
+                    &format!("k0:fact(100.1:type={})", c.key_type),
+                )
+                .replace("90001", &c.key_type.to_string());
+            let plan = format!(
+                "{plan}\n  GPU Descriptor Specialization: hash_count\n  GPU Descriptor Artifact Policy: ephemeral_fused reason=zero_retained_bytes construction_bytes=0 ephemeral_bytes=0 construction_time_us=0 expected_reuses=1 cache_hit=false invalidation_risk_ppm=0 cached_build_launches=0 ephemeral_build_launches=0 consumer_launches=1 budget_headroom_bytes=1000000\n  GPU Physical Kernel Mode: parallel_hash\n  GPU Dispatched Physical Kernel Mode: parallel_hash\n  GPU Physical Kernel Mode Verified: true"
+            );
+            assert!(plan_contains_raw_integer_count(&plan, c), "{name}: {plan}");
+            // Production runner stores EXPLAIN ONLY separately from its extra
+            // off-clock ANALYZE proof. Uninitialized static policy is expected.
+            let static_plan = plan
+                .lines()
+                .filter(|line| {
+                    !line.contains("GPU Dispatched Physical Kernel Mode:")
+                        && !line.contains("GPU Physical Kernel Mode Verified:")
+                })
+                .map(|line| {
+                    if line.contains("GPU Descriptor Artifact Policy:") {
+                        "  GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)"
+                    } else {
+                        line
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(!plan_contains_raw_integer_count(&static_plan, c));
+            assert!(plan_contains_raw_integer_count_descriptor(
+                &static_plan,
+                c,
+                false
+            ));
+            let mut workload = mock_workload_result(name, 1_000_017, 10.0, 20.0);
+            workload.plan_snippet = Some(static_plan.clone());
+            workload.raw_integer_count_execution_proof = Some(RawIntegerCountExecutionProof {
+                explain_analyze: plan.clone(),
+                gpu_kernel_execution_delta: 1,
+                stock_exec_delta: 0,
+                settings: GucSettings {
+                    settings: [
+                        ("pg_accel.cost_multiplier", "1"),
+                        ("pg_accel.min_batch_size", "65536"),
+                        ("pg_accel.enabled", "on"),
+                        ("pg_accel.gpu_enabled", "on"),
+                    ]
+                    .into_iter()
+                    .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                    .collect(),
+                },
+            });
+            assert!(raw_integer_count_plan_evidence_verified(&workload, c));
+            for invalid_actual in [
+                static_plan,
+                plan.replace("100.", "101."),
+                plan.replace(
+                    "GPU Descriptor Filter:",
+                    "-> Custom Scan (GpuAccelAgg)\n    GPU Descriptor Filter:",
+                ),
+            ] {
+                let mut invalid = workload.clone();
+                invalid
+                    .raw_integer_count_execution_proof
+                    .as_mut()
+                    .expect("actual proof")
+                    .explain_analyze = invalid_actual;
+                assert!(!raw_integer_count_plan_evidence_verified(&invalid, c));
+            }
+            workload.raw_integer_count_execution_proof = None;
+            assert!(!raw_integer_count_plan_evidence_verified(&workload, c));
+            for bad in [
+                plan.replace("hash_count", "dense_count_plain"),
+                plan.replace("ephemeral_fused", "cached_reusable"),
+                plan.replace("ephemeral_fused", "not initialized (EXPLAIN ONLY)"),
+                plan.replace("ephemeral_fused", "not_ephemeral_fused"),
+                plan.replace("GPU Descriptor Artifact Policy:", "Missing Policy:"),
+                plan.replace(
+                    "GPU Descriptor Artifact Policy:",
+                    "-> Seq Scan on other\n    GPU Descriptor Artifact Policy:",
+                ),
+                plan.replace("parallel_hash", "parallel_dense_count"),
+                plan.replace("k0:fact(", "k0:h3_cell_to_parent("),
+                plan.replace("encoding=hash", "encoding=dictionary"),
+                plan.replace("fact=none", "fact=sql_mask(input=100.3:type=16)"),
+                plan.replace(
+                    "GPU Descriptor Filter:",
+                    "-> Custom Scan (GpuAccelAgg)\n    GPU Descriptor Filter:",
+                ),
+                plan.replace(
+                    "GPU Physical Kernel Mode Verified: true",
+                    "GPU Physical Kernel Mode Verified: false",
+                ),
+            ] {
+                assert!(!plan_contains_raw_integer_count(&bad, c), "accepted {bad}");
+            }
+        }
+    }
+
+    #[test]
+    fn raw_integer_count_lifecycle_requires_explicit_ephemeral_policy() {
+        let persistent = with_valid_resident_lifecycle(mock_workload_result(
+            "raw_int4_count_star",
+            1_000_017,
+            10.0,
+            20.0,
+        ));
+        // The generic policy remains valid for existing cached dense/H3 paths.
+        assert_eq!(
+            selected_resident_lifecycle_evidence_error(&persistent),
+            None
+        );
+        assert!(raw_integer_count_lifecycle_evidence_error(&persistent).is_some());
+        let mut valid = persistent;
+        let probe = valid.artifact_lifecycle_probe.as_mut().expect("probe");
+        probe.artifact_policy = Some("ephemeral_fused".to_owned());
+        probe.artifact.artifact_bytes_observed = 0;
+        probe.artifact.construction_bytes = 0;
+        for capture in &mut valid.artifact_steady_state_captures {
+            capture.artifact_policy = Some("ephemeral_fused".to_owned());
+            capture.artifact.hits = 0;
+            capture.artifact.builds = 1;
+            capture.artifact.artifact_bytes_observed = 0;
+            capture.artifact.construction_bytes = 0;
+        }
+        assert_eq!(raw_integer_count_lifecycle_evidence_error(&valid), None);
+        for policy in [
+            None,
+            Some("cached_reusable"),
+            Some("not initialized (EXPLAIN ONLY)"),
+            Some("not_ephemeral_fused"),
+        ] {
+            let mut invalid_probe = valid.clone();
+            invalid_probe
+                .artifact_lifecycle_probe
+                .as_mut()
+                .expect("probe")
+                .artifact_policy = policy.map(str::to_owned);
+            assert!(raw_integer_count_lifecycle_evidence_error(&invalid_probe).is_some());
+            let mut invalid_steady = valid.clone();
+            invalid_steady.artifact_steady_state_captures[0].artifact_policy =
+                policy.map(str::to_owned);
+            assert!(raw_integer_count_lifecycle_evidence_error(&invalid_steady).is_some());
+        }
+        let mut missing = valid.clone();
+        missing.artifact_lifecycle_probe = None;
+        assert!(raw_integer_count_lifecycle_evidence_error(&missing).is_some());
+        valid.artifact_steady_state_captures.clear();
+        assert!(raw_integer_count_lifecycle_evidence_error(&valid).is_some());
+    }
+
+    #[test]
+    fn raw_integer_count_gate_never_accepts_unproven_summary() {
+        for name in &crate::workloads::raw_integer_count::NAMES[..6] {
+            let report = mock_report(vec![mock_workload_result(name, 1_000_017, 1.0, 20.0)]);
+            assert!(
+                report
+                    .evaluate_benchmark_ship_gate()
+                    .iter()
+                    .any(|failure| failure.workload == *name)
+            );
+        }
     }
 
     fn typed_h3_plan(type_oid: u32, resolution: i32) -> String {

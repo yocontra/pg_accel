@@ -33,6 +33,7 @@ mod grouped_multimeasure_integer;
 mod hashagg_sweep;
 mod predicate_expression_grouped_agg_int4;
 mod predicate_filter_expression_grouped_agg;
+pub mod raw_integer_count;
 mod timeseries_sensor_rollup;
 // --- GPU Sort ---
 mod gpu_sort_multikey;
@@ -349,6 +350,27 @@ pub trait Workload: Send + Sync {
 /// Return all registered workloads.
 pub fn all_workloads() -> Vec<Box<dyn Workload>> {
     vec![
+        Box::new(raw_integer_count::RawIntegerCount("raw_int2_count_star")),
+        Box::new(raw_integer_count::RawIntegerCount(
+            "raw_int2_count_bool_filter",
+        )),
+        Box::new(raw_integer_count::RawIntegerCount("raw_int4_count_star")),
+        Box::new(raw_integer_count::RawIntegerCount(
+            "raw_int4_count_bool_filter",
+        )),
+        Box::new(raw_integer_count::RawIntegerCount("raw_int8_count_star")),
+        Box::new(raw_integer_count::RawIntegerCount(
+            "raw_int8_count_bool_filter",
+        )),
+        Box::new(raw_integer_count::RawIntegerCount(
+            "dense_int2_count_control",
+        )),
+        Box::new(raw_integer_count::RawIntegerCount(
+            "dense_int4_count_control",
+        )),
+        Box::new(raw_integer_count::RawIntegerCount(
+            "dense_int8_count_control",
+        )),
         Box::new(nyc_taxi::NycTaxi("nyc_taxi_h3_res9")),
         Box::new(nyc_taxi::NycTaxi("nyc_taxi_airport_indexed")),
         Box::new(nyc_taxi::NycTaxi("nyc_taxi_airport_scan")),
@@ -1101,6 +1123,42 @@ struct ReleasedEnvelopeContract {
 
 const RELEASED_ENVELOPE_CONTRACTS: &[ReleasedEnvelopeContract] = &[
     ReleasedEnvelopeContract {
+        workload: "raw_int2_count_star",
+        min_rows: 1_000_017,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "raw_int2_count_bool_filter",
+        min_rows: 1_000_017,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "raw_int4_count_star",
+        min_rows: 1_000_017,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "raw_int4_count_bool_filter",
+        min_rows: 1_000_017,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "raw_int8_count_star",
+        min_rows: 1_000_017,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "raw_int8_count_bool_filter",
+        min_rows: 1_000_017,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
         workload: "grouped_agg_int4",
         min_rows: GROUPAGG_WINNER_MIN_ROWS,
         max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
@@ -1608,7 +1666,8 @@ pub fn benchmark_threshold_matrix_entry(
     name: &str,
     rows: usize,
 ) -> Option<BenchmarkThresholdMatrixEntry> {
-    groupagg_threshold_matrix_entry(name, rows)
+    raw_integer_count_threshold_entry(name, rows)
+        .or_else(|| groupagg_threshold_matrix_entry(name, rows))
         .or_else(|| olap_threshold_matrix_entry(name, rows))
         .or_else(|| h3_threshold_matrix_entry(name, rows))
         .or_else(|| raster_threshold_matrix_entry(name, rows))
@@ -1620,6 +1679,41 @@ pub fn benchmark_threshold_matrix_entry(
         .or_else(|| spatial_threshold_matrix_entry(name, rows))
         .or_else(|| regression_decline_matrix_entry(name, rows))
         .map(validate_performance_envelope)
+}
+
+fn raw_integer_count_threshold_entry(name: &str, rows: usize) -> Option<PerformanceEnvelope> {
+    let contract = raw_integer_count::contract(name)?;
+    if contract.dense_control || !raw_integer_count::ROW_SCALES.contains(&rows) {
+        return None;
+    }
+    let name = *raw_integer_count::NAMES
+        .iter()
+        .find(|candidate| **candidate == name)?;
+    Some(PerformanceEnvelope {
+        lane: name,
+        workload: name,
+        rows,
+        data_type: match contract.key_type {
+            21 => "INT2",
+            23 => "INT4",
+            _ => "INT8",
+        },
+        cardinality: "16388 non-NULL signed sparse keys plus NULL; deterministic 20% hot-key skew",
+        selectivity: "no WHERE; independent nullable BOOL value and FILTER",
+        result_count: "16389".to_owned(),
+        index_pruning_shape: "n/a",
+        prepared_geometry: "n/a",
+        batch_count: "bounded raw integer hash COUNT".to_owned(),
+        row_width: "typed raw key plus required value/FILTER",
+        output_size: "16389 typed key/count rows",
+        dispatch_evidence: "same-node FactColumn/hash/COUNT, raw selection, parallel_hash actual mode, positive kernel delta and zero stock fallback",
+        correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
+        cache_gate: GENERIC_CACHE_GATE,
+        threshold_basis: "predeclared raw integer COUNT qualification; no cost overrides",
+        expectation: BenchmarkLaneExpectation::GpuWinner {
+            min_warm_speedup: 1.15,
+        },
+    })
 }
 
 fn validate_performance_envelope(entry: PerformanceEnvelope) -> PerformanceEnvelope {
@@ -4247,7 +4341,7 @@ mod tests {
     }
 
     fn supported_default_suite_probe(name: &str, rows: usize) -> bool {
-        if h3_count_contract(name).is_some() {
+        if h3_count_contract(name).is_some() || raw_integer_count::contract(name).is_some() {
             return matches!(rows, 1_000_017 | 2_000_017);
         }
         matches!(

@@ -1,0 +1,54 @@
+-- pgaccel_kernels: SYCL (AdaptiveCpp) is the only supported backend; build fails without AdaptiveCpp
+-- Configuring done (0.2s)
+-- Generating done (0.1s)
+-- Build files have been written to: /Users/contra/Projects/pg_accel/pgaccel-kernels/build
+[ 26%] Built target pgaccel_kernels_shared
+[ 26%] Built target pgaccel_kernels
+[ 27%] Built target test_reduce_matrix
+[ 28%] Built target test_spatial_pairwise_boundary
+[ 30%] Built target test_spatial_dispatch
+[ 30%] Building CXX object CMakeFiles/test_join_rows.dir/test/test_join_rows.cpp.o
+[ 32%] Built target test_spatial
+[ 34%] Built target test_hash_agg_keys
+[ 36%] Built target test_spatial_resident
+[ 38%] Built target test_hashagg_spatial_matrix
+[ 40%] Built target test_device
+[ 41%] Built target test_hash_join
+[ 42%] Built target test_grouped_agg_workspace
+[ 44%] Built target test_reduce_minimal
+[ 47%] Built target test_bbox
+[ 48%] Built target test_expr_memory
+[ 48%] Built target test_correctness
+[ 49%] Built target test_hash_agg_partial
+[ 51%] Built target test_fork_warmed
+[ 52%] Built target test_raster_resident
+[ 54%] Built target test_kernel_failure_status
+[ 56%] Built target test_expr_vm_matrix
+[ 60%] Built target test_hash_domain_matrix
+[ 60%] Built target test_h3
+[ 62%] Built target test_host_api_contract
+[ 64%] Built target test_scalar
+[ 66%] Built target test_exec_gpu
+[ 68%] Built target test_fp64_probe_mul
+[ 72%] Built target test_fork_archive_stress
+[ 72%] Built target test_fork_cold_barrier
+[ 73%] Built target test_fp64_mul_probe
+[ 75%] Built target test_grouped_agg_hash
+[ 76%] Built target test_grouped_agg
+[ 78%] Built target test_reduce_bool_bit
+[ 79%] Built target test_reduce_stats
+[ 81%] Built target test_fp64_probe_add
+[ 83%] Built target test_fp64_probe_cos
+[ 87%] Built target test_fp64_probe_haversine
+[ 87%] Built target test_fp64_probe_asin
+[ 87%] Built target test_fp64_probe_atan2
+[ 90%] Built target test_ooo_overlap
+[ 92%] Built target test_fp64_probe_sqrt
+[ 93%] Built target test_spatial_bench
+[ 95%] Built target test_sycl_basic
+[ 96%] Built target test_fork_cold
+[ 97%] Built target test_oom_invariant
+[ 98%] Built target test_fp64_probe_sin
+[ 99%] Built target test_fork
+[100%] Linking CXX executable test_join_rows
+[100%] Built target test_join_rows

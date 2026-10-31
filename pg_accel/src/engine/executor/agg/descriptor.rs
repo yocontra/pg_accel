@@ -993,6 +993,7 @@ pub fn planned_descriptor_kernel_mode(
     if hash_grouping {
         return if matches!(spec.measures.as_slice(), [count] if canonical_count_measure(count))
             || canonical_h3_count(spec)
+            || canonical_raw_integer_count(spec)
         {
             GroupedAggKernelMode::ParallelHash
         } else {
@@ -1494,9 +1495,6 @@ pub fn canonical_h3_count(spec: &AggQuerySpec) -> bool {
     let Some((cell, resolution, result_type)) = h3_parent_group(spec) else {
         return false;
     };
-    let [measure] = spec.measures.as_slice() else {
-        return false;
-    };
     cell.relation_oid == spec.fact_rel
         && cell.attno > 0
         && i16::try_from(cell.attno).is_ok()
@@ -1504,7 +1502,21 @@ pub fn canonical_h3_count(spec: &AggQuerySpec) -> bool {
         && (0..=15).contains(&resolution)
         && spec.group_keys[0].encoding == GroupKeyEncoding::Hash
         && spec.group_keys[0].collation_oid == 0
-        && spec.star_dims.is_empty()
+        && canonical_hash_count_measure(spec)
+}
+
+/// An additional physical candidate, not a replacement for an unresolved
+/// dictionary key. The selected plan must explicitly request raw hashing.
+pub fn canonical_raw_integer_count(spec: &AggQuerySpec) -> bool {
+    raw_hash_group(spec).is_some_and(|column| i16::try_from(column.attno).is_ok())
+        && canonical_hash_count_measure(spec)
+}
+
+fn canonical_hash_count_measure(spec: &AggQuerySpec) -> bool {
+    let [measure] = spec.measures.as_slice() else {
+        return false;
+    };
+    spec.star_dims.is_empty()
         && matches!(spec.fact_filter, FilterSpec::None)
         && spec.having.is_none()
         && match measure.filter {
@@ -1570,6 +1582,24 @@ fn validate_h3_runtime_capability(
     if !canonical_h3_count(spec) {
         return Err("H3 parent grouping requires one fixed-width COUNT with an optional direct Boolean FILTER".to_owned());
     }
+    validate_single_count_projection(projection)
+}
+
+pub(super) fn validate_raw_count_capability(
+    spec: &AggQuerySpec,
+    projection: &AggOutputProjection,
+) -> Result<(), String> {
+    spec.validate().map_err(|error| error.to_string())?;
+    projection
+        .validate(spec)
+        .map_err(|error| error.to_string())?;
+    if !canonical_raw_integer_count(spec) {
+        return Err("raw integer hashing requires one direct key and one fixed-width COUNT with optional Boolean FILTER".into());
+    }
+    validate_single_count_projection(projection)
+}
+
+fn validate_single_count_projection(projection: &AggOutputProjection) -> Result<(), String> {
     if projection.slots.len() != 2
         || projection
             .slots
@@ -1598,9 +1628,7 @@ fn validate_h3_runtime_capability(
             .count()
             != 1
     {
-        return Err(
-            "H3 parent grouping projection must contain its key and COUNT(*) once".to_owned(),
-        );
+        return Err("hash COUNT projection must contain its key and COUNT once".to_owned());
     }
     Ok(())
 }
@@ -2658,6 +2686,7 @@ fn refresh_rebuilt_artifact_policy(
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum DescriptorAggExecutionError {
+    PreparationInterrupted,
     NumericOverflow,
     DivisionByZero,
     DateOutOfRange,
@@ -2668,6 +2697,7 @@ pub(super) enum DescriptorAggExecutionError {
 impl fmt::Display for DescriptorAggExecutionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::PreparationInterrupted => formatter.write_str("resident preparation interrupted"),
             Self::NumericOverflow => formatter.write_str("numeric value out of range"),
             Self::DivisionByZero => formatter.write_str("division by zero"),
             Self::DateOutOfRange => formatter.write_str("date out of range"),
@@ -2931,10 +2961,24 @@ fn descriptor_artifact_policy_input(
 }
 
 impl DescriptorAggPlan {
+    #[cfg(feature = "pg_test")]
     pub(super) fn new(spec: AggQuerySpec, projection: AggOutputProjection) -> Result<Self, String> {
-        validate_internal_runtime_capability(&spec, &projection)?;
-        let planned_kernel_mode =
-            planned_descriptor_kernel_mode(&spec, h3_parent_group(&spec).is_some());
+        Self::new_selected(spec, projection, super::AggExecutionSelection::Legacy)
+    }
+
+    pub(super) fn new_selected(
+        spec: AggQuerySpec,
+        projection: AggOutputProjection,
+        selection: super::AggExecutionSelection,
+    ) -> Result<Self, String> {
+        selection.validate(&spec, &projection)?;
+        let planned_kernel_mode = match selection {
+            super::AggExecutionSelection::Legacy => {
+                validate_internal_runtime_capability(&spec, &projection)?;
+                planned_descriptor_kernel_mode(&spec, h3_parent_group(&spec).is_some())
+            }
+            super::AggExecutionSelection::RawIntegerCount => GroupedAggKernelMode::ParallelHash,
+        };
         Self::from_validated_spec(spec, projection, planned_kernel_mode)
     }
 
@@ -2968,7 +3012,12 @@ impl DescriptorAggPlan {
                 let column = raw_hash_group(&spec)
                     .ok_or("raw hash requires one canonical integer fact key")?;
                 HashMeasureInput::from_spec(&spec)?;
-                (DescriptorArtifactKind::RawHash { column }, Vec::new())
+                (
+                    DescriptorArtifactKind::RawHash { column },
+                    super::AggExecutionSelection::RawIntegerCount
+                        .prefix()
+                        .to_vec(),
+                )
             } else if spec.fact_filter.spatial().is_some() {
                 // SAFETY: executor Begin runs on PostgreSQL's main backend thread.
                 let catalog = unsafe { resolve_postgis_catalog() }?;
@@ -3008,7 +3057,9 @@ impl DescriptorAggPlan {
             limits.gpu_hash_agg_max_groups
         };
         #[cfg(feature = "pg_test")]
-        let max_groups = if canonical_h3_count(&spec) {
+        let max_groups = if planned_kernel_mode == GroupedAggKernelMode::ParallelHash
+            && (canonical_h3_count(&spec) || canonical_raw_integer_count(&spec))
+        {
             TEST_ADAPTIVE_HASH_CAP
                 .with(|cap| cap.get().map_or(max_groups, |cap| cap.min(max_groups)))
         } else {
@@ -3518,23 +3569,29 @@ impl DescriptorAggPlan {
     }
 
     fn prepare_h3_execution(&self) -> Result<Option<HashExecutionFingerprint>, ResidentLoadError> {
-        if !canonical_h3_count(&self.spec) {
+        if !self.uses_adaptive_hash_count() {
             return Ok(None);
         }
-        let (cell, _, _) = h3_parent_group(&self.spec).expect("canonical H3 key");
-        // Catalog work must finish before either residency lease. This also
-        // prevents a retained plan from reusing an owner after function drift.
-        // SAFETY: execution runs on the main PostgreSQL backend thread, with
-        // no residency lease held across the catalog lookup.
-        let catalog = unsafe { crate::engine::ffi::syscache::resolve_h3_catalog() }
-            .map_err(ResidentLoadError::Loader)?;
-        let identity =
-            descriptor_artifact_identity(&self.spec, &self.projection, &catalog.fingerprint_words)?;
-        if identity != self.identity || u32::from(catalog.type_oid) != cell.type_oid {
-            return Err("H3 catalog identity changed before dispatch"
-                .to_owned()
-                .into());
-        }
+        let cell = if let Some((cell, _, _)) = h3_parent_group(&self.spec) {
+            // Catalog work must finish before either residency lease. Raw
+            // integer keys deliberately have no H3 extension dependency.
+            // SAFETY: main PostgreSQL backend thread, no residency lease held.
+            let catalog = unsafe { crate::engine::ffi::syscache::resolve_h3_catalog() }
+                .map_err(ResidentLoadError::Loader)?;
+            let identity = descriptor_artifact_identity(
+                &self.spec,
+                &self.projection,
+                &catalog.fingerprint_words,
+            )?;
+            if identity != self.identity || u32::from(catalog.type_oid) != cell.type_oid {
+                return Err("H3 catalog identity changed before dispatch"
+                    .to_owned()
+                    .into());
+            }
+            cell
+        } else {
+            raw_hash_group(&self.spec).ok_or("adaptive raw key missing".to_owned())?
+        };
         let owner = pg_sys::Oid::from(self.spec.fact_rel);
         let (fingerprint, bytes, protection) = if self.artifact_policy.get()
             == DescriptorArtifactPolicy::CachedReusable
@@ -3908,6 +3965,33 @@ pub(super) struct AdaptiveHashExecution {
 #[cfg(feature = "pg_test")]
 thread_local! {
     static TEST_ADAPTIVE_HASH_CAP: Cell<Option<usize>> = const { Cell::new(None) };
+    static TEST_ADAPTIVE_MASK_INTERRUPT: Cell<Option<(u64, bool)>> = const { Cell::new(None) };
+}
+
+#[cfg(feature = "pg_test")]
+fn set_adaptive_mask_test_interrupt(value: Option<(u64, bool)>) -> Option<(u64, bool)> {
+    TEST_ADAPTIVE_MASK_INTERRUPT.with(|state| state.replace(value))
+}
+
+#[cfg(feature = "pg_test")]
+fn test_adaptive_mask_interrupt(completed_calls: u64) {
+    let request = TEST_ADAPTIVE_MASK_INTERRUPT.with(|state| {
+        let request = state.get()?;
+        (completed_calls >= request.0).then(|| {
+            state.set(None);
+            request.1
+        })
+    });
+    if let Some(cancel) = request {
+        // SAFETY: backend-main-thread test hook changes only signal flags while
+        // a mask lease is held. PostgreSQL service remains outside that lease.
+        unsafe {
+            if cancel {
+                std::ptr::write_volatile(&raw mut pg_sys::QueryCancelPending, 1);
+            }
+            std::ptr::write_volatile(&raw mut pg_sys::InterruptPending, 1);
+        }
+    }
 }
 
 #[cfg(feature = "pg_test")]
@@ -3949,12 +4033,26 @@ impl DescriptorAggPlan {
         let Some(emitted) = state.learned_candidate.take() else {
             return Ok(());
         };
-        if self.artifact_policy.get() != DescriptorArtifactPolicy::CachedReusable {
-            return Ok(());
-        }
         // Revalidate the exact generation fingerprint before reacquiring its
         // artifact. No PostgreSQL service occurs between these bounded leases.
         self.with_adaptive_hash_descriptor(state, true, |_| Ok(()))?;
+        if self.artifact_policy.get() != DescriptorArtifactPolicy::CachedReusable {
+            if canonical_raw_integer_count(&self.spec) {
+                let ephemeral = self.ephemeral_artifact.borrow();
+                let Some(EphemeralDescriptorArtifact::Hash(artifact)) = ephemeral.as_ref() else {
+                    return Err("adaptive raw owner missing during learning"
+                        .to_owned()
+                        .into());
+                };
+                with_ephemeral_artifact_inputs(
+                    pg_sys::Oid::from(self.spec.fact_rel),
+                    artifact,
+                    &self.dispatch_columns,
+                    |inputs| inputs.artifact.record_validated_raw_groups(emitted),
+                )??;
+            }
+            return Ok(());
+        }
         with_derived_artifact_inputs::<H3ParentArtifact, _>(
             pg_sys::Oid::from(self.spec.fact_rel),
             &self.identity,
@@ -3965,7 +4063,8 @@ impl DescriptorAggPlan {
     }
 
     pub(super) fn uses_adaptive_hash_count(&self) -> bool {
-        canonical_h3_count(&self.spec)
+        self.planned_kernel_mode == GroupedAggKernelMode::ParallelHash
+            && (canonical_h3_count(&self.spec) || canonical_raw_integer_count(&self.spec))
     }
 
     /// Resolve a fresh borrowed descriptor for exactly one quote/dispatch.
@@ -3976,8 +4075,10 @@ impl DescriptorAggPlan {
         quote: bool,
         callback: impl FnOnce(abi::PgaccelGroupedAggDesc) -> Result<R, DescriptorAggExecutionError>,
     ) -> Result<R, DescriptorAggExecutionError> {
-        let (cell, _, _) =
-            h3_parent_group(&self.spec).ok_or("missing adaptive H3 key".to_owned())?;
+        let cell = h3_parent_group(&self.spec)
+            .map(|(cell, _, _)| cell)
+            .or_else(|| raw_hash_group(&self.spec))
+            .ok_or("missing adaptive hash key".to_owned())?;
         let owner = pg_sys::Oid::from(self.spec.fact_rel);
         if self.artifact_policy.get() == DescriptorArtifactPolicy::CachedReusable {
             with_derived_artifact_inputs::<H3ParentArtifact, _>(
@@ -4027,23 +4128,66 @@ impl DescriptorAggPlan {
                 )?;
                 if !quote && !state.filter_initialized {
                     let (_, mask_calls) = h3_mask_work(&self.spec, desc.row_count)?;
-                    state.scheduled_calls = state
-                        .scheduled_calls
-                        .checked_add(mask_calls)
-                        .ok_or("adaptive mask schedule overflow".to_owned())?;
-                    let bound = build_fused_hash_descriptor(
-                        inputs.artifact,
+                    let input = resolve_h3_filter(
+                        &self.spec,
                         &self.dispatch_columns,
                         &inputs.columns,
-                        cell,
-                        &mut postgres_interrupt_pending,
+                        desc.row_count,
                     )?;
-                    state.filter = bound._filter;
-                    state.filter_initialized = true;
+                    let before = crate::gpu::gpu_exec_count();
+                    let mut submitted = 0;
+                    let pending = || {
+                        #[cfg(feature = "pg_test")]
+                        test_adaptive_mask_interrupt(crate::gpu::gpu_exec_count() - before);
+                        postgres_interrupt_pending()
+                    };
+                    let built = input.map(|input| {
+                        crate::gpu::SqlBoolMask::from_resident_with_poll_counted(
+                            input.values,
+                            input.nulls,
+                            pending,
+                            &mut submitted,
+                        )
+                    });
+                    let observed = crate::gpu::gpu_exec_count()
+                        .checked_sub(before)
+                        .ok_or("adaptive mask native counter regressed".to_owned())?;
+                    state.scheduled_calls = state
+                        .scheduled_calls
+                        .checked_add(submitted)
+                        .ok_or("adaptive mask schedule overflow".to_owned())?;
                     state.calls = state
                         .calls
-                        .checked_add(mask_calls)
+                        .checked_add(observed)
                         .ok_or("adaptive mask call counter overflow".to_owned())?;
+                    state.filter = match built {
+                        Some(Ok(Some(mask))) => {
+                            if submitted != mask_calls || observed != submitted {
+                                return Err("adaptive mask completed call evidence mismatch"
+                                    .to_owned()
+                                    .into());
+                            }
+                            Some(mask)
+                        }
+                        Some(Ok(None)) => {
+                            if submitted > mask_calls || observed != submitted {
+                                return Err("adaptive mask interrupted call evidence mismatch"
+                                    .to_owned()
+                                    .into());
+                            }
+                            return Err(DescriptorAggExecutionError::PreparationInterrupted);
+                        }
+                        Some(Err(error)) => {
+                            return Err(gpu_execution_error("adaptive mask failed", error));
+                        }
+                        None => {
+                            if postgres_interrupt_pending() {
+                                return Err(DescriptorAggExecutionError::PreparationInterrupted);
+                            }
+                            None
+                        }
+                    };
+                    state.filter_initialized = true;
                 }
                 if h3_count_filter(&self.spec)?.is_some() && desc.row_count != 0 {
                     desc.measure_filters[0].kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
@@ -4220,7 +4364,12 @@ impl DescriptorAggPlan {
                 }
                 Err(error) => Err(gpu_execution_error("adaptive H3 kernel failed", error)),
             }
-        })?;
+        });
+        state.dispatch_time_us = state
+            .dispatch_time_us
+            .checked_add(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX))
+            .ok_or("adaptive dispatch time overflow".to_owned())?;
+        let attempt = attempt?;
         if matches!(attempt, AdaptiveHashAttempt::AllocationPressure) {
             if state.aggregate_calls == 0 {
                 return Err("adaptive hash initial allocation failed".to_owned().into());
@@ -4253,10 +4402,6 @@ impl DescriptorAggPlan {
             .scanned_rows
             .checked_add(counters.scanned_rows)
             .ok_or("adaptive scanned row count overflow".to_owned())?;
-        state.dispatch_time_us = state
-            .dispatch_time_us
-            .checked_add(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX))
-            .ok_or("adaptive dispatch time overflow".to_owned())?;
         if let AdaptiveHashAttempt::Complete(output, selected, emitted) = attempt {
             let driver = state.driver.as_mut().expect("initialized driver");
             driver.complete_leaf(selected)?;
@@ -4788,6 +4933,190 @@ pub struct DenseExecutionDecision {
     pub calls: u64,
 }
 
+/// Native work facts summed over the selected lifecycle, not over the distinct
+/// workspace probes used to find that lifecycle. Static shape facts occur once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DenseCountWork {
+    pub facts: abi::PgaccelGroupedAggCountWorkV1,
+    pub calls: u64,
+}
+
+impl DenseCountWork {
+    /// Narrow pricing envelope; no new admission or computed-state replacement.
+    pub fn supports(spec: &AggQuerySpec) -> bool {
+        matches!(spec.group_keys.as_slice(), [key]
+            if matches!(key.source, GroupKeySource::FactColumn(column)
+                if column.relation_oid == spec.fact_rel && column.attno > 0
+                    && i16::try_from(column.attno).is_ok()
+                    && matches!(column.type_oid, INT2OID | INT4OID | INT8OID))
+                && key.collation_oid == 0)
+            && canonical_hash_count_measure(spec)
+            // Aggregate FILTER is a raw/H3 capability. Dense SQL masks belong
+            // to WHERE and cannot substitute without losing zero-count groups.
+            && matches!(spec.measures[0].filter, FilterSpec::None)
+    }
+
+    /// Frozen physical work features: parallel operations, checks, serial work.
+    pub fn work_products(self) -> Result<(u64, u64, u64), String> {
+        let f = self.facts;
+        let parallel = [
+            f.row_counter_updates,
+            f.global_counter_clear_entries,
+            f.local_counter_init_entries,
+            f.local_reduction_additions,
+            f.partial_counter_writes,
+        ]
+        .into_iter()
+        .try_fold(0_u64, u64::checked_add);
+        let checks = f.value_null_checks.checked_add(f.sql_mask_checks);
+        let serial = (|| {
+            let reset = f
+                .serial_reset_group_visits
+                .checked_mul(1_u64.checked_add(f.persistent_counter_lanes)?)?;
+            let merge = f
+                .serial_merge_group_visits
+                .checked_mul(2_u64.checked_add(f.persistent_counter_lanes)?)?;
+            let finalize_lanes = 1_u64
+                .checked_add(3_u64.checked_mul(f.key_columns)?)?
+                .checked_add(f.nullable_key_columns)?;
+            reset
+                .checked_add(merge)?
+                .checked_add(f.serial_partial_counter_reads)?
+                .checked_add(f.serial_finalize_group_visits.checked_mul(finalize_lanes)?)
+        })();
+        parallel
+            .zip(checks)
+            .zip(serial)
+            .map(|((p, q), s)| (p, q, s))
+            .ok_or_else(|| "dense COUNT cost work overflow".to_owned())
+    }
+
+    fn add_repeated(
+        &mut self,
+        facts: abi::PgaccelGroupedAggCountWorkV1,
+        repeats: u64,
+    ) -> Result<(), String> {
+        if repeats == 0 {
+            return Ok(());
+        }
+        if self.calls == 0 {
+            self.facts.abi_version = facts.abi_version;
+            self.facts.size_bytes = facts.size_bytes;
+            self.facts.group_capacity = facts.group_capacity;
+            self.facts.persistent_counter_lanes = facts.persistent_counter_lanes;
+            self.facts.key_columns = facts.key_columns;
+            self.facts.nullable_key_columns = facts.nullable_key_columns;
+        } else if self.facts.group_capacity != facts.group_capacity
+            || self.facts.persistent_counter_lanes != facts.persistent_counter_lanes
+            || self.facts.key_columns != facts.key_columns
+            || self.facts.nullable_key_columns != facts.nullable_key_columns
+        {
+            return Err("dense COUNT work shape changed between lifecycle calls".into());
+        }
+        macro_rules! add_work {
+            ($($field:ident),+ $(,)?) => {$ (
+                self.facts.$field = facts.$field.checked_mul(repeats)
+                    .and_then(|work| self.facts.$field.checked_add(work))
+                    .ok_or("dense COUNT lifecycle work overflow")?;
+            )+};
+        }
+        add_work!(
+            rows,
+            row_counter_updates,
+            global_counter_clear_entries,
+            local_counter_init_entries,
+            local_reduction_additions,
+            partial_counter_writes,
+            serial_reset_group_visits,
+            serial_merge_group_visits,
+            serial_partial_counter_reads,
+            serial_finalize_group_visits,
+            value_null_checks,
+            sql_mask_checks
+        );
+        self.calls = self
+            .calls
+            .checked_add(repeats)
+            .ok_or("dense COUNT lifecycle call overflow")?;
+        Ok(())
+    }
+}
+
+/// Metadata-only native work for an already selected dense COUNT lifecycle.
+/// This neither selects a strategy nor changes costs or execution ownership.
+pub fn dense_count_work_requirements(
+    spec: &AggQuerySpec,
+    nullable_columns: &[i16],
+    group_capacity: usize,
+    rows: usize,
+    decision: DenseExecutionDecision,
+) -> Result<DenseCountWork, String> {
+    if decision.native_mode != GroupedAggKernelMode::ParallelDenseCount {
+        return Err("COUNT work requires the native parallel dense COUNT mode".into());
+    }
+    with_dense_layout_descriptor(spec, nullable_columns, group_capacity, rows, |desc| {
+        dense_count_lifecycle_work(desc, decision)
+    })
+}
+
+fn dense_count_lifecycle_work(
+    desc: &abi::PgaccelGroupedAggDesc,
+    decision: DenseExecutionDecision,
+) -> Result<DenseCountWork, String> {
+    let mut total = DenseCountWork {
+        facts: abi::PgaccelGroupedAggCountWorkV1::default(),
+        calls: 0,
+    };
+    let mut query = |rows, flags, repeats| -> Result<(), String> {
+        if repeats == 0 {
+            return Ok(());
+        }
+        let mut call = *desc;
+        call.row_count = rows;
+        call.execution_flags = flags;
+        // SAFETY: stack descriptor and borrowed fixed-width host metadata stay
+        // live for the synchronous query; native never reads payload bytes.
+        let facts = unsafe { crate::gpu::grouped_agg::query_dense_count_work_forecast(&call) }
+            .map_err(|error| error.to_string())?;
+        total.add_repeated(facts, repeats)
+    };
+    match decision.lifecycle {
+        DenseExecutionLifecycle::Bounded => {
+            let chunk = decision.chunk_rows;
+            if chunk == 0 || desc.row_count == 0 {
+                return Err("bounded COUNT work requires positive rows and chunk".into());
+            }
+            let first = desc.row_count.min(chunk);
+            query(
+                first,
+                abi::PGACCEL_GROUPED_AGG_EXEC_RESET | abi::PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE,
+                1,
+            )?;
+            let remaining = desc.row_count - first;
+            query(
+                chunk,
+                abi::PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE,
+                u64::try_from(remaining / chunk).map_err(|_| "COUNT call count exceeds u64")?,
+            )?;
+            let tail = remaining % chunk;
+            if tail != 0 {
+                query(tail, abi::PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE, 1)?;
+            }
+            query(0, abi::PGACCEL_GROUPED_AGG_EXEC_FINALIZE, 1)?;
+        }
+        DenseExecutionLifecycle::Empty | DenseExecutionLifecycle::OneShot => {
+            if (decision.lifecycle == DenseExecutionLifecycle::Empty) != (desc.row_count == 0) {
+                return Err("COUNT work lifecycle disagrees with input population".into());
+            }
+            query(desc.row_count, 0, 1)?;
+        }
+    }
+    if total.calls != decision.calls || total.facts.rows != desc.row_count as u64 {
+        return Err("COUNT work disagrees with selected lifecycle calls or rows".into());
+    }
+    Ok(total)
+}
+
 #[cfg(feature = "pg_test")]
 thread_local! {
     static TEST_DENSE_SELECTED_DECISION: Cell<Option<DenseExecutionDecision>> = const { Cell::new(None) };
@@ -5043,8 +5372,12 @@ fn with_dense_layout_descriptor<R>(
     {
         return Err("dense layout forecast requires a dimension-free dense shape".into());
     }
-    let marker = 0_i64;
-    let null_marker = 0_u8;
+    // Query-only row addresses: their declared N-row spans must not overlap
+    // stack-owned query outputs. These have no dereference provenance and are
+    // never bound to an executable descriptor. Native performs checked range
+    // arithmetic and reads only the real, bounded metadata below.
+    let marker = std::ptr::without_provenance::<i64>(std::mem::align_of::<i64>());
+    let null_marker = std::ptr::without_provenance::<u8>(1);
     let nullable = |column: ColumnRef| {
         nullable_columns
             .iter()
@@ -5068,9 +5401,9 @@ fn with_dense_layout_descriptor<R>(
             _ => return Err("dense layout forecast input physical type is unsupported".into()),
         };
         Ok(abi::PgaccelGroupedAggMeasureCol {
-            values: std::ptr::from_ref(&marker).cast(),
+            values: marker.cast(),
             nulls: if nullable(column) {
-                &raw const null_marker
+                null_marker
             } else {
                 std::ptr::null()
             },
@@ -5106,7 +5439,7 @@ fn with_dense_layout_descriptor<R>(
         {
             return Err("scalar layout forecast key identity is invalid".into());
         }
-        desc.keys[index].values.values = std::ptr::from_ref(&marker).cast();
+        desc.keys[index].values.values = marker.cast();
         desc.keys[index].values.tag = PgaccelValTag::Int32;
         desc.keys[index].cardinality = if index == 0 {
             u32::try_from(group_capacity).map_err(|_| "scalar dense capacity exceeds u32")?
@@ -5132,9 +5465,9 @@ fn with_dense_layout_descriptor<R>(
                 for ((binding, column), kind) in
                     bindings[index].iter_mut().zip(inputs).zip(proof.inputs())
                 {
-                    binding.values = std::ptr::from_ref(&marker).cast();
+                    binding.values = marker.cast();
                     binding.nulls = if nullable(*column) {
-                        &raw const null_marker
+                        null_marker
                     } else {
                         std::ptr::null()
                     };
@@ -5209,7 +5542,7 @@ fn with_dense_layout_descriptor<R>(
             build_measure_filter(spec, &measure.filter)?
         };
     }
-    desc.where_filter = build_filter(spec, rows, Some(std::ptr::from_ref(&null_marker).cast()))?;
+    desc.where_filter = build_filter(spec, rows, Some(null_marker.cast()))?;
     if !parallel_dense_integer_shape(&desc) && !parallel_dense_count_shape(&desc) {
         return Err(
             "dense layout forecast is outside the parallel dense integer/count family".into(),
@@ -5740,6 +6073,45 @@ pub fn h3_count_memory_requirements(
         return Err("hash memory forecast requires the normal H3 COUNT envelope".into());
     }
     let (cell, resolution, _) = h3_parent_group(spec).expect("canonical H3 key");
+    count_memory_requirements(
+        spec,
+        nullable_columns,
+        rows,
+        capacity,
+        cell,
+        if fused { Some(resolution as u32) } else { None },
+    )
+}
+
+/// Raw-key forecast has no parent lane or catalog dependency. The sole
+/// optional derived input is a query-local SQL FILTER mask, charged by caller.
+pub fn raw_count_memory_requirements(
+    spec: &AggQuerySpec,
+    nullable_columns: &[i16],
+    rows: usize,
+    capacity: usize,
+) -> Result<crate::gpu::GroupedAggMemoryRequirements, String> {
+    if !canonical_raw_integer_count(spec) || rows > u32::MAX as usize {
+        return Err("raw memory forecast requires the normal integer COUNT envelope".into());
+    }
+    count_memory_requirements(
+        spec,
+        nullable_columns,
+        rows,
+        capacity,
+        raw_hash_group(spec).expect("canonical raw key"),
+        None,
+    )
+}
+
+fn count_memory_requirements(
+    spec: &AggQuerySpec,
+    nullable_columns: &[i16],
+    rows: usize,
+    capacity: usize,
+    cell: ColumnRef,
+    h3_resolution: Option<u32>,
+) -> Result<crate::gpu::GroupedAggMemoryRequirements, String> {
     if capacity == 0 || capacity > rows.clamp(1, 1 << 30) {
         return Err("hash memory forecast capacity exceeds row/native allocation limits".into());
     }
@@ -5760,13 +6132,16 @@ pub fn h3_count_memory_requirements(
         capacity,
         std::ptr::from_ref(&marker).cast(),
         nulls(cell),
-        if fused {
+        if h3_resolution.is_some() {
             abi::PGACCEL_GROUPED_AGG_KEY_FLAG_H3_PARENT
         } else {
             0
         },
-        if fused { resolution as u32 } else { 0 },
+        h3_resolution.unwrap_or(0),
     );
+    if matches!(cell.type_oid, INT2OID | INT4OID) {
+        desc.keys[0].values.tag = PgaccelValTag::Int32;
+    }
     if let MeasureExpr::Column(column) = spec.measures[0].expression {
         let (physical_type, element_bytes) = match column.type_oid {
             BOOLOID => (abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL, 1),
@@ -5802,6 +6177,49 @@ pub struct H3PlanningMemory {
     pub bytes: u64,
     pub capacity: usize,
     pub cached_owner: bool,
+}
+
+pub fn raw_count_planning_memory(
+    spec: &AggQuerySpec,
+    estimate: &crate::engine::residency::ResidentLoadEstimate,
+    estimated_rows: u64,
+    max_groups: usize,
+) -> Result<H3PlanningMemory, String> {
+    let rows = if estimate.loaded {
+        estimate
+            .resident_rows
+            .ok_or("loaded raw row count unavailable")?
+    } else {
+        estimated_rows
+    };
+    let rows = usize::try_from(rows).map_err(|_| "raw row count exceeds usize")?;
+    let capacity = raw_hash_group_capacity(rows, max_groups)?;
+    let cold_nullable;
+    let nullable = if estimate.loaded {
+        estimate
+            .resident_nullable_columns
+            .as_deref()
+            .ok_or("loaded raw NULL metadata unavailable")?
+    } else {
+        cold_nullable = compact_hash_column_refs(spec)?
+            .iter()
+            .map(|column| column.attno)
+            .collect::<Vec<_>>();
+        &cold_nullable
+    };
+    let memory = raw_count_memory_requirements(spec, nullable, rows, capacity)?;
+    let mask = if h3_count_filter(spec)?.is_some() {
+        rows as u64
+    } else {
+        0
+    };
+    Ok(H3PlanningMemory {
+        bytes: (memory.total_bytes as u64)
+            .checked_add(mask)
+            .ok_or("raw COUNT footprint overflow")?,
+        capacity,
+        cached_owner: false,
+    })
 }
 
 /// Reconstruct exactly the execution identity before inspecting residency.
@@ -6489,10 +6907,13 @@ fn hash_execution_snapshot(
     evidence: &[ResidentRelationEvidence],
     predicate_layout: u64,
 ) -> Result<(HashExecutionFingerprint, u64), String> {
-    if !canonical_h3_count(spec) {
-        return Err("hash memory protection is restricted to normal H3 COUNT".into());
+    if !canonical_h3_count(spec) && !canonical_raw_integer_count(spec) {
+        return Err("hash memory protection requires a normal adaptive COUNT".into());
     }
-    let (cell, _, _) = h3_parent_group(spec).expect("canonical H3 key");
+    let cell = h3_parent_group(spec)
+        .map(|(cell, _, _)| cell)
+        .or_else(|| raw_hash_group(spec))
+        .ok_or("missing adaptive hash key")?;
     if desc.row_count > u32::MAX as usize
         || desc.group_capacity == 0
         || desc.group_capacity > desc.row_count.clamp(1, 1 << 30)
@@ -8444,6 +8865,10 @@ fn validate_h3_count_partition(
 #[path = "h3_count_test.rs"]
 mod h3_count_tests;
 
+#[cfg(feature = "pg_test")]
+#[path = "raw_count_test.rs"]
+mod raw_count_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8832,6 +9257,301 @@ mod tests {
             })
             .expect("non-flat exhaustive native oracle");
         }
+    }
+
+    #[test]
+    fn dense_count_pricing_envelope_preserves_types_aliases_and_exclusions() {
+        for key_type in [INT2OID, INT4OID, INT8OID] {
+            for value_type in [
+                None,
+                Some(BOOLOID),
+                Some(INT2OID),
+                Some(INT4OID),
+                Some(INT8OID),
+                Some(FLOAT4OID),
+                Some(FLOAT8OID),
+                Some(DATEOID),
+                Some(TIMESTAMPOID),
+                Some(TIMESTAMPTZOID),
+            ] {
+                let mut shape = dense_bool_count_spec();
+                shape.group_keys[0].source = GroupKeySource::FactColumn(ColumnRef {
+                    relation_oid: 42,
+                    attno: 1,
+                    type_oid: key_type,
+                });
+                shape.group_keys[0].type_oid = key_type;
+                shape.measures[0].expression =
+                    value_type.map_or(MeasureExpr::CountStar, |type_oid| {
+                        MeasureExpr::Column(ColumnRef {
+                            relation_oid: 42,
+                            attno: 2,
+                            type_oid,
+                        })
+                    });
+                assert!(DenseCountWork::supports(&shape));
+                shape.measures[0].filter = FilterSpec::Mask {
+                    input: ColumnRef {
+                        relation_oid: 42,
+                        attno: 3,
+                        type_oid: BOOLOID,
+                    },
+                    kind: crate::engine::spec::MaskKind::Sql,
+                };
+                assert!(!DenseCountWork::supports(&shape));
+                let mut rejected = shape.clone();
+                rejected.fact_filter = rejected.measures[0].filter.clone();
+                rejected.measures[0].filter = FilterSpec::None;
+                assert!(!DenseCountWork::supports(&rejected));
+                shape.measures[0].filter = FilterSpec::None;
+                rejected = shape.clone();
+                rejected.group_keys[0].collation_oid = 1;
+                assert!(!DenseCountWork::supports(&rejected));
+                rejected = shape.clone();
+                rejected.measures.push(rejected.measures[0].clone());
+                assert!(!DenseCountWork::supports(&rejected));
+                rejected = shape.clone();
+                rejected.measures[0].outputs[0].kind = AggregateKind::Sum;
+                assert!(!DenseCountWork::supports(&rejected));
+                shape.measures[0].expression = MeasureExpr::Column(ColumnRef {
+                    relation_oid: 42,
+                    attno: 1,
+                    type_oid: key_type,
+                });
+                assert!(DenseCountWork::supports(&shape), "COUNT(key) alias");
+            }
+        }
+        assert!(!DenseCountWork::supports(&dense_bool_count_spec()));
+    }
+
+    #[test]
+    fn dense_count_work_accounts_where_mask_aliases_without_pricing_or_dispatch() {
+        let before_bytes = resident_live_bytes();
+        let before_calls = crate::gpu::gpu_exec_count();
+        let rows = 2051;
+        for value_attno in [None, Some(1), Some(2), Some(3)] {
+            let mut shape = dense_bool_count_spec();
+            shape.group_keys[0].source = GroupKeySource::FactColumn(ColumnRef {
+                relation_oid: 42,
+                attno: 1,
+                type_oid: INT4OID,
+            });
+            shape.group_keys[0].type_oid = INT4OID;
+            shape.measures[0].expression = value_attno.map_or(MeasureExpr::CountStar, |attno| {
+                MeasureExpr::Column(ColumnRef {
+                    relation_oid: 42,
+                    attno,
+                    type_oid: if attno == 1 { INT4OID } else { BOOLOID },
+                })
+            });
+            shape.fact_filter = FilterSpec::Mask {
+                input: ColumnRef {
+                    relation_oid: 42,
+                    attno: 3,
+                    type_oid: BOOLOID,
+                },
+                kind: crate::engine::spec::MaskKind::Sql,
+            };
+            assert!(
+                !DenseCountWork::supports(&shape),
+                "WHERE is outside new pricing"
+            );
+            for nullable in [&[][..], &[1, 2, 3][..]] {
+                with_dense_layout_descriptor(&shape, nullable, 65, rows, |desc| {
+                    for chunk in [None, Some(1024)] {
+                        let decision = dense_execution_candidate(
+                            desc,
+                            chunk,
+                            GroupedAggKernelMode::ParallelDenseCount,
+                            0,
+                        )?;
+                        let work = dense_count_lifecycle_work(desc, decision)?;
+                        let value_checks = if value_attno.is_some() {
+                            rows as u64
+                        } else {
+                            0
+                        };
+                        assert_eq!(work.facts.sql_mask_checks, rows as u64);
+                        assert_eq!(work.facts.value_null_checks, value_checks);
+                        assert_eq!(work.work_products()?.1, rows as u64 + value_checks);
+                        assert_eq!(work.calls, if chunk.is_some() { 4 } else { 1 });
+                    }
+                    Ok(())
+                })
+                .expect("real typed aliases and nullable/distinct masks");
+            }
+        }
+        assert_eq!(resident_live_bytes(), before_bytes);
+        assert_eq!(crate::gpu::gpu_exec_count(), before_calls);
+    }
+
+    #[test]
+    fn dense_count_work_products_are_checked_and_include_each_phase() {
+        let mut work = DenseCountWork {
+            calls: 3,
+            facts: abi::PgaccelGroupedAggCountWorkV1 {
+                row_counter_updates: 11,
+                global_counter_clear_entries: 13,
+                local_counter_init_entries: 17,
+                local_reduction_additions: 19,
+                partial_counter_writes: 23,
+                value_null_checks: 29,
+                sql_mask_checks: 31,
+                serial_reset_group_visits: 2,
+                serial_merge_group_visits: 3,
+                serial_partial_counter_reads: 5,
+                serial_finalize_group_visits: 7,
+                persistent_counter_lanes: 2,
+                key_columns: 1,
+                nullable_key_columns: 1,
+                ..Default::default()
+            },
+        };
+        assert_eq!(work.work_products().expect("bounded work"), (83, 60, 58));
+        let original = work;
+        work.facts.row_counter_updates = u64::MAX;
+        assert!(work.work_products().is_err());
+        work = original;
+        work.facts.value_null_checks = u64::MAX;
+        assert!(work.work_products().is_err());
+        work = original;
+        work.facts.persistent_counter_lanes = u64::MAX;
+        assert!(work.work_products().is_err());
+        work = original;
+        work.facts.key_columns = u64::MAX;
+        assert!(work.work_products().is_err());
+        work = original;
+        work.facts.serial_finalize_group_visits = u64::MAX;
+        assert!(work.work_products().is_err());
+    }
+
+    #[test]
+    fn dense_count_work_repetition_checks_overflow_and_static_shape() {
+        let facts = abi::PgaccelGroupedAggCountWorkV1 {
+            abi_version: 1,
+            size_bytes: 144,
+            rows: 1024,
+            group_capacity: 9,
+            row_counter_updates: 2048,
+            global_counter_clear_entries: 18,
+            serial_merge_group_visits: 9,
+            serial_partial_counter_reads: 18,
+            persistent_counter_lanes: 2,
+            key_columns: 1,
+            nullable_key_columns: 1,
+            value_null_checks: 1024,
+            ..Default::default()
+        };
+        let mut work = DenseCountWork {
+            facts: abi::PgaccelGroupedAggCountWorkV1::default(),
+            calls: 0,
+        };
+        work.add_repeated(facts, 3).expect("three actual calls");
+        assert_eq!(work.calls, 3);
+        assert_eq!(work.facts.rows, 3072);
+        assert_eq!(work.facts.row_counter_updates, 6144);
+        assert_eq!(work.facts.serial_merge_group_visits, 27);
+        assert_eq!(work.facts.group_capacity, 9);
+        assert_eq!(work.facts.persistent_counter_lanes, 2);
+        assert!(work.add_repeated(facts, u64::MAX).is_err());
+        let mut changed = facts;
+        changed.group_capacity = 10;
+        assert!(work.add_repeated(changed, 1).is_err());
+    }
+
+    #[test]
+    fn dense_count_work_matches_actual_call_multiplicity_and_empty_phases() {
+        let ledger_before = resident_live_bytes();
+        let gpu_before = crate::gpu::gpu_exec_count();
+        for column_type in [
+            None,
+            Some(BOOLOID),
+            Some(INT2OID),
+            Some(INT4OID),
+            Some(INT8OID),
+            Some(DATEOID),
+            Some(TIMESTAMPOID),
+            Some(TIMESTAMPTZOID),
+            Some(FLOAT4OID),
+            Some(FLOAT8OID),
+        ] {
+            let mut shape = dense_bool_count_spec();
+            shape.measures = spec(
+                column_type.map_or(MeasureExpr::CountStar, |type_oid| {
+                    MeasureExpr::Column(ColumnRef {
+                        relation_oid: 42,
+                        attno: 2,
+                        type_oid,
+                    })
+                }),
+                AggregateKind::Count,
+            )
+            .measures;
+            for groups in [7, 8, 9] {
+                for rows in [0, 1, 1023, 1024, 1025, 2050, u32::MAX as usize] {
+                    with_dense_layout_descriptor(&shape, &[1, 2], groups, rows, |desc| {
+                        let one = dense_execution_candidate(
+                            desc,
+                            None,
+                            GroupedAggKernelMode::ParallelDenseCount,
+                            0,
+                        )?;
+                        let work =
+                            dense_count_work_requirements(&shape, &[1, 2], groups, rows, one)?;
+                        assert_eq!(work.calls, 1);
+                        assert_eq!(work.facts.rows, rows as u64);
+                        assert_eq!(work.facts.group_capacity, groups as u64);
+                        assert_eq!(work.facts.serial_reset_group_visits, groups as u64);
+                        assert_eq!(work.facts.serial_merge_group_visits, groups as u64);
+                        assert_eq!(work.facts.serial_finalize_group_visits, groups as u64);
+                        assert_eq!(
+                            work.facts.value_null_checks,
+                            if column_type.is_some() {
+                                rows as u64
+                            } else {
+                                0
+                            }
+                        );
+                        if rows == 0 {
+                            assert_eq!(
+                                work.facts.global_counter_clear_entries,
+                                groups as u64 * if column_type.is_some() { 2 } else { 1 }
+                            );
+                            return Ok(());
+                        }
+                        let bounded = dense_execution_candidate(
+                            desc,
+                            Some(1024),
+                            GroupedAggKernelMode::ParallelDenseCount,
+                            0,
+                        )?;
+                        let work = dense_count_lifecycle_work(desc, bounded)?;
+                        let data_calls = rows.div_ceil(1024) as u64;
+                        assert_eq!(work.calls, data_calls + 1);
+                        assert_eq!(work.facts.rows, rows as u64);
+                        assert_eq!(
+                            work.facts.row_counter_updates,
+                            rows as u64 * if column_type.is_some() { 2 } else { 1 }
+                        );
+                        assert_eq!(work.facts.serial_reset_group_visits, groups as u64);
+                        assert_eq!(work.facts.serial_finalize_group_visits, groups as u64);
+                        assert_eq!(
+                            work.facts.serial_merge_group_visits,
+                            groups as u64 * data_calls
+                        );
+                        assert_eq!(work.facts.key_columns, 1);
+                        assert_eq!(work.facts.nullable_key_columns, 1);
+                        let mut bad = bounded;
+                        bad.calls += 1;
+                        assert!(dense_count_lifecycle_work(desc, bad).is_err());
+                        Ok(())
+                    })
+                    .expect("native work metadata across exact lifecycle");
+                }
+            }
+        }
+        assert_eq!(resident_live_bytes(), ledger_before);
+        assert_eq!(crate::gpu::gpu_exec_count(), gpu_before);
     }
 
     #[test]
@@ -14296,6 +15016,80 @@ mod tests {
                 kind: MaskKind::Sql,
             };
             assert!(HashMeasureInput::from_spec(&spec).is_err());
+        }
+    }
+
+    #[test]
+    fn raw_count_envelope_and_metadata_cover_all_key_and_count_types() {
+        for key_type in [INT2OID, INT4OID, INT8OID] {
+            for count_type in [
+                None,
+                Some(BOOLOID),
+                Some(INT2OID),
+                Some(INT4OID),
+                Some(INT8OID),
+                Some(FLOAT4OID),
+                Some(FLOAT8OID),
+                Some(DATEOID),
+                Some(TIMESTAMPOID),
+                Some(TIMESTAMPTZOID),
+            ] {
+                for filtered in [false, true] {
+                    let (mut spec, _) = h3_count_shape();
+                    let key = column(key_type);
+                    spec.group_keys[0].source = GroupKeySource::FactColumn(key);
+                    spec.group_keys[0].type_oid = key_type;
+                    if let Some(type_oid) = count_type {
+                        spec.measures[0].expression = MeasureExpr::Column(ColumnRef {
+                            attno: 2,
+                            ..column(type_oid)
+                        });
+                    }
+                    if filtered {
+                        spec.measures[0].filter = FilterSpec::Mask {
+                            input: ColumnRef {
+                                attno: 3,
+                                ..column(BOOLOID)
+                            },
+                            kind: MaskKind::Sql,
+                        };
+                    }
+                    assert!(canonical_raw_integer_count(&spec));
+                    assert!(!canonical_h3_count(&spec));
+                    assert_eq!(
+                        planned_descriptor_kernel_mode(&spec, true),
+                        GroupedAggKernelMode::ParallelHash
+                    );
+                    assert_ne!(
+                        planned_descriptor_kernel_mode(&spec, false),
+                        GroupedAggKernelMode::ParallelHash
+                    );
+                    for rows in [0, 1_000_017, u32::MAX as usize] {
+                        let capacity = rows.clamp(1, 4097);
+                        let memory =
+                            raw_count_memory_requirements(&spec, &[1, 2, 3], rows, capacity)
+                                .expect("metadata-only raw footprint");
+                        assert!(memory.total_bytes > 0);
+                    }
+                    assert!(raw_count_memory_requirements(&spec, &[], 10, 0).is_err());
+                    assert!(raw_count_memory_requirements(&spec, &[], 10, 11).is_err());
+                    let mut rejected = spec.clone();
+                    rejected.fact_filter = FilterSpec::Mask {
+                        input: ColumnRef {
+                            attno: 3,
+                            ..column(BOOLOID)
+                        },
+                        kind: MaskKind::Sql,
+                    };
+                    assert!(!canonical_raw_integer_count(&rejected));
+                    rejected = spec.clone();
+                    rejected.measures[0].outputs[0].kind = AggregateKind::Sum;
+                    assert!(!canonical_raw_integer_count(&rejected));
+                    rejected = spec.clone();
+                    rejected.group_keys.push(rejected.group_keys[0].clone());
+                    assert!(!canonical_raw_integer_count(&rejected));
+                }
+            }
         }
     }
 

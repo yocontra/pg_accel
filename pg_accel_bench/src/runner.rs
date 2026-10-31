@@ -94,8 +94,15 @@ struct ProvenanceReport {
     loaded_binaries: Vec<FileProvenance>,
     mapped_library_discovery: MappedLibraryDiscovery,
     device_limits_sources: Vec<String>,
+    device_limits_source_rows: Vec<DeviceLimitSource>,
     warnings: Vec<String>,
     errors: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DeviceLimitSource {
+    name: String,
+    source: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -394,7 +401,13 @@ fn run_provenance_gate(
     let postgres = capture_postgres_provenance(&mut client)?;
     let sql = capture_sql_extension_provenance(&mut client, &mut errors);
     let live_smoke = capture_live_extension_smoke(&mut client, postgres.backend_pid);
-    let device_limits_sources = capture_device_limits_sources(&mut client, &mut errors);
+    let device_limits_source_rows = capture_device_limits_sources(&mut client, &mut errors);
+    let mut device_limits_sources = device_limits_source_rows
+        .iter()
+        .map(|row| row.source.clone())
+        .collect::<Vec<_>>();
+    device_limits_sources.sort();
+    device_limits_sources.dedup();
     let pg_config = capture_pg_config_provenance(&mut warnings);
     let expected_binary = capture_expected_binary(&mut warnings);
     let installed_binary = pg_config
@@ -428,6 +441,7 @@ fn run_provenance_gate(
         loaded_binaries,
         mapped_library_discovery: mapped.discovery,
         device_limits_sources,
+        device_limits_source_rows,
         warnings,
         errors,
     };
@@ -561,12 +575,21 @@ fn capture_live_extension_smoke(client: &mut Client, backend_pid: i32) -> LiveEx
     }
 }
 
-fn capture_device_limits_sources(client: &mut Client, errors: &mut Vec<String>) -> Vec<String> {
+fn capture_device_limits_sources(
+    client: &mut Client,
+    errors: &mut Vec<String>,
+) -> Vec<DeviceLimitSource> {
     match client.query(
-        "SELECT DISTINCT source FROM pg_accel_device_limits() ORDER BY source",
+        "SELECT name, source FROM pg_accel_device_limits() ORDER BY name",
         &[],
     ) {
-        Ok(rows) => rows.iter().map(|row| row.get::<_, String>(0)).collect(),
+        Ok(rows) => rows
+            .iter()
+            .map(|row| DeviceLimitSource {
+                name: row.get(0),
+                source: row.get(1),
+            })
+            .collect(),
         Err(e) => {
             errors.push(format!("SELECT pg_accel_device_limits() failed: {e}"));
             Vec::new()
@@ -1078,15 +1101,16 @@ fn instrumented_coverage_only() -> bool {
 }
 
 fn check_device_limits(report: &mut ProvenanceReport, allow_hosted_coverage: bool) {
-    if report.device_limits_sources.is_empty() {
+    if report.device_limits_source_rows.is_empty() {
         report
             .errors
             .push("pg_accel_device_limits() returned no source rows".to_owned());
         return;
     }
-    for source in &report.device_limits_sources {
-        match source.as_str() {
+    for row in &report.device_limits_source_rows {
+        match row.source.as_str() {
             "hardware_derived" => {}
+            "reference_device_calibrated" if row.name == "gpu_dense_count_serial_work_cost" => {}
             "hosted_compatibility_calibrated" if allow_hosted_coverage => {
                 report.warnings.push(
                     "pg_accel reports hosted_compatibility_calibrated device limits; this instrumented coverage run is ineligible for performance evidence"
@@ -1101,7 +1125,7 @@ fn check_device_limits(report: &mut ProvenanceReport, allow_hosted_coverage: boo
                 "pg_accel reports fallback_cpu_only device limits; benchmark/audit results require a real GPU path or native PostgreSQL plan".to_owned(),
             ),
             other => report.errors.push(format!(
-                "pg_accel reports unknown device-limit source {other:?}"
+                "pg_accel reports unknown device-limit source {other:?} for {:?}", row.name
             )),
         }
     }
@@ -1741,6 +1765,18 @@ fn run_with_timing_and_cache_internal(
             .typed_h3_settings
             .extend(warm.typed_h3_settings.clone());
         result
+            .raw_integer_count_settings
+            .extend(cold.raw_integer_count_settings.clone());
+        result
+            .raw_integer_count_settings
+            .extend(warm.raw_integer_count_settings.clone());
+        result
+            .raw_integer_count_native_kernel_deltas
+            .extend(cold.raw_integer_count_native_kernel_deltas.clone());
+        result
+            .raw_integer_count_native_kernel_deltas
+            .extend(warm.raw_integer_count_native_kernel_deltas.clone());
+        result
             .planner_stage_captures
             .extend(cold.planner_stage_captures.clone());
         let cold_iteration_count = cold.iterations.len();
@@ -1879,8 +1915,12 @@ fn run_with_timing_and_cache_internal(
         && workload_is_resident_lane(workload.name());
     let mut artifact_lifecycle_probe = None;
     let mut artifact_steady_state_captures = Vec::with_capacity(iterations);
-    let capture_typed_h3 = crate::workloads::h3_count_contract(workload.name()).is_some();
+    let capture_raw_count =
+        crate::workloads::raw_integer_count::contract(workload.name()).is_some();
+    let capture_typed_h3 =
+        crate::workloads::h3_count_contract(workload.name()).is_some() || capture_raw_count;
     let mut typed_h3_settings = Vec::new();
+    let mut raw_integer_count_native_kernel_deltas = Vec::new();
 
     for i in 0..total_runs {
         let is_warmup = i < effective_warmup;
@@ -1987,6 +2027,12 @@ fn run_with_timing_and_cache_internal(
                 && matches!(modes[idx], BenchMode::Accel)
                 && !planner_capture_taken;
             planner_capture_taken |= capture_this_planner;
+            let native_before = if capture_raw_count && matches!(modes[idx], BenchMode::PgParallel)
+            {
+                Some(capture_dispatch_stats(&mut mode_clients[client_idx])?)
+            } else {
+                None
+            };
             let mode_outcome = run_with_mode(
                 &mut mode_clients[client_idx],
                 sql_for_mode,
@@ -1995,6 +2041,14 @@ fn run_with_timing_and_cache_internal(
                 timing_mode,
                 capture_this_planner,
             )?;
+            if let Some(before) = native_before {
+                let after = capture_dispatch_stats(&mut mode_clients[client_idx])?;
+                let delta = dispatch_stats_delta(before, after)?;
+                if delta.gpu_kernel_executions != 0 || delta.stock_exec_count != 0 {
+                    return Err("raw integer COUNT native baseline dispatched pg_accel".into());
+                }
+                raw_integer_count_native_kernel_deltas.push(delta.gpu_kernel_executions);
+            }
             if capture_typed_h3 && matches!(modes[idx], BenchMode::Accel) {
                 typed_h3_settings.push(capture_typed_h3_settings(
                     &mut mode_clients[client_idx],
@@ -2179,7 +2233,12 @@ fn run_with_timing_and_cache_internal(
         true,
     );
     result.set_warmup_iterations(warmup_results);
-    result.typed_h3_settings = typed_h3_settings;
+    if capture_raw_count {
+        result.raw_integer_count_settings = typed_h3_settings;
+        result.raw_integer_count_native_kernel_deltas = raw_integer_count_native_kernel_deltas;
+    } else {
+        result.typed_h3_settings = typed_h3_settings;
+    }
     result.accel_output_rows_consumed = accel_output_rows_consumed;
     result.resident_load_ms = resident_load_ms;
     result.resident_lane = workload_is_resident_lane(workload.name());
@@ -4352,6 +4411,26 @@ fn run_workload_with_config(
 ) -> Result<WorkloadResult, Box<dyn std::error::Error>> {
     let query_identity =
         BenchmarkQueryIdentity::resolve(workload.query_sql(), workload.baseline_query_sql())?;
+    if crate::workloads::raw_integer_count::contract(workload.name()).is_some() {
+        let writer =
+            artifacts.ok_or("raw integer COUNT qualification requires retained artifacts")?;
+        let directory = writer.root().join("fixture_manifests");
+        std::fs::create_dir_all(&directory)?;
+        let contract = crate::workloads::raw_integer_count::contract(workload.name())
+            .expect("checked contract");
+        let manifest = serde_json::json!({
+            "workload": workload.name(), "rows": rows, "seed": config.seed,
+            "generator": "arithmetic-v1 (independent of PRNG seed)",
+            "non_null_groups": if contract.dense_control {64} else {16_388}, "null_group": true,
+            "setup_sql": workload.setup_sql(rows), "query_sql": workload.query_sql(),
+            "mandatory_scales": crate::workloads::raw_integer_count::ROW_SCALES,
+            "warmups": config.warmup, "iterations": config.iterations,
+        });
+        std::fs::write(
+            directory.join(format!("{}-{rows}.json", workload.name())),
+            serde_json::to_vec_pretty(&manifest)?,
+        )?;
+    }
     if let (Some(manifest), Some(writer)) = (workload.external_fixture_manifest(), artifacts) {
         let directory = writer.root().join("fixture_manifests");
         std::fs::create_dir_all(&directory)?;
@@ -4532,6 +4611,13 @@ fn run_workload_with_config(
         && result.physical_kernel_mode_counts.serial_generic == 0;
     result.plan_snippet = accel_plan.map(|capture| capture.text);
     result.baseline_plan_snippet = baseline_plan.map(|capture| capture.text);
+    if crate::workloads::raw_integer_count::contract(workload.name())
+        .is_some_and(|contract| !contract.dense_control)
+    {
+        result.raw_integer_count_execution_proof = Some(capture_raw_integer_count_execution_proof(
+            connection, workload,
+        )?);
+    }
     result.correctness_diff_artifact = correctness_diff_artifact;
     result.thermal = thermal;
     // Cold-honesty tag: if the workload fixture fits within shared_buffers,
@@ -5296,6 +5382,51 @@ fn plan_physical_kernel_mode(plan: &str) -> Option<&str> {
         line.trim()
             .strip_prefix("GPU Physical Kernel Mode: ")
             .map(str::trim)
+    })
+}
+
+/// One additional execution, after measured timing/counter windows, on its own
+/// backend. Never relabel the ordinary EXPLAIN-only plan as execution evidence.
+fn capture_raw_integer_count_execution_proof(
+    connection: &str,
+    workload: &dyn Workload,
+) -> Result<report::RawIntegerCountExecutionProof, Box<dyn std::error::Error>> {
+    let mut client = Client::connect(connection, NoTls)?;
+    apply_benchmark_safety_settings(&mut client)?;
+    prime_workload_accel_backend(&mut client, workload)?;
+    client.batch_execute(
+        "SET pg_accel.enabled = on; SET max_parallel_workers_per_gather = DEFAULT",
+    )?;
+    for sql in workload.pre_query_sql() {
+        client.batch_execute(&sql)?;
+    }
+    let before = capture_dispatch_stats(&mut client)?;
+    let rows = client.query(
+        &format!(
+            "EXPLAIN (ANALYZE, VERBOSE, COSTS OFF) {}",
+            workload.query_sql()
+        ),
+        &[],
+    )?;
+    let after = capture_dispatch_stats(&mut client)?;
+    let delta = dispatch_stats_delta(before, after)?;
+    let explain_analyze = rows
+        .iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let settings = capture_typed_h3_settings(
+        &mut client,
+        "off_clock_execution_proof",
+        0,
+        CacheState::Warm,
+    )?
+    .settings;
+    Ok(report::RawIntegerCountExecutionProof {
+        explain_analyze,
+        gpu_kernel_execution_delta: delta.gpu_kernel_executions,
+        stock_exec_delta: delta.stock_exec_count,
+        settings,
     })
 }
 
@@ -7350,6 +7481,10 @@ mod tests {
                 warning: None,
             },
             device_limits_sources: vec!["hardware_derived".to_owned()],
+            device_limits_source_rows: vec![DeviceLimitSource {
+                name: "gpu_op_cost_reduce".to_owned(),
+                source: "hardware_derived".to_owned(),
+            }],
             warnings: Vec::new(),
             errors: Vec::new(),
         }
@@ -7439,22 +7574,31 @@ mod tests {
         check_control_version(&mut report);
         assert!(report.warnings.is_empty());
 
-        report.device_limits_sources.clear();
+        report.device_limits_source_rows.clear();
         check_device_limits(&mut report, false);
         assert_eq!(report.errors.len(), 1);
         assert!(report.errors[0].contains("no source rows"));
 
         report.errors.clear();
-        report.device_limits_sources = vec![
-            "hardware_derived".to_owned(),
-            "fallback_cpu_only".to_owned(),
+        report.device_limits_source_rows = vec![
+            DeviceLimitSource {
+                name: "gpu_op_cost_reduce".to_owned(),
+                source: "hardware_derived".to_owned(),
+            },
+            DeviceLimitSource {
+                name: "gpu_op_cost_filter".to_owned(),
+                source: "fallback_cpu_only".to_owned(),
+            },
         ];
         check_device_limits(&mut report, false);
         assert_eq!(report.errors.len(), 1);
         assert!(report.errors[0].contains("real GPU path"));
 
         report.errors.clear();
-        report.device_limits_sources = vec!["hosted_compatibility_calibrated".to_owned()];
+        report.device_limits_source_rows = vec![DeviceLimitSource {
+            name: "gpu_op_cost_reduce".to_owned(),
+            source: "hosted_compatibility_calibrated".to_owned(),
+        }];
         check_device_limits(&mut report, false);
         assert_eq!(report.errors.len(), 1);
         assert!(report.errors[0].contains("hosted coverage calibration"));
@@ -7468,6 +7612,47 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("ineligible for performance evidence"))
         );
+    }
+
+    #[test]
+    fn provenance_reference_calibration_requires_exact_field_source_pair() {
+        let mut report = valid_provenance_report();
+        report.device_limits_source_rows.push(DeviceLimitSource {
+            name: "gpu_dense_count_serial_work_cost".to_owned(),
+            source: "reference_device_calibrated".to_owned(),
+        });
+        check_device_limits(&mut report, false);
+        assert!(report.errors.is_empty());
+
+        for (name, source) in [
+            ("gpu_op_cost_reduce", "reference_device_calibrated"),
+            ("gpu_dense_count_serial_work_cost", "unknown_calibration"),
+            (
+                "gpu_dense_count_serial_work_cost_typo",
+                "reference_device_calibrated",
+            ),
+        ] {
+            report.errors.clear();
+            report.device_limits_source_rows.push(DeviceLimitSource {
+                name: name.to_owned(),
+                source: source.to_owned(),
+            });
+            check_device_limits(&mut report, false);
+            assert_eq!(
+                report.errors.len(),
+                1,
+                "unexpected acceptance of {name}/{source}"
+            );
+            report.device_limits_source_rows.pop();
+        }
+
+        // A distinct-source summary cannot prove which field supplied a label.
+        report.errors.clear();
+        report.device_limits_sources = vec!["reference_device_calibrated".to_owned()];
+        report.device_limits_source_rows.clear();
+        check_device_limits(&mut report, false);
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0].contains("no source rows"));
     }
 
     #[test]
