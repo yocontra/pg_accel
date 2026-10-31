@@ -1,0 +1,39 @@
+[32m[1m       Using[0m[39m [37m[1mCliArgument("pg18")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/postgres18/bin/pg_config[39m
+CARGO_PGRX_TEST_PGDATA="/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/pgtests18-raw-qualification2/pgdata" CARGO_TARGET_DIR="/Users/contra/Projects/pg_accel/target" PGRX_ALL_FEATURES="false" PGRX_BUILD_PROFILE="dev" PGRX_FEATURES="pg18 pg_test" PGRX_MANIFEST_PATH="/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" PGRX_NO_DEFAULT_FEATURES="true" PGRX_NO_SCHEMA="false" "/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "test" "--manifest-path" "/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" "--features" "pg18 pg_test" "--no-default-features" "raw_count_tests"
+   Compiling pgrx-pg-sys v0.19.1
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+   Compiling pgrx v0.19.1
+   Compiling pgrx-tests v0.19.1
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 20.77s
+     Running unittests src/lib.rs (target/debug/deps/pg_accel-ed206a68dc782b00)
+
+running 9 tests
+test engine::executor::agg::descriptor::raw_count_tests::tests::pg_pg_raw_count_actual_device_cap_plus_one ... [32m[1m       Using[0m[39m [37m[1mPgConfig("pg18")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/postgres18/bin/pg_config[39m
+[32m[1m    Building[0m[39m extension with features [36mpg18 pg_test[39m
+[32m[1m     Running[0m[39m command [36m"/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "rustc" "--lib" "--manifest-path" "/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" "--features" "pg18 pg_test" "--no-default-features" "--message-format=json-render-diagnostics"[39m
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.23s
+[32m[1m  Installing[0m[39m extension
+[32m[1m     Copying[0m[39m control file to [36m.codex/scratch/hash-count-where-rust-20261030/postgres18/share/extension/pg_accel.control[39m
+[32m[1m     Copying[0m[39m shared library to [36m.codex/scratch/hash-count-where-rust-20261030/postgres18/lib/pg_accel.dylib[39m
+[32m[1m  Discovered[0m[39m [36m[1m371[0m[39m SQL entities: [36m[1m30[0m[39m schemas ([36m[1m3[0m[39m unique), [36m[1m339[0m[39m functions, [36m[1m0[0m[39m types, [36m[1m0[0m[39m enums, [36m[1m1[0m[39m sqls, [36m[1m0[0m[39m ords, [36m[1m0[0m[39m hashes, [36m[1m0[0m[39m aggregates, [36m[1m1[0m[39m triggers
+[32m[1m     Writing[0m[39m SQL entities to /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/postgres18/share/extension/pg_accel--1.0.0-rc1.sql
+[32m[1m    Finished[0m[39m installing pg_accel
+ok
+test engine::executor::agg::descriptor::raw_count_tests::tests::pg_pg_raw_count_forced_partition_signed_alias_and_predicate_identity ... ok
+test engine::executor::agg::descriptor::raw_count_tests::tests::pg_pg_raw_count_mask_interrupt_preserves_sqlstate_and_benign_counts ... ok
+test engine::executor::agg::descriptor::raw_count_tests::tests::pg_pg_raw_count_retained_cold_mutation_rollback_and_empty_reload ... ok
+test engine::executor::agg::descriptor::raw_count_tests::tests::pg_pg_raw_count_smallint_complete_domain_and_null ... ok
+test engine::executor::agg::descriptor::raw_count_tests::tests::pg_pg_raw_count_spool_failure_cancel_and_actual_rescan_cleanup ... ok
+test engine::executor::agg::descriptor::raw_count_tests::tests::pg_pg_raw_where_all_key_and_count_types_partition_default_parity ... ok
+test engine::executor::agg::descriptor::raw_count_tests::tests::pg_pg_raw_where_second_mask_interrupt_drops_partial_owners ... ok
+test engine::executor::agg::descriptor::raw_count_tests::tests::pg_pg_where_empty_v2_facade_executes_control_without_row_work ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 1916 filtered out; finished in 109.59s
+
+     Running tests/correctness_tests.rs (target/debug/deps/correctness_tests-4d5632827da0de27)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+

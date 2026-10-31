@@ -1,0 +1,163 @@
+[32m[1m       Using[0m[39m [37m[1mCliArgument("pg18")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/postgres18/bin/pg_config[39m
+CARGO_PGRX_TEST_PGDATA="/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/pgtests18-h3-qualification3/pgdata" CARGO_TARGET_DIR="/Users/contra/Projects/pg_accel/target" PGRX_ALL_FEATURES="false" PGRX_BUILD_PROFILE="dev" PGRX_FEATURES="pg18 pg_test" PGRX_MANIFEST_PATH="/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" PGRX_NO_DEFAULT_FEATURES="true" PGRX_NO_SCHEMA="false" "/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "test" "--manifest-path" "/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" "--features" "pg18 pg_test" "--no-default-features" "h3_count_tests"
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.50s
+     Running unittests src/lib.rs (target/debug/deps/pg_accel-ed206a68dc782b00)
+
+running 21 tests
+test engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_adaptive_where_empty_and_predicate_invalidation_rebuild_population ... [32m[1m       Using[0m[39m [37m[1mPgConfig("pg18")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/postgres18/bin/pg_config[39m
+[32m[1m    Building[0m[39m extension with features [36mpg18 pg_test[39m
+[32m[1m     Running[0m[39m command [36m"/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "rustc" "--lib" "--manifest-path" "/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" "--features" "pg18 pg_test" "--no-default-features" "--message-format=json-render-diagnostics"[39m
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.50s
+[32m[1m  Installing[0m[39m extension
+[32m[1m     Copying[0m[39m control file to [36m.codex/scratch/hash-count-where-rust-20261030/postgres18/share/extension/pg_accel.control[39m
+[32m[1m     Copying[0m[39m shared library to [36m.codex/scratch/hash-count-where-rust-20261030/postgres18/lib/pg_accel.dylib[39m
+[32m[1m  Discovered[0m[39m [36m[1m371[0m[39m SQL entities: [36m[1m30[0m[39m schemas ([36m[1m3[0m[39m unique), [36m[1m339[0m[39m functions, [36m[1m0[0m[39m types, [36m[1m0[0m[39m enums, [36m[1m1[0m[39m sqls, [36m[1m0[0m[39m ords, [36m[1m0[0m[39m hashes, [36m[1m0[0m[39m aggregates, [36m[1m1[0m[39m triggers
+[32m[1m     Writing[0m[39m SQL entities to /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/postgres18/share/extension/pg_accel--1.0.0-rc1.sql
+[32m[1m    Finished[0m[39m installing pg_accel
+ok
+test engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_h3_cached_capacity_and_exact_protected_budget ... ok
+test engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_h3_filtered_counts_resident_predicate_currentness ... ok
+test engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_h3_filtered_preflight_protects_exact_mask_footprint ... FAILED
+test engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_h3_int4_sum_count_materialization_and_currentness ... ok
+test engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_h3_integer_aggregate_subsets_and_exact_numeric_average ... ok
+test engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_h3_nullable_hash_count_resident_currentness_and_materialization ... ok
+test engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_h3_where_forces_key_evaluation_after_rejection ... ok
+test engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_hash_where_materialization_invalidation_empty_learning_and_cancellation ... ok
+test engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_normal_h3_adaptive_forced_cap_partitions_exact_keys ... ok
+test engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_normal_h3_adaptive_noncanonical_growth_spill_matches_native ... ok
+test engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_normal_h3_adaptive_prepared_mutation_and_rollback ... ok
+test engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_normal_h3_adaptive_real_device_cap_plus_one_matches_native ... ok
+test engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_normal_h3_adaptive_spill_error_and_semantic_error_cleanup ... ok
+test engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_normal_h3_boolean_filter_counts_dispatch_and_match_native ... ok
+test engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_normal_h3_column_count_all_types_dispatch_and_match_native ... ok
+test engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_normal_h3_where_typed_counts_partitions_and_rejected_invalid_cells ... FAILED
+test engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_raw_bigint_hash_rollups_without_dictionary_or_h3 ... ok
+test engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_raw_hash_budget_preflight_denies_before_dispatch_and_reuses_charges ... ok
+test engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_raw_hash_many_rows_bounded_capacity_learning_and_failure ... ok
+test engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_raw_narrow_integer_hash_keys_without_dictionary ... ok
+
+failures:
+
+---- engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_h3_filtered_preflight_protects_exact_mask_footprint stdout ----
+
+thread 'engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_h3_filtered_preflight_protects_exact_mask_footprint' (63438227) panicked at /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-tests-0.19.1/src/framework.rs:195:9:
+
+
+Postgres Messages:
+[37m[2m[2026-10-30 22:31:08.253 MST] [88966] [6ae57d1a.15b86]: LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+[2026-10-30 22:31:08.253 MST] [88966] [6ae57d1a.15b86]: LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+[2026-10-30 22:31:08.255 MST] [88966] [6ae57d1a.15b86]: LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+[2026-10-30 22:31:08.257 MST] [88966] [6ae57d1a.15b86]: LOG:  listening on IPv6 address "::1", port 51706
+[2026-10-30 22:31:08.257 MST] [88966] [6ae57d1a.15b86]: LOG:  listening on IPv4 address "127.0.0.1", port 51706
+[2026-10-30 22:31:08.257 MST] [88966] [6ae57d1a.15b86]: LOG:  listening on Unix socket "/tmp/pgrx-test-sockets-18-88895/.s.PGSQL.51706"
+[2026-10-30 22:31:08.264 MST] [88966] [6ae57d1a.15b86]: LOG:  database system is ready to accept connections
+[0m[39m
+
+Test Function Messages:
+[36m[2026-10-30 22:31:13.649 MST] [89231] [6ae57d21.15c8f]: LOG:  statement: START TRANSACTION
+[2026-10-30 22:31:13.650 MST] [89231] [6ae57d21.15c8f]: LOG:  statement: SELECT "tests"."pg_h3_filtered_preflight_protects_exact_mask_footprint"();
+[2026-10-30 22:31:13.781 MST] [89231] [6ae57d21.15c8f]: ERROR:  foreign active bookkeeping owner: 1507351
+[2026-10-30 22:31:13.781 MST] [89231] [6ae57d21.15c8f]: STATEMENT:  SELECT "tests"."pg_h3_filtered_preflight_protects_exact_mask_footprint"();
+[2026-10-30 22:31:13.782 MST] [89231] [6ae57d21.15c8f]: LOG:  statement: ROLLBACK
+[39m
+
+Client Error:
+[31m[1mforeign active bookkeeping owner: 1507351[0m[39m
+postgres location: [37m[2mh3_count_test.rs:1568[0m[39m
+rust location: [33m<unknown>[39m
+
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_normal_h3_where_typed_counts_partitions_and_rejected_invalid_cells stdout ----
+
+thread 'engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_normal_h3_where_typed_counts_partitions_and_rejected_invalid_cells' (63444909) panicked at /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-tests-0.19.1/src/framework.rs:195:9:
+
+
+Postgres Messages:
+[37m[2m[2026-10-30 22:31:08.253 MST] [88966] [6ae57d1a.15b86]: LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+[2026-10-30 22:31:08.253 MST] [88966] [6ae57d1a.15b86]: LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+[2026-10-30 22:31:08.255 MST] [88966] [6ae57d1a.15b86]: LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+[2026-10-30 22:31:08.257 MST] [88966] [6ae57d1a.15b86]: LOG:  listening on IPv6 address "::1", port 51706
+[2026-10-30 22:31:08.257 MST] [88966] [6ae57d1a.15b86]: LOG:  listening on IPv4 address "127.0.0.1", port 51706
+[2026-10-30 22:31:08.257 MST] [88966] [6ae57d1a.15b86]: LOG:  listening on Unix socket "/tmp/pgrx-test-sockets-18-88895/.s.PGSQL.51706"
+[2026-10-30 22:31:08.264 MST] [88966] [6ae57d1a.15b86]: LOG:  database system is ready to accept connections
+[0m[39m
+
+Test Function Messages:
+[36m[2026-10-30 22:33:29.526 MST] [90750] [6ae57da9.1627e]: LOG:  statement: START TRANSACTION
+[2026-10-30 22:33:29.526 MST] [90750] [6ae57da9.1627e]: LOG:  statement: SELECT "tests"."t36_pg_normal_h3_where_typed_counts_partitions_and_rejected_inv"();
+[2026-10-30 22:33:30.677 MST] [90750] [6ae57da9.1627e]: ERROR:  missing GPU Adaptive Final Tuples Spilled: true: Custom Scan (GpuAccelAgg) (actual time=48.004..48.073 rows=123.00 loops=1)
+[2026-10-30 22:33:30.677 MST] [90750] [6ae57da9.1627e]: STATEMENT:  SELECT "tests"."t36_pg_normal_h3_where_typed_counts_partitions_and_rejected_inv"();
+[2026-10-30 22:33:30.679 MST] [90750] [6ae57da9.1627e]: LOG:  statement: ROLLBACK
+[39m
+
+Client Error:
+[31m[1mmissing GPU Adaptive Final Tuples Spilled: true: Custom Scan (GpuAccelAgg) (actual time=48.004..48.073 rows=123.00 loops=1)
+  Output: (h3_cell_to_parent(cell, 1)), (count(*))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 49
+  GPU Lifecycle Calls Verified: true
+  GPU Adaptive Counter Scope: last completed execution (rescan-local)
+  GPU Adaptive Unique Input Rows: 1000018
+  GPU Adaptive Attempted Scan Rows: 33000594
+  GPU Adaptive Aggregate Attempts: 33
+  GPU Adaptive Capacity Overflows: 16
+  GPU Adaptive Completed Leaves: 17
+  GPU Adaptive Final Tuples Spilled: false
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: ephemeral_fused reason=where_before_h3_transform construction_bytes=8000144 ephemeral_bytes=1000018 construction_time_us=667 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=17 ephemeral_build_launches=16 consumer_launches=1 budget_headroom_bytes=8574934322
+  GPU Descriptor Group Keys: k0:h3_cell_to_parent(19217.1:type=19081, resolution=1) type=19081 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:count_star -> value.count
+  GPU Descriptor Filter: fact=sql_mask(input=19217.4:type=16); measures=[m0=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=19081 result_type=19081 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=19217 generation=1 global=1 relfilenode=19217
+  GPU Descriptor Bytes: raw=15000270 derived=0 artifact=0 total=15000270
+  GPU Resident Stage Mask: 17419
+  GPU Resident Device Columns: 2
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 33000594
+  Batches: 49
+  Rows Per Batch: 673481.510
+  Dispatch Time: 46.802 ms
+  Avg Dispatch Time Per Batch: 0.955 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 0.046 ms
+  Buffers: shared hit=15
+Planning:
+  Buffers: shared hit=120
+Planning Time: 0.969 ms
+Execution Time: 48.866 ms[0m[39m
+postgres location: [37m[2mh3_count_test.rs:171[0m[39m
+rust location: [33m<unknown>[39m
+
+
+
+
+failures:
+    engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_h3_filtered_preflight_protects_exact_mask_footprint
+    engine::executor::agg::descriptor::h3_count_tests::tests::pg_pg_normal_h3_where_typed_counts_partitions_and_rejected_invalid_cells
+
+test result: FAILED. 19 passed; 2 failed; 0 ignored; 0 measured; 1904 filtered out; finished in 162.93s
+
+error: test failed, to rerun pass `--lib`

@@ -34,7 +34,7 @@ mod tests {
     fn field(plan: &str, name: &str) -> u64 {
         plan.lines()
             .find_map(|line| line.trim().strip_prefix(name))
-            .expect("actual adaptive field")
+            .unwrap_or_else(|| panic!("missing actual adaptive field {name}: {plan}"))
             .trim()
             .parse()
             .expect("numeric adaptive field")
@@ -278,16 +278,58 @@ mod tests {
             );
             let before = crate::gpu::gpu_exec_count();
             let stock = stock_calls();
-            let plan = explain(&format!("CREATE TEMP TABLE where_masks_actual AS {query}"));
+            let (plan, candidates) =
+                crate::engine::ffi::planner_hooks::capture_candidate_observations(|| {
+                    explain(&format!("CREATE TEMP TABLE where_masks_actual AS {query}"))
+                });
+            pgrx::notice!("benign retry prefix={prefix}; candidates={candidates}; plan={plan}");
             assert_eq!(stock_calls(), stock);
             assert_eq!(super::super::set_adaptive_mask_test_interrupt(None), None);
+            for required in [
+                "GPU Dispatched Physical Kernel Mode: parallel_hash",
+                "GPU Physical Kernel Mode Verified: true",
+                "GPU Descriptor Specialization: hash_count",
+                "GPU Lifecycle Calls Verified: true",
+                "GPU Descriptor Artifact Policy: ephemeral_fused",
+            ] {
+                assert!(plan.contains(required), "missing {required}: {plan}");
+            }
+            // EXPLAIN deliberately emits the adaptive block only for a
+            // completed execution with capacity overflow. Mask restarts alone
+            // do not constitute overflow; the natural one-shot has one call.
+            let attempts = if plan.contains("GPU Adaptive ") {
+                assert!(
+                    plan.contains(
+                        "GPU Adaptive Counter Scope: last completed execution (rescan-local)"
+                    ),
+                    "{plan}"
+                );
+                let attempts = field(&plan, "GPU Adaptive Aggregate Attempts:");
+                let overflows = field(&plan, "GPU Adaptive Capacity Overflows:");
+                let leaves = field(&plan, "GPU Adaptive Completed Leaves:");
+                assert!(overflows > 0 && leaves > 0, "{plan}");
+                assert_eq!(attempts, overflows + leaves, "{plan}");
+                assert_eq!(field(&plan, "GPU Adaptive Unique Input Rows:"), rows as u64);
+                assert_eq!(
+                    field(&plan, "GPU Adaptive Attempted Scan Rows:"),
+                    rows as u64 * attempts
+                );
+                assert!(
+                    plan.contains("GPU Adaptive Final Tuples Spilled: true")
+                        || plan.contains("GPU Adaptive Final Tuples Spilled: false"),
+                    "{plan}"
+                );
+                attempts
+            } else {
+                1
+            };
             assert_eq!(
                 crate::gpu::gpu_exec_count() - before,
                 field(&plan, "GPU Planned Lifecycle Calls:")
             );
             assert_eq!(
                 field(&plan, "GPU Planned Lifecycle Calls:"),
-                prefix + 2 * chunks + field(&plan, "GPU Adaptive Aggregate Attempts:")
+                prefix + 2 * chunks + attempts
             );
             Spi::run("SET pg_accel.enabled=off").expect("native multiset diff");
             assert_eq!(Spi::get_one::<i64>("SELECT count(*) FROM ((TABLE where_masks_expected EXCEPT ALL TABLE where_masks_actual) UNION ALL (TABLE where_masks_actual EXCEPT ALL TABLE where_masks_expected))d").expect("full parity"),Some(0));

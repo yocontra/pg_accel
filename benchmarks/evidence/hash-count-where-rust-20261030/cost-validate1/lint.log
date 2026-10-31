@@ -1,0 +1,23 @@
+    Checking pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error: multiply and add expressions can be calculated more efficiently and accurately
+   --> pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs:704:17
+    |
+704 | /                 shape.cost.aggregate.get()
+705 | |                     + reads as f64 * model.coefficients.gpu_op_cost_filter.get(),
+    | |________________________________________________________________________________^ help: consider using: `(reads as f64).mul_add(model.coefficients.gpu_op_cost_filter.get(), shape.cost.aggregate.get())`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#suboptimal_flops
+    = note: `-D clippy::suboptimal-flops` implied by `-D clippy::nursery`
+    = help: to override `-D clippy::nursery` add `#[allow(clippy::suboptimal_flops)]`
+
+error: could not compile `pg_accel` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: multiply and add expressions can be calculated more efficiently and accurately
+    --> pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs:3701:13
+     |
+3701 |             295.0 + 17.0 * 3.0
+     |             ^^^^^^^^^^^^^^^^^^ help: consider using: `17.0f64.mul_add(3.0, 295.0)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#suboptimal_flops
+
+error: could not compile `pg_accel` (lib test) due to 2 previous errors

@@ -1,0 +1,36 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error[E0425]: cannot find function `h3_count_memory_requirements` in module `crate::engine::executor::agg`
+    --> pg_accel/src/engine/ffi/planner_hooks/shape/tests.rs:2244:47
+     |
+2244 |                   crate::engine::executor::agg::h3_count_memory_requirements(
+     |                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+    ::: pg_accel/src/engine/executor/agg/descriptor.rs:5070:1
+     |
+5070 | / pub fn dense_count_work_requirements(
+5071 | |     spec: &AggQuerySpec,
+5072 | |     nullable_columns: &[i16],
+5073 | |     group_capacity: usize,
+...    |
+5082 | |     })
+5083 | | }
+     | |_- similarly named function `dense_count_work_requirements` defined here
+     |
+note: function `crate::engine::executor::agg::descriptor::h3_count_memory_requirements` exists but is inaccessible
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:6088:1
+     |
+6088 | / pub fn h3_count_memory_requirements(
+6089 | |     spec: &AggQuerySpec,
+6090 | |     nullable_columns: &[i16],
+6091 | |     rows: usize,
+...    |
+6107 | | }
+     | |_^ not accessible
+help: a function with a similar name exists
+     |
+2244 -                 crate::engine::executor::agg::h3_count_memory_requirements(
+2244 +                 crate::engine::executor::agg::dense_count_work_requirements(
+     |
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `pg_accel` (lib test) due to 1 previous error

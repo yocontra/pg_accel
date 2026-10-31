@@ -1,0 +1,13 @@
+pg_accel/src/engine/spec/abi.rs: OK
+pg_accel/src/gpu/bridge.rs: OK
+pg_accel/src/gpu/grouped_agg.rs: OK
+pg_accel/src/engine/executor/agg/descriptor.rs: OK
+pg_accel/src/engine/executor/agg/hash_partition.rs: OK
+pg_accel/src/engine/ffi/planner_hooks/shape/cost.rs: OK
+pg_accel/src/engine/ffi/planner_hooks/shape/tests.rs: OK
+pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs: OK
+pg_accel/src/engine/executor/agg/raw_count_test.rs: OK
+pg_accel/src/engine/executor/agg/h3_count_test.rs: OK
+pgaccel-kernels/src/grouped_agg.cpp: OK
+pgaccel-kernels/include/pgaccel_olap.h: OK
+pg_accel/src/engine/ffi/planner_hooks/mod.rs: OK

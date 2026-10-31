@@ -1,0 +1,445 @@
+diff --git a/pg_accel/src/engine/executor/agg/h3_count_test.rs b/pg_accel/src/engine/executor/agg/h3_count_test.rs
+index 29506468..d7c6b29b 100644
+--- a/pg_accel/src/engine/executor/agg/h3_count_test.rs
++++ b/pg_accel/src/engine/executor/agg/h3_count_test.rs
+@@ -17,6 +17,199 @@ mod tests {
+     use pgrx::pg_sys;
+     use pgrx::prelude::*;
+ 
++    #[pg_test]
++    fn pg_adaptive_where_empty_and_predicate_invalidation_rebuild_population() {
++        Spi::run(
++            "CREATE EXTENSION IF NOT EXISTS h3; SET pg_accel.enabled=on; SET pg_accel.auto_load=on",
++        )
++        .expect("adaptive WHERE setup");
++        assert_eq!(
++            Spi::get_one::<bool>("SELECT gpu_available FROM pg_accel_device_info()")
++                .expect("device"),
++            Some(true)
++        );
++        for raw in [true, false] {
++            let key_type = if raw { "bigint" } else { "h3index" };
++            let key = if raw {
++                "(i%8)::bigint"
++            } else {
++                "'8001fffffffffff'::h3index"
++            };
++            Spi::run(&format!("CREATE TEMP TABLE hash_count_rows(cell {key_type},v integer,p boolean,w boolean); INSERT INTO hash_count_rows SELECT {key},1,CASE WHEN i%11=0 THEN NULL ELSE i%3<>0 END,false FROM generate_series(1,65537)s(i)")).expect("all-rejected source");
++            let plan = plan_for_predicates(
++                DescriptorArtifactPolicy::EphemeralFused,
++                true,
++                true,
++                &[AggregateKind::Count],
++                raw,
++                Some(4),
++            );
++            assert!(plan.uses_adaptive_hash_count());
++            let run = |expected: u64| {
++                fresh_snapshot(|| {
++                    let mut state = super::super::AdaptiveHashExecution::default();
++                    loop {
++                        match plan
++                            .next_adaptive_hash(&mut state)
++                            .expect("validated adaptive WHERE attempt")
++                        {
++                            super::super::AdaptiveHashStep::Retry => {}
++                            super::super::AdaptiveHashStep::Leaf { done, .. } => {
++                                if done {
++                                    break;
++                                }
++                            }
++                        }
++                    }
++                    assert_eq!(
++                        state.driver.as_ref().expect("driver").selected_rows,
++                        expected
++                    );
++                    assert_eq!(state.calls, state.scheduled_calls);
++                    assert!(
++                        state.aggregate_calls > 0,
++                        "even empty input executes native control"
++                    );
++                    if expected == 0 {
++                        assert_eq!(state.learned_candidate, Some(0));
++                    }
++                    plan.finish_adaptive_hash(&mut state)
++                        .expect("post-conservation learning");
++                    if raw && expected == 0 {
++                        let artifact = plan.ephemeral_artifact.borrow();
++                        let Some(super::super::EphemeralDescriptorArtifact::Hash(artifact)) =
++                            artifact.as_ref()
++                        else {
++                            panic!("raw owner");
++                        };
++                        assert_eq!(artifact.artifact().group_capacity.get(), 1);
++                    }
++                });
++            };
++            run(0);
++            run(0);
++            rolled_back(|| {
++                Spi::run("UPDATE hash_count_rows SET w=true")
++                    .expect("predicate-only generation mutation");
++                run(65537);
++                Spi::run("TRUNCATE hash_count_rows").expect("zero-row v2 binding");
++                run(0);
++            });
++            run(0);
++            Spi::run("SELECT pg_accel_evict('hash_count_rows'); DROP TABLE hash_count_rows")
++                .expect("release empty WHERE fixture");
++        }
++    }
++
++    #[pg_test]
++    fn pg_normal_h3_where_typed_counts_partitions_and_rejected_invalid_cells() {
++        struct RestoreCap(Option<usize>);
++        impl Drop for RestoreCap {
++            fn drop(&mut self) {
++                super::super::set_adaptive_hash_test_cap(self.0);
++            }
++        }
++        let _cap = RestoreCap(super::super::set_adaptive_hash_test_cap(Some(32)));
++        Spi::run("CREATE EXTENSION IF NOT EXISTS h3; RESET pg_accel.cost_multiplier; RESET pg_accel.min_batch_size; SET pg_accel.enabled=on; SET pg_accel.auto_load=on; SET work_mem='64kB'").expect("H3 WHERE setup");
++        assert_eq!(
++            Spi::get_one::<bool>("SELECT gpu_available FROM pg_accel_device_info()")
++                .expect("device"),
++            Some(true)
++        );
++        let rows =
++            1_000_017_usize.max(crate::engine::cost::device_limits().gpu_h3_group_min_rows + 1);
++        for (sql_type, value) in [
++            ("boolean", "false"),
++            ("smallint", "-32768"),
++            ("integer", "-2147483648"),
++            ("bigint", "-9223372036854775808"),
++            ("real", "'NaN'"),
++            ("double precision", "'Infinity'"),
++            ("date", "'-infinity'"),
++            ("timestamp", "'infinity'"),
++            ("timestamptz", "'-infinity'"),
++        ] {
++            Spi::run(&format!("CREATE TEMP TABLE h3_where_rows(cell h3index,v {sql_type},p boolean,w boolean); \
++                INSERT INTO h3_where_rows WITH seeds AS (SELECT array_agg(h3_cell_to_center_child(cell,15) ORDER BY cell) cells FROM h3_get_res_0_cells()c(cell)) \
++                SELECT CASE WHEN i%97=0 THEN NULL ELSE cells[1+(i-1)%122] END, \
++                CASE WHEN i%7=0 THEN NULL ELSE ({value})::{sql_type} END, \
++                CASE WHEN i%122=1 THEN false WHEN i%11=0 THEN NULL ELSE i%3<>0 END, \
++                CASE WHEN i%13=0 THEN NULL ELSE ((i-1)/122)%4<>0 END \
++                FROM generate_series(1,{rows}::bigint)s(i) CROSS JOIN seeds; \
++                INSERT INTO h3_where_rows VALUES ('8001fffffffffff',NULL,true,false); \
++                ANALYZE h3_where_rows; SELECT pg_accel_pin('h3_where_rows',ARRAY['cell','v','p','w'])"))
++                .expect("H3 typed WHERE with rejected invalid-resolution input");
++            for aggregate in [
++                "count(*)",
++                "count(v)",
++                "count(v) FILTER (WHERE w)",
++                "count(v) FILTER (WHERE p)",
++            ] {
++                let query = format!(
++                    "SELECT h3_cell_to_parent(cell,1) k,{aggregate} n FROM h3_where_rows WHERE w GROUP BY 1"
++                );
++                Spi::run("SET pg_accel.enabled=off").expect("native arm");
++                let before = crate::gpu::gpu_exec_count();
++                Spi::run(&format!("CREATE TEMP TABLE h3_where_expected AS {query}"))
++                    .expect("native full result");
++                assert_eq!(crate::gpu::gpu_exec_count(), before);
++                Spi::run("SET pg_accel.enabled=on").expect("GPU arm");
++                let stock = Spi::get_one::<i64>("SELECT stock_exec_count FROM pg_accel_stats()")
++                    .expect("stock counter");
++                let before = crate::gpu::gpu_exec_count();
++                let text = Spi::connect(|client| {
++                    client.select(&format!("EXPLAIN (ANALYZE,VERBOSE,COSTS OFF) CREATE TEMP TABLE h3_where_actual AS {query}"),None,&[]).expect("actual materialization plan")
++                    .map(|row| row.get::<String>(1).expect("line").expect("non-NULL")).collect::<Vec<_>>().join("\n")
++                });
++                for required in [
++                    "Custom Scan (GpuAccelAgg)",
++                    "GPU Dispatched Physical Kernel Mode: parallel_hash",
++                    "GPU Lifecycle Calls Verified: true",
++                    "GPU Descriptor Artifact Policy: ephemeral_fused",
++                    "GPU Adaptive Final Tuples Spilled: true",
++                ] {
++                    assert!(text.contains(required), "missing {required}: {text}");
++                }
++                assert!(crate::gpu::gpu_exec_count() > before);
++                assert_eq!(
++                    Spi::get_one::<i64>("SELECT stock_exec_count FROM pg_accel_stats()")
++                        .expect("stock counter"),
++                    stock
++                );
++                Spi::run("SET pg_accel.enabled=off").expect("native full diff");
++                assert_eq!(Spi::get_one::<i64>("SELECT count(*) FROM ((TABLE h3_where_expected EXCEPT ALL TABLE h3_where_actual) UNION ALL (TABLE h3_where_actual EXCEPT ALL TABLE h3_where_expected))d").expect("both directions"),Some(0));
++                Spi::run("SET pg_accel.enabled=on; DROP TABLE h3_where_expected,h3_where_actual")
++                    .expect("release output");
++            }
++            if sql_type == "integer" {
++                Spi::run("CREATE FUNCTION pg_temp.h3_where_error(sql text) RETURNS text LANGUAGE plpgsql AS $$ BEGIN EXECUTE sql; RETURN '00000'; EXCEPTION WHEN OTHERS THEN RETURN SQLSTATE; END $$; UPDATE h3_where_rows SET w=true WHERE cell='8001fffffffffff'::h3index").expect("accepted invalid-resolution source mutation");
++                let query = "CREATE TEMP TABLE h3_where_failed AS SELECT h3_cell_to_parent(cell,1),count(*) FROM h3_where_rows WHERE w GROUP BY 1";
++                let before = crate::gpu::gpu_exec_count();
++                assert_eq!(
++                    Spi::get_one::<String>(&format!(
++                        "SELECT pg_temp.h3_where_error($q${query}$q$)"
++                    ))
++                    .expect("native H3 error delivery")
++                    .as_deref(),
++                    Some("38000")
++                );
++                assert!(
++                    crate::gpu::gpu_exec_count() > before,
++                    "accepted invalid cell reached native GPU validation"
++                );
++                assert_eq!(
++                    Spi::get_one::<bool>("SELECT to_regclass('pg_temp.h3_where_failed') IS NULL")
++                        .expect("atomic publication"),
++                    Some(true)
++                );
++                Spi::run("DROP FUNCTION pg_temp.h3_where_error(text)")
++                    .expect("remove error catcher");
++            }
++            Spi::run("SELECT pg_accel_unpin('h3_where_rows'); SELECT pg_accel_evict('h3_where_rows'); DROP TABLE h3_where_rows").expect("release H3 WHERE fixture");
++        }
++        Spi::run("RESET work_mem").expect("restore work memory");
++    }
++
+     #[pg_test]
+     fn pg_normal_h3_adaptive_real_device_cap_plus_one_matches_native() {
+         Spi::run("CREATE EXTENSION IF NOT EXISTS h3; RESET pg_accel.cost_multiplier; RESET pg_accel.min_batch_size; SET pg_accel.enabled=on; SET statement_timeout='15min'; SET temp_file_limit='4GB'; SET max_parallel_workers_per_gather=2").expect("qualification fixture invariant");
+diff --git a/pg_accel/src/engine/executor/agg/raw_count_test.rs b/pg_accel/src/engine/executor/agg/raw_count_test.rs
+index 18a65b17..0bcdbaf4 100644
+--- a/pg_accel/src/engine/executor/agg/raw_count_test.rs
++++ b/pg_accel/src/engine/executor/agg/raw_count_test.rs
+@@ -40,7 +40,7 @@ mod tests {
+             .expect("numeric adaptive field")
+     }
+ 
+-    fn assert_partitioned_parity(query: &str, rows: usize) {
++    fn assert_partitioned_parity(query: &str, rows: usize) -> String {
+         Spi::run("SET pg_accel.enabled=off").expect("native oracle arm");
+         let before = crate::gpu::gpu_exec_count();
+         Spi::run(&format!("CREATE TEMP TABLE raw_expected AS {query}"))
+@@ -64,6 +64,226 @@ mod tests {
+         assert!(field(&plan, "GPU Adaptive Attempted Scan Rows:") > rows as u64);
+         assert_eq!(Spi::get_one::<i64>("SELECT count(*) FROM ((TABLE raw_expected EXCEPT ALL TABLE raw_actual) UNION ALL (TABLE raw_actual EXCEPT ALL TABLE raw_expected))d").expect("full multiset parity"), Some(0));
+         Spi::run("DROP TABLE raw_expected,raw_actual").expect("release oracle outputs");
++        plan
++    }
++
++    fn stock_calls() -> i64 {
++        Spi::get_one::<i64>("SELECT stock_exec_count FROM pg_accel_stats()")
++            .expect("stock execution counter")
++            .expect("counter row")
++    }
++
++    #[pg_test]
++    fn pg_where_empty_v2_facade_executes_control_without_row_work() {
++        use crate::engine::spec::abi;
++        use crate::gpu::{
++            GroupedAggOutcome, GroupedAggOutputStorage, HashCountExecutionCounters,
++            HashCountPartition, ResolvedGroupedAggPlan,
++        };
++        assert_eq!(
++            Spi::get_one::<bool>("SELECT gpu_available FROM pg_accel_device_info()")
++                .expect("device"),
++            Some(true)
++        );
++        for h3 in [false, true] {
++            for independent_filter in [false, true] {
++                let mut desc = super::super::hash_count_descriptor(
++                    0,
++                    1,
++                    std::ptr::null(),
++                    std::ptr::null(),
++                    if h3 {
++                        abi::PGACCEL_GROUPED_AGG_KEY_FLAG_H3_PARENT
++                    } else {
++                        0
++                    },
++                    0,
++                );
++                desc.where_filter.kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
++                if independent_filter {
++                    desc.measure_filters[0].kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
++                }
++                // SAFETY: canonical zero-row descriptors own no row payloads.
++                let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.expect("empty WHERE");
++                assert!(
++                    plan.one_shot_kernel_mode().is_err(),
++                    "legacy rejects SQL/null mask"
++                );
++                plan.hash_partition_memory_requirements(HashCountPartition::ALL)
++                    .expect("native v2 validated mode");
++                let mut output = GroupedAggOutputStorage::new(&plan).expect("bounded empty output");
++                let mut counters = HashCountExecutionCounters::default();
++                let before = crate::gpu::grouped_agg_native_telemetry();
++                let calls = crate::gpu::gpu_exec_count();
++                let result = crate::gpu::execute_hash_count_partition(
++                    &plan,
++                    HashCountPartition::ALL,
++                    &mut output,
++                    &mut counters,
++                )
++                .expect("v2 empty native execution");
++                let GroupedAggOutcome::Complete(result) = result else {
++                    panic!("no uncertainty");
++                };
++                assert_eq!(
++                    (
++                        result.emitted_group_count,
++                        result.selected_count,
++                        counters.where_rows
++                    ),
++                    (0, 0, Some(0))
++                );
++                assert_eq!(
++                    (
++                        counters.scheduled,
++                        counters.observed,
++                        counters.verified,
++                        counters.scanned_rows
++                    ),
++                    (1, 1, 1, 0)
++                );
++                let after = crate::gpu::grouped_agg_native_telemetry();
++                assert_eq!(after.transition_launches - before.transition_launches, 1);
++                assert!(after.queue_waits > before.queue_waits);
++                assert!(
++                    after.output_bytes >= before.output_bytes + 32,
++                    "tail command and populations returned"
++                );
++                assert_eq!(crate::gpu::gpu_exec_count() - calls, 1);
++            }
++        }
++        // The native foundation's test-only row-launch counter independently
++        // proves zero row kernels for these same empty contracts; production
++        // telemetry here proves actual control completion, not a skipped call.
++    }
++
++    #[pg_test]
++    fn pg_raw_where_all_key_and_count_types_partition_default_parity() {
++        let _restore = RestoreCap(super::super::set_adaptive_hash_test_cap(Some(4096)));
++        Spi::run("RESET pg_accel.cost_multiplier; RESET pg_accel.min_batch_size; SET pg_accel.enabled=on; SET pg_accel.auto_load=on; SET work_mem='64kB'")
++            .expect("normal WHERE admission setup");
++        assert_eq!(
++            Spi::get_one::<bool>("SELECT gpu_available FROM pg_accel_device_info()")
++                .expect("device"),
++            Some(true)
++        );
++        let rows =
++            1_000_017_usize.max(crate::engine::cost::device_limits().gpu_hash_agg_min_rows + 1);
++        for (key_type, key) in [
++            ("smallint", "g*3-24582"),
++            ("integer", "g*200003-1638844582"),
++            ("bigint", "g*100000000003-819400000024582"),
++        ] {
++            Spi::run(&format!("CREATE TEMP TABLE raw_where AS SELECT \
++                (CASE WHEN i%97=0 THEN NULL ELSE {key} END)::{key_type} k, \
++                CASE WHEN i%13=0 THEN NULL ELSE ((i-1)/16388)%4<>0 END w, \
++                CASE WHEN g=0 THEN false WHEN i%11=0 THEN NULL ELSE i%3<>0 END f, \
++                CASE WHEN i%7<>0 THEN i%2=0 END vb, \
++                (CASE WHEN i%7<>0 THEN i%1000-500 END)::smallint vi2, \
++                (CASE WHEN i%7<>0 THEN i%1000-500 END)::integer vi4, \
++                CASE WHEN i%7<>0 THEN i%1000-500 END vi8, \
++                (CASE WHEN i%7<>0 THEN i%1000-500 END)::real vf4, \
++                (CASE WHEN i%7<>0 THEN i%1000-500 END)::double precision vf8, \
++                CASE WHEN i%7<>0 THEN DATE '2000-01-01'+(i%1000)::int END vd, \
++                CASE WHEN i%7<>0 THEN TIMESTAMP '2000-01-01'+(i%1000)*INTERVAL '1 second' END vt, \
++                CASE WHEN i%7<>0 THEN TIMESTAMPTZ '2000-01-01 UTC'+(i%1000)*INTERVAL '1 second' END vz \
++                FROM (SELECT i, CASE WHEN i>16388 AND i%5=0 THEN 0 ELSE (i-1)%16388 END g \
++                FROM generate_series(1,{rows}::bigint)s(i))r; ANALYZE raw_where; \
++                SELECT pg_accel_pin('raw_where',ARRAY['k','w','f','vb','vi2','vi4','vi8','vf4','vf8','vd','vt','vz'])"))
++                .expect("nullable typed WHERE fixture");
++            for value in [
++                "*", "vb", "vi2", "vi4", "vi8", "vf4", "vf8", "vd", "vt", "vz",
++            ] {
++                for (filter, masks) in [("", 1), (" FILTER (WHERE w)", 1), (" FILTER (WHERE f)", 2)]
++                {
++                    let stock = stock_calls();
++                    let plan = assert_partitioned_parity(
++                        &format!(
++                            "SELECT k,count({value}){filter} n FROM raw_where WHERE w GROUP BY k"
++                        ),
++                        rows,
++                    );
++                    assert_eq!(stock_calls(), stock, "no stock executor fallback");
++                    let attempts = field(&plan, "GPU Adaptive Aggregate Attempts:");
++                    assert_eq!(
++                        field(&plan, "GPU Planned Lifecycle Calls:"),
++                        attempts
++                            + masks * rows.div_ceil(crate::gpu::SQL_BOOL_MASK_CHUNK_ROWS) as u64,
++                        "convert each distinct mask once, not per leaf: {plan}"
++                    );
++                }
++            }
++            Spi::run("SELECT pg_accel_unpin('raw_where'); SELECT pg_accel_evict('raw_where'); DROP TABLE raw_where").expect("release typed WHERE fixture");
++        }
++        Spi::run("RESET work_mem").expect("restore work memory");
++    }
++
++    #[pg_test]
++    fn pg_raw_where_second_mask_interrupt_drops_partial_owners() {
++        struct RestoreHook;
++        impl Drop for RestoreHook {
++            fn drop(&mut self) {
++                super::super::set_adaptive_mask_test_interrupt(None);
++            }
++        }
++        let _hook = RestoreHook;
++        Spi::run("RESET pg_accel.cost_multiplier; RESET pg_accel.min_batch_size; SET pg_accel.enabled=on; SET pg_accel.auto_load=on; CREATE FUNCTION pg_temp.where_mask_error(sql text) RETURNS text LANGUAGE plpgsql AS $$ BEGIN EXECUTE sql; RETURN '00000'; EXCEPTION WHEN OTHERS THEN RETURN SQLSTATE; WHEN query_canceled THEN RETURN SQLSTATE; END $$")
++            .expect("second mask cancellation setup");
++        let rows =
++            1_000_017_usize.max(crate::engine::cost::device_limits().gpu_hash_agg_min_rows + 1);
++        Spi::run(&format!("CREATE TEMP TABLE where_masks AS SELECT (i%16388)*1000000-8194000000 k, CASE WHEN i%13=0 THEN NULL ELSE ((i-1)/16388)%4<>0 END w, CASE WHEN i%11=0 THEN NULL ELSE i%3<>0 END f FROM generate_series(1,{rows}::bigint)s(i); ANALYZE where_masks; SELECT pg_accel_pin('where_masks',ARRAY['k','w','f'])")).expect("independent masks");
++        let query = "SELECT k,count(f) FILTER (WHERE f) n FROM where_masks WHERE w GROUP BY k";
++        Spi::run("SET pg_accel.enabled=off").expect("native oracle");
++        Spi::run(&format!(
++            "CREATE TEMP TABLE where_masks_expected AS {query}"
++        ))
++        .expect("native result");
++        Spi::run("SET pg_accel.enabled=on").expect("GPU arm");
++        assert!(explain(query).contains("GPU Dispatched Physical Kernel Mode: parallel_hash"));
++        crate::gpu::cleanup_grouped_allocation_pools();
++        let baseline = crate::engine::residency::resident_live_bytes();
++        let chunks = rows.div_ceil(crate::gpu::SQL_BOOL_MASK_CHUNK_ROWS) as u64;
++        for prefix in [chunks, chunks + 1, chunks * 2] {
++            assert_eq!(
++                super::super::set_adaptive_mask_test_interrupt(Some((prefix, true))),
++                None
++            );
++            let before = crate::gpu::gpu_exec_count();
++            assert_eq!(Spi::get_one::<String>(&format!("SELECT pg_temp.where_mask_error($q$CREATE TEMP TABLE where_masks_partial AS {query}$q$)")).expect("caught cancel").as_deref(), Some("57014"));
++            assert_eq!(crate::gpu::gpu_exec_count() - before, prefix);
++            assert_eq!(super::super::set_adaptive_mask_test_interrupt(None), None);
++            assert_eq!(
++                Spi::get_one::<bool>("SELECT to_regclass('pg_temp.where_masks_partial') IS NULL")
++                    .expect("no output"),
++                Some(true)
++            );
++            crate::gpu::cleanup_grouped_allocation_pools();
++            assert_eq!(crate::engine::residency::resident_live_bytes(), baseline);
++            assert_eq!(
++                super::super::set_adaptive_mask_test_interrupt(Some((prefix, false))),
++                None
++            );
++            let before = crate::gpu::gpu_exec_count();
++            let stock = stock_calls();
++            let plan = explain(&format!("CREATE TEMP TABLE where_masks_actual AS {query}"));
++            assert_eq!(stock_calls(), stock);
++            assert_eq!(super::super::set_adaptive_mask_test_interrupt(None), None);
++            assert_eq!(
++                crate::gpu::gpu_exec_count() - before,
++                field(&plan, "GPU Planned Lifecycle Calls:")
++            );
++            assert_eq!(
++                field(&plan, "GPU Planned Lifecycle Calls:"),
++                prefix + 2 * chunks + field(&plan, "GPU Adaptive Aggregate Attempts:")
++            );
++            Spi::run("SET pg_accel.enabled=off").expect("native multiset diff");
++            assert_eq!(Spi::get_one::<i64>("SELECT count(*) FROM ((TABLE where_masks_expected EXCEPT ALL TABLE where_masks_actual) UNION ALL (TABLE where_masks_actual EXCEPT ALL TABLE where_masks_expected))d").expect("full parity"),Some(0));
++            Spi::run("SET pg_accel.enabled=on; DROP TABLE where_masks_actual")
++                .expect("release result");
++            crate::gpu::cleanup_grouped_allocation_pools();
++            assert_eq!(crate::engine::residency::resident_live_bytes(), baseline);
++        }
++        Spi::run("SELECT pg_accel_unpin('where_masks'); DROP TABLE where_masks,where_masks_expected; DROP FUNCTION pg_temp.where_mask_error(text)").expect("mask cleanup");
+     }
+ 
+     #[pg_test]
+

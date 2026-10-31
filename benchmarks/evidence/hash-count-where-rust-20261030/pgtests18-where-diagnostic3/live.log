@@ -1,0 +1,119 @@
+[32m[1m       Using[0m[39m [37m[1mCliArgument("pg18")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/postgres18/bin/pg_config[39m
+CARGO_PGRX_TEST_PGDATA="/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/pgtests18-where-diagnostic3/pgdata" CARGO_TARGET_DIR="/Users/contra/Projects/pg_accel/target" PGRX_ALL_FEATURES="false" PGRX_BUILD_PROFILE="dev" PGRX_FEATURES="pg18 pg_test" PGRX_MANIFEST_PATH="/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" PGRX_NO_DEFAULT_FEATURES="true" PGRX_NO_SCHEMA="false" "/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "test" "--manifest-path" "/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" "--features" "pg18 pg_test" "--no-default-features" "raw_count_tests::tests::pg_pg_raw_where_"
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.35s
+     Running unittests src/lib.rs (target/debug/deps/pg_accel-ed206a68dc782b00)
+
+running 2 tests
+test engine::executor::agg::descriptor::raw_count_tests::tests::pg_pg_raw_where_all_key_and_count_types_partition_default_parity ... [32m[1m       Using[0m[39m [37m[1mPgConfig("pg18")[0m[39m and `pg_config` from [36m/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/postgres18/bin/pg_config[39m
+[32m[1m    Building[0m[39m extension with features [36mpg_test pg18[39m
+[32m[1m     Running[0m[39m command [36m"/Users/contra/.asdf/installs/rust/1.96.0/toolchains/1.96.0-aarch64-apple-darwin/bin/cargo" "rustc" "--lib" "--manifest-path" "/Users/contra/Projects/pg_accel/pg_accel/Cargo.toml" "--features" "pg_test pg18" "--no-default-features" "--message-format=json-render-diagnostics"[39m
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.58s
+[32m[1m  Installing[0m[39m extension
+[32m[1m     Copying[0m[39m control file to [36m.codex/scratch/hash-count-where-rust-20261030/postgres18/share/extension/pg_accel.control[39m
+[32m[1m     Copying[0m[39m shared library to [36m.codex/scratch/hash-count-where-rust-20261030/postgres18/lib/pg_accel.dylib[39m
+[32m[1m  Discovered[0m[39m [36m[1m371[0m[39m SQL entities: [36m[1m30[0m[39m schemas ([36m[1m3[0m[39m unique), [36m[1m339[0m[39m functions, [36m[1m0[0m[39m types, [36m[1m0[0m[39m enums, [36m[1m1[0m[39m sqls, [36m[1m0[0m[39m ords, [36m[1m0[0m[39m hashes, [36m[1m0[0m[39m aggregates, [36m[1m1[0m[39m triggers
+[32m[1m     Writing[0m[39m SQL entities to /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/postgres18/share/extension/pg_accel--1.0.0-rc1.sql
+[32m[1m    Finished[0m[39m installing pg_accel
+ok
+test engine::executor::agg::descriptor::raw_count_tests::tests::pg_pg_raw_where_second_mask_interrupt_drops_partial_owners ... FAILED
+
+failures:
+
+---- engine::executor::agg::descriptor::raw_count_tests::tests::pg_pg_raw_where_second_mask_interrupt_drops_partial_owners stdout ----
+
+thread 'engine::executor::agg::descriptor::raw_count_tests::tests::pg_pg_raw_where_second_mask_interrupt_drops_partial_owners' (63405846) panicked at /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-tests-0.19.1/src/framework.rs:195:9:
+
+
+Postgres Messages:
+[37m[2m[2026-10-30 22:20:38.246 MST] [81270] [6ae57aa5.13d76]: LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+[2026-10-30 22:20:38.246 MST] [81270] [6ae57aa5.13d76]: LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+[2026-10-30 22:20:38.250 MST] [81270] [6ae57aa5.13d76]: LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+[2026-10-30 22:20:38.252 MST] [81270] [6ae57aa5.13d76]: LOG:  listening on IPv6 address "::1", port 50839
+[2026-10-30 22:20:38.252 MST] [81270] [6ae57aa5.13d76]: LOG:  listening on IPv4 address "127.0.0.1", port 50839
+[2026-10-30 22:20:38.253 MST] [81270] [6ae57aa5.13d76]: LOG:  listening on Unix socket "/tmp/pgrx-test-sockets-18-81173/.s.PGSQL.50839"
+[2026-10-30 22:20:38.261 MST] [81270] [6ae57aa5.13d76]: LOG:  database system is ready to accept connections
+[0m[39m
+
+Test Function Messages:
+[36m[2026-10-30 22:21:47.376 MST] [81724] [6ae57aeb.13f3c]: LOG:  statement: START TRANSACTION
+[2026-10-30 22:21:47.376 MST] [81724] [6ae57aeb.13f3c]: LOG:  statement: SELECT "tests"."pg_raw_where_second_mask_interrupt_drops_partial_owners"();
+[2026-10-30 22:21:48.243 MST] [81724] [6ae57aeb.13f3c]: NOTICE:  candidate integer WHERE work: decision=DenseExecutionDecision { lifecycle: Bounded, chunk_rows: 36864, native_mode: ParallelDenseInteger, memory: GroupedAggMemoryRequirements { workspace_bytes: 33964200, output_bytes: 279004, total_bytes: 34243204 }, metadata_peak_bytes: 480, peak_bytes: 34243684, calls: 29 }; reads=1000017; coefficient=0.001; before=ShapeCost { fact_scan: PgCost(1000.017), dimension_setup: PgCost(0.0), join_probe: PgCost(0.0), spatial_filter: PgCost(0.0), spatial_recheck_reserve: PgCost(0.0), aggregate: PgCost(6000.102000000001), additional_aggregate_launches: PgCost(0.0), output_materialization: PgCost(492.35999999999996), amortized_auto_load: PgCost(0.0), total: PgCost(7492.479) }
+[2026-10-30 22:21:48.243 MST] [81724] [6ae57aeb.13f3c]: CONTEXT:  SQL statement "EXPLAIN (ANALYZE,VERBOSE,COSTS OFF) SELECT k,count(f) FILTER (WHERE f) n FROM where_masks WHERE w GROUP BY k"
+[2026-10-30 22:21:48.243 MST] [81724] [6ae57aeb.13f3c]: NOTICE:  candidate raw=false; final components=ShapeCost { fact_scan: PgCost(1000.017), dimension_setup: PgCost(0.0), join_probe: PgCost(0.0), spatial_filter: PgCost(0.0), spatial_recheck_reserve: PgCost(0.0), aggregate: PgCost(7000.119000000001), additional_aggregate_launches: PgCost(140.0), output_materialization: PgCost(492.35999999999996), amortized_auto_load: PgCost(0.0), total: PgCost(8632.496000000001) }; effective=EffectivePathCost { startup: 5.0, total: 8637.496000000001 }
+[2026-10-30 22:21:48.243 MST] [81724] [6ae57aeb.13f3c]: CONTEXT:  SQL statement "EXPLAIN (ANALYZE,VERBOSE,COSTS OFF) SELECT k,count(f) FILTER (WHERE f) n FROM where_masks WHERE w GROUP BY k"
+[2026-10-30 22:21:48.243 MST] [81724] [6ae57aeb.13f3c]: NOTICE:  candidate raw=true; final components=ShapeCost { fact_scan: PgCost(1000.017), dimension_setup: PgCost(0.0), join_probe: PgCost(0.0), spatial_filter: PgCost(0.0), spatial_recheck_reserve: PgCost(0.0), aggregate: PgCost(6160.102000000001), additional_aggregate_launches: PgCost(0.0), output_materialization: PgCost(492.35999999999996), amortized_auto_load: PgCost(0.0), total: PgCost(7652.479) }; effective=EffectivePathCost { startup: 5.0, total: 7657.479 }
+[2026-10-30 22:21:48.243 MST] [81724] [6ae57aeb.13f3c]: CONTEXT:  SQL statement "EXPLAIN (ANALYZE,VERBOSE,COSTS OFF) SELECT k,count(f) FILTER (WHERE f) n FROM where_masks WHERE w GROUP BY k"
+[2026-10-30 22:21:48.278 MST] [81724] [6ae57aeb.13f3c]: NOTICE:  mask query=SELECT k,count(f) FILTER (WHERE f) n FROM where_masks WHERE w GROUP BY k; candidates=Some([CandidateObservation { raw_count: false, native_cost: Some(19015.85), cost: Some(("ParallelDenseInteger", 8637.496000000001, 140.0)), outcome: "added" }, CandidateObservation { raw_count: true, native_cost: Some(19015.85), cost: Some(("ParallelHash", 7657.479, 0.0)), outcome: "added" }]); plan=Custom Scan (GpuAccelAgg) (actual time=24.453..33.670 rows=16388.00 loops=1)
+[2026-10-30 22:21:48.285 MST] [81724] [6ae57aeb.13f3c]: NOTICE:  candidate integer WHERE work: decision=DenseExecutionDecision { lifecycle: Bounded, chunk_rows: 36864, native_mode: ParallelDenseInteger, memory: GroupedAggMemoryRequirements { workspace_bytes: 33964200, output_bytes: 279004, total_bytes: 34243204 }, metadata_peak_bytes: 480, peak_bytes: 34243684, calls: 29 }; reads=1000017; coefficient=0.001; before=ShapeCost { fact_scan: PgCost(1000.017), dimension_setup: PgCost(0.0), join_probe: PgCost(0.0), spatial_filter: PgCost(0.0), spatial_recheck_reserve: PgCost(0.0), aggregate: PgCost(6000.102000000001), additional_aggregate_launches: PgCost(0.0), output_materialization: PgCost(492.35999999999996), amortized_auto_load: PgCost(0.0), total: PgCost(7492.479) }
+[2026-10-30 22:21:48.285 MST] [81724] [6ae57aeb.13f3c]: CONTEXT:  SQL statement "EXPLAIN (ANALYZE,VERBOSE,COSTS OFF) CREATE TEMP TABLE where_masks_actual AS SELECT k,count(f) FILTER (WHERE f) n FROM where_masks WHERE w GROUP BY k"
+[2026-10-30 22:21:48.285 MST] [81724] [6ae57aeb.13f3c]: NOTICE:  candidate raw=false; final components=ShapeCost { fact_scan: PgCost(1000.017), dimension_setup: PgCost(0.0), join_probe: PgCost(0.0), spatial_filter: PgCost(0.0), spatial_recheck_reserve: PgCost(0.0), aggregate: PgCost(7000.119000000001), additional_aggregate_launches: PgCost(140.0), output_materialization: PgCost(492.35999999999996), amortized_auto_load: PgCost(0.0), total: PgCost(8632.496000000001) }; effective=EffectivePathCost { startup: 5.0, total: 8637.496000000001 }
+[2026-10-30 22:21:48.285 MST] [81724] [6ae57aeb.13f3c]: CONTEXT:  SQL statement "EXPLAIN (ANALYZE,VERBOSE,COSTS OFF) CREATE TEMP TABLE where_masks_actual AS SELECT k,count(f) FILTER (WHERE f) n FROM where_masks WHERE w GROUP BY k"
+[2026-10-30 22:21:48.285 MST] [81724] [6ae57aeb.13f3c]: NOTICE:  candidate raw=true; final components=ShapeCost { fact_scan: PgCost(1000.017), dimension_setup: PgCost(0.0), join_probe: PgCost(0.0), spatial_filter: PgCost(0.0), spatial_recheck_reserve: PgCost(0.0), aggregate: PgCost(6160.102000000001), additional_aggregate_launches: PgCost(0.0), output_materialization: PgCost(492.35999999999996), amortized_auto_load: PgCost(0.0), total: PgCost(7652.479) }; effective=EffectivePathCost { startup: 5.0, total: 7657.479 }
+[2026-10-30 22:21:48.285 MST] [81724] [6ae57aeb.13f3c]: CONTEXT:  SQL statement "EXPLAIN (ANALYZE,VERBOSE,COSTS OFF) CREATE TEMP TABLE where_masks_actual AS SELECT k,count(f) FILTER (WHERE f) n FROM where_masks WHERE w GROUP BY k"
+[2026-10-30 22:21:48.311 MST] [81724] [6ae57aeb.13f3c]: NOTICE:  benign retry prefix=16; candidates=Some([CandidateObservation { raw_count: false, native_cost: Some(19015.85), cost: Some(("ParallelDenseInteger", 8637.496000000001, 140.0)), outcome: "added" }, CandidateObservation { raw_count: true, native_cost: Some(19015.85), cost: Some(("ParallelHash", 7657.479, 0.0)), outcome: "added" }]); plan=Custom Scan (GpuAccelAgg) (actual time=13.680..23.133 rows=16388.00 loops=1)
+[2026-10-30 22:21:48.320 MST] [81724] [6ae57aeb.13f3c]: ERROR:  missing actual adaptive field GPU Adaptive Aggregate Attempts:: Custom Scan (GpuAccelAgg) (actual time=13.680..23.133 rows=16388.00 loops=1)
+[2026-10-30 22:21:48.320 MST] [81724] [6ae57aeb.13f3c]: STATEMENT:  SELECT "tests"."pg_raw_where_second_mask_interrupt_drops_partial_owners"();
+[2026-10-30 22:21:48.322 MST] [81724] [6ae57aeb.13f3c]: LOG:  statement: ROLLBACK
+[39m
+
+Client Error:
+[31m[1mmissing actual adaptive field GPU Adaptive Aggregate Attempts:: Custom Scan (GpuAccelAgg) (actual time=13.680..23.133 rows=16388.00 loops=1)
+  Output: k, (count(f) FILTER (WHERE f))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_hash
+  GPU Dispatched Physical Kernel Mode: parallel_hash
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 49
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: hash_count
+  GPU Descriptor Specialization Cache: hit
+  GPU Descriptor Artifact Policy: ephemeral_fused reason=zero_retained_bytes construction_bytes=0 ephemeral_bytes=2000034 construction_time_us=1 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=0 ephemeral_build_launches=32 consumer_launches=1 budget_headroom_bytes=8577934388
+  GPU Descriptor Group Keys: k0:fact(17290.1:type=20) type=20 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:column(17290.3:type=16) -> value.count
+  GPU Descriptor Filter: fact=sql_mask(input=17290.2:type=16); measures=[m0=sql_mask(input=17290.3:type=16)]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=20 result_type=20 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=16 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=17290 generation=1 global=1 relfilenode=17290
+  GPU Descriptor Bytes: raw=12000204 derived=0 artifact=0 total=12000204
+  GPU Resident Stage Mask: 16395
+  GPU Resident Device Columns: 3
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 1000017
+  Batches: 49
+  Rows Per Batch: 20408.510
+  Dispatch Time: 13.556 ms
+  Avg Dispatch Time Per Batch: 0.277 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 0.020 ms
+Planning:
+  Buffers: shared hit=84
+Planning Time: 0.740 ms
+Execution Time: 25.841 ms[0m[39m
+postgres location: [37m[2mraw_count_test.rs:37[0m[39m
+rust location: [33m<unknown>[39m
+
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    engine::executor::agg::descriptor::raw_count_tests::tests::pg_pg_raw_where_second_mask_interrupt_drops_partial_owners
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 1923 filtered out; finished in 77.95s
+
+error: test failed, to rerun pass `--lib`

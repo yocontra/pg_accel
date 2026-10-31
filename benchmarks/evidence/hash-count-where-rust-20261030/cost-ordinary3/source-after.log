@@ -1,0 +1,8 @@
+pg_accel/src/engine/spec/abi.rs: OK
+pg_accel/src/gpu/bridge.rs: OK
+pg_accel/src/gpu/grouped_agg.rs: OK
+pg_accel/src/engine/executor/agg/descriptor.rs: OK
+pg_accel/src/engine/executor/agg/hash_partition.rs: OK
+pg_accel/src/engine/ffi/planner_hooks/shape/cost.rs: OK
+pg_accel/src/engine/ffi/planner_hooks/shape/tests.rs: OK
+pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs: OK

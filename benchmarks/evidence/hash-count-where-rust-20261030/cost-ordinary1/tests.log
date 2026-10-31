@@ -1,0 +1,21 @@
+   Compiling pgrx-pg-sys v0.19.1
+   Compiling pgrx v0.19.1
+   Compiling pgrx-tests v0.19.1
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error[E0599]: no associated function or constant named `default` found for struct `engine::spec::abi::PgaccelGroupedAggFilter` in the current scope
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:9444:81
+     |
+9444 |                         unfiltered.where_filter = abi::PgaccelGroupedAggFilter::default();
+     |                                                                                 ^^^^^^^ associated function or constant not found in `engine::spec::abi::PgaccelGroupedAggFilter`
+     |
+    ::: pg_accel/src/engine/spec/abi.rs:240:1
+     |
+ 240 | pub struct PgaccelGroupedAggFilter {
+     | ---------------------------------- associated function or constant `default` not found for this struct
+     |
+     = help: items from traits can only be used if the trait is implemented and in scope
+     = note: the following trait defines an item `default`, perhaps you need to implement it:
+             candidate #1: `std::default::Default`
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `pg_accel` (lib test) due to 1 previous error

@@ -1,0 +1,52 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:4147:29
+     |
+4147 | / ...                   match input {
+4148 | | ...                       Some(input) => {
+4149 | | ...                           crate::gpu::SqlBoolMask::from_resident_with_poll_counted(
+4150 | | ...                               input.values,
+...    |
+4169 | | ...                   }
+     | |_______________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#single_match_else
+     = note: `-D clippy::single-match-else` implied by `-D clippy::pedantic`
+     = help: to override `-D clippy::pedantic` add `#[allow(clippy::single_match_else)]`
+help: try
+     |
+4147 ~                             if let Some(input) = input {
+4148 +                                 crate::gpu::SqlBoolMask::from_resident_with_poll_counted(
+4149 +                                     input.values,
+4150 +                                     input.nulls,
+4151 +                                     &mut pending,
+4152 +                                     &mut submitted,
+4153 +                                 )
+4154 +                                 .map_err(|error| {
+4155 +                                     gpu_execution_error("adaptive mask failed", error)
+4156 +                                 })?
+4157 +                                 .map(Some)
+4158 +                                 .ok_or(DescriptorAggExecutionError::PreparationInterrupted)
+4159 +                             } else {
+4160 +                                 if pending() {
+4161 +                                     return Err(
+4162 +                                         DescriptorAggExecutionError::PreparationInterrupted,
+4163 +                                     );
+4164 +                                 }
+4165 +                                 Ok(None)
+4166 +                             }
+     |
+
+error: multiply and add expressions can be calculated more efficiently and accurately
+  --> pg_accel/src/engine/ffi/planner_hooks/shape/cost.rs:75:44
+   |
+75 |         self.replace_aggregate(PgCost::new(self.aggregate.get() + work * masks as f64));
+   |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider using: `work.mul_add(masks as f64, self.aggregate.get())`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#suboptimal_flops
+   = note: `-D clippy::suboptimal-flops` implied by `-D clippy::nursery`
+   = help: to override `-D clippy::nursery` add `#[allow(clippy::suboptimal_flops)]`
+
+error: could not compile `pg_accel` (lib) due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `pg_accel` (lib test) due to 2 previous errors

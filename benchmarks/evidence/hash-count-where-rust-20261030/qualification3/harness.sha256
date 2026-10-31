@@ -1,0 +1,12 @@
+6f6d2d2d503ecf988cc325577b7dc360600984c0cf49eef762cfab2f66d8e05c  .codex/scratch/hash-count-where-rust-20261030/qualify-live3.sh
+28e5297ebb09d846cf889e26580f934d77a3e3429577ddb921b5fdc79c360c52  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/run-live3.sh
+09a21188a8481066ba83d5b991498560676f43dbbd7f8726c4439221d6ae5614  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/check-live2.py
+1ae826b5f810c307e5f50bca52057aec07e92d0ea30428570b3ac1f80382ec64  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/raw.expected
+18c4517e403083049b4b966222736861df5767137e16cf141a58bfccc6e62e3b  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/h3.expected
+c1d795daf1a0595f3ced59227a32a311954f9aa22840ff1bd065b72602da264a  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/planner.expected
+cb5f3804675debc7561f32f8eb9b798db481f1f8c180fb96a06f204a3a8ed791  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/pgrx/config.toml
+9a190d4efce0ff6797ce50147bbbd65419e9e39e8c675dd3104d0060fda4a159  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/pgtests18-raw-qualification2/live.log
+201fb8ca7824f35ff583e7f24d1e37a8b7d6c6142666c02b22217fed5f869a28  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/pgtests18-raw-qualification2/terminal.log
+867a4ff4cab59d8143be3b405fe3a02c4e8f99b6cc71331cc37f793539d16f46  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/pgtests18-raw-qualification2/pg-test-module.sha256
+976db5c8720b09a12cf34cd6e22202e8c58429d77269c053cc027c5629964b99  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/pgtests18-raw-qualification2/harness.sha256
+00bd91c7c1602adfdfec8d4bdef37c6dc48cff9011095b94ab661334974d4143  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/pgtests18-raw-qualification2/protected.sha256

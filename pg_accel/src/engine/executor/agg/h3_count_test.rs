@@ -17,6 +17,36 @@ mod tests {
     use pgrx::pg_sys;
     use pgrx::prelude::*;
 
+    fn assert_where_partition_evidence(plan: &str, rows: usize, spilled: bool) -> u64 {
+        let field = |name: &str| -> u64 {
+            plan.lines()
+                .find_map(|line| line.trim().strip_prefix(name))
+                .unwrap_or_else(|| panic!("missing {name}: {plan}"))
+                .trim()
+                .parse()
+                .expect("numeric partition evidence")
+        };
+        let attempts = field("GPU Adaptive Aggregate Attempts:");
+        let overflows = field("GPU Adaptive Capacity Overflows:");
+        let leaves = field("GPU Adaptive Completed Leaves:");
+        assert!(overflows > 0 && leaves > 1, "{plan}");
+        assert_eq!(attempts, overflows + leaves, "{plan}");
+        assert_eq!(field("GPU Adaptive Unique Input Rows:"), rows as u64);
+        assert_eq!(
+            field("GPU Adaptive Attempted Scan Rows:"),
+            rows as u64 * attempts
+        );
+        assert!(
+            plan.contains(&format!("GPU Adaptive Final Tuples Spilled: {spilled}")),
+            "{plan}"
+        );
+        assert!(
+            plan.contains("GPU Physical Kernel Mode Verified: true"),
+            "{plan}"
+        );
+        attempts
+    }
+
     #[pg_test]
     fn pg_adaptive_where_empty_and_predicate_invalidation_rebuild_population() {
         Spi::run(
@@ -166,10 +196,24 @@ mod tests {
                     "GPU Dispatched Physical Kernel Mode: parallel_hash",
                     "GPU Lifecycle Calls Verified: true",
                     "GPU Descriptor Artifact Policy: ephemeral_fused",
-                    "GPU Adaptive Final Tuples Spilled: true",
                 ] {
                     assert!(text.contains(required), "missing {required}: {text}");
                 }
+                // Partitioning does not force disk spill: 123 final tuples fit
+                // in 64kB. The dedicated WHERE spill fixture below covers disk.
+                let attempts = assert_where_partition_evidence(&text, rows + 1, false);
+                let masks = if aggregate == "count(v) FILTER (WHERE p)" {
+                    2
+                } else {
+                    1
+                };
+                let calls = attempts
+                    + masks * (rows + 1).div_ceil(crate::gpu::SQL_BOOL_MASK_CHUNK_ROWS) as u64;
+                assert_eq!(crate::gpu::gpu_exec_count() - before, calls);
+                assert!(
+                    text.contains(&format!("GPU Planned Lifecycle Calls: {calls}")),
+                    "{text}"
+                );
                 assert!(crate::gpu::gpu_exec_count() > before);
                 assert_eq!(
                     Spi::get_one::<i64>("SELECT stock_exec_count FROM pg_accel_stats()")
@@ -1471,6 +1515,106 @@ mod tests {
     }
 
     #[pg_test]
+    fn pg_h3_where_large_final_result_spills_with_exact_masks() {
+        struct RestoreCap(Option<usize>);
+        impl Drop for RestoreCap {
+            fn drop(&mut self) {
+                super::super::set_adaptive_hash_test_cap(self.0);
+            }
+        }
+        let _cap = RestoreCap(super::super::set_adaptive_hash_test_cap(Some(512)));
+        Spi::run("CREATE EXTENSION IF NOT EXISTS h3; RESET pg_accel.cost_multiplier; RESET pg_accel.min_batch_size; SET pg_accel.enabled=off; SET pg_accel.auto_load=on; SET work_mem='64kB'").expect("WHERE spill setup");
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT gpu_available FROM pg_accel_device_info()")
+                .expect("device"),
+            Some(true)
+        );
+        let rows =
+            1_000_017_usize.max(crate::engine::cost::device_limits().gpu_h3_group_min_rows + 1);
+        // 4097 res3 parents plus NULL exceed the final 64kB tuplestore. The
+        // 512 cap exercises partitions, not production capacity selection.
+        // f=false for group zero deliberately retains one zero-count group.
+        Spi::run(&format!("CREATE TEMP TABLE h3_where_spill AS WITH parents AS \
+            (SELECT child FROM h3_get_res_0_cells() r(cell) CROSS JOIN LATERAL h3_cell_to_children(r.cell,3) c(child) ORDER BY child LIMIT 4097), \
+            seeds AS (SELECT array_agg(h3_cell_to_center_child(child,15) ORDER BY child) cells FROM parents) \
+            SELECT CASE WHEN i%97=0 THEN NULL ELSE cells[(1+g)::int] END cell, \
+            CASE WHEN i%7<>0 THEN i%2=0 END v, \
+            CASE WHEN i%13=0 THEN NULL ELSE ((i-1)/4097)%4<>0 END w, \
+            CASE WHEN g=0 THEN false WHEN i%11=0 THEN NULL ELSE i%3<>0 END f \
+            FROM (SELECT i,(i-1)%4097 g FROM generate_series(1,{rows}::bigint)s(i)) x CROSS JOIN seeds; \
+            INSERT INTO h3_where_spill VALUES ('8001fffffffffff'::h3index,NULL,false,false); \
+            ANALYZE h3_where_spill; SELECT pg_accel_pin('h3_where_spill',ARRAY['cell','v','w','f'])"))
+            .expect("large final WHERE fixture with rejected invalid-resolution row");
+        assert_eq!(
+            Spi::get_one::<i64>("SELECT count(*) FROM h3_where_spill").expect("input count"),
+            Some((rows + 1) as i64)
+        );
+        for (aggregate, masks) in [
+            ("count(*)", 1),
+            ("count(v) FILTER (WHERE f)", 2),
+            ("count(v) FILTER (WHERE w)", 1),
+        ] {
+            let query = format!(
+                "SELECT h3_cell_to_parent(cell,3) k,{aggregate} n FROM h3_where_spill WHERE w GROUP BY 1"
+            );
+            Spi::run("SET pg_accel.enabled=off").expect("stock oracle");
+            let before = crate::gpu::gpu_exec_count();
+            Spi::run(&format!("CREATE TEMP TABLE h3_spill_expected AS {query}"))
+                .expect("stock full result");
+            assert_eq!(crate::gpu::gpu_exec_count(), before);
+            assert_eq!(
+                Spi::get_one::<i64>("SELECT count(*) FROM h3_spill_expected").expect("group count"),
+                Some(4098)
+            );
+            assert_eq!(
+                Spi::get_one::<i64>("SELECT count(*) FROM h3_spill_expected WHERE k IS NULL")
+                    .expect("NULL group"),
+                Some(1)
+            );
+            if masks == 2 {
+                assert_eq!(
+                    Spi::get_one::<i64>("SELECT count(*) FROM h3_spill_expected WHERE n=0")
+                        .expect("zero-count group"),
+                    Some(1)
+                );
+            }
+            Spi::run("SET pg_accel.enabled=on").expect("GPU arm");
+            let stock = Spi::get_one::<i64>("SELECT stock_exec_count FROM pg_accel_stats()")
+                .expect("stock counter");
+            let before = crate::gpu::gpu_exec_count();
+            let text = Spi::connect(|client| {
+                client.select(&format!("EXPLAIN (ANALYZE,VERBOSE,COSTS OFF) CREATE TEMP TABLE h3_spill_actual AS {query}"), None, &[]).expect("materialized actual spill")
+                .map(|row| row.get::<String>(1).expect("line").expect("non-NULL")).collect::<Vec<_>>().join("\n")
+            });
+            for required in [
+                "Custom Scan (GpuAccelAgg)",
+                "GPU Dispatched Physical Kernel Mode: parallel_hash",
+                "GPU Lifecycle Calls Verified: true",
+                "GPU Descriptor Artifact Policy: ephemeral_fused",
+            ] {
+                assert!(text.contains(required), "missing {required}: {text}");
+            }
+            let attempts = assert_where_partition_evidence(&text, rows + 1, true);
+            let calls =
+                attempts + masks * (rows + 1).div_ceil(crate::gpu::SQL_BOOL_MASK_CHUNK_ROWS) as u64;
+            assert_eq!(crate::gpu::gpu_exec_count() - before, calls);
+            assert!(
+                text.contains(&format!("GPU Planned Lifecycle Calls: {calls}")),
+                "{text}"
+            );
+            assert_eq!(
+                Spi::get_one::<i64>("SELECT stock_exec_count FROM pg_accel_stats()")
+                    .expect("stock counter"),
+                stock
+            );
+            Spi::run("SET pg_accel.enabled=off").expect("stock full diff");
+            assert_eq!(Spi::get_one::<i64>("SELECT count(*) FROM ((TABLE h3_spill_expected EXCEPT ALL TABLE h3_spill_actual) UNION ALL (TABLE h3_spill_actual EXCEPT ALL TABLE h3_spill_expected))d").expect("both directions"), Some(0));
+            Spi::run("DROP TABLE h3_spill_expected,h3_spill_actual").expect("release results");
+        }
+        Spi::run("SELECT pg_accel_unpin('h3_where_spill'); SELECT pg_accel_evict('h3_where_spill'); DROP TABLE h3_where_spill; RESET work_mem").expect("release fixture");
+    }
+
+    #[pg_test]
     fn pg_h3_filtered_preflight_protects_exact_mask_footprint() {
         use super::super::{EphemeralDescriptorArtifact, h3_planning_memory};
         use crate::engine::residency::{
@@ -1501,7 +1645,7 @@ mod tests {
                 DescriptorArtifactPolicy::EphemeralFused,
             ] {
                 let plan = plan_for(policy, true, false);
-                assert_h3_native_memory_quote(&plan);
+                let native_memory = assert_h3_native_memory_quote(&plan);
                 let expected = native_for(true, false);
                 crate::gpu::cleanup_grouped_allocation_pools();
                 let baseline = resident_live_bytes();
@@ -1519,7 +1663,8 @@ mod tests {
                     baseline,
                     "quote must not charge or allocate a mask"
                 );
-                let native_bytes: u64 = snapshot.layout.iter().rev().take(2).sum();
+                let native_bytes =
+                    u64::try_from(native_memory.total_bytes).expect("typed native memory fits u64");
                 let required = native_bytes
                     + if policy == DescriptorArtifactPolicy::EphemeralFused {
                         65_537
@@ -2870,7 +3015,9 @@ mod tests {
         assert_eq!(execute(plan, false), expected);
     }
 
-    fn assert_h3_native_memory_quote(plan: &DescriptorAggPlan) {
+    fn assert_h3_native_memory_quote(
+        plan: &DescriptorAggPlan,
+    ) -> crate::gpu::GroupedAggMemoryRequirements {
         use super::super::{EphemeralDescriptorArtifact, H3ParentArtifact};
         use crate::engine::residency::{
             with_derived_artifact_inputs, with_ephemeral_artifact_inputs,
@@ -2896,8 +3043,9 @@ mod tests {
                     .hash_memory_requirements()
                     .expect("real native bytes")
             );
+            quoted
         };
-        if plan.artifact_policy.get() == DescriptorArtifactPolicy::CachedReusable {
+        let memory = if plan.artifact_policy.get() == DescriptorArtifactPolicy::CachedReusable {
             with_derived_artifact_inputs::<H3ParentArtifact, _>(
                 plan.spec.fact_rel.into(),
                 &plan.identity,
@@ -2910,10 +3058,10 @@ mod tests {
                         cell,
                     )
                     .expect("real cached binding");
-                    check(bound.desc, false);
+                    check(bound.desc, false)
                 },
             )
-            .expect("cached owner borrow");
+            .expect("cached owner borrow")
         } else {
             let owner = plan.ephemeral_artifact.borrow();
             let Some(EphemeralDescriptorArtifact::Hash(owner)) = owner.as_ref() else {
@@ -2932,16 +3080,17 @@ mod tests {
                         &mut || false,
                     )
                     .expect("real fused binding");
-                    check(bound.desc, true);
+                    check(bound.desc, true)
                 },
             )
-            .expect("fused owner borrow");
-        }
+            .expect("fused owner borrow")
+        };
         assert_eq!(
             crate::engine::residency::resident_live_bytes(),
             baseline,
             "query is uncharged"
         );
+        memory
     }
 
     #[pg_test]

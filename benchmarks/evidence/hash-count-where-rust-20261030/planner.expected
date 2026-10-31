@@ -1,0 +1,4 @@
+engine::ffi::planner_hooks::generic_groupagg::tests::pg_pg_raw_count_dense_controls_preserve_independent_candidates
+engine::ffi::planner_hooks::generic_groupagg::tests::pg_pg_raw_count_shared_inputs_equivalence_and_nonshareable_filters_having
+engine::ffi::planner_hooks::generic_groupagg::tests::pg_pg_raw_count_shared_inputs_keep_raw_cache_hit_independent
+engine::ffi::planner_hooks::generic_groupagg::tests::pg_pg_raw_count_sparse_star_candidate_cost_observations

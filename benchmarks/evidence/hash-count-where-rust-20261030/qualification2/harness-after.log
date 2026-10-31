@@ -1,0 +1,7 @@
+.codex/scratch/hash-count-where-rust-20261030/qualify-live2.sh: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/run-live2.sh: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/check-live.py: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/raw.expected: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/h3.expected: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/planner.expected: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/pgrx/config.toml: OK
