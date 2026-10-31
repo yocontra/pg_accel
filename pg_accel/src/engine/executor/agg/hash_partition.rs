@@ -29,6 +29,16 @@ pub(super) struct HashPartitionDriver {
 }
 
 impl HashPartitionDriver {
+    /// Exact successful native population coverage, never a partial attempt.
+    pub(super) fn completed_population(&self) -> Option<(u64, u64, u64)> {
+        let whole = self.whole_rows?;
+        (self.current.is_none()
+            && self.pending_len == 0
+            && self.selected_rows == whole
+            && self.completed_leaves > 0)
+            .then_some((whole, self.selected_rows, self.completed_leaves))
+    }
+
     pub(super) fn new(initial: usize, maximum: usize) -> Result<Self, String> {
         if initial == 0 || maximum == 0 || initial > maximum {
             return Err("invalid adaptive hash capacity interval".into());
@@ -171,8 +181,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn population_proof_rejects_partial_unvalidated_and_reset_state() {
+        let mut driver = HashPartitionDriver::new(4, 4).expect("capacity");
+        assert_eq!(driver.completed_population(), None);
+        driver.complete_leaf(2).expect("non-population retirement");
+        assert_eq!(driver.completed_population(), None);
+        let mut driver = HashPartitionDriver::new(4, 4).expect("reset capacity");
+        assert_eq!(driver.completed_population(), None);
+        assert!(driver.complete_population_leaf(2, 3, 4).is_err());
+        assert_eq!(driver.completed_population(), None);
+        driver.complete_population_leaf(3, 3, 4).expect("one shot");
+        assert!(!driver.overflowed);
+        assert_eq!(driver.completed_population(), Some((3, 3, 1)));
+        driver.pending_len = 1;
+        assert_eq!(driver.completed_population(), None);
+        driver.pending_len = 0;
+        driver.completed_leaves = 0;
+        assert_eq!(driver.completed_population(), None);
+        driver.completed_leaves = 1;
+        driver.selected_rows = 2;
+        assert_eq!(driver.completed_population(), None);
+    }
+
+    #[test]
     fn where_population_is_stable_exhaustive_and_success_only() {
         let mut driver = HashPartitionDriver::new(1, 1).expect("capacity");
+        assert_eq!(driver.completed_population(), None);
         assert!(driver.complete_population_leaf(3, 4, 8).is_err());
         assert_eq!(driver.completed_leaves, 0);
         driver.capacity_overflow(false).expect("split failed root");
@@ -184,10 +218,12 @@ mod tests {
         assert!(driver.complete_population_leaf(0, 4, 8).is_err());
         assert!(driver.complete_population_leaf(2, 4, 8).is_err());
         assert_eq!(driver.completed_leaves, 1);
+        assert_eq!(driver.completed_population(), None);
         driver
             .complete_population_leaf(1, 4, 8)
             .expect("NULL leaf closes exact sum");
         assert_eq!(driver.selected_rows, 4);
+        assert_eq!(driver.completed_population(), Some((4, 4, 2)));
         assert!(driver.attempt().expect("EOF").is_none());
         assert!(driver.complete_population_leaf(0, 4, 8).is_err());
         for input in [0, 8] {
@@ -196,6 +232,7 @@ mod tests {
                 .complete_population_leaf(0, 0, input)
                 .expect("empty or all rejected");
             assert!(empty.attempt().expect("EOF").is_none());
+            assert_eq!(empty.completed_population(), Some((0, 0, 1)));
         }
         let mut overflow = HashPartitionDriver::new(1, 1).expect("capacity");
         overflow.capacity_overflow(false).expect("split");

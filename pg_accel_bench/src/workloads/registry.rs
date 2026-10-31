@@ -905,6 +905,10 @@ const PINS_REDUCE_F64: &[ResidentPinSpec] = &[pin!("bench_fp64_num", ["v_f64"])]
 const PINS_HASHAGG_F64: &[ResidentPinSpec] = &[pin!("bench_fp64_num", ["gk", "v_f64", "w_f64"])];
 const PINS_H3_PARENT: &[ResidentPinSpec] = &[pin!("bench_h3_parent", ["cell"])];
 const PINS_RAW_COUNT_STAR: &[ResidentPinSpec] = &[pin!("bench_raw_integer_count", ["k"])];
+const PINS_WHERE_STAR: &[ResidentPinSpec] = &[pin!("bench_hash_where", ["k", "w"])];
+const PINS_WHERE_INDEPENDENT: &[ResidentPinSpec] =
+    &[pin!("bench_hash_where", ["k", "w", "f", "vb"])];
+const PINS_WHERE_IDENTICAL: &[ResidentPinSpec] = &[pin!("bench_hash_where", ["k", "w", "vi"])];
 const PINS_RAW_COUNT_FILTER: &[ResidentPinSpec] =
     &[pin!("bench_raw_integer_count", ["k", "value", "qualifies"])];
 const PINS_H3_COUNT_COLUMN: &[ResidentPinSpec] =
@@ -1127,6 +1131,61 @@ const PINS_CLICKBENCH_TOP_URLS: &[ResidentPinSpec] = &[pin!(
 
 /// Canonical registry. Exact workload names appear once and only once here.
 pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
+    workload("where_int2_count_star", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_WHERE_STAR)
+        .evidence(WINNER),
+    workload("where_int2_count_independent", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_WHERE_INDEPENDENT)
+        .evidence(WINNER),
+    workload("where_int2_count_identical", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_WHERE_IDENTICAL)
+        .evidence(WINNER),
+    workload("where_int4_count_star", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_WHERE_STAR)
+        .evidence(WINNER),
+    workload("where_int4_count_independent", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_WHERE_INDEPENDENT)
+        .evidence(WINNER),
+    workload("where_int4_count_identical", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_WHERE_IDENTICAL)
+        .evidence(WINNER),
+    workload("where_int8_count_star", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_WHERE_STAR)
+        .evidence(WINNER),
+    workload("where_int8_count_independent", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_WHERE_INDEPENDENT)
+        .evidence(WINNER),
+    workload("where_int8_count_identical", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_WHERE_IDENTICAL)
+        .evidence(WINNER),
+    workload("where_h3_count_star", C::GpuHashAgg, K::H3CellToParent)
+        .pins(PINS_WHERE_STAR)
+        .extensions(H3)
+        .evidence(WINNER),
+    workload(
+        "where_h3_count_independent",
+        C::GpuHashAgg,
+        K::H3CellToParent,
+    )
+    .pins(PINS_WHERE_INDEPENDENT)
+    .extensions(H3)
+    .evidence(WINNER),
+    workload("where_h3_count_identical", C::GpuHashAgg, K::H3CellToParent)
+        .pins(PINS_WHERE_IDENTICAL)
+        .extensions(H3)
+        .evidence(WINNER),
+    workload("where_int8_sparse_control", C::GpuHashAgg, K::HashAgg).pins(PINS_WHERE_STAR),
+    workload("where_int8_rejected_control", C::GpuHashAgg, K::HashAgg).pins(PINS_WHERE_STAR),
+    workload("where_h3_sparse_control", C::GpuHashAgg, K::H3CellToParent)
+        .pins(PINS_WHERE_STAR)
+        .extensions(H3),
+    workload(
+        "where_h3_rejected_control",
+        C::GpuHashAgg,
+        K::H3CellToParent,
+    )
+    .pins(PINS_WHERE_STAR)
+    .extensions(H3),
     workload("gpu_reduce_sum", C::GpuReduce, K::Reduce),
     workload("gpu_reduce_scaling", C::GpuReduce, K::Reduce),
     workload("reduce_sum_f32", C::GpuReduce, K::Reduce),
@@ -2417,10 +2476,38 @@ mod tests {
     fn registry_typed_policy_is_complete_for_special_families() {
         for entry in WORKLOAD_REGISTRY {
             let is_h3 = matches!(entry.kernel_class, K::H3LatLng | K::H3CellToParent);
+            let where_contract = super::super::hash_count_where::contract(entry.name);
+            if let Some(contract) = where_contract {
+                use super::super::hash_count_where::{Form, Key};
+                assert_eq!(entry.category, C::GpuHashAgg);
+                assert_eq!(is_h3, contract.key == Key::H3);
+                assert_eq!(
+                    entry.kernel_class,
+                    if is_h3 { K::H3CellToParent } else { K::HashAgg }
+                );
+                assert_eq!(
+                    entry.resident_pins,
+                    match contract.form {
+                        Form::Star => PINS_WHERE_STAR,
+                        Form::Independent => PINS_WHERE_INDEPENDENT,
+                        Form::Identical => PINS_WHERE_IDENTICAL,
+                    }
+                );
+                assert_eq!(entry.required_extensions, if is_h3 { H3 } else { &[] });
+                assert_eq!(
+                    entry.evidence,
+                    if contract.designated() {
+                        WINNER
+                    } else {
+                        EvidenceEligibility::NONE
+                    }
+                );
+                assert!(entry.h3_lane.is_none(), "WHERE has its own exact contract");
+            }
             // Real-data characterization has no pre-declared winner/parity
             // policy. It must report the observed lane, including losers;
             // all existing release-H3 policies remain mandatory.
-            let released_h3 = is_h3 && entry.category != C::NycTaxi;
+            let released_h3 = is_h3 && entry.category != C::NycTaxi && where_contract.is_none();
             assert_eq!(
                 released_h3,
                 entry.h3_lane.is_some(),

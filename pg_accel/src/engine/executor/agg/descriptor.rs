@@ -2959,6 +2959,16 @@ fn descriptor_artifact_policy_input(
 }
 
 impl DescriptorAggPlan {
+    /// Read existing validated v2 leaf evidence; no-WHERE plans have no proof.
+    pub(super) fn completed_where_population(
+        &self,
+        state: &AdaptiveHashExecution,
+    ) -> Option<(u64, u64, u64, u64)> {
+        hash_where_filter(&self.spec).ok().flatten()?;
+        let (whole, sum, leaves) = state.driver.as_ref()?.completed_population()?;
+        Some((u64::try_from(state.fact_rows).ok()?, whole, sum, leaves))
+    }
+
     #[cfg(feature = "pg_test")]
     pub(super) fn paired_identity(&self) -> DerivedArtifactIdentity {
         self.identity.clone()

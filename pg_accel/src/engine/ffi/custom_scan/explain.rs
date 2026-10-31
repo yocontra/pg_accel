@@ -826,6 +826,33 @@ unsafe fn explain_descriptor_agg(agg_state: &AggExecState, es: *mut pg_sys::Expl
                 agg_state.descriptor_planned_batches() == agg_state.batches_executed,
                 es,
             );
+            if let Some((input, whole, sum, leaves)) = agg_state.descriptor_where_population()
+                && let (Ok(input), Ok(whole), Ok(sum), Ok(leaves)) = (
+                    i64::try_from(input),
+                    i64::try_from(whole),
+                    i64::try_from(sum),
+                    i64::try_from(leaves),
+                )
+            {
+                pg_sys::ExplainPropertyText(
+                    c"GPU WHERE Population ABI".as_ptr(),
+                    c"hash_partition_v2".as_ptr(),
+                    es,
+                );
+                pg_sys::ExplainPropertyText(
+                    c"GPU WHERE Population Scope".as_ptr(),
+                    c"last completed execution (rescan-local)".as_ptr(),
+                    es,
+                );
+                for (name, value) in [
+                    (c"GPU WHERE Unique Input Rows", input),
+                    (c"GPU WHERE Whole Rows", whole),
+                    (c"GPU WHERE Successful Leaf Rows", sum),
+                    (c"GPU WHERE Completed Leaves", leaves),
+                ] {
+                    pg_sys::ExplainPropertyInteger(name.as_ptr(), std::ptr::null(), value, es);
+                }
+            }
             if let Some((input, scanned, attempts, overflows, leaves, spilled)) =
                 agg_state.descriptor_adaptive_evidence()
             {

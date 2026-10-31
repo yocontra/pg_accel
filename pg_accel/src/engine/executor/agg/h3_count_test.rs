@@ -29,6 +29,16 @@ mod tests {
         let attempts = field("GPU Adaptive Aggregate Attempts:");
         let overflows = field("GPU Adaptive Capacity Overflows:");
         let leaves = field("GPU Adaptive Completed Leaves:");
+        assert!(
+            plan.contains("GPU WHERE Population ABI: hash_partition_v2"),
+            "{plan}"
+        );
+        assert_eq!(field("GPU WHERE Unique Input Rows:"), rows as u64);
+        assert_eq!(
+            field("GPU WHERE Whole Rows:"),
+            field("GPU WHERE Successful Leaf Rows:")
+        );
+        assert_eq!(field("GPU WHERE Completed Leaves:"), leaves);
         assert!(overflows > 0 && leaves > 1, "{plan}");
         assert_eq!(attempts, overflows + leaves, "{plan}");
         assert_eq!(field("GPU Adaptive Unique Input Rows:"), rows as u64);
@@ -169,6 +179,9 @@ mod tests {
                 INSERT INTO h3_where_rows VALUES ('8001fffffffffff',NULL,true,false); \
                 ANALYZE h3_where_rows; SELECT pg_accel_pin('h3_where_rows',ARRAY['cell','v','p','w'])"))
                 .expect("H3 typed WHERE with rejected invalid-resolution input");
+            let expected_where = Spi::get_one::<i64>("SELECT count(*) FROM h3_where_rows WHERE w")
+                .expect("WHERE population oracle")
+                .expect("population");
             for aggregate in [
                 "count(*)",
                 "count(v)",
@@ -202,6 +215,10 @@ mod tests {
                 // Partitioning does not force disk spill: 123 final tuples fit
                 // in 64kB. The dedicated WHERE spill fixture below covers disk.
                 let attempts = assert_where_partition_evidence(&text, rows + 1, false);
+                assert!(
+                    text.contains(&format!("GPU WHERE Whole Rows: {expected_where}")),
+                    "{text}"
+                );
                 let masks = if aggregate == "count(v) FILTER (WHERE p)" {
                     2
                 } else {

@@ -271,6 +271,17 @@ impl AggExecState {
     }
 
     /// Logical input population is separate from repeated physical scans.
+    /// Only the last completed, dispatched canonical WHERE execution qualifies.
+    /// Rescan clears both completion and dispatch before any new work begins.
+    pub fn descriptor_where_population(&self) -> Option<(u64, u64, u64, u64)> {
+        if !self.descriptor.completed || !self.gpu_dispatched {
+            return None;
+        }
+        let adaptive = self.descriptor.adaptive.as_ref()?;
+        self.descriptor.plan.completed_where_population(adaptive)
+    }
+
+    /// Logical input population is separate from repeated physical scans.
     /// Return only dynamic executions so canonical one-shot EXPLAIN is stable.
     pub fn descriptor_adaptive_evidence(&self) -> Option<(u64, u64, u64, u64, u64, bool)> {
         let adaptive = self.descriptor.adaptive.as_ref()?;

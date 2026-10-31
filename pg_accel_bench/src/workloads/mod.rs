@@ -30,6 +30,7 @@ mod grouped_filtered_integer;
 mod grouped_integer_sum_avg_candidate;
 mod grouped_multikey_integer;
 mod grouped_multimeasure_integer;
+pub mod hash_count_where;
 mod hashagg_sweep;
 mod predicate_expression_grouped_agg_int4;
 mod predicate_filter_expression_grouped_agg;
@@ -350,6 +351,42 @@ pub trait Workload: Send + Sync {
 /// Return all registered workloads.
 pub fn all_workloads() -> Vec<Box<dyn Workload>> {
     vec![
+        Box::new(hash_count_where::HashCountWhere("where_int2_count_star")),
+        Box::new(hash_count_where::HashCountWhere(
+            "where_int2_count_independent",
+        )),
+        Box::new(hash_count_where::HashCountWhere(
+            "where_int2_count_identical",
+        )),
+        Box::new(hash_count_where::HashCountWhere("where_int4_count_star")),
+        Box::new(hash_count_where::HashCountWhere(
+            "where_int4_count_independent",
+        )),
+        Box::new(hash_count_where::HashCountWhere(
+            "where_int4_count_identical",
+        )),
+        Box::new(hash_count_where::HashCountWhere("where_int8_count_star")),
+        Box::new(hash_count_where::HashCountWhere(
+            "where_int8_count_independent",
+        )),
+        Box::new(hash_count_where::HashCountWhere(
+            "where_int8_count_identical",
+        )),
+        Box::new(hash_count_where::HashCountWhere("where_h3_count_star")),
+        Box::new(hash_count_where::HashCountWhere(
+            "where_h3_count_independent",
+        )),
+        Box::new(hash_count_where::HashCountWhere("where_h3_count_identical")),
+        Box::new(hash_count_where::HashCountWhere(
+            "where_int8_sparse_control",
+        )),
+        Box::new(hash_count_where::HashCountWhere(
+            "where_int8_rejected_control",
+        )),
+        Box::new(hash_count_where::HashCountWhere("where_h3_sparse_control")),
+        Box::new(hash_count_where::HashCountWhere(
+            "where_h3_rejected_control",
+        )),
         Box::new(raw_integer_count::RawIntegerCount("raw_int2_count_star")),
         Box::new(raw_integer_count::RawIntegerCount(
             "raw_int2_count_bool_filter",
@@ -1123,6 +1160,78 @@ struct ReleasedEnvelopeContract {
 
 const RELEASED_ENVELOPE_CONTRACTS: &[ReleasedEnvelopeContract] = &[
     ReleasedEnvelopeContract {
+        workload: "where_int2_count_star",
+        min_rows: 1_000_017,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "where_int2_count_independent",
+        min_rows: 1_000_017,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "where_int2_count_identical",
+        min_rows: 1_000_017,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "where_int4_count_star",
+        min_rows: 1_000_017,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "where_int4_count_independent",
+        min_rows: 1_000_017,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "where_int4_count_identical",
+        min_rows: 1_000_017,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "where_int8_count_star",
+        min_rows: 1_000_017,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "where_int8_count_independent",
+        min_rows: 1_000_017,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "where_int8_count_identical",
+        min_rows: 1_000_017,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "where_h3_count_star",
+        min_rows: 1_000_017,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::H3Parent,
+    },
+    ReleasedEnvelopeContract {
+        workload: "where_h3_count_independent",
+        min_rows: 1_000_017,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::H3Parent,
+    },
+    ReleasedEnvelopeContract {
+        workload: "where_h3_count_identical",
+        min_rows: 1_000_017,
+        max_rows: 2_000_017,
+        family: ReleasedPathFamily::H3Parent,
+    },
+    ReleasedEnvelopeContract {
         workload: "raw_int2_count_star",
         min_rows: 1_000_017,
         max_rows: 2_000_017,
@@ -1666,7 +1775,8 @@ pub fn benchmark_threshold_matrix_entry(
     name: &str,
     rows: usize,
 ) -> Option<BenchmarkThresholdMatrixEntry> {
-    raw_integer_count_threshold_entry(name, rows)
+    hash_count_where_threshold_entry(name, rows)
+        .or_else(|| raw_integer_count_threshold_entry(name, rows))
         .or_else(|| groupagg_threshold_matrix_entry(name, rows))
         .or_else(|| olap_threshold_matrix_entry(name, rows))
         .or_else(|| h3_threshold_matrix_entry(name, rows))
@@ -1679,6 +1789,39 @@ pub fn benchmark_threshold_matrix_entry(
         .or_else(|| spatial_threshold_matrix_entry(name, rows))
         .or_else(|| regression_decline_matrix_entry(name, rows))
         .map(validate_performance_envelope)
+}
+
+fn hash_count_where_threshold_entry(name: &str, rows: usize) -> Option<PerformanceEnvelope> {
+    let c = hash_count_where::contract(name)?;
+    if !c.designated() || !hash_count_where::ROW_SCALES.contains(&rows) {
+        return None;
+    }
+    Some(PerformanceEnvelope {
+        lane: c.name,
+        workload: c.name,
+        rows,
+        data_type: match c.key {
+            hash_count_where::Key::Int2 => "INT2",
+            hash_count_where::Key::Int4 => "INT4",
+            hash_count_where::Key::Int8 => "INT8",
+            hash_count_where::Key::H3 => "H3 resolution15 to parent3",
+        },
+        cardinality: "16388 distinct non-NULL groups plus NULL; arithmetic skew",
+        selectivity: "cycle-varying direct BOOL WHERE; nullable independent or identical FILTER",
+        result_count: "16389".to_owned(),
+        index_pruning_shape: "n/a",
+        prepared_geometry: "n/a",
+        batch_count: "bounded v2 WHERE hash COUNT with natural capacity".to_owned(),
+        row_width: "typed key and physically required Boolean/value columns",
+        output_size: "16389 complete typed key/count rows",
+        dispatch_evidence: "default result-producing verified parallel_hash; actual lifecycle, v2 WHERE population, positive GPU and zero stock fallback",
+        correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
+        cache_gate: GENERIC_CACHE_GATE,
+        threshold_basis: "predeclared 24 WHERE designated cells; eight sensitivities never relabeled winners",
+        expectation: BenchmarkLaneExpectation::GpuWinner {
+            min_warm_speedup: 1.15,
+        },
+    })
 }
 
 fn raw_integer_count_threshold_entry(name: &str, rows: usize) -> Option<PerformanceEnvelope> {
@@ -4341,7 +4484,10 @@ mod tests {
     }
 
     fn supported_default_suite_probe(name: &str, rows: usize) -> bool {
-        if h3_count_contract(name).is_some() || raw_integer_count::contract(name).is_some() {
+        if h3_count_contract(name).is_some()
+            || raw_integer_count::contract(name).is_some()
+            || hash_count_where::contract(name).is_some()
+        {
             return matches!(rows, 1_000_017 | 2_000_017);
         }
         matches!(
@@ -6482,14 +6628,25 @@ mod tests {
     // Validate every registered workload
     // -----------------------------------------------------------------------
 
+    fn structural_scales(workload: &dyn Workload, legacy: &[usize]) -> Vec<usize> {
+        if hash_count_where::contract(workload.name()).is_some() {
+            assert_eq!(workload.row_scales(), hash_count_where::ROW_SCALES);
+            workload.row_scales().to_vec()
+        } else {
+            legacy.to_vec()
+        }
+    }
+
     #[test]
     fn test_validate_all_workloads() {
         let workloads = all_workloads();
         let mut all_issues = Vec::new();
         for w in &workloads {
-            let issues = validate_workload(w.as_ref(), 1000);
-            for issue in &issues {
-                all_issues.push(issue.clone());
+            for rows in structural_scales(w.as_ref(), &[1000]) {
+                let issues = validate_workload(w.as_ref(), rows);
+                for issue in &issues {
+                    all_issues.push(issue.clone());
+                }
             }
         }
         assert!(
@@ -6538,21 +6695,23 @@ mod tests {
     #[test]
     fn test_every_workload_setup_creates_tables() {
         for w in &all_workloads() {
-            let setup = w.setup_sql(100);
-            // Match `CREATE TABLE`, `CREATE UNLOGGED TABLE`, `CREATE TEMP TABLE`,
-            // and `CREATE TEMPORARY TABLE` — all legal PG table-creation forms.
-            let has_create = setup.iter().any(|s| {
-                let lower = s.to_lowercase();
-                lower.contains("create table")
-                    || lower.contains("create unlogged table")
-                    || lower.contains("create temp table")
-                    || lower.contains("create temporary table")
-            });
-            assert!(
-                has_create,
-                "workload '{}' setup_sql does not create any tables",
-                w.name()
-            );
+            for rows in structural_scales(w.as_ref(), &[100]) {
+                let setup = w.setup_sql(rows);
+                // Match `CREATE TABLE`, `CREATE UNLOGGED TABLE`, `CREATE TEMP TABLE`,
+                // and `CREATE TEMPORARY TABLE` — all legal PG table-creation forms.
+                let has_create = setup.iter().any(|s| {
+                    let lower = s.to_lowercase();
+                    lower.contains("create table")
+                        || lower.contains("create unlogged table")
+                        || lower.contains("create temp table")
+                        || lower.contains("create temporary table")
+                });
+                assert!(
+                    has_create,
+                    "workload '{}' setup_sql does not create any tables",
+                    w.name()
+                );
+            }
         }
     }
 
@@ -6657,8 +6816,10 @@ mod tests {
     fn test_all_workloads_balanced_parens() {
         for w in &all_workloads() {
             let mut issues = Vec::new();
-            for (i, sql) in w.setup_sql(100).iter().enumerate() {
-                check_balanced_parens(sql, &format!("{}/setup[{i}]", w.name()), &mut issues);
+            for rows in structural_scales(w.as_ref(), &[100]) {
+                for (i, sql) in w.setup_sql(rows).iter().enumerate() {
+                    check_balanced_parens(sql, &format!("{}/setup[{i}]", w.name()), &mut issues);
+                }
             }
             check_balanced_parens(&w.query_sql(), &format!("{}/query", w.name()), &mut issues);
             for (i, sql) in w.cleanup_sql().iter().enumerate() {
@@ -6698,7 +6859,7 @@ mod tests {
             }
 
             let mut scales = workload.row_scales().to_vec();
-            scales.extend(boundary_scales);
+            scales.extend(structural_scales(workload.as_ref(), &boundary_scales));
             scales.sort_unstable();
             scales.dedup();
             for rows in scales {

@@ -388,6 +388,13 @@ pub struct WorkloadResult {
     /// dispatch is excluded from all measured samples and counter windows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_integer_count_execution_proof: Option<RawIntegerCountExecutionProof>,
+    /// Exact new WHERE contract; never populated for released no-WHERE lanes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub where_count_settings: Vec<TypedH3SettingsCapture>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub where_count_native_kernel_deltas: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub where_count_execution_proof: Option<RawIntegerCountExecutionProof>,
     /// Per-pair, off-clock planner-stage deltas for native-decline benchmark
     /// cells. Entries index `iterations`; absent for non-native cells.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1370,6 +1377,9 @@ impl WorkloadResult {
             raw_integer_count_settings: Vec::new(),
             raw_integer_count_native_kernel_deltas: Vec::new(),
             raw_integer_count_execution_proof: None,
+            where_count_settings: Vec::new(),
+            where_count_native_kernel_deltas: Vec::new(),
+            where_count_execution_proof: None,
             planner_stage_captures: Vec::new(),
             native_parity_pair_captures: Vec::new(),
             artifact_lifecycle_probe: None,
@@ -2277,6 +2287,140 @@ fn raw_integer_count_plan_evidence_verified(
                             == plan_text_property(&proof.explain_analyze, &[*property])
                     })
             })
+}
+
+/// Same-node typed WHERE evidence, independent of the released no-WHERE parser.
+pub fn plan_contains_where_count(
+    plan: &str,
+    c: crate::workloads::hash_count_where::Contract,
+    executed: bool,
+) -> bool {
+    use crate::workloads::hash_count_where::{Form, Key};
+    let blocks = pg_accel_custom_scan_blocks(plan);
+    let [block] = blocks.as_slice() else {
+        return false;
+    };
+    let direct = direct_custom_scan_property_lines(block).join("\n");
+    let Some(key) = plan_text_property(&direct, &["gpu descriptor group keys"]) else {
+        return false;
+    };
+    let column = if c.key == Key::H3 {
+        key.strip_prefix("k0:h3_cell_to_parent(")
+            .and_then(|s| s.split_once(", resolution="))
+            .and_then(|(column, tail)| {
+                let parsed = parse_descriptor_column(column)?;
+                (tail == format!("3) type={} collation=0 encoding=hash", parsed.type_oid))
+                    .then_some(parsed)
+            })
+    } else {
+        let oid = match c.key {
+            Key::Int2 => 21,
+            Key::Int4 => 23,
+            _ => 20,
+        };
+        key.strip_prefix("k0:fact(")
+            .and_then(|s| s.strip_suffix(&format!(") type={oid} collation=0 encoding=hash")))
+            .and_then(parse_descriptor_column)
+            .filter(|column| column.type_oid == oid)
+    };
+    let Some(column) = column else {
+        return false;
+    };
+    let (aggregate, count_oid, filter) = match c.form {
+        Form::Star => (
+            "m0:count_star -> value.count".to_owned(),
+            0,
+            "none".to_owned(),
+        ),
+        Form::Independent => (
+            format!(
+                "m0:column({}.4:type=16) -> value.count",
+                column.relation_oid
+            ),
+            16,
+            format!("sql_mask(input={}.3:type=16)", column.relation_oid),
+        ),
+        Form::Identical => (
+            format!(
+                "m0:column({}.5:type=23) -> value.count",
+                column.relation_oid
+            ),
+            23,
+            format!("sql_mask(input={}.2:type=16)", column.relation_oid),
+        ),
+    };
+    column.relation_oid > 0
+        && column.attno == 1
+        && column.type_oid > 0
+        && plan_contains_resident_groupagg_logical_evidence(&direct)
+        && plan_text_property(&direct, &["gpu descriptor specialization"])
+            == Some("hash_count".to_owned())
+        && plan_text_property(&direct, &["gpu physical kernel mode"])
+            == Some("parallel_hash".to_owned())
+        && plan_text_property(&direct, &["gpu descriptor aggregates"]) == Some(aggregate)
+        && plan_text_property(&direct, &["gpu descriptor filter"])
+            == Some(format!(
+                "fact=sql_mask(input={}.2:type=16); measures=[m0={filter}]; dimensions=[none]",
+                column.relation_oid
+            ))
+        && plan_text_property(&direct, &["gpu descriptor output"])
+            == Some(format!(
+                "slot0:group[k0] source_type={} result_type={} typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type={count_oid} result_type=20 typmod=-1 collation=0 nullable=false",
+                column.type_oid, column.type_oid
+            ))
+        && (!executed
+            || (plan_text_property(&direct, &["gpu dispatched physical kernel mode"])
+                == Some("parallel_hash".to_owned())
+                && plan_text_property(&direct, &["gpu physical kernel mode verified"])
+                    == Some("true".to_owned())
+                && plan_text_property(&direct, &["gpu lifecycle calls verified"])
+                    == Some("true".to_owned())
+                && plan_text_property(&direct, &["gpu descriptor artifact policy"])
+                    .is_some_and(|p| p.split_whitespace().next() == Some("ephemeral_fused"))))
+}
+
+fn where_count_calls_verified(
+    w: &WorkloadResult,
+    c: crate::workloads::hash_count_where::Contract,
+) -> bool {
+    let Some(mask_calls) = u64::try_from(w.rows.div_ceil(65_536))
+        .ok()
+        .and_then(|chunks| chunks.checked_mul(u64::try_from(c.mask_count()).ok()?))
+        .and_then(|calls| calls.checked_mul(u64::try_from(w.iterations.len()).ok()?))
+    else {
+        return false;
+    };
+    w.physical_kernel_mode_counts
+        .parallel_hash
+        .checked_add(mask_calls)
+        == Some(w.gpu_kernel_execution_delta)
+        && w.physical_kernel_mode_counts.parallel_dense_count == 0
+        && w.physical_kernel_mode_counts.parallel_dense_integer == 0
+        && w.physical_kernel_mode_counts.parallel_dense_numeric == 0
+        && w.physical_kernel_mode_counts.serial_generic == 0
+}
+
+fn where_count_population_verified(plan: &str, rows: usize) -> bool {
+    let expected = match rows {
+        1_000_017 => 681_055,
+        2_000_017 => 1_377_222,
+        _ => return false,
+    };
+    let blocks = pg_accel_custom_scan_blocks(plan);
+    let [block] = blocks.as_slice() else {
+        return false;
+    };
+    let direct = direct_custom_scan_property_lines(block).join("\n");
+    plan_text_property(&direct, &["gpu where population abi"])
+        == Some("hash_partition_v2".to_owned())
+        && plan_text_property(&direct, &["gpu where population scope"])
+            == Some("last completed execution (rescan-local)".to_owned())
+        && plan_integer_property(&direct, &["gpu where unique input rows"])
+            == i64::try_from(rows).ok()
+        && plan_integer_property(&direct, &["gpu where whole rows"]) == Some(expected)
+        && plan_integer_property(&direct, &["gpu where successful leaf rows"]) == Some(expected)
+        && plan_integer_property(&direct, &["gpu where completed leaves"])
+            .is_some_and(|leaves| leaves > 0)
 }
 
 fn typed_h3_default_settings(gucs: Option<&GucSettings>) -> bool {
@@ -5589,6 +5733,79 @@ impl BenchReport {
         for w in &report.workloads {
             let threshold_entry =
                 crate::workloads::benchmark_threshold_matrix_entry(&w.name, w.rows);
+            if let Some(contract) = crate::workloads::hash_count_where::contract(&w.name) {
+                let pairs = w
+                    .iterations
+                    .iter()
+                    .filter(|p| p.cache_state == CacheState::Warm)
+                    .collect::<Vec<_>>();
+                let first = pairs.iter().filter(|p| p.accel_first).count();
+                let common = crate::workloads::hash_count_where::ROW_SCALES.contains(&w.rows)
+                    && report.methodology.timing_mode == "raw-wallclock"
+                    && report.methodology.warmup == 5
+                    && report.methodology.iterations == 10
+                    && w.warmup_iterations
+                        .iter()
+                        .filter(|p| p.cache_state == CacheState::Warm)
+                        .count()
+                        == 5
+                    && pairs.len() == 10
+                    && first == 5
+                    && pairs.iter().all(|p| {
+                        p.accel_ms.is_finite()
+                            && p.accel_ms > 0.0
+                            && p.parallel_ms.is_finite()
+                            && p.parallel_ms > 0.0
+                    })
+                    && count_settings_verified(w, &w.where_count_settings)
+                    && w.where_count_native_kernel_deltas.len()
+                        == w.iterations.len() + w.warmup_iterations.len()
+                    && w.where_count_native_kernel_deltas
+                        .iter()
+                        .all(|delta| *delta == 0)
+                    && w.correctness_diff_artifact.is_some();
+                let proof = w.where_count_execution_proof.as_ref();
+                let verified = common
+                    && (!contract.designated()
+                        || (w.plan_selected
+                            && w.gpu_kernel_dispatched
+                            && w.dispatch_counter_captured
+                            && w.gpu_kernel_execution_delta > 0
+                            && w.pg_accel_stock_exec_delta == 0
+                            && u64::try_from(w.iterations.len())
+                                .ok()
+                                .and_then(|count| count.checked_mul(16_389))
+                                == Some(w.accel_output_rows_consumed)
+                            && w.physical_kernel_mode_verified
+                            && w.physical_kernel_mode.as_deref() == Some("parallel_hash")
+                            && w.physical_kernel_mode_counts.parallel_hash > 0
+                            && where_count_calls_verified(w, contract)
+                            && w.physical_kernel_mode_counts.serial_generic == 0
+                            && w.plan_snippet
+                                .as_deref()
+                                .is_some_and(|p| plan_contains_where_count(p, contract, false))
+                            && proof.is_some_and(|p| {
+                                p.gpu_kernel_execution_delta > 0
+                                    && p.stock_exec_delta == 0
+                                    && typed_h3_default_settings(Some(&p.settings))
+                                    && plan_contains_where_count(&p.explain_analyze, contract, true)
+                                    && where_count_population_verified(&p.explain_analyze, w.rows)
+                            })
+                            && raw_integer_count_lifecycle_evidence_error(w).is_none()));
+                let speedup = warm_speedup_for_gate(w);
+                if !verified || (contract.designated() && (!speedup.is_finite() || speedup < 1.15))
+                {
+                    failures.push(BenchmarkShipGateFailure {
+                        workload:w.name.clone(),rows:w.rows,
+                        kind:if verified {BenchmarkShipGateFailureKind::ExpectedWinnerBelowThreshold} else {BenchmarkShipGateFailureKind::ExpectedWinnerMissingEvidence},
+                        speedup_median:speedup,gate_floor:if contract.designated(){1.15}else{0.0},
+                        detail:"frozen WHERE matrix requires five warmups, ten balanced raw pairs, default settings and full parity; designated cells additionally require exact typed WHERE/hash proof and >=1.15x warm speedup; controls have no winner floor".to_owned(),
+                    });
+                }
+                // Sensitivity controls report either selected or declined paths;
+                // they are never relabeled wins or subjected to winner ratchets.
+                continue;
+            }
             if let Some(contract) =
                 crate::workloads::raw_integer_count::contract(&w.name).filter(|c| !c.dense_control)
             {
@@ -6855,6 +7072,279 @@ fn detect_memory() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn where_population_requires_complete_exact_same_node_evidence() {
+        let plan = "Custom Scan (GpuAccelAgg)\n  GPU WHERE Population ABI: hash_partition_v2\n  GPU WHERE Population Scope: last completed execution (rescan-local)\n  GPU WHERE Unique Input Rows: 1000017\n  GPU WHERE Whole Rows: 681055\n  GPU WHERE Successful Leaf Rows: 681055\n  GPU WHERE Completed Leaves: 1";
+        assert!(where_count_population_verified(plan, 1_000_017));
+        assert!(!where_count_population_verified(plan, 2_000_017));
+        for wrong in [
+            plan.replace("hash_partition_v2", "hash_partition_v1"),
+            plan.replace("rescan-local", "cumulative"),
+            plan.replace("Unique Input Rows: 1000017", "Unique Input Rows: 1000016"),
+            plan.replace("Whole Rows: 681055", "Whole Rows: 681054"),
+            plan.replace(
+                "Successful Leaf Rows: 681055",
+                "Successful Leaf Rows: 681054",
+            ),
+            plan.replace("Completed Leaves: 1", "Completed Leaves: 0"),
+            plan.replace("  GPU WHERE Completed Leaves: 1", ""),
+            plan.replace(
+                "  GPU WHERE Completed Leaves: 1",
+                "  -> Custom Scan (GpuAccelAgg)\n       GPU WHERE Completed Leaves: 1",
+            ),
+        ] {
+            assert!(
+                !where_count_population_verified(&wrong, 1_000_017),
+                "{wrong}"
+            );
+        }
+    }
+
+    fn passing_where_report(both: bool) -> BenchReport {
+        let mut w = mock_workload_result("where_int2_count_star", 1_000_017, 10.0, 30.0);
+        w.set_warmup_iterations(w.iterations[..5].to_vec());
+        if both {
+            let cold = w
+                .iterations
+                .iter()
+                .cloned()
+                .map(|mut sample| {
+                    sample.cache_state = CacheState::Cold;
+                    sample
+                })
+                .collect::<Vec<_>>();
+            w.iterations.splice(0..0, cold);
+        }
+        w = with_valid_resident_lifecycle(w);
+        // The real Both runner retains the warm sub-run's lifecycle summary;
+        // the generic mock helper includes every iteration, including cold.
+        let mut warm_with_probe = vec![
+            w.artifact_lifecycle_probe
+                .as_ref()
+                .expect("probe")
+                .iteration
+                .clone(),
+        ];
+        warm_with_probe.extend(
+            w.iterations
+                .iter()
+                .filter(|sample| sample.cache_state == CacheState::Warm)
+                .cloned(),
+        );
+        w.combined_warm_summary =
+            CacheModeSummary::from_iterations(CacheState::Warm, &warm_with_probe);
+        for capture in w
+            .artifact_lifecycle_probe
+            .iter_mut()
+            .chain(w.artifact_steady_state_captures.iter_mut())
+        {
+            capture.artifact_policy = Some("ephemeral_fused".to_owned());
+            capture.artifact.builds = 1;
+            capture.artifact.hits = 0;
+            capture.artifact.artifact_bytes_observed = 0;
+            capture.artifact.construction_bytes = 0;
+        }
+        let settings = GucSettings {
+            settings: vec![
+                ("pg_accel.cost_multiplier".to_owned(), "1".to_owned()),
+                ("pg_accel.min_batch_size".to_owned(), "65536".to_owned()),
+                ("pg_accel.enabled".to_owned(), "on".to_owned()),
+                ("pg_accel.gpu_enabled".to_owned(), "on".to_owned()),
+            ],
+        };
+        for cache in [CacheState::Warm, CacheState::Cold] {
+            for (phase, samples) in [
+                ("warmup", &w.warmup_iterations),
+                ("measured", &w.iterations),
+            ] {
+                for index in 0..samples.iter().filter(|s| s.cache_state == cache).count() {
+                    w.where_count_settings.push(TypedH3SettingsCapture {
+                        phase: phase.to_owned(),
+                        index,
+                        cache_state: cache,
+                        settings: settings.clone(),
+                    });
+                }
+            }
+        }
+        w.where_count_settings.push(TypedH3SettingsCapture {
+            phase: "lifecycle".to_owned(),
+            index: 0,
+            cache_state: CacheState::Warm,
+            settings: settings.clone(),
+        });
+        w.where_count_native_kernel_deltas =
+            vec![0; w.iterations.len() + w.warmup_iterations.len()];
+        let count = u64::try_from(w.iterations.len()).expect("small fixture");
+        w.plan_selected = true;
+        w.gpu_kernel_dispatched = true;
+        w.dispatch_counter_captured = true;
+        w.gpu_kernel_execution_delta = count * 17;
+        w.pg_accel_queries_accelerated_delta = count;
+        w.pg_accel_batches_executed_delta = count * 17;
+        w.accel_output_rows_consumed = count * 16_389;
+        w.physical_kernel_mode = Some("parallel_hash".to_owned());
+        w.physical_kernel_mode_counts = PhysicalKernelModeCounts::default();
+        w.physical_kernel_mode_counts.parallel_hash = count;
+        w.correctness_diff_artifact = Some("full-parity.json".to_owned());
+        let plan = "Custom Scan (GpuAccelAgg)\n  GPU Resident Operator Class: resident_groupagg\n  GPU Descriptor Strategy: descriptor_grouped_aggregate\n  GPU Descriptor Specialization: hash_count\n  GPU Physical Kernel Mode: parallel_hash\n  GPU Dispatched Physical Kernel Mode: parallel_hash\n  GPU Physical Kernel Mode Verified: true\n  GPU Lifecycle Calls Verified: true\n  GPU Descriptor Artifact Policy: ephemeral_fused reason=zero_retained_bytes\n  GPU Descriptor Group Keys: k0:fact(17000.1:type=21) type=21 collation=0 encoding=hash\n  GPU Descriptor Aggregates: m0:count_star -> value.count\n  GPU Descriptor Filter: fact=sql_mask(input=17000.2:type=16); measures=[m0=none]; dimensions=[none]\n  GPU Descriptor Output: slot0:group[k0] source_type=21 result_type=21 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false\n  GPU WHERE Population ABI: hash_partition_v2\n  GPU WHERE Population Scope: last completed execution (rescan-local)\n  GPU WHERE Unique Input Rows: 1000017\n  GPU WHERE Whole Rows: 681055\n  GPU WHERE Successful Leaf Rows: 681055\n  GPU WHERE Completed Leaves: 1".to_owned();
+        w.plan_snippet = Some(plan.clone());
+        w.where_count_execution_proof = Some(RawIntegerCountExecutionProof {
+            explain_analyze: plan,
+            gpu_kernel_execution_delta: 17,
+            stock_exec_delta: 0,
+            settings,
+        });
+        let mut report = mock_report(vec![w]);
+        report.methodology.iterations = 10;
+        report.methodology.timing_mode = "raw-wallclock".to_owned();
+        report.methodology.cache_mode = if both { "both" } else { "warm" }.to_owned();
+        report
+    }
+
+    #[test]
+    fn where_gate_accepts_complete_warm_and_both_and_rejects_mutations() {
+        for both in [false, true] {
+            let valid = passing_where_report(both);
+            assert!(
+                valid.evaluate_benchmark_ship_gate().is_empty(),
+                "{:?}",
+                valid.evaluate_benchmark_ship_gate()
+            );
+            for mutation in 0..8 {
+                let mut bad = valid.clone();
+                let w = &mut bad.workloads[0];
+                match mutation {
+                    0 => {
+                        w.where_count_settings.pop();
+                    }
+                    1 => {
+                        w.artifact_lifecycle_probe = None;
+                    }
+                    2 => {
+                        w.accel_output_rows_consumed -= 1;
+                    }
+                    3 => {
+                        w.gpu_kernel_execution_delta += 1;
+                    }
+                    4 => {
+                        w.where_count_native_kernel_deltas[0] = 1;
+                    }
+                    5 => {
+                        w.where_count_execution_proof
+                            .as_mut()
+                            .expect("proof")
+                            .explain_analyze = w
+                            .plan_snippet
+                            .as_ref()
+                            .expect("plan")
+                            .replace("Whole Rows: 681055", "Whole Rows: 681054");
+                    }
+                    6 => {
+                        w.pg_accel_stock_exec_delta = 1;
+                    }
+                    _ => {
+                        w.where_count_execution_proof = None;
+                    }
+                }
+                assert!(
+                    !bad.evaluate_benchmark_ship_gate().is_empty(),
+                    "mutation {mutation}, both={both}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn where_evidence_fields_are_additive_and_fail_closed() {
+        let old = mock_workload_result("raw_int2_count_star", 1_000_017, 1.0, 2.0);
+        let json = serde_json::to_value(&old).expect("old report serialization");
+        assert!(json.get("where_count_settings").is_none());
+        assert!(json.get("where_count_native_kernel_deltas").is_none());
+        assert!(json.get("where_count_execution_proof").is_none());
+        let restored: WorkloadResult =
+            serde_json::from_value(json).expect("old report compatibility");
+        assert!(restored.where_count_settings.is_empty());
+        assert!(restored.where_count_execution_proof.is_none());
+        for name in crate::workloads::hash_count_where::NAMES {
+            let result = mock_workload_result(name, 1_000_017, 1.0, 100.0);
+            assert!(
+                !mock_report(vec![result])
+                    .evaluate_benchmark_ship_gate()
+                    .is_empty(),
+                "summary-only WHERE evidence rejected: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn where_mask_and_aggregate_calls_have_independent_exact_accounting() {
+        for name in &crate::workloads::hash_count_where::NAMES[..12] {
+            let c = crate::workloads::hash_count_where::contract(name).expect("contract");
+            let mut w = mock_workload_result(name, 1_000_017, 1.0, 2.0);
+            w.physical_kernel_mode_counts = PhysicalKernelModeCounts::default();
+            w.physical_kernel_mode_counts.parallel_hash = 30;
+            w.gpu_kernel_execution_delta =
+                30 + 160 * u64::try_from(c.mask_count()).expect("small mask count");
+            assert!(where_count_calls_verified(&w, c));
+            w.gpu_kernel_execution_delta += 1;
+            assert!(!where_count_calls_verified(&w, c));
+            w.gpu_kernel_execution_delta -= 1;
+            w.physical_kernel_mode_counts.parallel_dense_numeric = 1;
+            assert!(!where_count_calls_verified(&w, c));
+        }
+    }
+
+    #[test]
+    fn where_parser_requires_exact_key_mask_and_count_in_one_node() {
+        use crate::workloads::hash_count_where::{Form, Key, NAMES, contract};
+        for name in &NAMES[..12] {
+            let c = contract(name).expect("exact contract");
+            let oid = match c.key {
+                Key::Int2 => 21,
+                Key::Int4 => 23,
+                Key::Int8 => 20,
+                Key::H3 => 16400,
+            };
+            let key = if c.key == Key::H3 {
+                format!(
+                    "k0:h3_cell_to_parent(17000.1:type={oid}, resolution=3) type={oid} collation=0 encoding=hash"
+                )
+            } else {
+                format!("k0:fact(17000.1:type={oid}) type={oid} collation=0 encoding=hash")
+            };
+            let (aggregate, source, filter) = match c.form {
+                Form::Star => ("m0:count_star -> value.count".to_owned(), 0, "none"),
+                Form::Independent => (
+                    "m0:column(17000.4:type=16) -> value.count".to_owned(),
+                    16,
+                    "sql_mask(input=17000.3:type=16)",
+                ),
+                Form::Identical => (
+                    "m0:column(17000.5:type=23) -> value.count".to_owned(),
+                    23,
+                    "sql_mask(input=17000.2:type=16)",
+                ),
+            };
+            let plan = format!(
+                "Custom Scan (GpuAccelAgg)\n  GPU Resident Operator Class: resident_groupagg\n  GPU Descriptor Strategy: descriptor_grouped_aggregate\n  GPU Descriptor Specialization: hash_count\n  GPU Physical Kernel Mode: parallel_hash\n  GPU Dispatched Physical Kernel Mode: parallel_hash\n  GPU Physical Kernel Mode Verified: true\n  GPU Lifecycle Calls Verified: true\n  GPU Descriptor Artifact Policy: ephemeral_fused reason=zero_retained_bytes\n  GPU Descriptor Group Keys: {key}\n  GPU Descriptor Aggregates: {aggregate}\n  GPU Descriptor Filter: fact=sql_mask(input=17000.2:type=16); measures=[m0={filter}]; dimensions=[none]\n  GPU Descriptor Output: slot0:group[k0] source_type={oid} result_type={oid} typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type={source} result_type=20 typmod=-1 collation=0 nullable=false"
+            );
+            assert!(plan_contains_where_count(&plan, c, true), "{name}");
+            for wrong in [
+                plan.replace("fact=sql_mask(input=17000.2:type=16)", "fact=none"),
+                plan.replace("parallel_hash", "parallel_dense_count"),
+                plan.replace("input=17000.2:type=16", "input=17001.2:type=16"),
+                plan.replace("ephemeral_fused", "cached_transform"),
+                format!("{plan}\n  -> Custom Scan (GpuAccelAgg)\n"),
+            ] {
+                assert!(
+                    !plan_contains_where_count(&wrong, c, true),
+                    "{name} malformed proof"
+                );
+            }
+        }
+    }
 
     fn mock_workload_result(
         name: &str,

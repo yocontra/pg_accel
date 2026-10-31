@@ -1777,6 +1777,18 @@ fn run_with_timing_and_cache_internal(
             .raw_integer_count_native_kernel_deltas
             .extend(warm.raw_integer_count_native_kernel_deltas.clone());
         result
+            .where_count_settings
+            .extend(cold.where_count_settings.clone());
+        result
+            .where_count_settings
+            .extend(warm.where_count_settings.clone());
+        result
+            .where_count_native_kernel_deltas
+            .extend(cold.where_count_native_kernel_deltas.clone());
+        result
+            .where_count_native_kernel_deltas
+            .extend(warm.where_count_native_kernel_deltas.clone());
+        result
             .planner_stage_captures
             .extend(cold.planner_stage_captures.clone());
         let cold_iteration_count = cold.iterations.len();
@@ -1917,8 +1929,11 @@ fn run_with_timing_and_cache_internal(
     let mut artifact_steady_state_captures = Vec::with_capacity(iterations);
     let capture_raw_count =
         crate::workloads::raw_integer_count::contract(workload.name()).is_some();
-    let capture_typed_h3 =
-        crate::workloads::h3_count_contract(workload.name()).is_some() || capture_raw_count;
+    let capture_where_count =
+        crate::workloads::hash_count_where::contract(workload.name()).is_some();
+    let capture_typed_h3 = crate::workloads::h3_count_contract(workload.name()).is_some()
+        || capture_raw_count
+        || capture_where_count;
     let mut typed_h3_settings = Vec::new();
     let mut raw_integer_count_native_kernel_deltas = Vec::new();
 
@@ -2027,7 +2042,8 @@ fn run_with_timing_and_cache_internal(
                 && matches!(modes[idx], BenchMode::Accel)
                 && !planner_capture_taken;
             planner_capture_taken |= capture_this_planner;
-            let native_before = if capture_raw_count && matches!(modes[idx], BenchMode::PgParallel)
+            let native_before = if (capture_raw_count || capture_where_count)
+                && matches!(modes[idx], BenchMode::PgParallel)
             {
                 Some(capture_dispatch_stats(&mut mode_clients[client_idx])?)
             } else {
@@ -2233,7 +2249,10 @@ fn run_with_timing_and_cache_internal(
         true,
     );
     result.set_warmup_iterations(warmup_results);
-    if capture_raw_count {
+    if capture_where_count {
+        result.where_count_settings = typed_h3_settings;
+        result.where_count_native_kernel_deltas = raw_integer_count_native_kernel_deltas;
+    } else if capture_raw_count {
         result.raw_integer_count_settings = typed_h3_settings;
         result.raw_integer_count_native_kernel_deltas = raw_integer_count_native_kernel_deltas;
     } else {
@@ -4440,6 +4459,38 @@ fn run_workload_with_config(
         )?;
     }
     setup(connection, workload, rows, config.seed)?;
+    if let Some(contract) = crate::workloads::hash_count_where::contract(workload.name()) {
+        let writer = artifacts.ok_or("WHERE COUNT qualification requires retained artifacts")?;
+        let directory = writer.root().join("fixture_manifests");
+        std::fs::create_dir_all(&directory)?;
+        let seeds = if contract.key == crate::workloads::hash_count_where::Key::H3 {
+            let mut client = Client::connect(connection, NoTls)?;
+            client.batch_execute("SET pg_accel.enabled=off")?;
+            let seeds = client.query("SELECT ordinal, parent::text, child::text FROM bench_hash_where_seeds ORDER BY ordinal", &[])?
+                .iter().map(|r| (r.get::<_,i64>(0),r.get::<_,String>(1),r.get::<_,String>(2))).collect::<Vec<_>>();
+            if seeds.len() != contract.groups() {
+                return Err("WHERE H3 ordered seed count changed".into());
+            }
+            Some(seeds)
+        } else {
+            None
+        };
+        let seed_path = directory.join(format!("{}-{rows}-seeds.json", workload.name()));
+        std::fs::write(&seed_path, serde_json::to_vec_pretty(&seeds)?)?;
+        let seed_sha256 = sha256_file(&seed_path).map_err(std::io::Error::other)?;
+        let manifest = serde_json::json!({
+            "workload": workload.name(), "rows": rows, "generator":"where-arithmetic-v1",
+            "designated":contract.designated(), "groups":contract.groups(), "distinct_masks":contract.mask_count(),
+            "mandatory_scales":crate::workloads::hash_count_where::ROW_SCALES,
+            "setup_sql":workload.setup_sql(rows), "query_sql":workload.query_sql(),
+            "ordered_seeds_file":seed_path.file_name().and_then(|s|s.to_str()), "ordered_seeds_sha256":seed_sha256,
+            "warmups":config.warmup,"iterations":config.iterations,
+        });
+        std::fs::write(
+            directory.join(format!("{}-{rows}.json", workload.name())),
+            serde_json::to_vec_pretty(&manifest)?,
+        )?;
+    }
 
     // VACUUM (ANALYZE, VERBOSE) after load, before timing begins. This proves the parallel
     // baseline's planner had fresh stats for every measured row — otherwise
@@ -4619,6 +4670,11 @@ fn run_workload_with_config(
         )?);
     }
     result.correctness_diff_artifact = correctness_diff_artifact;
+    if crate::workloads::hash_count_where::contract(workload.name()).is_some() {
+        result.where_count_execution_proof = Some(capture_raw_integer_count_execution_proof(
+            connection, workload,
+        )?);
+    }
     result.thermal = thermal;
     // Cold-honesty tag: if the workload fixture fits within shared_buffers,
     // the data stays resident even after the OS page-cache purge, so a "cold"

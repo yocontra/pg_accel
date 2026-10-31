@@ -53,6 +53,9 @@ mod tests {
                 explain(&format!("CREATE TEMP TABLE raw_actual AS {query}"))
             });
         pgrx::notice!("raw query={query}; candidates={candidates}; plan={plan}");
+        if !query.contains(" WHERE ") {
+            assert!(!plan.contains("GPU WHERE Population ABI:"), "{plan}");
+        }
         for required in [
             "Custom Scan (GpuAccelAgg)",
             "GPU Dispatched Physical Kernel Mode: parallel_hash",
@@ -198,6 +201,9 @@ mod tests {
                 FROM generate_series(1,{rows}::bigint)s(i))r; ANALYZE raw_where; \
                 SELECT pg_accel_pin('raw_where',ARRAY['k','w','f','vb','vi2','vi4','vi8','vf4','vf8','vd','vt','vz'])"))
                 .expect("nullable typed WHERE fixture");
+            let expected_where = Spi::get_one::<i64>("SELECT count(*) FROM raw_where WHERE w")
+                .expect("WHERE population oracle")
+                .expect("population");
             for value in [
                 "*", "vb", "vi2", "vi4", "vi8", "vf4", "vf8", "vd", "vt", "vz",
             ] {
@@ -211,6 +217,20 @@ mod tests {
                         rows,
                     );
                     assert_eq!(stock_calls(), stock, "no stock executor fallback");
+                    assert!(
+                        plan.contains("GPU WHERE Population ABI: hash_partition_v2"),
+                        "{plan}"
+                    );
+                    assert_eq!(field(&plan, "GPU WHERE Unique Input Rows:"), rows as u64);
+                    assert_eq!(field(&plan, "GPU WHERE Whole Rows:"), expected_where as u64);
+                    assert_eq!(
+                        field(&plan, "GPU WHERE Successful Leaf Rows:"),
+                        expected_where as u64
+                    );
+                    assert_eq!(
+                        field(&plan, "GPU WHERE Completed Leaves:"),
+                        field(&plan, "GPU Adaptive Completed Leaves:")
+                    );
                     let attempts = field(&plan, "GPU Adaptive Aggregate Attempts:");
                     assert_eq!(
                         field(&plan, "GPU Planned Lifecycle Calls:"),
@@ -283,6 +303,16 @@ mod tests {
                     explain(&format!("CREATE TEMP TABLE where_masks_actual AS {query}"))
                 });
             pgrx::notice!("benign retry prefix={prefix}; candidates={candidates}; plan={plan}");
+            assert!(
+                plan.contains("GPU WHERE Population ABI: hash_partition_v2"),
+                "{plan}"
+            );
+            assert_eq!(field(&plan, "GPU WHERE Unique Input Rows:"), rows as u64);
+            assert_eq!(
+                field(&plan, "GPU WHERE Whole Rows:"),
+                field(&plan, "GPU WHERE Successful Leaf Rows:")
+            );
+            assert!(field(&plan, "GPU WHERE Completed Leaves:") > 0, "{plan}");
             assert_eq!(stock_calls(), stock);
             assert_eq!(super::super::set_adaptive_mask_test_interrupt(None), None);
             for required in [
