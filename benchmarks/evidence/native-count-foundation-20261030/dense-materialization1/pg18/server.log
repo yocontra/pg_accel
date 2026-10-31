@@ -1,0 +1,29 @@
+2026-10-30 18:23:59.804 MST [20492] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-30 18:23:59.804 MST [20492] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-30 18:23:59.834 MST [20492] LOG:  starting PostgreSQL 18.4 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-30 18:23:59.834 MST [20492] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/ncfm18-20261030/.s.PGSQL.34218"
+2026-10-30 18:23:59.840 MST [20498] LOG:  database system was shut down at 2026-10-30 18:23:59 MST
+2026-10-30 18:23:59.842 MST [20492] LOG:  database system is ready to accept connections
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/dense-materialization1/jit-cache/apps/global/jit-cache/8679761371087084770.15838927696693884544.metalar.20507.2452240170415504657.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/dense-materialization1/jit-cache/apps/global/jit-cache/15645957498266366212.15278749811535163947.metalar.20507.5840725860942381246.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/dense-materialization1/jit-cache/apps/global/jit-cache/15474309831433514436.13938743479207491959.metalar.20507.3968831869627759072.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/dense-materialization1/jit-cache/apps/global/jit-cache/7576768572038059902.15838927696693884544.metalar.20507.15838967236097718509.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/dense-materialization1/jit-cache/apps/global/jit-cache/18431816913528895982.5352501570065973448.metalar.20507.16236540363708769027.tmp (kernels_added=1 skipped=0)
+2026-10-30 18:24:02.249 MST [20492] LOG:  received fast shutdown request
+2026-10-30 18:24:02.249 MST [20492] LOG:  aborting any active transactions
+2026-10-30 18:24:02.250 MST [20492] LOG:  background worker "logical replication launcher" (PID 20501) exited with exit code 1
+2026-10-30 18:24:02.250 MST [20496] LOG:  shutting down
+2026-10-30 18:24:02.250 MST [20496] LOG:  checkpoint starting: shutdown immediate
+2026-10-30 18:24:02.269 MST [20496] LOG:  checkpoint complete: wrote 74 buffers (0.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 4 recycled; write=0.017 s, sync=0.002 s, total=0.020 s; sync files=45, longest=0.001 s, average=0.001 s; distance=62943 kB, estimate=62943 kB; lsn=0/5487908, redo lsn=0/5487908
+2026-10-30 18:24:02.277 MST [20492] LOG:  database system is shut down

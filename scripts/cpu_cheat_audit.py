@@ -99,9 +99,9 @@ OUTPUT_ASSIGNMENTS = frozenset(
 )
 
 DEFAULT_ABI_MANIFEST = pathlib.Path(__file__).with_name("cpu_cheat_abi_manifest.txt")
-EXPECTED_ABI_MANIFEST_COUNT = 133
+EXPECTED_ABI_MANIFEST_COUNT = 134
 EXPECTED_ABI_MANIFEST_SHA256 = (
-    "0bf4c2bcbf1890eb8cc64f838518cd8f1c30afeb34cc768fff72595975f410aa"
+    "e8383a0ac16ebbb2756e9275f55151abcbba5a97f744db551ce70ed241044105"
 )
 INTERNAL_NON_ABI_HEADERS = frozenset(
     {"alloc_helper.h", "pgaccel_error.h", "pgaccel_queue.h"}

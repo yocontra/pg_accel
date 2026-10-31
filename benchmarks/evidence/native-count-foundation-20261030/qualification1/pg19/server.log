@@ -1,0 +1,94 @@
+2026-10-30 18:22:59.101 MST [19053] LOG:  pg_accel: planner hooks installed (scan, join, upper_paths)
+2026-10-30 18:22:59.102 MST [19053] LOG:  pg_accel loaded: version 1.0.0-rc1, 12 CPU cores, GPU: deferred to first query
+2026-10-30 18:22:59.130 MST [19053] LOG:  starting PostgreSQL 19beta1 on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-10-30 18:22:59.131 MST [19053] LOG:  listening on Unix socket "/Users/contra/Projects/pg_accel/.codex/scratch/ncf19-20261030/.s.PGSQL.34119"
+2026-10-30 18:22:59.136 MST [19068] LOG:  database system was shut down at 2026-10-30 18:22:58 MST
+2026-10-30 18:22:59.138 MST [19053] LOG:  database system is ready to accept connections
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/jit-cache/apps/global/jit-cache/15573996695728911356.15838927696693884544.metalar.19077.13427222067550458898.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/jit-cache/apps/global/jit-cache/15645957498266366212.17971903528946387683.metalar.19077.5523454836464416814.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/jit-cache/apps/global/jit-cache/8568816607208866522.13938743479207491959.metalar.19077.2803797802711641849.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/jit-cache/apps/global/jit-cache/14516035493841795168.15838927696693884544.metalar.19077.125310288267518541.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/jit-cache/apps/global/jit-cache/6890419827763566320.5352501570065973448.metalar.19077.7134519609721965012.tmp (kernels_added=1 skipped=0)
+2026-10-30 18:23:17.280 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 18:23:17.280 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 18:23:17.280 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+[;35m[AdaptiveCpp Warning] [0mkernel_cache: This application run has resulted in new binaries being JIT-compiled. This indicates that the runtime optimization process has not yet reached peak performance. You may want to run the application again until this warning no longer appears to achieve optimal performance.
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/jit-cache/apps/global/jit-cache/6274895644714698374.3579585920436312592.metalar.19848.7436406209520675462.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/jit-cache/apps/global/jit-cache/16472906124498925646.8552054542954140739.metalar.19848.3346518955454566313.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/jit-cache/apps/global/jit-cache/17272798710366362446.15049125391404923422.metalar.19848.14841514550846610430.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/jit-cache/apps/global/jit-cache/2011006588560296530.276896800945861089.metalar.19848.3857205525093155335.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/jit-cache/apps/global/jit-cache/10717957082454213122.10412296268157230710.metalar.19848.4052472537062052793.tmp (kernels_added=1 skipped=0)
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/jit-cache/apps/global/jit-cache/8995984428368698120.15838927696693884544.metalar.19848.6334093147489543841.tmp (kernels_added=1 skipped=0)
+2026-10-30 18:23:23.433 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 18:23:23.433 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 18:23:23.433 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 18:23:24.060 MST [19066] LOG:  checkpoints are occurring too frequently (25 seconds apart)
+2026-10-30 18:23:24.060 MST [19066] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-30 18:23:24.060 MST [19066] LOG:  checkpoint starting: wal
+2026-10-30 18:23:26.071 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 18:23:26.071 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 18:23:26.071 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+warning: linking module flags 'SDK Version': IDs have conflicting values ('[2 x i32] [i32 26, i32 5]' from  with '[2 x i32] [i32 27, i32 0]' from )
+acpp-metal-archive-build: wrote /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/jit-cache/apps/global/jit-cache/11225245954795835278.13938743479207491959.metalar.19848.878918350376518105.tmp (kernels_added=1 skipped=0)
+2026-10-30 18:23:29.192 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 18:23:29.192 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 18:23:29.192 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 18:23:29.372 MST [19066] LOG:  checkpoint complete: wal: wrote 2204 buffers (0.1%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=5.283 s, sync=0.004 s, total=5.312 s; sync files=83, longest=0.001 s, average=0.001 s; distance=542324 kB, estimate=542324 kB; lsn=0/40C4D068, redo lsn=0/228DFFC8
+2026-10-30 18:23:29.772 MST [19066] LOG:  checkpoints are occurring too frequently (5 seconds apart)
+2026-10-30 18:23:29.772 MST [19066] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-30 18:23:29.772 MST [19066] LOG:  checkpoint starting: wal
+2026-10-30 18:23:31.825 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 18:23:31.825 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 18:23:31.825 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 18:23:34.248 MST [19066] LOG:  checkpoint complete: wal: wrote 2125 buffers (0.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=4.469 s, sync=0.002 s, total=4.476 s; sync files=26, longest=0.002 s, average=0.001 s; distance=544970 kB, estimate=544970 kB; lsn=0/6184CAD0, redo lsn=0/43D12BA0
+2026-10-30 18:23:34.409 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 18:23:34.410 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 18:23:34.410 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 18:23:34.851 MST [19066] LOG:  checkpoints are occurring too frequently (5 seconds apart)
+2026-10-30 18:23:34.851 MST [19066] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-30 18:23:34.851 MST [19066] LOG:  checkpoint starting: wal
+2026-10-30 18:23:36.970 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 18:23:36.970 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 18:23:36.970 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 18:23:39.224 MST [19066] LOG:  checkpoint complete: wal: wrote 1611 buffers (0.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=4.362 s, sync=0.002 s, total=4.373 s; sync files=29, longest=0.001 s, average=0.001 s; distance=530517 kB, estimate=543525 kB; lsn=0/82058560, redo lsn=0/64328300
+2026-10-30 18:23:39.587 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 18:23:39.587 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 18:23:39.587 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 18:23:40.021 MST [19066] LOG:  checkpoints are occurring too frequently (6 seconds apart)
+2026-10-30 18:23:40.021 MST [19066] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-30 18:23:40.022 MST [19066] LOG:  checkpoint starting: wal
+2026-10-30 18:23:42.196 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 18:23:42.196 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 18:23:42.196 MST [19848] WARNING:  Deprecation notice: h3_lat_lng_to_cell will be deprecated in favor of h3_latlng_to_cell next major release
+2026-10-30 18:23:44.394 MST [19066] LOG:  checkpoint complete: wal: wrote 1680 buffers (0.1%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 34 recycled; write=4.363 s, sync=0.002 s, total=4.373 s; sync files=28, longest=0.001 s, average=0.001 s; distance=553823 kB, estimate=553823 kB; lsn=0/A3C0E7A8, redo lsn=0/86000198
+2026-10-30 18:23:44.851 MST [19053] LOG:  received fast shutdown request
+2026-10-30 18:23:44.851 MST [19053] LOG:  aborting any active transactions
+2026-10-30 18:23:44.853 MST [19053] LOG:  background worker "logical replication launcher" (PID 19071) exited with exit code 1
+2026-10-30 18:23:44.853 MST [19066] LOG:  shutting down
+2026-10-30 18:23:44.853 MST [19066] LOG:  checkpoint starting: shutdown fast
+2026-10-30 18:23:44.871 MST [19066] LOG:  checkpoint complete: shutdown fast: wrote 25 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 31 recycled; write=0.013 s, sync=0.001 s, total=0.018 s; sync files=21, longest=0.001 s, average=0.001 s; distance=512006 kB, estimate=549641 kB; lsn=0/A5401C90, redo lsn=0/A5401C90
+2026-10-30 18:23:44.891 MST [19053] LOG:  database system is shut down

@@ -1,0 +1,73 @@
+SET
+SET
+SELECT 1000017
+ANALYZE
+ pg_accel_pin 
+--------------
+      1000017
+(1 row)
+
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/dense-smoke.sql:25: NOTICE:  Custom Scan (GpuAccelAgg) (actual rows=65.00 loops=1)
+  Output: k, (count(*))
+  Strategy: GpuAgg
+  Plan Selected: true
+  Batch Size: 65536
+  Expected Threads: 1
+  GPU Resident Pipeline: true
+  GPU Resident Proof Version: 2
+  GPU Resident Operator Class: resident_groupagg
+  GPU Physical Kernel Mode: parallel_dense_count
+  GPU Dispatched Physical Kernel Mode: parallel_dense_count
+  GPU Physical Kernel Mode Verified: true
+  GPU Planned Lifecycle Calls: 3
+  GPU Lifecycle Calls Verified: true
+  GPU Descriptor Strategy: descriptor_grouped_aggregate
+  GPU Descriptor Specialization: dense_count_plain
+  GPU Descriptor Specialization Cache: miss
+  GPU Descriptor Artifact Policy: cached_reusable reason=lower_expected_total_cost construction_bytes=4000068 ephemeral_bytes=4000068 construction_time_us=334 expected_reuses=8 cache_hit=false invalidation_risk_ppm=50000 cached_build_launches=0 ephemeral_build_launches=0 consumer_launches=3 budget_headroom_bytes=8584934507
+  GPU Descriptor Group Keys: k0:fact(16555.1:type=23) type=23 collation=0 encoding=hash
+  GPU Descriptor Aggregates: m0:count_star -> value.count
+  GPU Descriptor Filter: fact=none; measures=[m0=none]; dimensions=[none]
+  GPU Descriptor Star Dimensions: none
+  GPU Descriptor Output: slot0:group[k0] source_type=23 result_type=23 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false
+  GPU Descriptor Residency State: resident (1 relations; loaded/reloaded=none)
+  GPU Descriptor Artifact: built
+  GPU Descriptor Generations: rel=16555 generation=1 global=1 relfilenode=16555
+  GPU Descriptor Bytes: raw=5000085 derived=4000068 artifact=4000068 total=9000153
+  GPU Resident Stage Mask: 16393
+  GPU Resident Device Columns: 1
+  GPU Resident Boundary: none: no CPU boundary
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 0
+  Rows Dispatched: 1000017
+  Batches: 3
+  Rows Per Batch: 333339.000
+  Dispatch Time: 3261.576 ms
+  Avg Dispatch Time Per Batch: 1087.192 ms
+  Counter Scope: Local Backend
+  GPU Dispatched: true
+  Raw Relation Load Time: 0.000 ms
+  Total Residency Preparation Time: 6.819 ms
+Planning:
+  Buffers: shared hit=58 read=2
+Planning Time: 1.077 ms
+Execution Time: 3269.149 ms
+
+DO
+SELECT 65
+SET
+SELECT 65
+psql:/Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/dense-smoke.sql:39: NOTICE:  legacy_dense_full_parity=PASS groups=65
+DO
+SET
+ pg_accel_unpin 
+----------------
+ t
+(1 row)
+
+ pg_accel_evict 
+----------------
+ t
+(1 row)
+
+DROP TABLE

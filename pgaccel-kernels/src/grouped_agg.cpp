@@ -5523,8 +5523,14 @@ void submit_grouped_agg_mode(sycl::queue& queue, const pgaccel_grouped_agg_desc&
       // strides over actual groups, so sparse large-capacity inputs do not
       // launch capacity-sized no-op grids or synchronize mid-pipeline.
       const size_t grid = std::min(desc.group_capacity, size_t{65'536});
+      // Validated v1 COUNT already owns parallel sort scratch. Do not execute
+      // a serial heapsort merely because this attempt emitted few groups,
+      // then also pay the scheduled parallel pipeline's no-op launches.
+      // Preserve the legacy aggregate path and truly small-capacity kernel.
+      const bool adaptive_count =
+          host_params.partition.version == PGACCEL_HASH_COUNT_PARTITION_VERSION;
       queue.single_task<GroupedAggHashCompactPrepareKernel>([=]() {
-        if (*device_params->hash_group_count <= kHashSerialFinalizeGroups)
+        if (!adaptive_count && *device_params->hash_group_count <= kHashSerialFinalizeGroups)
           run_hash_compact_kernel(device_params);
         else
           run_hash_compact_prepare(device_params);
@@ -5532,7 +5538,8 @@ void submit_grouped_agg_mode(sycl::queue& queue, const pgaccel_grouped_agg_desc&
       queue.parallel_for<GroupedAggHashCompactRowsKernel>(
           sycl::range<1>(grid), [=](sycl::id<1> id) {
             const size_t emitted = *device_params->hash_group_count;
-            if (emitted <= kHashSerialFinalizeGroups || emitted > device_params->group_capacity)
+            if ((!adaptive_count && emitted <= kHashSerialFinalizeGroups) ||
+                emitted > device_params->group_capacity)
               return;
             for (size_t index = id[0]; index < emitted; index += grid)
               run_hash_compact_row(device_params, index, true);
@@ -5541,7 +5548,8 @@ void submit_grouped_agg_mode(sycl::queue& queue, const pgaccel_grouped_agg_desc&
       for (size_t width = 1; width < desc.group_capacity; width *= 2) {
         queue.parallel_for<GroupedAggHashMergeKernel>(sycl::range<1>(grid), [=](sycl::id<1> id) {
           const size_t emitted = *device_params->hash_group_count;
-          if (emitted <= kHashSerialFinalizeGroups || emitted > device_params->group_capacity ||
+          if ((!adaptive_count && emitted <= kHashSerialFinalizeGroups) ||
+              emitted > device_params->group_capacity ||
               width >= emitted)
             return;
           for (size_t index = id[0]; index < emitted; index += grid)
@@ -5551,7 +5559,8 @@ void submit_grouped_agg_mode(sycl::queue& queue, const pgaccel_grouped_agg_desc&
       }
       queue.parallel_for<GroupedAggHashSortFinishKernel>(sycl::range<1>(grid), [=](sycl::id<1> id) {
         const size_t emitted = *device_params->hash_group_count;
-        if (emitted <= kHashSerialFinalizeGroups || emitted > device_params->group_capacity)
+        if ((!adaptive_count && emitted <= kHashSerialFinalizeGroups) ||
+            emitted > device_params->group_capacity)
           return;
         bool final_staged = true;
         for (size_t width = 1; width < emitted; width *= 2)
@@ -6411,6 +6420,89 @@ extern "C" pgaccel_status pgaccel_grouped_agg_kernel_mode(const pgaccel_grouped_
   return PGACCEL_OK;
 }
 
+extern "C" pgaccel_status pgaccel_grouped_agg_count_work_requirements_v1(
+    const pgaccel_grouped_agg_desc* desc, pgaccel_grouped_agg_count_work_v1* out) {
+  // Reject pointer-rich families before any generic validator can inspect their
+  // nested metadata. All failures, including aliased envelopes, are no-write.
+  if (desc == nullptr || out == nullptr ||
+      reinterpret_cast<uintptr_t>(desc) % alignof(pgaccel_grouped_agg_desc) != 0 ||
+      reinterpret_cast<uintptr_t>(out) % alignof(pgaccel_grouped_agg_count_work_v1) != 0 ||
+      out->abi_version != 1 || out->size_bytes != sizeof(*out) ||
+      out->reserved0 != 0 || out->reserved1 != 0)
+    return PGACCEL_ERROR;
+  if (desc->dim_count != 0 || desc->key_count > PGACCEL_GROUPED_AGG_MAX_KEYS ||
+      desc->measure_count != 1 || !parallel_dense_count_shape(*desc))
+    return PGACCEL_UNSUPPORTED;
+  const auto& measure = desc->measures[0];
+  // COUNT(*)'s shape predicate intentionally ignores unused value metadata.
+  // Do not let malformed NUMERIC/SCALAR tags reach helpers which follow views.
+  // This query describes direct COUNT only, without hidden predicate inputs.
+  if (measure.flags != 0 || !bytewise_zero(measure.rhs) ||
+      (measure.op == PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR &&
+       !bytewise_zero(measure.value)))
+    return PGACCEL_UNSUPPORTED;
+  Validation validation;
+  WorkspaceLayout layout;
+  const pgaccel_status status = validate_desc(desc, &validation, &layout);
+  if (status != PGACCEL_OK)
+    return status;
+  if (grouped_agg_kernel_mode(*desc, layout) !=
+      PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_COUNT)
+    return PGACCEL_UNSUPPORTED;
+  SpanList inputs;
+  SpanList outputs;
+  if (!collect_input_spans(*desc, &inputs) || !add_span(&inputs, desc, 1, sizeof(*desc)) ||
+      !add_span(&inputs, desc->scratch, desc->scratch_bytes, 1) ||
+      !add_span(&outputs, out, 1, sizeof(*out)))
+    return PGACCEL_ERROR;
+  for (size_t i = 0; i < inputs.count; ++i)
+    if (spans_overlap(inputs.values[i], outputs.values[0]))
+      return PGACCEL_ERROR;
+
+  pgaccel_grouped_agg_count_work_v1 facts{};
+  facts.abi_version = 1;
+  facts.size_bytes = sizeof(facts);
+  facts.rows = desc->row_count;
+  facts.group_capacity = desc->group_capacity;
+  facts.key_columns = desc->key_count;
+  facts.persistent_counter_lanes = (layout.measures[0].count != kNoOffset ? 1 : 0) +
+                                   (layout.measures[0].nonnull != kNoOffset ? 1 : 0);
+  for (size_t i = 0; i < desc->key_count; ++i)
+    facts.nullable_key_columns += key_nullable(*desc, desc->keys[i]) ? 1 : 0;
+  if ((desc->execution_flags & PGACCEL_GROUPED_AGG_EXEC_RESET) != 0)
+    facts.serial_reset_group_visits = desc->group_capacity;
+  if ((desc->execution_flags & PGACCEL_GROUPED_AGG_EXEC_FINALIZE) != 0)
+    facts.serial_finalize_group_visits = desc->group_capacity;
+  if ((desc->execution_flags & PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE) != 0) {
+    const bool column = parallel_dense_count_column_shape(*desc);
+    const size_t arrays = column ? 2 : 1;
+    size_t rows = 0;
+    size_t entries = 0;
+    size_t local_init = 0;
+    size_t local_reduce = 0;
+    if (!checked_mul_size(desc->row_count, arrays, &rows) ||
+        !checked_mul_size(layout.dense_count_hierarchical ? layout.dense_count_partial_count
+                                                        : desc->group_capacity,
+                          arrays, &entries))
+      return PGACCEL_ERROR;
+    if (layout.dense_count_hierarchical &&
+        (!checked_mul_size(entries, kDenseReductionWorkgroupSize, &local_init) ||
+         !checked_mul_size(entries, kDenseReductionWorkgroupSize - 1, &local_reduce)))
+      return PGACCEL_ERROR;
+    facts.row_counter_updates = rows;
+    facts.global_counter_clear_entries = entries;
+    facts.local_counter_init_entries = local_init;
+    facts.local_reduction_additions = local_reduce;
+    facts.partial_counter_writes = layout.dense_count_hierarchical ? entries : 0;
+    facts.serial_merge_group_visits = desc->group_capacity;
+    facts.serial_partial_counter_reads = entries;
+    facts.value_null_checks = column ? desc->row_count : 0;
+    facts.sql_mask_checks = exact_sql_mask_filter(desc->where_filter) ? desc->row_count : 0;
+  }
+  *out = facts;
+  return PGACCEL_OK;
+}
+
 static bool valid_hash_count_partition(const pgaccel_grouped_agg_desc* desc,
                                        const pgaccel_hash_count_partition_v1* partition) {
   if (partition == nullptr ||
@@ -6432,7 +6524,8 @@ static bool valid_hash_count_partition(const pgaccel_grouped_agg_desc* desc,
          reinterpret_cast<uintptr_t>(desc) % alignof(pgaccel_grouped_agg_desc) == 0 &&
          desc->grouping_mode == PGACCEL_GROUPED_AGG_GROUPING_HASH &&
          desc->output_mode == PGACCEL_GROUPED_AGG_OUTPUT_COMPACT && desc->key_count == 1 &&
-         desc->keys[0].values.type == PGACCEL_VAL_INT64 && desc->measure_count == 1 &&
+         (desc->keys[0].values.type == PGACCEL_VAL_INT32 ||
+          desc->keys[0].values.type == PGACCEL_VAL_INT64) && desc->measure_count == 1 &&
          desc->dim_count == 0 && desc->where_filter.kind == PGACCEL_GROUPED_AGG_FILTER_NONE &&
          (desc->measure_filters[0].kind == PGACCEL_GROUPED_AGG_FILTER_NONE ||
           desc->measure_filters[0].kind == PGACCEL_GROUPED_AGG_FILTER_SQL) &&

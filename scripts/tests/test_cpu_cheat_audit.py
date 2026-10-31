@@ -6936,11 +6936,11 @@ class AbiInventoryTests(unittest.TestCase):
 
     def test_checked_in_manifest_has_literal_integrity_anchor(self) -> None:
         manifest = audit.load_abi_manifest(audit.DEFAULT_ABI_MANIFEST)
-        self.assertEqual(manifest.count, 133)
-        self.assertEqual(audit.EXPECTED_ABI_MANIFEST_COUNT, 133)
+        self.assertEqual(manifest.count, 134)
+        self.assertEqual(audit.EXPECTED_ABI_MANIFEST_COUNT, 134)
         self.assertEqual(
             manifest.sha256,
-            "0bf4c2bcbf1890eb8cc64f838518cd8f1c30afeb34cc768fff72595975f410aa",
+            "e8383a0ac16ebbb2756e9275f55151abcbba5a97f744db551ce70ed241044105",
         )
         self.assertEqual(manifest.sha256, audit.EXPECTED_ABI_MANIFEST_SHA256)
 
@@ -7166,15 +7166,15 @@ class ProductionWitnessTests(unittest.TestCase):
         )
 
     def test_complete_real_abi_baseline_and_violation_floor(self) -> None:
-        self.assertEqual(len(self.abi.definitions), 133)
-        self.assertEqual(len({item.name for item in self.abi.definitions}), 133)
-        self.assertEqual(len({item.name for item in self.abi.declarations}), 133)
+        self.assertEqual(len(self.abi.definitions), 134)
+        self.assertEqual(len({item.name for item in self.abi.definitions}), 134)
+        self.assertEqual(len({item.name for item in self.abi.declarations}), 134)
         self.assertFalse(self.abi.findings)
         self.assertEqual(self.abi.definition_hash, self.abi.declaration_hash)
         self.assertEqual(self.abi.source_definition_hash, self.abi.definition_hash)
         self.assertEqual(self.abi.manifest["status"], "verified")
         self.assertEqual(self.abi.compiler["status"], "verified")
-        self.assertEqual(self.abi.compiler["inventory_count"], 133)
+        self.assertEqual(self.abi.compiler["inventory_count"], 134)
         status_names = sorted(
             entry.entrypoint for entry in self.by_name.values() if entry.is_status
         )[:82]
@@ -7196,6 +7196,19 @@ class ProductionWitnessTests(unittest.TestCase):
         )
         self.assertEqual(len(status_names), 82)
         self.assertGreaterEqual(status_failed, 82)
+
+    def test_count_work_inventory_does_not_grant_metadata_proof(self) -> None:
+        name = "pgaccel_grouped_agg_count_work_requirements_v1"
+        manifest = audit.load_abi_manifest(audit.DEFAULT_ABI_MANIFEST)
+        self.assertEqual(
+            manifest.signatures[name],
+            "pgaccel_status (const pgaccel_grouped_agg_desc *, "
+            "pgaccel_grouped_agg_count_work_v1 *)",
+        )
+        self.assertNotIn(name, audit.LIFECYCLE_CONTRACTS)
+        entry = self.by_name[name]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn(name, self.findings)
 
     def test_join_workspace_member_is_not_an_output_shadow(self) -> None:
         for name in (

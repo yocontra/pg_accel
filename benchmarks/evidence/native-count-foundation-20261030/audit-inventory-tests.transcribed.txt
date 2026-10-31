@@ -1,0 +1,13 @@
+TRANSCRIBED TOOL OUTPUT: reconstructed from chunks f1ae7d and f9c833 for session 55813; not an originally redirected logfile.
+
+test_checked_in_manifest_has_literal_integrity_anchor (scripts.tests.test_cpu_cheat_audit.AbiInventoryTests.test_checked_in_manifest_has_literal_integrity_anchor) ... ok
+test_mutated_immutable_manifest_is_rejected (scripts.tests.test_cpu_cheat_audit.AbiInventoryTests.test_mutated_immutable_manifest_is_rejected) ... ok
+test_complete_real_abi_baseline_and_violation_floor (scripts.tests.test_cpu_cheat_audit.ProductionWitnessTests.test_complete_real_abi_baseline_and_violation_floor) ... ok
+test_count_work_inventory_does_not_grant_metadata_proof (scripts.tests.test_cpu_cheat_audit.ProductionWitnessTests.test_count_work_inventory_does_not_grant_metadata_proof) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 438.000s
+
+OK
+
+Process exit code reported by final tool response: 0

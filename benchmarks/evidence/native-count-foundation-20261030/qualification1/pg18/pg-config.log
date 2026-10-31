@@ -1,0 +1,23 @@
+BINDIR = /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/pg18/postgres/bin
+DOCDIR = /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/pg18/postgres/share/doc
+HTMLDIR = /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/pg18/postgres/share/doc
+INCLUDEDIR = /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/pg18/postgres/include
+PKGINCLUDEDIR = /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/pg18/postgres/include
+INCLUDEDIR-SERVER = /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/pg18/postgres/include/server
+LIBDIR = /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/pg18/postgres/lib
+PKGLIBDIR = /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/pg18/postgres/lib
+LOCALEDIR = /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/pg18/postgres/share/locale
+MANDIR = /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/pg18/postgres/share/man
+SHAREDIR = /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/pg18/postgres/share
+SYSCONFDIR = /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/pg18/postgres/etc
+PGXS = /Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/pg18/postgres/lib/pgxs/src/makefiles/pgxs.mk
+CONFIGURE =  '--prefix=/Users/contra/Projects/pg_accel/.pgaccel/postgres/install/18.4' '--enable-debug' '--enable-cassert' '--without-icu' 'PYTHON=/Users/contra/.local/share/uv/python/cpython-3.12.8-macos-aarch64-none/bin/python3.12'
+CC = gcc
+CPPFLAGS = -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk
+CFLAGS = -Wall -Wmissing-prototypes -Wpointer-arith -Wdeclaration-after-statement -Werror=vla -Werror=unguarded-availability-new -Wendif-labels -Wmissing-format-attribute -Wcast-function-type -Wformat-security -Wmissing-variable-declarations -fno-strict-aliasing -fwrapv -fexcess-precision=standard -Wno-unused-command-line-argument -Wno-compound-token-split-by-macro -Wno-format-truncation -Wno-cast-function-type-strict -g -O2
+CFLAGS_SL = 
+LDFLAGS = -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk -Wl,-dead_strip_dylibs
+LDFLAGS_EX = 
+LDFLAGS_SL = 
+LIBS = -lpgcommon -lpgport -lz -lreadline -lm 
+VERSION = PostgreSQL 18.4

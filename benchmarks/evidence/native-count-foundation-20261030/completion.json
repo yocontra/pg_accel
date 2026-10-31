@@ -1,0 +1,39 @@
+{
+  "scope": "Native COUNT foundation with unchanged main Rust callers; not raw integer admission or new cost-model qualification",
+  "date": "2026-10-30",
+  "source_manifest": "qualification1/source.sha256",
+  "source_manifest_sha256": "a1ce2aabf4e40e9ff88414b3073fde4760fbd896e4096b1b4706045547fa1232",
+  "source_patch_sha256": "c89829892b5794a64aa009d75cbf5045e40c27c901db3d52b3dac1ce0af01bb6",
+  "installed_modules": {
+    "pg18": {"sha256": "4587214a84344ba694dd54912320a7d65a4004b172f4a707adc3a019d4c7c7ba", "receipt": "qualification1/pg18/module.sha256"},
+    "pg19": {"sha256": "e0513c79177a20dbbf2200c360a5e77f79345c966e63cbc99c2ebb15210b2076", "receipt": "qualification1/pg19/module.sha256"}
+  },
+  "qualification_terminal": "qualification1/terminal.log",
+  "materialization_terminal": "dense-materialization1/terminal.log",
+  "native": {
+    "metadata_contracts": {"passed": 60310, "failed": 0, "receipt": "qualification1/native-contract.log"},
+    "grouped_hash": {"passed": 10366112, "failed": 0, "receipt": "qualification1/native-hash.log"},
+    "h3": {"passed": 1176, "failed": 0, "receipt": "qualification1/native-h3.log"}
+  },
+  "postgres_majors": [18, 19],
+  "focused_audit_inventory_tests": {
+    "passed": 4,
+    "failed": 0,
+    "receipt": "audit-inventory-tests.md",
+    "output": "audit-inventory-tests.transcribed.txt",
+    "evidence_kind": "Transcribed retained tool output; not an original redirected logfile",
+    "overall_release_audit_pass": false
+  },
+  "per_major_verified": [
+    "Isolated production release build and installed module matches build module",
+    "Legacy dense EXPLAIN ANALYZE selects and dispatches parallel_dense_count",
+    "Existing conditional H3 COUNT all-types/star/alias integration test passes",
+    "Separate actual accelerated dense CTAS increases GPU counter with zero stock fallback delta",
+    "Disabled native oracle CTAS has zero GPU and stock counter deltas",
+    "Bidirectional EXCEPT ALL parity with 65 groups including NULL",
+    "All owned clusters stopped and postmaster.pid absent"
+  ],
+  "seals": "Before/after source, harness, toolchain, installed module/native archive and protected original artifacts preserved in run directories",
+  "performance_claim": false,
+  "remaining_scope": "Raw integer COUNT admission retains two failed strict old/new dense no-slowdown gates; source/LLVM audit proof debt remains open"
+}

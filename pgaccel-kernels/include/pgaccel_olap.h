@@ -437,6 +437,40 @@ typedef struct {
   uint32_t flags;
 } pgaccel_grouped_agg_workspace_req;
 
+/* Metadata-only work quantities for one actual dense COUNT lifecycle call.
+ * Initialize the four-field envelope to {1, sizeof(record), 0, 0}.
+ * Every failure leaves the entire record unchanged. No row payload is read. */
+typedef struct {
+  uint32_t abi_version;
+  uint32_t size_bytes;
+  uint32_t reserved0;
+  uint32_t reserved1;
+  uint64_t rows;
+  uint64_t group_capacity;
+  uint64_t row_counter_updates;
+  uint64_t global_counter_clear_entries;
+  uint64_t local_counter_init_entries;
+  uint64_t local_reduction_additions;
+  uint64_t partial_counter_writes;
+  uint64_t serial_reset_group_visits;
+  uint64_t serial_merge_group_visits;
+  uint64_t serial_partial_counter_reads;
+  uint64_t serial_finalize_group_visits;
+  uint64_t persistent_counter_lanes;
+  uint64_t key_columns;
+  uint64_t nullable_key_columns;
+  uint64_t value_null_checks;
+  uint64_t sql_mask_checks;
+} pgaccel_grouped_agg_count_work_v1;
+
+pgaccel_status pgaccel_grouped_agg_count_work_requirements_v1(
+    const pgaccel_grouped_agg_desc* desc, pgaccel_grouped_agg_count_work_v1* out);
+
+PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_count_work_v1) == 144, "count work size");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_count_work_v1, rows) == 16, "count work facts");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_count_work_v1, sql_mask_checks) == 136,
+                "count work last fact");
+
 /* Per-measure output lanes. Value-state pointers use the descriptor's
  * accumulator kind and state_bytes. count is required iff COUNT is projected.
  * nonnull_count is always required for SUM/MIN/MAX/SUMSQ, even when COUNT is

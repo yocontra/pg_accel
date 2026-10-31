@@ -1,0 +1,6 @@
+/Users/contra/Projects/pg_accel/target/release/libpg_accel.dylib: OK
+/Users/contra/Projects/pg_accel/target/release/pg_accel_bench: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/18.4/lib/pg_accel.dylib: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/uniform-budget-live-20261012/postgres/19beta1/lib/pg_accel.dylib: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/control-baseline-build2/postgres18/lib/pg_accel.dylib: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/raw-integer-count-20261026/calibration-companion-build1/postgres18/lib/pg_accel.dylib: OK

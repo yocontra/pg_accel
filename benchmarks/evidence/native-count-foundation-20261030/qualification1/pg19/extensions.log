@@ -1,0 +1,9 @@
+CREATE EXTENSION
+CREATE EXTENSION
+ extname  | extversion 
+----------+------------
+ h3       | 4.2.3
+ pg_accel | 1.0.0-rc1
+ plpgsql  | 1.0
+(3 rows)
+

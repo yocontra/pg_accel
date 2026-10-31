@@ -1,0 +1,29 @@
+[  6%] Generating CMakeFiles/pgaccel_metadata.dir/Release/join_rows_layout.cpp.o
+[  6%] Built target pgaccel_metadata
+[ 12%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/device_manager.cpp.o
+[ 18%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/bbox_ops.cpp.o
+[ 18%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/archive_stats.cpp.o
+[ 25%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/bbox_ops_f64.cpp.o
+[ 31%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/reduce.cpp.o
+[ 37%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/spatial_predicates.cpp.o
+[ 37%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/spatial_dispatch.cpp.o
+[ 43%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/h3_ops.cpp.o
+[ 50%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/raster_ops.cpp.o
+[ 56%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/expr_eval.cpp.o
+[ 56%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/expr_memory.cpp.o
+[ 62%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/hash_join.cpp.o
+[ 68%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/join_rows.cpp.o
+[ 75%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/resident_count.cpp.o
+[ 75%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/grouped_agg.cpp.o
+[ 81%] Building CXX object CMakeFiles/pgaccel_kernels_shared.dir/src/grouped_agg_workspace.cpp.o
+[ 87%] Linking CXX shared library libpgaccel_kernels_shared.dylib
+ld: warning: object file (/Users/contra/Projects/pg_accel/.codex/scratch/native-count-foundation-validation-20261030/qualification1/native/CMakeFiles/pgaccel_metadata.dir/Release/join_rows_layout.cpp.o) was built for newer 'macOS' version (27.0) than being linked (18.0)
+[ 87%] Built target pgaccel_kernels_shared
+[ 93%] Building CXX object CMakeFiles/test_grouped_agg_hash.dir/test/test_grouped_agg_hash.cpp.o
+[100%] Linking CXX executable test_grouped_agg_hash
+[100%] Built target test_grouped_agg_hash
+[  6%] Built target pgaccel_metadata
+[ 87%] Built target pgaccel_kernels_shared
+[ 93%] Building CXX object CMakeFiles/test_h3.dir/test/test_h3.cpp.o
+[100%] Linking CXX executable test_h3
+[100%] Built target test_h3

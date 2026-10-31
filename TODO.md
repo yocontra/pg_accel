@@ -61,6 +61,18 @@ The September implementation plan expands the objective beyond the historical
 completion of this expansion. Retain this file and planning docs until the
 complete objective is implemented and verified.
 
+- [x] Land the native COUNT foundation independently of unfinished raw planner
+  admission: preserve parallel finalization for validated large-capacity v1
+  COUNT calls, accept sign-extended INT32 raw partition keys, and expose an
+  additive metadata-only dense COUNT work query. Existing ABI layouts, legacy
+  calls and small-capacity execution remain unchanged. Isolated main Rust
+  builds and passes H3 plus actual dense-result parity on PG18/19; native
+  metadata/hash/H3 suites pass 60,310/10,366,112/1,176 checks. Inventory tests
+  recognize 134 source ABI entries while keeping the new query unproved.
+  The broader raw admission/cost milestone still fails two dense no-slowdown
+  controls and is not completed by this item; hosted/release gates remain open.
+  Evidence: `benchmarks/evidence/native-count-foundation-20261030/README.md`.
+
 - [x] Correct integration observer address extraction without weakening strict
   numeric-IP validation. Use PostgreSQL's host-only inet formatting; retain
   Unix-socket identity and port. All six focused live registration/reconnection/
