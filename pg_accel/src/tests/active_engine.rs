@@ -6,12 +6,7 @@ mod tests {
     use pgrx::prelude::*;
 
     fn gpu_device_available() -> bool {
-        Spi::get_one::<String>("SELECT DISTINCT source FROM pg_accel_device_limits()")
-            .ok()
-            .flatten()
-            .is_some_and(|source| {
-                source == "hardware_derived" || source == "hosted_compatibility_calibrated"
-            })
+        crate::tests::gpu_sources_available("SELECT source FROM pg_accel_device_limits()")
     }
 
     fn begin_gpu_test() -> bool {

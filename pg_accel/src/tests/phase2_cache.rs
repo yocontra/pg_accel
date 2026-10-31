@@ -22,12 +22,34 @@ mod tests {
     }
 
     fn gpu_device_available() -> bool {
-        Spi::get_one::<String>("SELECT DISTINCT source FROM pg_accel_device_limits()")
-            .ok()
-            .flatten()
-            .is_some_and(|source| {
-                source == "hardware_derived" || source == "hosted_compatibility_calibrated"
-            })
+        crate::tests::gpu_sources_available("SELECT source FROM pg_accel_device_limits()")
+    }
+
+    #[pg_test]
+    fn test_gpu_device_source_inventory_is_order_independent() {
+        for (sources, expected) in [
+            (
+                "VALUES ('reference_device_calibrated'),('hardware_derived')",
+                true,
+            ),
+            (
+                "VALUES ('hardware_derived'),('reference_device_calibrated')",
+                true,
+            ),
+            (
+                "VALUES ('reference_device_calibrated'),('hosted_compatibility_calibrated')",
+                true,
+            ),
+            ("VALUES ('reference_device_calibrated')", false),
+            ("VALUES ('unknown')", false),
+            ("SELECT NULL::text WHERE false", false),
+        ] {
+            assert_eq!(
+                crate::tests::gpu_sources_available(sources),
+                expected,
+                "{sources}"
+            );
+        }
     }
 
     fn serialize_gpu_tests() {

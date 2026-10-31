@@ -24,6 +24,17 @@ mod phase6_spatial;
 mod scalar_lowering;
 
 #[cfg(any(test, feature = "pg_test"))]
+fn gpu_sources_available(source_query: &str) -> bool {
+    pgrx::Spi::get_one::<bool>(&format!(
+        "SELECT EXISTS (SELECT 1 FROM ({source_query}) AS inventory(source) \
+         WHERE source IN ('hardware_derived','hosted_compatibility_calibrated'))"
+    ))
+    .ok()
+    .flatten()
+    .unwrap_or(false)
+}
+
+#[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod tests {
     use pgrx::prelude::*;
@@ -140,12 +151,7 @@ mod tests {
     }
 
     fn gpu_device_available() -> bool {
-        Spi::get_one::<String>("SELECT DISTINCT source FROM pg_accel_device_limits()")
-            .ok()
-            .flatten()
-            .is_some_and(|source| {
-                source == "hardware_derived" || source == "hosted_compatibility_calibrated"
-            })
+        crate::tests::gpu_sources_available("SELECT source FROM pg_accel_device_limits()")
     }
 
     fn qualifying_device_rows(limit_name: &str, floor: i64) -> i64 {

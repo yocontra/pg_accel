@@ -21,12 +21,7 @@ mod tests {
     }
 
     fn gpu_device_available() -> bool {
-        Spi::get_one::<String>("SELECT DISTINCT source FROM pg_accel_device_limits()")
-            .ok()
-            .flatten()
-            .is_some_and(|source| {
-                source == "hardware_derived" || source == "hosted_compatibility_calibrated"
-            })
+        crate::tests::gpu_sources_available("SELECT source FROM pg_accel_device_limits()")
     }
 
     fn serialize_gpu_tests() {
