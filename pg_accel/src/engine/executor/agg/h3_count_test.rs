@@ -18,6 +18,199 @@ mod tests {
     use pgrx::prelude::*;
 
     #[pg_test]
+    fn pg_adaptive_where_empty_and_predicate_invalidation_rebuild_population() {
+        Spi::run(
+            "CREATE EXTENSION IF NOT EXISTS h3; SET pg_accel.enabled=on; SET pg_accel.auto_load=on",
+        )
+        .expect("adaptive WHERE setup");
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT gpu_available FROM pg_accel_device_info()")
+                .expect("device"),
+            Some(true)
+        );
+        for raw in [true, false] {
+            let key_type = if raw { "bigint" } else { "h3index" };
+            let key = if raw {
+                "(i%8)::bigint"
+            } else {
+                "'8001fffffffffff'::h3index"
+            };
+            Spi::run(&format!("CREATE TEMP TABLE hash_count_rows(cell {key_type},v integer,p boolean,w boolean); INSERT INTO hash_count_rows SELECT {key},1,CASE WHEN i%11=0 THEN NULL ELSE i%3<>0 END,false FROM generate_series(1,65537)s(i)")).expect("all-rejected source");
+            let plan = plan_for_predicates(
+                DescriptorArtifactPolicy::EphemeralFused,
+                true,
+                true,
+                &[AggregateKind::Count],
+                raw,
+                Some(4),
+            );
+            assert!(plan.uses_adaptive_hash_count());
+            let run = |expected: u64| {
+                fresh_snapshot(|| {
+                    let mut state = super::super::AdaptiveHashExecution::default();
+                    loop {
+                        match plan
+                            .next_adaptive_hash(&mut state)
+                            .expect("validated adaptive WHERE attempt")
+                        {
+                            super::super::AdaptiveHashStep::Retry => {}
+                            super::super::AdaptiveHashStep::Leaf { done, .. } => {
+                                if done {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    assert_eq!(
+                        state.driver.as_ref().expect("driver").selected_rows,
+                        expected
+                    );
+                    assert_eq!(state.calls, state.scheduled_calls);
+                    assert!(
+                        state.aggregate_calls > 0,
+                        "even empty input executes native control"
+                    );
+                    if expected == 0 {
+                        assert_eq!(state.learned_candidate, Some(0));
+                    }
+                    plan.finish_adaptive_hash(&mut state)
+                        .expect("post-conservation learning");
+                    if raw && expected == 0 {
+                        let artifact = plan.ephemeral_artifact.borrow();
+                        let Some(super::super::EphemeralDescriptorArtifact::Hash(artifact)) =
+                            artifact.as_ref()
+                        else {
+                            panic!("raw owner");
+                        };
+                        assert_eq!(artifact.artifact().group_capacity.get(), 1);
+                    }
+                });
+            };
+            run(0);
+            run(0);
+            rolled_back(|| {
+                Spi::run("UPDATE hash_count_rows SET w=true")
+                    .expect("predicate-only generation mutation");
+                run(65537);
+                Spi::run("TRUNCATE hash_count_rows").expect("zero-row v2 binding");
+                run(0);
+            });
+            run(0);
+            Spi::run("SELECT pg_accel_evict('hash_count_rows'); DROP TABLE hash_count_rows")
+                .expect("release empty WHERE fixture");
+        }
+    }
+
+    #[pg_test]
+    fn pg_normal_h3_where_typed_counts_partitions_and_rejected_invalid_cells() {
+        struct RestoreCap(Option<usize>);
+        impl Drop for RestoreCap {
+            fn drop(&mut self) {
+                super::super::set_adaptive_hash_test_cap(self.0);
+            }
+        }
+        let _cap = RestoreCap(super::super::set_adaptive_hash_test_cap(Some(32)));
+        Spi::run("CREATE EXTENSION IF NOT EXISTS h3; RESET pg_accel.cost_multiplier; RESET pg_accel.min_batch_size; SET pg_accel.enabled=on; SET pg_accel.auto_load=on; SET work_mem='64kB'").expect("H3 WHERE setup");
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT gpu_available FROM pg_accel_device_info()")
+                .expect("device"),
+            Some(true)
+        );
+        let rows =
+            1_000_017_usize.max(crate::engine::cost::device_limits().gpu_h3_group_min_rows + 1);
+        for (sql_type, value) in [
+            ("boolean", "false"),
+            ("smallint", "-32768"),
+            ("integer", "-2147483648"),
+            ("bigint", "-9223372036854775808"),
+            ("real", "'NaN'"),
+            ("double precision", "'Infinity'"),
+            ("date", "'-infinity'"),
+            ("timestamp", "'infinity'"),
+            ("timestamptz", "'-infinity'"),
+        ] {
+            Spi::run(&format!("CREATE TEMP TABLE h3_where_rows(cell h3index,v {sql_type},p boolean,w boolean); \
+                INSERT INTO h3_where_rows WITH seeds AS (SELECT array_agg(h3_cell_to_center_child(cell,15) ORDER BY cell) cells FROM h3_get_res_0_cells()c(cell)) \
+                SELECT CASE WHEN i%97=0 THEN NULL ELSE cells[1+(i-1)%122] END, \
+                CASE WHEN i%7=0 THEN NULL ELSE ({value})::{sql_type} END, \
+                CASE WHEN i%122=1 THEN false WHEN i%11=0 THEN NULL ELSE i%3<>0 END, \
+                CASE WHEN i%13=0 THEN NULL ELSE ((i-1)/122)%4<>0 END \
+                FROM generate_series(1,{rows}::bigint)s(i) CROSS JOIN seeds; \
+                INSERT INTO h3_where_rows VALUES ('8001fffffffffff',NULL,true,false); \
+                ANALYZE h3_where_rows; SELECT pg_accel_pin('h3_where_rows',ARRAY['cell','v','p','w'])"))
+                .expect("H3 typed WHERE with rejected invalid-resolution input");
+            for aggregate in [
+                "count(*)",
+                "count(v)",
+                "count(v) FILTER (WHERE w)",
+                "count(v) FILTER (WHERE p)",
+            ] {
+                let query = format!(
+                    "SELECT h3_cell_to_parent(cell,1) k,{aggregate} n FROM h3_where_rows WHERE w GROUP BY 1"
+                );
+                Spi::run("SET pg_accel.enabled=off").expect("native arm");
+                let before = crate::gpu::gpu_exec_count();
+                Spi::run(&format!("CREATE TEMP TABLE h3_where_expected AS {query}"))
+                    .expect("native full result");
+                assert_eq!(crate::gpu::gpu_exec_count(), before);
+                Spi::run("SET pg_accel.enabled=on").expect("GPU arm");
+                let stock = Spi::get_one::<i64>("SELECT stock_exec_count FROM pg_accel_stats()")
+                    .expect("stock counter");
+                let before = crate::gpu::gpu_exec_count();
+                let text = Spi::connect(|client| {
+                    client.select(&format!("EXPLAIN (ANALYZE,VERBOSE,COSTS OFF) CREATE TEMP TABLE h3_where_actual AS {query}"),None,&[]).expect("actual materialization plan")
+                    .map(|row| row.get::<String>(1).expect("line").expect("non-NULL")).collect::<Vec<_>>().join("\n")
+                });
+                for required in [
+                    "Custom Scan (GpuAccelAgg)",
+                    "GPU Dispatched Physical Kernel Mode: parallel_hash",
+                    "GPU Lifecycle Calls Verified: true",
+                    "GPU Descriptor Artifact Policy: ephemeral_fused",
+                    "GPU Adaptive Final Tuples Spilled: true",
+                ] {
+                    assert!(text.contains(required), "missing {required}: {text}");
+                }
+                assert!(crate::gpu::gpu_exec_count() > before);
+                assert_eq!(
+                    Spi::get_one::<i64>("SELECT stock_exec_count FROM pg_accel_stats()")
+                        .expect("stock counter"),
+                    stock
+                );
+                Spi::run("SET pg_accel.enabled=off").expect("native full diff");
+                assert_eq!(Spi::get_one::<i64>("SELECT count(*) FROM ((TABLE h3_where_expected EXCEPT ALL TABLE h3_where_actual) UNION ALL (TABLE h3_where_actual EXCEPT ALL TABLE h3_where_expected))d").expect("both directions"),Some(0));
+                Spi::run("SET pg_accel.enabled=on; DROP TABLE h3_where_expected,h3_where_actual")
+                    .expect("release output");
+            }
+            if sql_type == "integer" {
+                Spi::run("CREATE FUNCTION pg_temp.h3_where_error(sql text) RETURNS text LANGUAGE plpgsql AS $$ BEGIN EXECUTE sql; RETURN '00000'; EXCEPTION WHEN OTHERS THEN RETURN SQLSTATE; END $$; UPDATE h3_where_rows SET w=true WHERE cell='8001fffffffffff'::h3index").expect("accepted invalid-resolution source mutation");
+                let query = "CREATE TEMP TABLE h3_where_failed AS SELECT h3_cell_to_parent(cell,1),count(*) FROM h3_where_rows WHERE w GROUP BY 1";
+                let before = crate::gpu::gpu_exec_count();
+                assert_eq!(
+                    Spi::get_one::<String>(&format!(
+                        "SELECT pg_temp.h3_where_error($q${query}$q$)"
+                    ))
+                    .expect("native H3 error delivery")
+                    .as_deref(),
+                    Some("38000")
+                );
+                assert!(
+                    crate::gpu::gpu_exec_count() > before,
+                    "accepted invalid cell reached native GPU validation"
+                );
+                assert_eq!(
+                    Spi::get_one::<bool>("SELECT to_regclass('pg_temp.h3_where_failed') IS NULL")
+                        .expect("atomic publication"),
+                    Some(true)
+                );
+                Spi::run("DROP FUNCTION pg_temp.h3_where_error(text)")
+                    .expect("remove error catcher");
+            }
+            Spi::run("SELECT pg_accel_unpin('h3_where_rows'); SELECT pg_accel_evict('h3_where_rows'); DROP TABLE h3_where_rows").expect("release H3 WHERE fixture");
+        }
+        Spi::run("RESET work_mem").expect("restore work memory");
+    }
+
+    #[pg_test]
     fn pg_normal_h3_adaptive_real_device_cap_plus_one_matches_native() {
         Spi::run("CREATE EXTENSION IF NOT EXISTS h3; RESET pg_accel.cost_multiplier; RESET pg_accel.min_batch_size; SET pg_accel.enabled=on; SET statement_timeout='15min'; SET temp_file_limit='4GB'; SET max_parallel_workers_per_gather=2").expect("qualification fixture invariant");
         // SAFETY: live backend main thread, using the same PostgreSQL timeout

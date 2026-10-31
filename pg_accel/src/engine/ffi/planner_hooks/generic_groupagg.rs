@@ -497,8 +497,12 @@ fn apply_exact_residency_with_memory(
         .collect::<BTreeMap<_, _>>();
     let derived_artifact_bytes = if shape.execution_selection()
         == crate::engine::executor::agg::AggExecutionSelection::RawIntegerCount
+        || (crate::engine::executor::agg::canonical_h3_count(&shape.spec)
+            && !matches!(shape.spec.fact_filter, FilterSpec::None))
     {
-        0 // Raw keys borrow resident lanes; FILTER is charged in execution memory.
+        // Raw keys and WHERE-bearing H3 borrow resident lanes. WHERE forces
+        // fused H3 evaluation; distinct masks are charged in execution memory.
+        0
     } else {
         estimate_descriptor_artifact_bytes_upper_bound(&shape.spec, &relation_rows)
             .ok_or(AdmissionDecline::DerivedArtifactEstimateUnavailable)?
@@ -668,6 +672,13 @@ fn apply_exact_residency_with_memory(
             .replace_additional_aggregate_launches(resources.launches);
     } else if let Some(decision) = dense_decision {
         if let Some(work) = dense_count_work {
+            #[cfg(feature = "pg_test")]
+            if CANDIDATE_OBSERVATIONS.with(|slot| slot.borrow().is_some()) {
+                pgrx::notice!(
+                    "candidate COUNT work: decision={decision:?}; work={work:?}; before={:?}",
+                    shape.cost
+                );
+            }
             if work.calls != decision.calls || work.facts.rows != lifecycle_fact_rows {
                 return Err(AdmissionDecline::ScalarEstimateUnavailable {
                     detail: "dense COUNT pricing disagrees with selected lifecycle".into(),
@@ -676,6 +687,23 @@ fn apply_exact_residency_with_memory(
             shape
                 .cost
                 .replace_aggregate(dense_count_aggregate_cost(work, model)?);
+        } else if let Some(reads) =
+            dense_integer_count_where_reads(shape, decision, lifecycle_fact_rows)
+        {
+            #[cfg(feature = "pg_test")]
+            if CANDIDATE_OBSERVATIONS.with(|slot| slot.borrow().is_some()) {
+                pgrx::notice!(
+                    "candidate integer WHERE work: decision={decision:?}; reads={reads}; coefficient={}; before={:?}",
+                    model.coefficients.gpu_op_cost_filter.get(),
+                    shape.cost
+                );
+            }
+            // Integer COUNT workers visit each input once across chunks. This
+            // is consumer work, not cached host-mask construction or launches.
+            let mask_read_cost = reads as f64 * model.coefficients.gpu_op_cost_filter.get();
+            shape
+                .cost
+                .replace_aggregate(PgCost::new(shape.cost.aggregate.get() + mask_read_cost));
         }
         shape
             .cost
@@ -762,6 +790,31 @@ struct NumericPlanningResources {
     bytes: u64,
     aggregate: PgCost,
     launches: PgCost,
+}
+
+fn dense_integer_count_where_reads(
+    shape: &ShapePlan,
+    decision: DenseExecutionDecision,
+    rows: u64,
+) -> Option<u64> {
+    use crate::engine::spec::{AggregateSource, MaskKind};
+    let spec = &shape.spec;
+    let [measure] = spec.measures.as_slice() else {
+        return None;
+    };
+    (shape.execution_selection() == crate::engine::executor::agg::AggExecutionSelection::Legacy
+        && decision.native_mode == GroupedAggKernelMode::ParallelDenseInteger
+        && spec.star_dims.is_empty()
+        && matches!(spec.fact_filter, FilterSpec::Mask { input, kind: MaskKind::Sql }
+            if input.relation_oid == spec.fact_rel && input.type_oid == 16
+                && input.attno > 0 && i16::try_from(input.attno).is_ok())
+        && matches!(
+            measure.expression,
+            MeasureExpr::Column(_) | MeasureExpr::Bytecode { .. }
+        )
+        && matches!(measure.outputs.as_slice(), [output]
+            if output.kind == AggregateKind::Count && output.source == AggregateSource::Value))
+    .then_some(rows)
 }
 
 fn dense_count_aggregate_cost(
@@ -2537,6 +2590,12 @@ unsafe fn try_inject_candidate(
         };
         #[cfg(feature = "pg_test")]
         {
+            if CANDIDATE_OBSERVATIONS.with(|slot| slot.borrow().is_some()) {
+                pgrx::notice!(
+                    "candidate raw={raw_count}; final components={:?}; effective={effective_cost:?}",
+                    shape.cost
+                );
+            }
             observed_cost = Some((
                 format!("{:?}", shape_kernel_mode(&shape)),
                 effective_cost.total,
@@ -2606,6 +2665,21 @@ unsafe fn try_inject_candidate(
 
 // Test-only observation of real default admission; this does not alter candidate
 // order, costs, cache identities, path pruning, or production EXPLAIN output.
+#[cfg(feature = "pg_test")]
+pub(crate) fn capture_candidate_observations<T>(run: impl FnOnce() -> T) -> (T, String) {
+    struct Restore(Option<Vec<CandidateObservation>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CANDIDATE_OBSERVATIONS.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore =
+        Restore(CANDIDATE_OBSERVATIONS.with(|slot| slot.borrow_mut().replace(Vec::new())));
+    let result = run();
+    let observations = CANDIDATE_OBSERVATIONS.with(|slot| format!("{:?}", slot.borrow()));
+    (result, observations)
+}
+
 #[cfg(feature = "pg_test")]
 #[derive(Debug)]
 struct CandidateObservation {
@@ -3618,6 +3692,101 @@ mod unit_tests {
         let mut overflowing = work;
         overflowing.facts.global_counter_clear_entries = u64::MAX;
         assert!(dense_count_aggregate_cost(overflowing, &model).is_err());
+        let mut masked = work;
+        masked.facts.sql_mask_checks = 17;
+        assert_eq!(
+            dense_count_aggregate_cost(masked, &model)
+                .expect("SQL reads")
+                .get(),
+            346.0
+        );
+    }
+
+    #[test]
+    fn dense_integer_where_count_reads_follow_selected_workers_not_calls() {
+        let mut shape = dense_sum_count_shape(2051);
+        shape.spec.measures.truncate(1);
+        shape.spec.measures[0].outputs[0].kind = AggregateKind::Count;
+        shape.spec.fact_filter = FilterSpec::Mask {
+            input: ColumnRef {
+                relation_oid: 42,
+                attno: 3,
+                type_oid: 16,
+            },
+            kind: crate::engine::spec::MaskKind::Sql,
+        };
+        let mut decision = select_dense_execution(&shape.spec, &[], 65, 2051, 1024, 1, u64::MAX)
+            .expect("native metadata")
+            .expect("fits");
+        // The direct COUNT descriptor naturally selects COUNT. The helper must
+        // reject it: its exact work facts already contain the SQL checks.
+        assert_eq!(
+            dense_integer_count_where_reads(&shape, decision, 2051),
+            None
+        );
+        decision.native_mode = GroupedAggKernelMode::ParallelDenseInteger;
+        for calls in [1, 4, 29] {
+            decision.calls = calls;
+            for rows in [0, 2051, 1_000_017, 2_000_017] {
+                assert_eq!(
+                    dense_integer_count_where_reads(&shape, decision, rows),
+                    Some(rows)
+                );
+            }
+        }
+        let original = shape.clone();
+        shape.spec.measures[0].expression = MeasureExpr::Bytecode {
+            inputs: vec![],
+            program: vec![
+                crate::engine::spec::scalar::SCALAR_PROGRAM_MAGIC,
+                2,
+                0,
+                1,
+                42,
+            ],
+            result_type_oid: u32::from(pg_sys::INT4OID),
+        };
+        let actual = select_dense_execution(&shape.spec, &[], 65, 2051, 1024, 1, u64::MAX)
+            .expect("native scalar COUNT metadata")
+            .expect("fits");
+        assert_eq!(
+            actual.native_mode,
+            GroupedAggKernelMode::ParallelDenseInteger
+        );
+        assert_eq!(
+            dense_integer_count_where_reads(&shape, actual, 2051),
+            Some(2051)
+        );
+        shape = original.clone();
+        shape.spec.fact_filter = FilterSpec::None;
+        assert_eq!(
+            dense_integer_count_where_reads(&shape, decision, 2051),
+            None
+        );
+        shape = original.clone();
+        shape.spec.measures[0].outputs[0].kind = AggregateKind::Sum;
+        assert_eq!(
+            dense_integer_count_where_reads(&shape, decision, 2051),
+            None
+        );
+        shape = original.clone();
+        shape.spec.measures.push(shape.spec.measures[0].clone());
+        assert_eq!(
+            dense_integer_count_where_reads(&shape, decision, 2051),
+            None
+        );
+        shape = original;
+        for mode in [
+            GroupedAggKernelMode::ParallelDenseCount,
+            GroupedAggKernelMode::ParallelDenseNumeric,
+            GroupedAggKernelMode::ParallelHash,
+        ] {
+            decision.native_mode = mode;
+            assert_eq!(
+                dense_integer_count_where_reads(&shape, decision, 2051),
+                None
+            );
+        }
     }
 
     fn expected_exact_load(rows: u64, bytes: u64, fixed_width: bool) -> PgCost {

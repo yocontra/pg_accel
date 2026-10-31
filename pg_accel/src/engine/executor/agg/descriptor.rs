@@ -1517,7 +1517,8 @@ fn canonical_hash_count_measure(spec: &AggQuerySpec) -> bool {
         return false;
     };
     spec.star_dims.is_empty()
-        && matches!(spec.fact_filter, FilterSpec::None)
+        && hash_where_filter(spec)
+            .is_ok_and(|column| column.is_none_or(|column| i16::try_from(column.attno).is_ok()))
         && spec.having.is_none()
         && match measure.filter {
             FilterSpec::None => true,
@@ -1573,11 +1574,8 @@ fn validate_h3_runtime_capability(
     {
         return Err("H3 parent group key metadata is not canonical".to_owned());
     }
-    if !spec.star_dims.is_empty()
-        || !matches!(spec.fact_filter, FilterSpec::None)
-        || spec.having.is_some()
-    {
-        return Err("H3 parent grouping does not support joins, filters, or HAVING".to_owned());
+    if !spec.star_dims.is_empty() || spec.having.is_some() {
+        return Err("H3 parent grouping does not support joins or HAVING".to_owned());
     }
     if !canonical_h3_count(spec) {
         return Err("H3 parent grouping requires one fixed-width COUNT with an optional direct Boolean FILTER".to_owned());
@@ -3950,6 +3948,7 @@ pub(super) struct AdaptiveHashExecution {
     driver: Option<HashPartitionDriver>,
     fingerprint: Option<HashExecutionFingerprint>,
     filter: Option<crate::gpu::SqlBoolMask>,
+    where_mask: Option<crate::gpu::SqlBoolMask>,
     filter_initialized: bool,
     learned_candidate: Option<usize>,
     pub(super) fact_rows: usize,
@@ -4015,7 +4014,7 @@ pub(super) enum AdaptiveHashStep {
 // Same ownership-transfer rationale as AdaptiveHashStep above.
 #[allow(clippy::large_enum_variant)]
 enum AdaptiveHashAttempt {
-    Complete(DescriptorAggOutput, u64, usize),
+    Complete(DescriptorAggOutput, u64, u64, usize),
     Capacity,
     AllocationPressure,
 }
@@ -4128,27 +4127,48 @@ impl DescriptorAggPlan {
                 )?;
                 if !quote && !state.filter_initialized {
                     let (_, mask_calls) = h3_mask_work(&self.spec, desc.row_count)?;
-                    let input = resolve_h3_filter(
-                        &self.spec,
-                        &self.dispatch_columns,
-                        &inputs.columns,
-                        desc.row_count,
-                    )?;
                     let before = crate::gpu::gpu_exec_count();
                     let mut submitted = 0;
-                    let pending = || {
+                    let mut pending = || {
                         #[cfg(feature = "pg_test")]
                         test_adaptive_mask_interrupt(crate::gpu::gpu_exec_count() - before);
                         postgres_interrupt_pending()
                     };
-                    let built = input.map(|input| {
-                        crate::gpu::SqlBoolMask::from_resident_with_poll_counted(
-                            input.values,
-                            input.nulls,
-                            pending,
-                            &mut submitted,
-                        )
-                    });
+                    // Keep partial owners local: on interruption/error they drop
+                    // before leaving the lease and before PostgreSQL is serviced.
+                    let built = (|| -> Result<_, DescriptorAggExecutionError> {
+                        let mut build = |column| {
+                            let input = resolve_hash_boolean_input(
+                                column,
+                                &self.dispatch_columns,
+                                &inputs.columns,
+                                desc.row_count,
+                            )?;
+                            if let Some(input) = input {
+                                crate::gpu::SqlBoolMask::from_resident_with_poll_counted(
+                                    input.values,
+                                    input.nulls,
+                                    &mut pending,
+                                    &mut submitted,
+                                )
+                                .map_err(|error| {
+                                    gpu_execution_error("adaptive mask failed", error)
+                                })?
+                                .map(Some)
+                                .ok_or(DescriptorAggExecutionError::PreparationInterrupted)
+                            } else {
+                                if pending() {
+                                    return Err(
+                                        DescriptorAggExecutionError::PreparationInterrupted,
+                                    );
+                                }
+                                Ok(None)
+                            }
+                        };
+                        let where_mask = build(hash_where_filter(&self.spec)?)?;
+                        let filter = build(h3_count_filter(&self.spec)?)?;
+                        Ok((where_mask, filter))
+                    })();
                     let observed = crate::gpu::gpu_exec_count()
                         .checked_sub(before)
                         .ok_or("adaptive mask native counter regressed".to_owned())?;
@@ -4160,48 +4180,30 @@ impl DescriptorAggPlan {
                         .calls
                         .checked_add(observed)
                         .ok_or("adaptive mask call counter overflow".to_owned())?;
-                    state.filter = match built {
-                        Some(Ok(Some(mask))) => {
-                            if submitted != mask_calls || observed != submitted {
-                                return Err("adaptive mask completed call evidence mismatch"
-                                    .to_owned()
-                                    .into());
-                            }
-                            Some(mask)
-                        }
-                        Some(Ok(None)) => {
-                            if submitted > mask_calls || observed != submitted {
-                                return Err("adaptive mask interrupted call evidence mismatch"
-                                    .to_owned()
-                                    .into());
-                            }
-                            return Err(DescriptorAggExecutionError::PreparationInterrupted);
-                        }
-                        Some(Err(error)) => {
-                            return Err(gpu_execution_error("adaptive mask failed", error));
-                        }
-                        None => {
-                            if postgres_interrupt_pending() {
-                                return Err(DescriptorAggExecutionError::PreparationInterrupted);
-                            }
-                            None
-                        }
-                    };
+                    if submitted > mask_calls
+                        || observed != submitted
+                        || (built.is_ok() && submitted != mask_calls)
+                    {
+                        return Err("adaptive mask call evidence mismatch".to_owned().into());
+                    }
+                    let (where_mask, filter) = built?;
+                    state.where_mask = where_mask;
+                    state.filter = filter;
                     state.filter_initialized = true;
                 }
-                if h3_count_filter(&self.spec)?.is_some() && desc.row_count != 0 {
-                    desc.measure_filters[0].kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
-                    // A metadata-only marker's synthetic row span must not
-                    // overlap stack-owned native query outputs. Never execute it.
-                    desc.measure_filters[0].mask = if quote {
-                        std::ptr::dangling::<i8>()
-                    } else {
-                        state
-                            .filter
-                            .as_ref()
-                            .ok_or("adaptive SQL mask owner missing".to_owned())?
-                            .as_ptr()
-                    };
+                mark_hash_predicates(&mut desc, &self.spec)?;
+                if !quote && desc.row_count != 0 {
+                    for (native_filter, mask) in [
+                        (&mut desc.where_filter, &state.where_mask),
+                        (&mut desc.measure_filters[0], &state.filter),
+                    ] {
+                        if native_filter.kind == abi::PGACCEL_GROUPED_AGG_FILTER_SQL {
+                            native_filter.mask = mask
+                                .as_ref()
+                                .ok_or("adaptive SQL mask owner missing".to_owned())?
+                                .as_ptr();
+                        }
+                    }
                 }
                 callback(desc)
             })?
@@ -4229,9 +4231,8 @@ impl DescriptorAggPlan {
     ) -> Result<u64, DescriptorAggExecutionError> {
         let mask_bytes = if self.artifact_policy.get() != DescriptorArtifactPolicy::CachedReusable
             && !state.filter_initialized
-            && h3_count_filter(&self.spec)?.is_some()
         {
-            state.fact_rows as u64
+            h3_mask_work(&self.spec, state.fact_rows)?.0
         } else {
             0
         };
@@ -4336,14 +4337,31 @@ impl DescriptorAggPlan {
                     Ok(AdaptiveHashAttempt::Complete(
                         output,
                         result.selected_count,
+                        if hash_where_filter(&self.spec)?.is_some() {
+                            counters.where_rows.ok_or(
+                                "successful WHERE attempt lacks native population".to_owned(),
+                            )?
+                        } else {
+                            if counters.where_rows.is_some() {
+                                return Err("legacy attempt published a WHERE population"
+                                    .to_owned()
+                                    .into());
+                            }
+                            desc.row_count as u64
+                        },
                         result.emitted_group_count,
                     ))
                 }
                 Err(error)
                     if error.domain == GpuErrorDomain::GroupedAgg
                         && error.status == GpuStatusDetail::CapacityOverflow
-                        && error.operation
-                            == GpuOperation::Kernel("hash_count_partition_execute_v1") =>
+                        && matches!(
+                            error.operation,
+                            GpuOperation::Kernel(
+                                "hash_count_partition_execute_v1"
+                                    | "hash_count_partition_execute_v2"
+                            )
+                        ) =>
                 {
                     Ok(AdaptiveHashAttempt::Capacity)
                 }
@@ -4355,8 +4373,13 @@ impl DescriptorAggPlan {
                 Err(error)
                     if error.domain == GpuErrorDomain::H3
                         && error.status == GpuStatusDetail::ShapeMismatch
-                        && error.operation
-                            == GpuOperation::Kernel("hash_count_partition_execute_v1") =>
+                        && matches!(
+                            error.operation,
+                            GpuOperation::Kernel(
+                                "hash_count_partition_execute_v1"
+                                    | "hash_count_partition_execute_v2"
+                            )
+                        ) =>
                 {
                     Err(DescriptorAggExecutionError::ExternalRoutineException(
                         error.to_string(),
@@ -4402,17 +4425,13 @@ impl DescriptorAggPlan {
             .scanned_rows
             .checked_add(counters.scanned_rows)
             .ok_or("adaptive scanned row count overflow".to_owned())?;
-        if let AdaptiveHashAttempt::Complete(output, selected, emitted) = attempt {
+        if let AdaptiveHashAttempt::Complete(output, selected, whole, emitted) = attempt {
             let driver = state.driver.as_mut().expect("initialized driver");
-            driver.complete_leaf(selected)?;
+            driver.complete_population_leaf(selected, whole, state.fact_rows as u64)?;
             let done = driver.attempt()?.is_none();
-            if done && driver.selected_rows != state.fact_rows as u64 {
-                return Err("adaptive partitions do not cover all input rows"
-                    .to_owned()
-                    .into());
-            }
             if done {
                 state.filter = None;
+                state.where_mask = None;
                 if !driver.overflowed {
                     state.learned_candidate = Some(emitted);
                 }
@@ -4951,6 +4970,8 @@ impl DenseCountWork {
                     && matches!(column.type_oid, INT2OID | INT4OID | INT8OID))
                 && key.collation_oid == 0)
             && canonical_hash_count_measure(spec)
+            // canonical_hash_count_measure already proves NONE or a direct
+            // same-fact Boolean SQL WHERE. Native work facts count its reads.
             // Aggregate FILTER is a raw/H3 capability. Dense SQL masks belong
             // to WHERE and cannot substitute without losing zero-count groups.
             && matches!(spec.measures[0].filter, FilterSpec::None)
@@ -6163,10 +6184,7 @@ fn count_memory_requirements(
             flags: 0,
         };
     }
-    if rows != 0 && h3_count_filter(spec)?.is_some() {
-        desc.measure_filters[0].kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
-        desc.measure_filters[0].mask = std::ptr::from_ref(&null_marker).cast();
-    }
+    mark_hash_predicates(&mut desc, spec)?;
     // SAFETY: the metadata-only API never reads row buffers or retains markers.
     unsafe { crate::gpu::query_hash_grouped_memory_layout(&desc) }
         .map_err(|error| error.to_string())
@@ -6208,11 +6226,7 @@ pub fn raw_count_planning_memory(
         &cold_nullable
     };
     let memory = raw_count_memory_requirements(spec, nullable, rows, capacity)?;
-    let mask = if h3_count_filter(spec)?.is_some() {
-        rows as u64
-    } else {
-        0
-    };
+    let mask = h3_mask_work(spec, rows)?.0;
     Ok(H3PlanningMemory {
         bytes: (memory.total_bytes as u64)
             .checked_add(mask)
@@ -6259,6 +6273,24 @@ pub fn h3_planning_memory(
     };
     let mut capacity = theoretical;
     let mut cached_owner = false;
+    if hash_where_filter(spec)?.is_some() {
+        if estimate.loaded {
+            // SAFETY: main-backend catalog check precedes every resident lease;
+            // fused ownership does not waive the original H3 type identity proof.
+            let catalog = unsafe { crate::engine::ffi::syscache::resolve_h3_catalog() }?;
+            if u32::from(catalog.type_oid) != cell.type_oid {
+                return Err("H3 catalog identity changed during memory forecasting".into());
+            }
+        }
+        let fused = h3_count_memory_requirements(spec, &nullable, rows, capacity, true)?;
+        return Ok(Some(H3PlanningMemory {
+            bytes: (fused.total_bytes as u64)
+                .checked_add(h3_mask_work(spec, rows)?.0)
+                .ok_or("H3 WHERE memory overflow")?,
+            capacity,
+            cached_owner: false,
+        }));
+    }
     if estimate.loaded {
         // SAFETY: normal planner invocation on PostgreSQL's main thread. The
         // entire catalog lookup finishes before the immutable STORE inspection.
@@ -6858,11 +6890,39 @@ fn hash_predicate_layout(
     views: &[ResidentColumnView<'_>],
     rows: usize,
 ) -> Result<u64, String> {
-    let input = resolve_h3_filter(spec, requests, views, rows)?;
-    Ok(match input {
-        Some(input) => 2 + u64::from(input.nulls.is_some()),
-        None => u64::from(h3_count_filter(spec)?.is_some()),
-    })
+    let mut layout = 0;
+    for (shift, column) in [(0, h3_count_filter(spec)?), (2, hash_where_filter(spec)?)] {
+        let input = resolve_hash_boolean_input(column, requests, views, rows)?;
+        let lane = match input {
+            Some(input) => 2 + u64::from(input.nulls.is_some()),
+            None => u64::from(column.is_some()),
+        };
+        layout |= lane << shift;
+    }
+    Ok(layout)
+}
+
+/// Seed metadata-only mask identities, retaining v2 SQL identity at zero rows.
+/// Markers must never reach execution; resident owners replace them there.
+fn mark_hash_predicates(
+    desc: &mut abi::PgaccelGroupedAggDesc,
+    spec: &AggQuerySpec,
+) -> Result<(), String> {
+    let where_column = hash_where_filter(spec)?;
+    for (filter, column) in [
+        (&mut desc.where_filter, where_column),
+        (&mut desc.measure_filters[0], h3_count_filter(spec)?),
+    ] {
+        if column.is_some() && (desc.row_count != 0 || where_column.is_some()) {
+            filter.kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
+            filter.mask = if desc.row_count == 0 {
+                std::ptr::null()
+            } else {
+                std::ptr::dangling::<i8>()
+            };
+        }
+    }
+    Ok(())
 }
 
 /// The marker is consumed only by the metadata query, never by an executable
@@ -6879,16 +6939,8 @@ fn fused_hash_execution_snapshot(
         &inputs.columns,
         desc.row_count,
     )?;
-    let marker = 0_i8;
-    let mask_bytes = if h3_count_filter(&inputs.artifact.resolved_spec)?.is_some() {
-        if desc.row_count != 0 {
-            desc.measure_filters[0].kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
-            desc.measure_filters[0].mask = &raw const marker;
-        }
-        desc.row_count as u64
-    } else {
-        0
-    };
+    mark_hash_predicates(&mut desc, &inputs.artifact.resolved_spec)?;
+    let mask_bytes = h3_mask_work(&inputs.artifact.resolved_spec, desc.row_count)?.0;
     let (fingerprint, native_bytes) = hash_execution_snapshot(
         &desc,
         &inputs.artifact.resolved_spec,
@@ -6944,13 +6996,11 @@ fn hash_execution_snapshot(
                     .map_err(|_| "negative H3 filter kind")?,
                 u64::from(!desc.measure_filters[0].mask.is_null()),
                 predicate_layout,
-                if h3_count_filter(spec)?.is_some() {
-                    desc.row_count as u64
-                } else {
-                    0
-                },
+                h3_mask_work(spec, desc.row_count)?.0,
                 memory.workspace_bytes as u64,
                 memory.output_bytes as u64,
+                u64::try_from(desc.where_filter.kind).map_err(|_| "negative WHERE kind")?,
+                u64::from(!desc.where_filter.mask.is_null()),
             ],
             sources: evidence
                 .iter()
@@ -7102,9 +7152,11 @@ fn build_and_execute_fused_hash_one_shot(
             build_fused_hash_descriptor(inputs.artifact, requests, &inputs.columns, cell, pending)
         })
         .map_err(DescriptorDispatchFailure::Residency)?;
+    let snapshot_desc = staged_hash_snapshot_descriptor(&desc.desc, &inputs.artifact.resolved_spec)
+        .map_err(DescriptorAggExecutionError::Failure)?;
     validate_hash_execution_snapshot(
         prepared,
-        &desc.desc,
+        &snapshot_desc,
         &inputs.artifact.resolved_spec,
         &inputs.evidence,
         hash_predicate_layout(
@@ -7194,6 +7246,31 @@ fn build_and_execute_fused_hash_one_shot(
         kernel_mode,
         residency: None,
     })
+}
+
+/// The staged one-shot binder intentionally disables empty masks for the
+/// legacy API. Its logical preparation uses the conservative v2 forecast now
+/// shared with adaptive COUNT. Normalize only a comparison copy: actual legacy
+/// mode validation, allocation and execution still receive the original bytes.
+fn staged_hash_snapshot_descriptor(
+    desc: &abi::PgaccelGroupedAggDesc,
+    spec: &AggQuerySpec,
+) -> Result<abi::PgaccelGroupedAggDesc, String> {
+    let mut snapshot = *desc;
+    if desc.row_count == 0
+        && (canonical_h3_count(spec) || canonical_raw_integer_count(spec))
+        && hash_where_filter(spec)?.is_some()
+    {
+        if !canonical_disabled_filter(&desc.where_filter)
+            || !canonical_disabled_filter(&desc.measure_filters[0])
+        {
+            return Err(
+                "empty staged hash binder returned noncanonical disabled predicates".into(),
+            );
+        }
+        mark_hash_predicates(&mut snapshot, spec)?;
+    }
+    Ok(snapshot)
 }
 
 enum DescriptorDispatchFailure {
@@ -9302,7 +9379,7 @@ mod tests {
                 let mut rejected = shape.clone();
                 rejected.fact_filter = rejected.measures[0].filter.clone();
                 rejected.measures[0].filter = FilterSpec::None;
-                assert!(!DenseCountWork::supports(&rejected));
+                assert!(DenseCountWork::supports(&rejected));
                 shape.measures[0].filter = FilterSpec::None;
                 rejected = shape.clone();
                 rejected.group_keys[0].collation_oid = 1;
@@ -9325,7 +9402,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_count_work_accounts_where_mask_aliases_without_pricing_or_dispatch() {
+    fn dense_count_work_accounts_where_mask_aliases_without_dispatch() {
         let before_bytes = resident_live_bytes();
         let before_calls = crate::gpu::gpu_exec_count();
         let rows = 2051;
@@ -9352,10 +9429,7 @@ mod tests {
                 },
                 kind: crate::engine::spec::MaskKind::Sql,
             };
-            assert!(
-                !DenseCountWork::supports(&shape),
-                "WHERE is outside new pricing"
-            );
+            assert!(DenseCountWork::supports(&shape));
             for nullable in [&[][..], &[1, 2, 3][..]] {
                 with_dense_layout_descriptor(&shape, nullable, 65, rows, |desc| {
                     for chunk in [None, Some(1024)] {
@@ -9366,6 +9440,13 @@ mod tests {
                             0,
                         )?;
                         let work = dense_count_lifecycle_work(desc, decision)?;
+                        let mut unfiltered = *desc;
+                        assert!(canonical_disabled_filter(&desc.measure_filters[0]));
+                        unfiltered.where_filter = desc.measure_filters[0];
+                        let baseline = dense_count_lifecycle_work(&unfiltered, decision)?;
+                        let mut expected = baseline.facts;
+                        expected.sql_mask_checks = rows as u64;
+                        assert_eq!(work.facts, expected, "only SQL reads differ");
                         let value_checks = if value_attno.is_some() {
                             rows as u64
                         } else {
@@ -9383,6 +9464,47 @@ mod tests {
         }
         assert_eq!(resident_live_bytes(), before_bytes);
         assert_eq!(crate::gpu::gpu_exec_count(), before_calls);
+    }
+
+    #[test]
+    fn dense_where_work_empty_atomic_hierarchical_and_finalize_reads() {
+        let mut shape = dense_bool_count_spec();
+        shape.measures[0].expression = MeasureExpr::CountStar;
+        shape.fact_filter = FilterSpec::Mask {
+            input: ColumnRef {
+                relation_oid: 42,
+                attno: 3,
+                type_oid: BOOLOID,
+            },
+            kind: crate::engine::spec::MaskKind::Sql,
+        };
+        for groups in [7, 65] {
+            for rows in [0, 1, 1025, 1_000_017] {
+                with_dense_layout_descriptor(&shape, &[], groups, rows, |desc| {
+                    for chunk in [None, (rows > 0).then_some(1024)] {
+                        let decision = dense_execution_candidate(
+                            desc,
+                            chunk,
+                            GroupedAggKernelMode::ParallelDenseCount,
+                            0,
+                        )?;
+                        let work = dense_count_lifecycle_work(desc, decision)?;
+                        assert_eq!(work.facts.sql_mask_checks, rows as u64);
+                        let mut final_only = *desc;
+                        final_only.row_count = 0;
+                        final_only.execution_flags = abi::PGACCEL_GROUPED_AGG_EXEC_FINALIZE;
+                        // SAFETY: metadata-only native query; descriptor remains live.
+                        let facts = unsafe {
+                            crate::gpu::grouped_agg::query_dense_count_work_forecast(&final_only)
+                        }
+                        .map_err(|error| error.to_string())?;
+                        assert_eq!(facts.sql_mask_checks, 0);
+                    }
+                    Ok(())
+                })
+                .expect("WHERE work facts for each native lifecycle");
+            }
+        }
     }
 
     #[test]
@@ -15081,7 +15203,19 @@ mod tests {
                         },
                         kind: MaskKind::Sql,
                     };
-                    assert!(!canonical_raw_integer_count(&rejected));
+                    assert!(canonical_raw_integer_count(&rejected));
+                    assert_eq!(DenseCountWork::supports(&rejected), !filtered);
+                    for rows in [0, 1_000_017] {
+                        assert!(
+                            raw_count_memory_requirements(
+                                &rejected,
+                                &[1, 2, 3],
+                                rows,
+                                rows.clamp(1, 4097)
+                            )
+                            .is_ok()
+                        );
+                    }
                     rejected = spec.clone();
                     rejected.measures[0].outputs[0].kind = AggregateKind::Sum;
                     assert!(!canonical_raw_integer_count(&rejected));
@@ -15216,7 +15350,7 @@ mod tests {
     }
 
     #[test]
-    fn hash_where_binding_tracks_predicates_and_keeps_sql_admission_closed() {
+    fn hash_where_binding_tracks_predicates_and_explicit_raw_selection() {
         for key_type in [INT2OID, INT4OID, INT8OID] {
             for filtered in [false, true] {
                 let (mut spec, projection) = h3_count_shape();
@@ -15246,6 +15380,12 @@ mod tests {
                     GroupedAggKernelMode::ParallelHash
                 );
                 assert!(validate_normal_descriptor_capability(&spec, &projection).is_err());
+                let mut raw_projection = projection.clone();
+                raw_projection.slots[0].result_type_oid = key_type;
+                raw_projection.slots[0].source_type_oid = key_type;
+                validate_raw_count_capability(&spec, &raw_projection)
+                    .expect("exact raw WHERE envelope");
+                assert_eq!(DenseCountWork::supports(&spec), !filtered);
                 let requests = compact_hash_column_refs(&spec).expect("key and both predicates");
                 let attributes: Vec<_> = requests.iter().map(|request| request.attno).collect();
                 assert_eq!(
@@ -15279,6 +15419,25 @@ mod tests {
                         .expect("empty WHERE binding requires no device allocation");
                 assert!(bound._where.is_none() && bound._filter.is_none());
                 assert!(canonical_disabled_filter(&bound.desc.where_filter));
+                let mut metadata = bound.desc;
+                mark_hash_predicates(&mut metadata, &spec).expect("v2 empty identity");
+                assert_eq!(
+                    metadata.where_filter.kind,
+                    abi::PGACCEL_GROUPED_AGG_FILTER_SQL
+                );
+                assert!(metadata.where_filter.mask.is_null());
+                // SAFETY: initialized empty metadata; no row pointer is read.
+                let native =
+                    unsafe { ResolvedGroupedAggPlan::from_abi(metadata) }.expect("metadata");
+                assert!(
+                    native.one_shot_kernel_mode().is_err(),
+                    "legacy mode stays closed"
+                );
+                assert!(
+                    native
+                        .hash_partition_memory_requirements(crate::gpu::HashCountPartition::ALL)
+                        .is_ok()
+                );
                 assert!(
                     build_fused_hash_descriptor(&artifact, &requests, &views, key, &mut || true)
                         .is_err()
@@ -15320,6 +15479,7 @@ mod tests {
                 ] {
                     spec.fact_filter = bad;
                     assert!(HashMeasureInput::from_spec(&spec).is_err());
+                    assert!(!canonical_raw_integer_count(&spec));
                 }
             }
         }
@@ -15356,6 +15516,11 @@ mod tests {
             abi::PGACCEL_GROUPED_AGG_KEY_FLAG_H3_PARENT
         );
         assert!(bound._where.is_none());
+        assert!(canonical_h3_count(&h3));
+        let mut metadata = bound.desc;
+        mark_hash_predicates(&mut metadata, &h3).expect("H3 empty WHERE");
+        // SAFETY: native metadata-only query of initialized zero-row descriptor.
+        assert!(unsafe { crate::gpu::query_hash_grouped_memory_layout(&metadata) }.is_ok());
         assert!(
             H3ParentArtifact::new(h3, 0, 1, None, None).is_err(),
             "cached prevalidation must not move H3 errors before WHERE"
@@ -15430,6 +15595,93 @@ mod tests {
     }
 
     #[test]
+    fn empty_staged_count_snapshot_preserves_legacy_execution_and_v2_forecast() {
+        for raw in [false, true] {
+            for filter_kind in 0..3 {
+                let (mut spec, _) = h3_count_shape();
+                if raw {
+                    spec.group_keys[0].source = GroupKeySource::FactColumn(column(INT8OID));
+                    spec.group_keys[0].type_oid = INT8OID;
+                }
+                let mask = |attno| FilterSpec::Mask {
+                    input: ColumnRef {
+                        attno,
+                        ..column(BOOLOID)
+                    },
+                    kind: MaskKind::Sql,
+                };
+                spec.fact_filter = mask(3);
+                spec.measures[0].filter = match filter_kind {
+                    0 => FilterSpec::None,
+                    1 => mask(4),
+                    _ => mask(3),
+                };
+                let actual = hash_count_descriptor(
+                    0,
+                    1,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    if raw {
+                        0
+                    } else {
+                        abi::PGACCEL_GROUPED_AGG_KEY_FLAG_H3_PARENT
+                    },
+                    0,
+                );
+                let normalized = staged_hash_snapshot_descriptor(&actual, &spec)
+                    .expect("empty logical comparison");
+                let mut prepared = actual;
+                mark_hash_predicates(&mut prepared, &spec).expect("prospective identity");
+                let (expected, forecast) =
+                    hash_execution_snapshot(&prepared, &spec, &[], 5).expect("v2 forecast");
+                validate_hash_execution_snapshot(Some(&expected), &normalized, &spec, &[], 5)
+                    .expect("same complete snapshot");
+                assert!(canonical_disabled_filter(&actual.where_filter));
+                assert!(canonical_disabled_filter(&actual.measure_filters[0]));
+                // SAFETY: initialized zero-row legacy descriptor has no payloads.
+                let legacy =
+                    unsafe { ResolvedGroupedAggPlan::from_abi(actual) }.expect("legacy empty plan");
+                assert_eq!(
+                    legacy.one_shot_kernel_mode().expect("legacy unchanged"),
+                    GroupedAggKernelMode::ParallelHash
+                );
+                assert!(
+                    forecast
+                        >= legacy
+                            .hash_memory_requirements()
+                            .expect("legacy footprint")
+                            .total_bytes as u64
+                );
+                assert_eq!(
+                    normalized.where_filter.kind,
+                    abi::PGACCEL_GROUPED_AGG_FILTER_SQL
+                );
+                assert!(normalized.where_filter.mask.is_null());
+                for invalid in 0..4 {
+                    let mut bad = actual;
+                    match invalid {
+                        0 => bad.where_filter.mask = std::ptr::dangling(),
+                        1 => bad.where_filter.flags = 1,
+                        2 => bad.measure_filters[0].predicate_range_count = 1,
+                        _ => bad.measure_filters[0].pad0 = 1,
+                    }
+                    assert!(staged_hash_snapshot_descriptor(&bad, &spec).is_err());
+                }
+                let mut nonempty = actual;
+                nonempty.row_count = 1;
+                let unchanged =
+                    staged_hash_snapshot_descriptor(&nonempty, &spec).expect("nonempty unchanged");
+                assert!(canonical_disabled_filter(&unchanged.where_filter));
+                spec.fact_filter = FilterSpec::None;
+                let unchanged =
+                    staged_hash_snapshot_descriptor(&actual, &spec).expect("no WHERE unchanged");
+                assert!(canonical_disabled_filter(&unchanged.where_filter));
+                assert!(canonical_disabled_filter(&unchanged.measure_filters[0]));
+            }
+        }
+    }
+
+    #[test]
     fn hash_where_implies_only_identical_validated_boolean_filters() {
         let (mut spec, projection) = h3_count_shape();
         spec.fact_filter = FilterSpec::Mask {
@@ -15479,7 +15731,15 @@ mod tests {
                     .iter()
                     .any(|r| r.attno == 3)
             );
-            assert!(validate_normal_descriptor_capability(&shape, &projection).is_err());
+            if raw {
+                assert!(validate_normal_descriptor_capability(&shape, &projection).is_err());
+                let mut raw_projection = projection.clone();
+                raw_projection.slots[0].source_type_oid = INT8OID;
+                raw_projection.slots[0].result_type_oid = INT8OID;
+                validate_raw_count_capability(&shape, &raw_projection).expect("explicit raw WHERE");
+            } else {
+                validate_normal_descriptor_capability(&shape, &projection).expect("exact H3 WHERE");
+            }
         }
         // COUNT(column) remains nullable even though its FILTER is implied.
         let value = ColumnRef {

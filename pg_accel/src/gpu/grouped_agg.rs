@@ -210,6 +210,18 @@ impl HashCountPartition {
     pub const ALL: Self = Self::new(abi::PGACCEL_HASH_COUNT_PARTITION_ALL, 0, 0);
     pub const NULL: Self = Self::new(abi::PGACCEL_HASH_COUNT_PARTITION_NULL_ONLY, 0, 0);
 
+    fn v2(self) -> abi::PgaccelHashCountPartitionV2 {
+        abi::PgaccelHashCountPartitionV2 {
+            version: abi::PGACCEL_HASH_COUNT_PARTITION_VERSION_V2,
+            struct_size: 32,
+            flags: 0,
+            kind: self.0.kind,
+            prefix_bits: self.0.prefix_bits,
+            reserved: 0,
+            prefix: self.0.prefix,
+        }
+    }
+
     #[must_use]
     pub const fn is_all(self) -> bool {
         self.0.kind == abi::PGACCEL_HASH_COUNT_PARTITION_ALL
@@ -261,6 +273,20 @@ pub unsafe fn query_hash_partition_memory_layout(
             .checked_add(output_bytes)
             .ok_or_else(|| capacity_error("partition footprint overflow"))?,
     })
+}
+
+/// V2's workspace validator proves ParallelHash even for a canonical empty
+/// SQL/null mask, which the intentionally unchanged legacy mode API rejects.
+fn partition_validated_mode(
+    desc: &abi::PgaccelGroupedAggDesc,
+    partition: Option<HashCountPartition>,
+) -> GpuResult<GroupedAggKernelMode> {
+    if partition.is_some() && desc.where_filter.kind == abi::PGACCEL_GROUPED_AGG_FILTER_SQL {
+        GroupedAggWorkspace::requirements_for_partition(desc, partition)?;
+        Ok(GroupedAggKernelMode::ParallelHash)
+    } else {
+        native_kernel_mode(desc)
+    }
 }
 
 impl<'input> ResolvedGroupedAggPlan<'input> {
@@ -1354,11 +1380,19 @@ impl GroupedAggWorkspace {
         // the duration of the synchronous call.
         let status = unsafe {
             if let Some(partition) = partition {
-                bridge::pgaccel_hash_count_partition_workspace_requirements_v1(
-                    std::ptr::from_ref(&query_desc),
-                    std::ptr::from_ref(&partition.0),
-                    std::ptr::from_mut(&mut requirement),
-                )
+                if query_desc.where_filter.kind == abi::PGACCEL_GROUPED_AGG_FILTER_SQL {
+                    bridge::pgaccel_hash_count_partition_workspace_requirements_v2(
+                        std::ptr::from_ref(&query_desc),
+                        std::ptr::from_ref(&partition.v2()),
+                        std::ptr::from_mut(&mut requirement),
+                    )
+                } else {
+                    bridge::pgaccel_hash_count_partition_workspace_requirements_v1(
+                        std::ptr::from_ref(&query_desc),
+                        std::ptr::from_ref(&partition.0),
+                        std::ptr::from_mut(&mut requirement),
+                    )
+                }
             } else {
                 bridge::pgaccel_grouped_agg_workspace_requirements(
                     std::ptr::from_ref(&query_desc),
@@ -2726,7 +2760,7 @@ fn execute_call_partition(
     let mut desc = lifecycle_call_descriptor(desc, flags);
     let _numeric_views = pin_numeric_views(&mut desc, 0)?;
     workspace.apply_to(&mut desc)?;
-    let actual_mode = native_kernel_mode(&desc)?;
+    let actual_mode = partition_validated_mode(&desc, partition)?;
     if expected_data_mode.is_some_and(|expected| actual_mode != expected) {
         workspace.poisoned = true;
         return Err(descriptor_error(
@@ -2740,6 +2774,24 @@ fn execute_call_partition(
     // SAFETY: descriptor, optional output, and workspace remain live through
     // the synchronous FFI call and were built from pinned ABI types.
     let mut detail = abi::PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+    let uses_v2 =
+        partition.is_some() && desc.where_filter.kind == abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
+    let operation = if uses_v2 {
+        "hash_count_partition_execute_v2"
+    } else {
+        "hash_count_partition_execute_v1"
+    };
+    let mut population = abi::PgaccelHashCountPopulationV2 {
+        version: abi::PGACCEL_HASH_COUNT_PARTITION_VERSION_V2,
+        struct_size: 32,
+        flags: 0,
+        reserved: 0,
+        where_rows: 0,
+        partition_rows: 0,
+    };
+    if let Some(counters) = counters.as_deref_mut() {
+        counters.where_rows = None;
+    }
     let before = counters
         .as_ref()
         .map(|_| grouped_agg_native_telemetry().transition_launches);
@@ -2757,12 +2809,22 @@ fn execute_call_partition(
         // SAFETY: `desc`, `raw_output`, workspace-applied buffers, and `detail`
         // remain live and exclusively accessible for this synchronous bridge call.
         if let Some(partition) = partition {
-            bridge::pgaccel_hash_count_partition_execute_v1(
-                std::ptr::from_ref(&desc),
-                std::ptr::from_ref(&partition.0),
-                output_ptr,
-                std::ptr::from_mut(&mut detail),
-            )
+            if uses_v2 {
+                bridge::pgaccel_hash_count_partition_execute_v2(
+                    std::ptr::from_ref(&desc),
+                    std::ptr::from_ref(&partition.v2()),
+                    output_ptr,
+                    std::ptr::from_mut(&mut population),
+                    std::ptr::from_mut(&mut detail),
+                )
+            } else {
+                bridge::pgaccel_hash_count_partition_execute_v1(
+                    std::ptr::from_ref(&desc),
+                    std::ptr::from_ref(&partition.0),
+                    output_ptr,
+                    std::ptr::from_mut(&mut detail),
+                )
+            }
         } else {
             bridge::pgaccel_grouped_agg_execute_ex(
                 std::ptr::from_ref(&desc),
@@ -2782,7 +2844,7 @@ fn execute_call_partition(
             bridge::pgaccel_copy_last_error(native_error.as_mut_ptr().cast(), native_error.len())
         };
     }
-    if let (Some(counters), Some(before)) = (counters, before) {
+    if let (Some(counters), Some(before)) = (counters.as_deref_mut(), before) {
         let observed = grouped_agg_native_telemetry()
             .transition_launches
             .checked_sub(before)
@@ -2816,7 +2878,7 @@ fn execute_call_partition(
         {
             return Err(GpuError::new(
                 GpuErrorDomain::GroupedAgg,
-                GpuOperation::Kernel("hash_count_partition_execute_v1"),
+                GpuOperation::Kernel(operation),
                 GpuStatusDetail::CapacityOverflow,
             ));
         }
@@ -2826,7 +2888,7 @@ fn execute_call_partition(
         {
             return Err(GpuError::new(
                 GpuErrorDomain::H3,
-                GpuOperation::Kernel("hash_count_partition_execute_v1"),
+                GpuOperation::Kernel(operation),
                 GpuStatusDetail::ShapeMismatch,
             ));
         }
@@ -2839,7 +2901,7 @@ fn execute_call_partition(
             let native_error = String::from_utf8_lossy(&native_error[..length]);
             return Err(GpuError::with_owned_detail(
                 error.domain,
-                GpuOperation::Kernel("hash_count_partition_execute_v1"),
+                GpuOperation::Kernel(operation),
                 error.status,
                 format!(
                     "native_status={status:?} detail={detail} rows={} capacity={} partition_kind={} prefix_bits={} prefix={:#018x} mode={actual_mode:?} native_transition_before={before:?} native_exception={native_error}",
@@ -2859,10 +2921,43 @@ fn execute_call_partition(
             "successful grouped aggregate returned a device error detail",
         ));
     }
+    if uses_v2 {
+        let valid = population.version == abi::PGACCEL_HASH_COUNT_PARTITION_VERSION_V2
+            && population.struct_size == 32
+            && population.flags == 0
+            && population.reserved == 0
+            && population.where_rows <= desc.row_count as u64
+            && population.partition_rows <= population.where_rows
+            && raw_output
+                .as_ref()
+                .is_some_and(|out| out.selected_count == population.partition_rows)
+            && partition.is_some_and(|part| {
+                !part.is_all() || population.partition_rows == population.where_rows
+            });
+        if !valid {
+            workspace.poisoned = true;
+            return Err(descriptor_error("invalid successful hash WHERE population"));
+        }
+    }
     if flags & abi::PGACCEL_GROUPED_AGG_EXEC_RESET != 0 {
         workspace.poisoned = false;
     }
-    finish_successful_call(workspace, output.as_deref(), raw_output.as_ref())
+    publish_hash_population(
+        finish_successful_call(workspace, output.as_deref(), raw_output.as_ref()),
+        uses_v2.then_some(population.where_rows),
+        counters,
+    )
+}
+
+fn publish_hash_population(
+    result: GpuResult<Option<GroupedAggOutcome>>,
+    where_rows: Option<u64>,
+    counters: Option<&mut HashCountExecutionCounters>,
+) -> GpuResult<Option<GroupedAggOutcome>> {
+    if let Some(counters) = counters {
+        counters.where_rows = if result.is_ok() { where_rows } else { None };
+    }
+    result
 }
 
 fn finish_successful_call(
@@ -2932,6 +3027,8 @@ pub struct HashCountExecutionCounters {
     pub observed: u64,
     pub verified: u64,
     pub scanned_rows: u64,
+    /// Present only after a validated successful v2 call. Failed attempts discard it.
+    pub where_rows: Option<u64>,
 }
 
 pub fn execute_hash_count_partition(
@@ -2940,6 +3037,9 @@ pub fn execute_hash_count_partition(
     output: &mut GroupedAggOutputStorage,
     counters: &mut HashCountExecutionCounters,
 ) -> GpuResult<GroupedAggOutcome> {
+    // A caller may reuse telemetry across attempts. No early validation or
+    // allocation error may leave the preceding successful population visible.
+    counters.where_rows = None;
     output.validate_for_plan(plan)?;
     let mut workspace = GroupedAggWorkspace::allocate_for_partition(&plan.desc, Some(partition))?;
     execute_call_partition(
@@ -3399,6 +3499,10 @@ pub unsafe fn query_hash_grouped_memory_layout(
         ));
     }
     let query = workspace_query_descriptor(desc);
+    if query.where_filter.kind == abi::PGACCEL_GROUPED_AGG_FILTER_SQL {
+        // SAFETY: the same bounded metadata contract applies to the v2 query.
+        return unsafe { query_hash_partition_memory_layout(&query, HashCountPartition::ALL) };
+    }
     if native_kernel_mode(&query)? != GroupedAggKernelMode::ParallelHash {
         return Err(descriptor_error(
             "hash layout forecast requires native parallel hash",
@@ -3662,6 +3766,43 @@ mod tests {
         desc.measures[0].accumulator_kind = abi::PGACCEL_GROUPED_AGG_ACCUM_I64;
         desc.measures[0].state_bytes = 8;
         desc
+    }
+
+    #[test]
+    fn hash_population_is_discarded_on_early_and_output_finish_errors() {
+        let desc = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_COMPACT);
+        // SAFETY: empty initialized metadata; these plans are never dispatched.
+        let first = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.expect("first plan");
+        // SAFETY: independent owned identity with the same readable empty metadata.
+        let second = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.expect("second plan");
+        let mut output = GroupedAggOutputStorage::new(&first).expect("host output");
+        let mut counters = HashCountExecutionCounters {
+            where_rows: Some(123),
+            ..Default::default()
+        };
+        let before = super::super::gpu_exec_count();
+        assert!(
+            execute_hash_count_partition(
+                &second,
+                HashCountPartition::ALL,
+                &mut output,
+                &mut counters
+            )
+            .is_err()
+        );
+        assert_eq!(counters.where_rows, None);
+        assert_eq!(counters.scheduled, 0);
+        assert_eq!(super::super::gpu_exec_count(), before);
+        let mut raw = output.raw();
+        raw.emitted_group_count = raw.group_capacity + 1;
+        let finish = output.finish(&raw).map(Some);
+        assert!(
+            finish.is_err(),
+            "native-success output still requires Rust validation"
+        );
+        counters.where_rows = Some(123);
+        assert!(publish_hash_population(finish, Some(7), Some(&mut counters)).is_err());
+        assert_eq!(counters.where_rows, None);
     }
 
     #[test]

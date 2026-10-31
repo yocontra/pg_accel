@@ -25,6 +25,7 @@ pub(super) struct HashPartitionDriver {
     pub overflowed: bool,
     pub completed_leaves: u64,
     pub selected_rows: u64,
+    whole_rows: Option<u64>,
 }
 
 impl HashPartitionDriver {
@@ -42,6 +43,7 @@ impl HashPartitionDriver {
             overflowed: false,
             completed_leaves: 0,
             selected_rows: 0,
+            whole_rows: None,
         })
     }
 
@@ -104,7 +106,37 @@ impl HashPartitionDriver {
         Ok(())
     }
 
-    pub(super) fn complete_leaf(&mut self, selected: u64) -> Result<(), String> {
+    /// Only successful native calls reach this boundary. The whole-WHERE
+    /// population must be stable across disjoint leaves, with exact final sum.
+    pub(super) fn complete_population_leaf(
+        &mut self,
+        selected: u64,
+        whole: u64,
+        input: u64,
+    ) -> Result<(), String> {
+        let node = self
+            .current
+            .ok_or("duplicate adaptive hash leaf completion")?;
+        if whole > input
+            || selected > whole
+            || self.whole_rows.is_some_and(|prior| prior != whole)
+            || (node == Node::All && selected != whole)
+        {
+            return Err("adaptive hash population contract mismatch".into());
+        }
+        let sum = self
+            .selected_rows
+            .checked_add(selected)
+            .ok_or("adaptive hash population overflow")?;
+        if sum > whole || (self.pending_len == 0 && sum != whole) {
+            return Err("adaptive partitions do not cover WHERE population".into());
+        }
+        self.complete_leaf(selected)?;
+        self.whole_rows = Some(whole);
+        Ok(())
+    }
+
+    fn complete_leaf(&mut self, selected: u64) -> Result<(), String> {
         if self.current.take().is_none() {
             return Err("duplicate adaptive hash leaf completion".into());
         }
@@ -137,6 +169,45 @@ impl HashPartitionDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn where_population_is_stable_exhaustive_and_success_only() {
+        let mut driver = HashPartitionDriver::new(1, 1).expect("capacity");
+        assert!(driver.complete_population_leaf(3, 4, 8).is_err());
+        assert_eq!(driver.completed_leaves, 0);
+        driver.capacity_overflow(false).expect("split failed root");
+        assert_eq!(driver.whole_rows, None, "failed root contributes nothing");
+        driver
+            .complete_population_leaf(3, 4, 8)
+            .expect("nonnull leaf");
+        assert!(driver.complete_population_leaf(1, 5, 8).is_err());
+        assert!(driver.complete_population_leaf(0, 4, 8).is_err());
+        assert!(driver.complete_population_leaf(2, 4, 8).is_err());
+        assert_eq!(driver.completed_leaves, 1);
+        driver
+            .complete_population_leaf(1, 4, 8)
+            .expect("NULL leaf closes exact sum");
+        assert_eq!(driver.selected_rows, 4);
+        assert!(driver.attempt().expect("EOF").is_none());
+        assert!(driver.complete_population_leaf(0, 4, 8).is_err());
+        for input in [0, 8] {
+            let mut empty = HashPartitionDriver::new(1, 1).expect("capacity");
+            empty
+                .complete_population_leaf(0, 0, input)
+                .expect("empty or all rejected");
+            assert!(empty.attempt().expect("EOF").is_none());
+        }
+        let mut overflow = HashPartitionDriver::new(1, 1).expect("capacity");
+        overflow.capacity_overflow(false).expect("split");
+        overflow.selected_rows = u64::MAX;
+        assert!(
+            overflow
+                .complete_population_leaf(1, u64::MAX, u64::MAX)
+                .is_err()
+        );
+        assert_eq!(overflow.completed_leaves, 0);
+        assert!(overflow.complete_population_leaf(0, 10, 9).is_err());
+    }
 
     #[test]
     fn growth_then_exact_prefixes_have_bounded_depth_and_no_eof_redispatch() {

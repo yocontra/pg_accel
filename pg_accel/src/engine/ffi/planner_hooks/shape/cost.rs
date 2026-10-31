@@ -63,8 +63,8 @@ impl ShapeCost {
         rows: u64,
         model: &TypedCostModel,
     ) {
-        if !matches!(spec.measures.as_slice(), [measure] if matches!(measure.filter, FilterSpec::Mask { kind: MaskKind::Sql, .. }))
-        {
+        let masks = hash_mask_count(spec);
+        if masks == 0 {
             return;
         }
         let conversions = rows.div_ceil(crate::gpu::SQL_BOOL_MASK_CHUNK_ROWS as u64);
@@ -72,7 +72,9 @@ impl ShapeCost {
             GPU_LAUNCH_OVERHEAD,
             mul_cost(rows, model.coefficients.gpu_op_cost_filter),
         );
-        self.replace_aggregate(PgCost::new(self.aggregate.get() + work));
+        self.replace_aggregate(PgCost::new(
+            work.mul_add(masks as f64, self.aggregate.get()),
+        ));
     }
 
     pub(crate) fn replace_additional_aggregate_launches(&mut self, launches: PgCost) {
@@ -102,6 +104,88 @@ impl ShapeCost {
                 + self.output_materialization.get()
                 + self.amortized_auto_load.get(),
         );
+    }
+}
+
+/// Physical masks after the validated identical WHERE/FILTER fold. Logical
+/// dependencies remain in the spec and selected resident-column union.
+fn hash_mask_count(spec: &AggQuerySpec) -> u64 {
+    let where_mask = matches!(
+        spec.fact_filter,
+        FilterSpec::Mask {
+            kind: MaskKind::Sql,
+            ..
+        }
+    );
+    let filter = matches!(spec.measures.as_slice(), [measure]
+        if matches!(measure.filter, FilterSpec::Mask { kind: MaskKind::Sql, .. })
+            && measure.filter != spec.fact_filter);
+    u64::from(where_mask) + u64::from(filter)
+}
+
+#[cfg(test)]
+mod hash_mask_tests {
+    use super::*;
+
+    #[test]
+    fn conversion_cost_is_once_per_distinct_mask_and_zero_for_empty() {
+        let mask = |attno| FilterSpec::Mask {
+            input: ColumnRef {
+                relation_oid: 42,
+                attno,
+                type_oid: 16,
+            },
+            kind: MaskKind::Sql,
+        };
+        let mut spec = AggQuerySpec {
+            fact_rel: 42,
+            group_keys: vec![],
+            star_dims: vec![],
+            having: None,
+            fact_filter: FilterSpec::None,
+            measures: vec![crate::engine::spec::MeasureSpec {
+                expression: MeasureExpr::CountStar,
+                outputs: vec![AggregateOutput {
+                    source: AggregateSource::Value,
+                    kind: AggregateKind::Count,
+                }],
+                filter: FilterSpec::None,
+            }],
+        };
+        let model = TypedCostModel::from_limits(&crate::engine::cost::DeviceLimits::cpu_only());
+        for (where_filter, filter, expected) in [
+            (FilterSpec::None, FilterSpec::None, 0),
+            (FilterSpec::None, mask(2), 1),
+            (mask(2), FilterSpec::None, 1),
+            (mask(2), mask(2), 1),
+            (mask(2), mask(3), 2),
+        ] {
+            spec.fact_filter = where_filter;
+            spec.measures[0].filter = filter;
+            assert_eq!(hash_mask_count(&spec), expected);
+            for rows in [0, 1, crate::gpu::SQL_BOOL_MASK_CHUNK_ROWS as u64 + 1] {
+                let mut cost = ShapeCost {
+                    fact_scan: PgCost::ZERO,
+                    dimension_setup: PgCost::ZERO,
+                    join_probe: PgCost::ZERO,
+                    spatial_filter: PgCost::ZERO,
+                    spatial_recheck_reserve: PgCost::ZERO,
+                    aggregate: PgCost::ZERO,
+                    additional_aggregate_launches: PgCost::ZERO,
+                    output_materialization: PgCost::ZERO,
+                    amortized_auto_load: PgCost::ZERO,
+                    total: PgCost::ZERO,
+                };
+                cost.charge_hash_filter_conversion(&spec, rows, &model);
+                let each = (rows.div_ceil(crate::gpu::SQL_BOOL_MASK_CHUNK_ROWS as u64) as f64)
+                    .mul_add(
+                        GPU_LAUNCH_OVERHEAD,
+                        mul_cost(rows, model.coefficients.gpu_op_cost_filter),
+                    );
+                assert_eq!(cost.aggregate.get(), each * expected as f64);
+                assert_eq!(cost.total, cost.aggregate);
+            }
+        }
     }
 }
 
@@ -748,10 +832,26 @@ pub(super) fn estimate_selected_shape_cost(
         0
     };
     // Preserve separately rounded conservative cost terms across qualification.
+    // V2 reads every physical mask on every attempt at full input size. Do not
+    // assume WHERE selectivity; keep released no-WHERE pricing unchanged.
+    let where_scan = if (raw_count || crate::engine::executor::agg::canonical_h3_count(spec))
+        && matches!(
+            spec.fact_filter,
+            FilterSpec::Mask {
+                kind: MaskKind::Sql,
+                ..
+            }
+        ) {
+        mul_cost(fact_rows, model.coefficients.gpu_op_cost_filter) * hash_mask_count(spec) as f64
+    } else {
+        0.0
+    };
     #[allow(clippy::suboptimal_flops)]
     let aggregate = aggregate
+        + where_scan
         + retry_scans as f64
             * (mul_cost(fact_rows, aggregate_coefficient)
+                + where_scan
                 + if raw_count {
                     0.0
                 } else {

@@ -2132,10 +2132,56 @@ fn raw_count_is_an_additional_candidate_with_independent_capacity_and_digest() {
         input
             .relation_filters
             .push((100, input.aggregates[0].filter.clone()));
-        assert!(
-            super::builder::build_selected_shape(input, &model, true).is_err(),
-            "WHERE is not admitted"
+        let where_raw = super::builder::build_selected_shape(input.clone(), &model, true)
+            .expect("exact Boolean WHERE is admitted by raw candidate");
+        assert_eq!(
+            where_raw.spec.fact_filter,
+            where_raw.spec.measures[0].filter
         );
+        assert_eq!(where_raw.spec.measures.len(), 1, "no hidden dense carrier");
+        assert_eq!(
+            where_raw.execution_selection(),
+            AggExecutionSelection::RawIntegerCount
+        );
+        assert!(where_raw.required_relations[0].attnos.contains(&4));
+        assert!(!crate::engine::executor::agg::DenseCountWork::supports(
+            &where_raw.spec
+        ));
+        let decoded = crate::engine::spec::AggQuerySpec::decode_i32(
+            &where_raw.spec.encode_i32().expect("logical encode"),
+        )
+        .expect("WHERE/FILTER roundtrip");
+        assert_eq!(decoded, where_raw.spec);
+        let mut independent = input.clone();
+        independent.relation_filters[0].1 = FilterSpec::Mask {
+            input: column(1, 100, 5, 16).column,
+            kind: crate::engine::spec::MaskKind::Sql,
+        };
+        let independent = super::builder::build_selected_shape(independent, &model, true)
+            .expect("independent Boolean WHERE/FILTER");
+        assert!(independent.required_relations[0].attnos.contains(&5));
+        assert!(
+            independent.cost.aggregate > where_raw.cost.aggregate,
+            "full-input independent mask scan is charged on every estimated attempt"
+        );
+        let retry_scans = input
+            .estimated_output_rows
+            .div_ceil(model.memory.gpu_hash_agg_max_groups.get() as u64)
+            * 2;
+        assert!(retry_scans > 0);
+        let expected_delta = (1 + retry_scans) as f64
+            * input.relations[0].estimated_rows as f64
+            * model.coefficients.gpu_op_cost_filter.get();
+        let actual_delta = independent.cost.aggregate.get() - where_raw.cost.aggregate.get();
+        assert!(
+            (actual_delta - expected_delta).abs() <= expected_delta.abs() * 1e-12,
+            "independent scan charged for every attempt: {actual_delta} vs {expected_delta}"
+        );
+        input.relation_filters[0].1 = FilterSpec::Mask {
+            input: column(1, 100, 4, 16).column,
+            kind: crate::engine::spec::MaskKind::Recheck,
+        };
+        assert!(super::builder::build_selected_shape(input, &model, true).is_err());
     }
 }
 
@@ -2174,6 +2220,39 @@ fn h3_boolean_count_filter_builder_is_contextual_and_preserves_outputs() {
         assert!(plan.residency.relations[0].attnos.contains(&4));
         if type_oid != 0 {
             assert!(plan.residency.relations[0].attnos.contains(&2));
+        }
+        for where_attno in [4, 5] {
+            let mut with_where = input.clone();
+            with_where.relation_filters.push((
+                100,
+                FilterSpec::Mask {
+                    input: column(1, 100, where_attno, 16).column,
+                    kind: crate::engine::spec::MaskKind::Sql,
+                },
+            ));
+            let shape =
+                build_shape(with_where, &model()).expect("H3 direct WHERE plus COUNT FILTER");
+            assert_eq!(shape.spec.measures.len(), 1);
+            assert!(shape.required_relations[0].attnos.contains(&where_attno));
+            assert!(shape.required_relations[0].attnos.contains(&4));
+            crate::engine::executor::agg::validate_normal_descriptor_capability(
+                &shape.spec,
+                &crate::engine::spec::AggOutputProjection {
+                    slots: shape.projections.clone(),
+                },
+            )
+            .expect("exact H3 WHERE envelope");
+            assert_eq!(
+                planned_descriptor_kernel_mode(&shape.spec, true),
+                GroupedAggKernelMode::ParallelHash
+            );
+            assert_eq!(
+                crate::engine::spec::AggQuerySpec::decode_i32(
+                    &shape.spec.encode_i32().expect("wire encode")
+                )
+                .expect("wire decode"),
+                shape.spec
+            );
         }
         for invalid in 0..11 {
             let mut bad = input.clone();

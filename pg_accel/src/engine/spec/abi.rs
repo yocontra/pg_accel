@@ -39,6 +39,7 @@ pub const PGACCEL_GROUPED_AGG_DEVICE_ERROR_DATE_OUT_OF_RANGE: i32 = 4;
 pub const PGACCEL_GROUPED_AGG_DEVICE_ERROR_HASH_CAPACITY: i32 = 5;
 pub const PGACCEL_GROUPED_AGG_DEVICE_ERROR_H3_RESOLUTION: i32 = 6;
 pub const PGACCEL_HASH_COUNT_PARTITION_VERSION: u32 = 1;
+pub const PGACCEL_HASH_COUNT_PARTITION_VERSION_V2: u32 = 2;
 pub const PGACCEL_HASH_COUNT_PARTITION_ALL: u32 = 0;
 pub const PGACCEL_HASH_COUNT_PARTITION_NONNULL_PREFIX: u32 = 1;
 pub const PGACCEL_HASH_COUNT_PARTITION_NULL_ONLY: u32 = 2;
@@ -54,6 +55,31 @@ pub struct PgaccelHashCountPartitionV1 {
     pub prefix_bits: u32,
     pub reserved: u32,
     pub prefix: u64,
+}
+
+/// WHERE-aware partition control, independently versioned from legacy routing.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PgaccelHashCountPartitionV2 {
+    pub version: u32,
+    pub struct_size: u32,
+    pub flags: u32,
+    pub kind: u32,
+    pub prefix_bits: u32,
+    pub reserved: u32,
+    pub prefix: u64,
+}
+
+/// Native-success-only population publication; both output lanes start at zero.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PgaccelHashCountPopulationV2 {
+    pub version: u32,
+    pub struct_size: u32,
+    pub flags: u32,
+    pub reserved: u32,
+    pub where_rows: u64,
+    pub partition_rows: u64,
 }
 
 pub const PGACCEL_GROUPED_AGG_MEASURE_COLUMN: i32 = 0;
@@ -548,6 +574,23 @@ mod tests {
         assert_eq!(offset_of!(PgaccelHashCountPartitionV1, prefix_bits), 16);
         assert_eq!(offset_of!(PgaccelHashCountPartitionV1, reserved), 20);
         assert_eq!(offset_of!(PgaccelHashCountPartitionV1, prefix), 24);
+        assert_eq!(size_of::<PgaccelHashCountPartitionV2>(), 32);
+        assert_eq!(std::mem::align_of::<PgaccelHashCountPartitionV2>(), 8);
+        assert_eq!(offset_of!(PgaccelHashCountPartitionV2, version), 0);
+        assert_eq!(offset_of!(PgaccelHashCountPartitionV2, struct_size), 4);
+        assert_eq!(offset_of!(PgaccelHashCountPartitionV2, flags), 8);
+        assert_eq!(offset_of!(PgaccelHashCountPartitionV2, kind), 12);
+        assert_eq!(offset_of!(PgaccelHashCountPartitionV2, prefix_bits), 16);
+        assert_eq!(offset_of!(PgaccelHashCountPartitionV2, reserved), 20);
+        assert_eq!(offset_of!(PgaccelHashCountPartitionV2, prefix), 24);
+        assert_eq!(size_of::<PgaccelHashCountPopulationV2>(), 32);
+        assert_eq!(std::mem::align_of::<PgaccelHashCountPopulationV2>(), 8);
+        assert_eq!(offset_of!(PgaccelHashCountPopulationV2, version), 0);
+        assert_eq!(offset_of!(PgaccelHashCountPopulationV2, struct_size), 4);
+        assert_eq!(offset_of!(PgaccelHashCountPopulationV2, flags), 8);
+        assert_eq!(offset_of!(PgaccelHashCountPopulationV2, reserved), 12);
+        assert_eq!(offset_of!(PgaccelHashCountPopulationV2, where_rows), 16);
+        assert_eq!(offset_of!(PgaccelHashCountPopulationV2, partition_rows), 24);
         assert_eq!(PGACCEL_GROUPED_AGG_DEVICE_ERROR_HASH_CAPACITY, 5);
         assert_eq!(PGACCEL_OLAP_ABI_VERSION, 1);
         assert_eq!(PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR, 4);

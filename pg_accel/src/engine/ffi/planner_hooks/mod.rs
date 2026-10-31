@@ -25,6 +25,8 @@ mod decision;
 mod decline_cache;
 mod gate;
 mod generic_groupagg;
+#[cfg(feature = "pg_test")]
+pub(crate) use generic_groupagg::capture_candidate_observations;
 mod join_pathlist;
 mod raster;
 mod rel_pathlist;

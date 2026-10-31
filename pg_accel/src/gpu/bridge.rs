@@ -801,6 +801,22 @@ bridge_status_fns! {
         detail: *mut i32,
     ) -> PgaccelStatus;
 
+    /// WHERE-aware metadata validation also proves the parallel-hash strategy.
+    pub fn pgaccel_hash_count_partition_workspace_requirements_v2(
+        desc: *const crate::engine::spec::abi::PgaccelGroupedAggDesc,
+        partition: *const crate::engine::spec::abi::PgaccelHashCountPartitionV2,
+        out: *mut crate::engine::spec::abi::PgaccelGroupedAggWorkspaceReq,
+    ) -> PgaccelStatus;
+
+    /// Publishes both populations only on successful, independently reset execution.
+    pub fn pgaccel_hash_count_partition_execute_v2(
+        desc: *const crate::engine::spec::abi::PgaccelGroupedAggDesc,
+        partition: *const crate::engine::spec::abi::PgaccelHashCountPartitionV2,
+        out: *mut crate::engine::spec::abi::PgaccelGroupedAggOut,
+        population: *mut crate::engine::spec::abi::PgaccelHashCountPopulationV2,
+        detail: *mut i32,
+    ) -> PgaccelStatus;
+
 }
 
 /// Raw resident raster entry point kept outside [`bridge_status_fns!`].
