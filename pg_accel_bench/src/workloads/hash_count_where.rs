@@ -169,7 +169,7 @@ impl Workload for HashCountWhere {
             "DROP TABLE IF EXISTS bench_hash_where_seeds".to_owned(),
         ];
         if c.key == Key::H3 {
-            sql.push(format!("CREATE TABLE bench_hash_where_seeds AS SELECT row_number() OVER(ORDER BY parent)-1 AS ordinal, parent, public.h3_cell_to_center_child(parent,15) AS child FROM (SELECT DISTINCT child AS parent FROM public.h3_get_res_0_cells() r(cell) CROSS JOIN LATERAL public.h3_cell_to_children(r.cell,3) c(child) ORDER BY parent LIMIT {groups}) seeds"));
+            sql.push(format!("CREATE TABLE bench_hash_where_seeds AS SELECT row_number() OVER(ORDER BY parent::bigint ASC)-1 AS ordinal, parent, public.h3_cell_to_center_child(parent,15) AS child FROM (SELECT parent FROM (SELECT DISTINCT child AS parent FROM public.h3_get_res_0_cells() r(cell) CROSS JOIN LATERAL public.h3_cell_to_children(r.cell,3) c(child)) distinct_seeds ORDER BY parent::bigint ASC LIMIT {groups}) seeds"));
             sql.push("ALTER TABLE bench_hash_where_seeds ADD PRIMARY KEY(ordinal)".to_owned());
             sql.push(format!("DO $$ BEGIN IF (SELECT count(*)={groups} AND count(DISTINCT parent)={groups} AND bool_and(public.h3_get_resolution(parent)=3 AND public.h3_get_resolution(child)=15 AND public.h3_cell_to_parent(child,3)=parent) FROM bench_hash_where_seeds) IS DISTINCT FROM true THEN RAISE EXCEPTION 'frozen H3 seed cardinality/roundtrip'; END IF; END $$"));
         }
@@ -284,6 +284,14 @@ mod tests {
                 let sql = HashCountWhere(name).setup_sql(*rows).join("\n");
                 assert!(sql.contains("frozen WHERE row population"));
                 assert!(!sql.contains("SET "));
+                if c.key == Key::H3 {
+                    assert!(sql.contains("OVER(ORDER BY parent::bigint ASC)"));
+                    assert!(sql.contains(&format!(
+                        "distinct_seeds ORDER BY parent::bigint ASC LIMIT {}",
+                        c.groups()
+                    )));
+                    assert!(!sql.contains("ORDER BY parent LIMIT"));
+                }
                 assert_eq!(
                     sql.contains("frozen H3 seed cardinality/roundtrip"),
                     c.key == Key::H3
