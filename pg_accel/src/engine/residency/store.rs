@@ -1,6 +1,14 @@
 //! Backend-local two-tier resident relation store.
 
 use std::any::Any;
+
+#[cfg(feature = "pg_test")]
+mod paired;
+#[cfg(feature = "pg_test")]
+pub use paired::{
+    paired_assert_eviction_rejections, paired_current_raw, paired_raw_evidence,
+    paired_remove_exact_derived,
+};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

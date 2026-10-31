@@ -12,6 +12,9 @@
 //! 3. **`end_custom_scan`** — reclaims via `Box::from_raw`.
 
 mod artifact;
+
+#[cfg(feature = "pg_test")]
+pub(crate) use descriptor::{paired_assert_no_overrides, paired_with_mask_cancel};
 mod descriptor;
 mod execute;
 mod hash_partition;

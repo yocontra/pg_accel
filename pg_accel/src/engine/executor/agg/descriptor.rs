@@ -2960,6 +2960,10 @@ fn descriptor_artifact_policy_input(
 
 impl DescriptorAggPlan {
     #[cfg(feature = "pg_test")]
+    pub(super) fn paired_identity(&self) -> DerivedArtifactIdentity {
+        self.identity.clone()
+    }
+    #[cfg(feature = "pg_test")]
     pub(super) fn new(spec: AggQuerySpec, projection: AggOutputProjection) -> Result<Self, String> {
         Self::new_selected(spec, projection, super::AggExecutionSelection::Legacy)
     }
@@ -3999,6 +4003,31 @@ fn set_adaptive_hash_test_cap(capacity: Option<usize>) -> Option<usize> {
     TEST_ADAPTIVE_HASH_CAP.with(|cap| cap.replace(capacity))
 }
 
+#[cfg(feature = "pg_test")]
+pub fn paired_assert_no_overrides() -> Result<(), String> {
+    if TEST_ADAPTIVE_HASH_CAP.with(Cell::get).is_some()
+        || TEST_ADAPTIVE_MASK_INTERRUPT.with(Cell::get).is_some()
+        || TEST_DENSE_CHUNK_ROWS.load(Ordering::SeqCst) != 0
+        || TEST_DENSE_ONE_SHOT_MAX_ROWS.load(Ordering::SeqCst) != 0
+        || TEST_DENSE_TIMEOUT_AFTER_CALLS.load(Ordering::SeqCst) != 0
+    {
+        return Err("diagnostic rejects capacity/chunk/interrupt overrides".into());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "pg_test")]
+pub fn paired_with_mask_cancel<T>(run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<(u64, bool)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            set_adaptive_mask_test_interrupt(self.0);
+        }
+    }
+    let _restore = Restore(set_adaptive_mask_test_interrupt(Some((1, true))));
+    run()
+}
+
 // Keep the owned output inline: this short-lived control transfer must not add
 // a fallible heap allocation between native completion and installed ownership.
 #[allow(clippy::large_enum_variant)]
@@ -4428,6 +4457,14 @@ impl DescriptorAggPlan {
         if let AdaptiveHashAttempt::Complete(output, selected, whole, emitted) = attempt {
             let driver = state.driver.as_mut().expect("initialized driver");
             driver.complete_population_leaf(selected, whole, state.fact_rows as u64)?;
+            #[cfg(feature = "pg_test")]
+            if hash_where_filter(&self.spec)?.is_some() {
+                crate::engine::ffi::custom_scan::paired_population::record_successful_leaf(
+                    whole,
+                    selected,
+                    state.fact_rows as u64,
+                );
+            }
             let done = driver.attempt()?.is_none();
             if done {
                 state.filter = None;

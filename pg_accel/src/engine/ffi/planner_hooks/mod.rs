@@ -6,6 +6,9 @@
 
 use std::cell::Cell;
 
+#[cfg(feature = "pg_test")]
+pub(crate) use generic_groupagg::{PairedRecipe, capture_paired_recipes};
+
 use pgrx::pg_sys::{
     self, CustomPath, JoinPathExtraData, List, NodeTag, Path, PlannerInfo, RangeTblEntry,
     RelOptInfo, RestrictInfo, UpperRelationKind,

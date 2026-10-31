@@ -14,6 +14,12 @@ mod numeric;
 mod proof;
 mod store;
 
+#[cfg(feature = "pg_test")]
+pub(crate) use store::{
+    paired_assert_eviction_rejections, paired_current_raw, paired_raw_evidence,
+    paired_remove_exact_derived,
+};
+
 pub(crate) use ledger::ExecutionMemoryCharge;
 pub(crate) use store::with_resident_dispatch_inputs;
 

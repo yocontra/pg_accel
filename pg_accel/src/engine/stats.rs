@@ -333,6 +333,19 @@ pub fn record_stock_exec() {
     });
 }
 
+#[cfg(feature = "pg_test")]
+pub(crate) fn paired_stock_count() -> u64 {
+    STATS.with(|stats| stats.borrow().stock_exec_count)
+}
+
+#[cfg(feature = "pg_test")]
+pub(crate) fn paired_verified_data_calls() -> u64 {
+    GROUPED_KERNEL_MODE_CALLS
+        .iter()
+        .map(|counter| counter.load(Ordering::Relaxed))
+        .sum()
+}
+
 /// Record a GPU kernel batch completion.
 pub fn record_gpu_batch(rows: u64, uncertain: u64) {
     STATS.with(|s| {

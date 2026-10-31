@@ -150,6 +150,15 @@ pub struct AggExecState {
 }
 
 impl AggExecState {
+    #[cfg(feature = "pg_test")]
+    pub(crate) fn paired_completion_identity(
+        &self,
+    ) -> (bool, crate::engine::residency::DerivedArtifactIdentity) {
+        (
+            self.descriptor.completed,
+            self.descriptor.plan.paired_identity(),
+        )
+    }
     /// Validate a strict neutral contract without beginning fallible artifact
     /// preparation. The caller must install this state into its query-context
     /// cleanup owner before calling [`Self::prepare_descriptor`], because that

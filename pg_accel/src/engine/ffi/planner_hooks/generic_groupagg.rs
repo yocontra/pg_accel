@@ -37,6 +37,11 @@ use crate::engine::spec::{
 use crate::engine::stats;
 use crate::gpu::GroupedAggKernelMode;
 
+#[cfg(feature = "pg_test")]
+mod paired_recipes;
+#[cfg(feature = "pg_test")]
+pub use paired_recipes::{PairedRecipe, capture_paired_recipes};
+
 const GENERIC_SHAPE_PATH_CONTEXT: &str = "upper_paths_generic_groupagg";
 use crate::engine::ffi::custom_scan::{AGG_OUTPUT_PROJECTION_SENTINEL, AGG_QUERY_SPEC_SENTINEL};
 const WEIGHTED_GLOBAL_COUNT_MIN_FACT_ROWS: u64 = 1_000_000;
@@ -2580,6 +2585,8 @@ unsafe fn try_inject_candidate(
             },
             &model,
         )?;
+        #[cfg(feature = "pg_test")]
+        paired_recipes::paired_capture_recipe(&shape);
         // SAFETY: root and parse belong to this live upper-path invocation.
         let effective_cost = unsafe {
             add_native_having_cost(
@@ -2666,7 +2673,7 @@ unsafe fn try_inject_candidate(
 // Test-only observation of real default admission; this does not alter candidate
 // order, costs, cache identities, path pruning, or production EXPLAIN output.
 #[cfg(feature = "pg_test")]
-pub(crate) fn capture_candidate_observations<T>(run: impl FnOnce() -> T) -> (T, String) {
+pub fn capture_candidate_observations<T>(run: impl FnOnce() -> T) -> (T, String) {
     struct Restore(Option<Vec<CandidateObservation>>);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -2883,12 +2890,7 @@ mod tests {
                     let inputs = CANDIDATE_INPUT_OBSERVATIONS
                         .with(|slot| slot.borrow_mut().take().expect("active input observer"));
                     assert_eq!(inputs.len(), 1, "{inputs:?}");
-                    if !cached_legacy_decline {
-                        assert_eq!(inputs[0].clones, 1, "{inputs:?}");
-                        assert_eq!(inputs[0].fresh_legacy, 1, "{inputs:?}");
-                        assert_eq!(inputs[0].reused_raw, 1, "{inputs:?}");
-                        assert_eq!(inputs[0].fresh_raw, 0, "{inputs:?}");
-                    } else {
+                    if cached_legacy_decline {
                         legacy_cache_hits += 1;
                         assert_eq!(inputs[0].clones, 0, "{inputs:?}");
                         assert_eq!(
@@ -2900,6 +2902,11 @@ mod tests {
                             inputs[0].fresh_raw, 1,
                             "raw must still extract after legacy cache decline: {inputs:?}"
                         );
+                    } else {
+                        assert_eq!(inputs[0].clones, 1, "{inputs:?}");
+                        assert_eq!(inputs[0].fresh_legacy, 1, "{inputs:?}");
+                        assert_eq!(inputs[0].reused_raw, 1, "{inputs:?}");
+                        assert_eq!(inputs[0].fresh_raw, 0, "{inputs:?}");
                     }
                     pgrx::notice!(
                         "candidate control kind={kind} rows={rows} repeat={repeat}: {observations:?}"

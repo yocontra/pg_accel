@@ -2810,6 +2810,10 @@ fn execute_call_partition(
         // remain live and exclusively accessible for this synchronous bridge call.
         if let Some(partition) = partition {
             if uses_v2 {
+                #[cfg(feature = "pg_test")]
+                crate::engine::ffi::custom_scan::paired_population::record_v2_call(
+                    desc.group_capacity,
+                );
                 bridge::pgaccel_hash_count_partition_execute_v2(
                     std::ptr::from_ref(&desc),
                     std::ptr::from_ref(&partition.v2()),

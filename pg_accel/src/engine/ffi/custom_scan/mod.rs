@@ -13,6 +13,21 @@
 
 use std::ffi::{c_int, c_void};
 
+#[cfg(feature = "pg_test")]
+mod paired_backend;
+#[cfg(feature = "pg_test")]
+mod paired_cleanup_tests;
+#[cfg(feature = "pg_test")]
+mod paired_driver;
+#[cfg(feature = "pg_test")]
+mod paired_fixtures;
+#[cfg(feature = "pg_test")]
+pub(crate) mod paired_population;
+#[cfg(feature = "pg_test")]
+mod paired_runner;
+#[cfg(feature = "pg_test")]
+mod paired_sink;
+
 use pgrx::pg_sys;
 
 use super::super::gucs;
