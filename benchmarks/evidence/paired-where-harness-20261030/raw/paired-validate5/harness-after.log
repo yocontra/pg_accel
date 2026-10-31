@@ -1,0 +1,6 @@
+.codex/scratch/hash-count-where-rust-20261030/paired-validate5.sh: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/test-paired-exit-status.sh: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/paired-exit-status.sh: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/paired-sink.expected: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/run-paired-correctness.sh: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/paired-cleanup.expected: OK

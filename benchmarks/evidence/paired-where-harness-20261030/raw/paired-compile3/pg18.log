@@ -1,0 +1,135 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error[E0277]: the type `UnsafeCell<paired_sink::Sink>` may contain interior mutability and a reference may not be safely transferable across a catch_unwind boundary
+   --> pg_accel/src/engine/ffi/custom_scan/paired_backend.rs:212:27
+    |
+212 |               .catch_others(|caught| {
+    |  ______________------------_^
+    | |              |
+    | |              required by a bound introduced by this call
+213 | |                 // Immediate append to captured PG log before rethrow. Never
+214 | |                 // turn ERROR into a timing sample or silently continue a pair.
+215 | |                 super::paired_sink::error_before_rethrow(&error_sink, &error_context);
+216 | |                 caught.rethrow()
+217 | |             })
+    | |_____________^ `UnsafeCell<paired_sink::Sink>` may contain interior mutability and a reference may not be safely transferable across a catch_unwind boundary
+    |
+    = help: within `std::cell::RefCell<paired_sink::Sink>`, the trait `RefUnwindSafe` is not implemented for `UnsafeCell<paired_sink::Sink>`
+note: required because it appears within the type `std::cell::RefCell<paired_sink::Sink>`
+   --> /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/cell.rs:849:11
+    = note: required for `std::rc::Rc<std::cell::RefCell<paired_sink::Sink>>` to implement `RefUnwindSafe`
+    = note: required for `&std::rc::Rc<std::cell::RefCell<paired_sink::Sink>>` to implement `UnwindSafe`
+note: required because it's used within this closure
+   --> pg_accel/src/engine/ffi/custom_scan/paired_backend.rs:212:27
+    |
+212 |             .catch_others(|caught| {
+    |                           ^^^^^^^^
+note: required by a bound in `pgrx::PgTryBuilder::<'a, R, F>::catch_others`
+   --> /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-pg-sys-0.19.1/src/submodules/pg_try.rs:103:48
+    |
+101 |     pub fn catch_others(
+    |            ------------ required by a bound in this associated function
+102 |         mut self,
+103 |         f: impl FnMut(CaughtError) -> R + 'a + UnwindSafe + RefUnwindSafe,
+    |                                                ^^^^^^^^^^ required by this bound in `PgTryBuilder::<'a, R, F>::catch_others`
+
+error[E0277]: the type `UnsafeCell<isize>` may contain interior mutability and a reference may not be safely transferable across a catch_unwind boundary
+   --> pg_accel/src/engine/ffi/custom_scan/paired_backend.rs:212:27
+    |
+212 |               .catch_others(|caught| {
+    |  ______________------------_^
+    | |              |
+    | |              required by a bound introduced by this call
+213 | |                 // Immediate append to captured PG log before rethrow. Never
+214 | |                 // turn ERROR into a timing sample or silently continue a pair.
+215 | |                 super::paired_sink::error_before_rethrow(&error_sink, &error_context);
+216 | |                 caught.rethrow()
+217 | |             })
+    | |_____________^ `UnsafeCell<isize>` may contain interior mutability and a reference may not be safely transferable across a catch_unwind boundary
+    |
+    = help: within `std::cell::RefCell<paired_sink::Sink>`, the trait `RefUnwindSafe` is not implemented for `UnsafeCell<isize>`
+note: required because it appears within the type `std::cell::Cell<isize>`
+   --> /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/cell.rs:312:11
+note: required because it appears within the type `std::cell::RefCell<paired_sink::Sink>`
+   --> /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/cell.rs:849:11
+    = note: required for `std::rc::Rc<std::cell::RefCell<paired_sink::Sink>>` to implement `RefUnwindSafe`
+    = note: required for `&std::rc::Rc<std::cell::RefCell<paired_sink::Sink>>` to implement `UnwindSafe`
+note: required because it's used within this closure
+   --> pg_accel/src/engine/ffi/custom_scan/paired_backend.rs:212:27
+    |
+212 |             .catch_others(|caught| {
+    |                           ^^^^^^^^
+note: required by a bound in `pgrx::PgTryBuilder::<'a, R, F>::catch_others`
+   --> /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-pg-sys-0.19.1/src/submodules/pg_try.rs:103:48
+    |
+101 |     pub fn catch_others(
+    |            ------------ required by a bound in this associated function
+102 |         mut self,
+103 |         f: impl FnMut(CaughtError) -> R + 'a + UnwindSafe + RefUnwindSafe,
+    |                                                ^^^^^^^^^^ required by this bound in `PgTryBuilder::<'a, R, F>::catch_others`
+
+error[E0277]: the type `UnsafeCell<paired_sink::Sink>` may contain interior mutability and a reference may not be safely transferable across a catch_unwind boundary
+   --> pg_accel/src/engine/ffi/custom_scan/paired_fixtures.rs:25:30
+    |
+ 25 |               })).catch_others(|caught| {
+    |  _________________------------_^
+    | |                 |
+    | |                 required by a bound introduced by this call
+ 26 | |                 super::super::paired_sink::error_before_rethrow(&error_sink,&format!("fixture setup/capture/invalidation/executio...
+ 27 | |                 caught.rethrow()
+ 28 | |             }).execute();
+    | |_____________^ `UnsafeCell<paired_sink::Sink>` may contain interior mutability and a reference may not be safely transferable across a catch_unwind boundary
+    |
+    = help: within `std::cell::RefCell<paired_sink::Sink>`, the trait `RefUnwindSafe` is not implemented for `UnsafeCell<paired_sink::Sink>`
+note: required because it appears within the type `std::cell::RefCell<paired_sink::Sink>`
+   --> /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/cell.rs:849:11
+    = note: required for `std::rc::Rc<std::cell::RefCell<paired_sink::Sink>>` to implement `RefUnwindSafe`
+    = note: required for `&std::rc::Rc<std::cell::RefCell<paired_sink::Sink>>` to implement `UnwindSafe`
+note: required because it's used within this closure
+   --> pg_accel/src/engine/ffi/custom_scan/paired_fixtures.rs:25:30
+    |
+ 25 |             })).catch_others(|caught| {
+    |                              ^^^^^^^^
+note: required by a bound in `pgrx::PgTryBuilder::<'a, R, F>::catch_others`
+   --> /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-pg-sys-0.19.1/src/submodules/pg_try.rs:103:48
+    |
+101 |     pub fn catch_others(
+    |            ------------ required by a bound in this associated function
+102 |         mut self,
+103 |         f: impl FnMut(CaughtError) -> R + 'a + UnwindSafe + RefUnwindSafe,
+    |                                                ^^^^^^^^^^ required by this bound in `PgTryBuilder::<'a, R, F>::catch_others`
+
+error[E0277]: the type `UnsafeCell<isize>` may contain interior mutability and a reference may not be safely transferable across a catch_unwind boundary
+   --> pg_accel/src/engine/ffi/custom_scan/paired_fixtures.rs:25:30
+    |
+ 25 |               })).catch_others(|caught| {
+    |  _________________------------_^
+    | |                 |
+    | |                 required by a bound introduced by this call
+ 26 | |                 super::super::paired_sink::error_before_rethrow(&error_sink,&format!("fixture setup/capture/invalidation/executio...
+ 27 | |                 caught.rethrow()
+ 28 | |             }).execute();
+    | |_____________^ `UnsafeCell<isize>` may contain interior mutability and a reference may not be safely transferable across a catch_unwind boundary
+    |
+    = help: within `std::cell::RefCell<paired_sink::Sink>`, the trait `RefUnwindSafe` is not implemented for `UnsafeCell<isize>`
+note: required because it appears within the type `std::cell::Cell<isize>`
+   --> /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/cell.rs:312:11
+note: required because it appears within the type `std::cell::RefCell<paired_sink::Sink>`
+   --> /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/cell.rs:849:11
+    = note: required for `std::rc::Rc<std::cell::RefCell<paired_sink::Sink>>` to implement `RefUnwindSafe`
+    = note: required for `&std::rc::Rc<std::cell::RefCell<paired_sink::Sink>>` to implement `UnwindSafe`
+note: required because it's used within this closure
+   --> pg_accel/src/engine/ffi/custom_scan/paired_fixtures.rs:25:30
+    |
+ 25 |             })).catch_others(|caught| {
+    |                              ^^^^^^^^
+note: required by a bound in `pgrx::PgTryBuilder::<'a, R, F>::catch_others`
+   --> /Users/contra/.asdf/installs/rust/1.96.0/registry/src/index.crates.io-1949cf8c6b5b557f/pgrx-pg-sys-0.19.1/src/submodules/pg_try.rs:103:48
+    |
+101 |     pub fn catch_others(
+    |            ------------ required by a bound in this associated function
+102 |         mut self,
+103 |         f: impl FnMut(CaughtError) -> R + 'a + UnwindSafe + RefUnwindSafe,
+    |                                                ^^^^^^^^^^ required by this bound in `PgTryBuilder::<'a, R, F>::catch_others`
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `pg_accel` (lib test) due to 4 previous errors

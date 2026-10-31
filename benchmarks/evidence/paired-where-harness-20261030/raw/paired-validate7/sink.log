@@ -1,0 +1,11 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running unittests src/lib.rs (target/debug/deps/pg_accel-ed206a68dc782b00)
+
+running 4 tests
+test engine::ffi::custom_scan::paired_sink::tests::bounded_sink_charges_partial_bytes_and_never_retries_after_limit ... ok
+test engine::ffi::custom_scan::paired_sink::tests::bounded_sink_rejects_collisions_total_limit_and_record_limit ... ok
+test engine::ffi::custom_scan::paired_sink::tests::bounded_sink_rejects_directory_replacement ... ok
+test engine::ffi::custom_scan::paired_sink::tests::bounded_sink_retains_exact_records_and_rejects_reopen_aliases ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1930 filtered out; finished in 0.11s
+

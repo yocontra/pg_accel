@@ -1,0 +1,334 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error: 5 bindings with single-character names in scope
+   --> pg_accel/src/engine/ffi/custom_scan/paired_backend.rs:257:9
+    |
+257 |         f: &'static str,
+    |         ^
+258 |         p: Phase,
+    |         ^
+259 |         n: usize,
+    |         ^
+260 |         i: usize,
+    |         ^
+261 |         e: Option<&str>,
+    |         ^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#many_single_char_names
+    = note: `-D clippy::many-single-char-names` implied by `-D clippy::pedantic`
+    = help: to override `-D clippy::pedantic` add `#[allow(clippy::many_single_char_names)]`
+
+error: 6 bindings with single-character names in scope
+   --> pg_accel/src/engine/ffi/custom_scan/paired_backend.rs:268:9
+    |
+268 |         f: &'static str,
+    |         ^
+269 |         p: Phase,
+    |         ^
+270 |         n: usize,
+    |         ^
+271 |         i: usize,
+    |         ^
+272 |         a: Arm,
+    |         ^
+273 |         e: &str,
+    |         ^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#many_single_char_names
+
+error: this sequence of operators looks suspiciously like a bug
+   --> pg_accel/src/engine/ffi/custom_scan/paired_driver.rs:139:12
+    |
+139 |         || e.generation != recipe.relation_generation
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: did you mean: `recipe.generation != recipe.relation_generation`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#suspicious_operation_groupings
+    = note: `-D clippy::suspicious-operation-groupings` implied by `-D clippy::nursery`
+    = help: to override `-D clippy::nursery` add `#[allow(clippy::suspicious_operation_groupings)]`
+
+error: pub(crate) function inside private module
+    --> pg_accel/src/engine/executor/agg/descriptor.rs:4007:1
+     |
+4007 | pub(crate) fn paired_assert_no_overrides() -> Result<(), String> {
+     | ----------^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     | |
+     | help: consider using: `pub`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_pub_crate
+     = note: `-D clippy::redundant-pub-crate` implied by `-D clippy::nursery`
+     = help: to override `-D clippy::nursery` add `#[allow(clippy::redundant_pub_crate)]`
+
+error: usage of wildcard import
+ --> pg_accel/src/engine/ffi/custom_scan/paired_backend.rs:1:5
+  |
+1 | use super::paired_driver::*;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^ help: try: `super::paired_driver::{Key, Backend, Rows, Recipe, Arm, Run, Evidence, SuccessfulV2Leaf, Sample, Phase}`
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#wildcard_imports
+  = note: `-D clippy::wildcard-imports` implied by `-D clippy::pedantic`
+  = help: to override `-D clippy::pedantic` add `#[allow(clippy::wildcard_imports)]`
+
+error: pub(crate) struct inside private module
+ --> pg_accel/src/engine/ffi/custom_scan/paired_backend.rs:5:1
+  |
+5 | pub(crate) struct PgBackend {
+  | ----------^^^^^^^^^^^^^^^^^
+  | |
+  | help: consider using: `pub`
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_pub_crate
+
+error: consider adding a `;` to the last statement for consistent formatting
+  --> pg_accel/src/engine/ffi/custom_scan/paired_backend.rs:69:13
+   |
+69 |             Spi::run(&format!("EXPLAIN (VERBOSE) {sql}")).expect("capture unchanged candidate pair")
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: add a `;` here: `Spi::run(&format!("EXPLAIN (VERBOSE) {sql}")).expect("capture unchanged candidate pair");`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#semicolon_if_nothing_returned
+   = note: `-D clippy::semicolon-if-nothing-returned` implied by `-D clippy::pedantic`
+   = help: to override `-D clippy::pedantic` add `#[allow(clippy::semicolon_if_nothing_returned)]`
+
+error: matching over `()` is more explicit
+  --> pg_accel/src/engine/ffi/custom_scan/paired_backend.rs:68:14
+   |
+68 |         let (_, candidates) = planner_hooks::capture_paired_recipes(|| {
+   |              ^ help: use `()` instead of `_`: `()`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#ignored_unit_patterns
+   = note: `-D clippy::ignored-unit-patterns` implied by `-D clippy::pedantic`
+   = help: to override `-D clippy::pedantic` add `#[allow(clippy::ignored_unit_patterns)]`
+
+error: more than 3 bools in a struct
+  --> pg_accel/src/engine/ffi/custom_scan/paired_driver.rs:39:1
+   |
+39 | / pub struct Evidence {
+40 | |     pub physical_mode: String,
+41 | |     pub completed: bool,
+42 | |     pub bridge_delta: u64,
+...  |
+62 | |     pub end_to_end_ns: u128,
+63 | | }
+   | |_^
+   |
+   = help: consider using a state machine or refactoring bools into two-variant enums
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#struct_excessive_bools
+   = note: `-D clippy::struct-excessive-bools` implied by `-D clippy::pedantic`
+   = help: to override `-D clippy::pedantic` add `#[allow(clippy::struct_excessive_bools)]`
+
+error: pub(crate) struct inside private module
+ --> pg_accel/src/engine/ffi/custom_scan/paired_population.rs:2:1
+  |
+2 | pub(crate) struct V2Leaf {
+  | ----------^^^^^^^^^^^^^^
+  | |
+  | help: consider using: `pub`
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_pub_crate
+
+error: pub(crate) struct inside private module
+ --> pg_accel/src/engine/ffi/custom_scan/paired_population.rs:8:1
+  |
+8 | pub(crate) struct PopulationTrace {
+  | ----------^^^^^^^^^^^^^^^^^^^^^^^
+  | |
+  | help: consider using: `pub`
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_pub_crate
+
+error: pub(crate) function inside private module
+  --> pg_accel/src/engine/ffi/custom_scan/paired_population.rs:18:1
+   |
+18 | pub(crate) fn record_v2_call(capacity: usize) {
+   | ----------^^^^^^^^^^^^^^^^^^
+   | |
+   | help: consider using: `pub`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_pub_crate
+
+error: pub(crate) function inside private module
+  --> pg_accel/src/engine/ffi/custom_scan/paired_population.rs:29:1
+   |
+29 | pub(crate) fn record_successful_leaf(whole: u64, partition: u64, input: u64) {
+   | ----------^^^^^^^^^^^^^^^^^^^^^^^^^^
+   | |
+   | help: consider using: `pub`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_pub_crate
+
+error: pub(crate) function inside private module
+  --> pg_accel/src/engine/ffi/custom_scan/paired_population.rs:40:1
+   |
+40 | pub(crate) fn capture<T>(body: impl FnOnce() -> T) -> (T, PopulationTrace) {
+   | ----------^^^^^^^^^^^
+   | |
+   | help: consider using: `pub`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_pub_crate
+
+error: usage of wildcard import
+ --> pg_accel/src/engine/ffi/custom_scan/paired_runner.rs:1:5
+  |
+1 | use super::*;
+  |     ^^^^^^^^ help: try: `super::{pg_sys, GpuAccelScanState, register_executor_cleanup, with_installed_executor_error_boundary, AggExecState, abandon_aggregate_transport, close_aggregate_transport, install_boxed_executor, release_executor}`
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#wildcard_imports
+
+error: usage of wildcard import
+ --> pg_accel/src/engine/ffi/planner_hooks/generic_groupagg/paired_recipes.rs:1:5
+  |
+1 | use super::*;
+  |     ^^^^^^^^ help: try: `super::{AggOutputProjection, ShapePlan}`
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#wildcard_imports
+
+error: pub(crate) struct inside private module
+ --> pg_accel/src/engine/ffi/planner_hooks/generic_groupagg/paired_recipes.rs:4:1
+  |
+4 | pub(crate) struct PairedRecipe {
+  | ----------^^^^^^^^^^^^^^^^^^^^
+  | |
+  | help: consider using: `pub`
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_pub_crate
+
+error: pub(crate) function inside private module
+  --> pg_accel/src/engine/ffi/planner_hooks/generic_groupagg/paired_recipes.rs:40:1
+   |
+40 | pub(crate) fn capture_paired_recipes<T>(
+   | ----------^^^^^^^^^^^^^^^^^^^^^^^^^^
+   | |
+   | help: consider using: `pub`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_pub_crate
+
+error: pub(crate) import inside private module
+  --> pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs:43:33
+   |
+43 | pub(crate) use paired_recipes::{PairedRecipe, capture_paired_recipes};
+   | ----------                      ^^^^^^^^^^^^
+   | |
+   | help: consider using: `pub`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_pub_crate
+
+error: pub(crate) import inside private module
+  --> pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs:43:47
+   |
+43 | pub(crate) use paired_recipes::{PairedRecipe, capture_paired_recipes};
+   | ---------- help: consider using: `pub`        ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_pub_crate
+
+error: pub(crate) function inside private module
+    --> pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs:2676:1
+     |
+2676 | pub(crate) fn capture_candidate_observations<T>(run: impl FnOnce() -> T) -> (T, String) {
+     | ----------^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     | |
+     | help: consider using: `pub`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_pub_crate
+
+error: unnecessary boolean `not` operation
+    --> pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs:2893:21
+     |
+2893 | /                     if !cached_legacy_decline {
+2894 | |                         assert_eq!(inputs[0].clones, 1, "{inputs:?}");
+2895 | |                         assert_eq!(inputs[0].fresh_legacy, 1, "{inputs:?}");
+2896 | |                         assert_eq!(inputs[0].reused_raw, 1, "{inputs:?}");
+...    |
+2909 | |                         );
+2910 | |                     }
+     | |_____________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#if_not_else
+     = note: `-D clippy::if-not-else` implied by `-D clippy::pedantic`
+     = help: to override `-D clippy::pedantic` add `#[allow(clippy::if_not_else)]`
+help: try
+     |
+2893 ~                     if cached_legacy_decline {
+2894 +                         legacy_cache_hits += 1;
+2895 +                         assert_eq!(inputs[0].clones, 0, "{inputs:?}");
+2896 +                         assert_eq!(
+2897 +                             inputs[0].fresh_legacy, 0,
+2898 +                             "cached legacy decline: {inputs:?}"
+2899 +                         );
+2900 +                         assert_eq!(inputs[0].reused_raw, 0, "{inputs:?}");
+2901 +                         assert_eq!(
+2902 +                             inputs[0].fresh_raw, 1,
+2903 +                             "raw must still extract after legacy cache decline: {inputs:?}"
+2904 +                         );
+2905 +                     } else {
+2906 +                         assert_eq!(inputs[0].clones, 1, "{inputs:?}");
+2907 +                         assert_eq!(inputs[0].fresh_legacy, 1, "{inputs:?}");
+2908 +                         assert_eq!(inputs[0].reused_raw, 1, "{inputs:?}");
+2909 +                         assert_eq!(inputs[0].fresh_raw, 0, "{inputs:?}");
+2910 +                     }
+     |
+
+error: usage of wildcard import
+ --> pg_accel/src/engine/residency/store/paired.rs:1:5
+  |
+1 | use super::*;
+  |     ^^^^^^^^ help: try: `super::{ResidentRelationEvidence, DerivedArtifactIdentity, process_invalidations, STORE, pg_sys, ResidentRelation}`
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#wildcard_imports
+
+error: pub(crate) function inside private module
+ --> pg_accel/src/engine/residency/store/paired.rs:3:1
+  |
+3 | pub(crate) fn paired_remove_exact_derived(
+  | ----------^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  | |
+  | help: consider using: `pub`
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_pub_crate
+
+error: pub(crate) function inside private module
+  --> pg_accel/src/engine/residency/store/paired.rs:82:1
+   |
+82 | pub(crate) fn paired_current_raw(
+   | ----------^^^^^^^^^^^^^^^^^^^^^^
+   | |
+   | help: consider using: `pub`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_pub_crate
+
+error: pub(crate) function inside private module
+   --> pg_accel/src/engine/residency/store/paired.rs:116:1
+    |
+116 | pub(crate) fn paired_raw_evidence(relid: pg_sys::Oid) -> Result<ResidentRelationEvidence, String> {
+    | ----------^^^^^^^^^^^^^^^^^^^^^^^
+    | |
+    | help: consider using: `pub`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_pub_crate
+
+error: pub(crate) import inside private module
+ --> pg_accel/src/engine/residency/store.rs:8:25
+  |
+8 | pub(crate) use paired::{paired_current_raw, paired_raw_evidence, paired_remove_exact_derived};
+  | ----------              ^^^^^^^^^^^^^^^^^^
+  | |
+  | help: consider using: `pub`
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_pub_crate
+
+error: pub(crate) import inside private module
+ --> pg_accel/src/engine/residency/store.rs:8:45
+  |
+8 | pub(crate) use paired::{paired_current_raw, paired_raw_evidence, paired_remove_exact_derived};
+  | ---------- help: consider using: `pub`      ^^^^^^^^^^^^^^^^^^^
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_pub_crate
+
+error: pub(crate) import inside private module
+ --> pg_accel/src/engine/residency/store.rs:8:66
+  |
+8 | pub(crate) use paired::{paired_current_raw, paired_raw_evidence, paired_remove_exact_derived};
+  | ---------- help: consider using: `pub`                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_pub_crate
+
+error: could not compile `pg_accel` (lib) due to 29 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `pg_accel` (lib test) due to 25 previous errors

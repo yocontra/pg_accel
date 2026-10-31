@@ -1,0 +1,37 @@
+    Checking pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error: assigning the result of `Clone::clone()` may be inefficient
+   --> pg_accel/src/engine/ffi/custom_scan/paired_backend.rs:103:9
+    |
+103 |         self.oracle = result.clone();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: use `clone_from()`: `self.oracle.clone_from(&result)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#assigning_clones
+    = note: `-D clippy::assigning-clones` implied by `-D clippy::pedantic`
+    = help: to override `-D clippy::pedantic` add `#[allow(clippy::assigning_clones)]`
+
+error: this `if` statement can be collapsed
+   --> pg_accel/src/engine/ffi/custom_scan/paired_driver.rs:228:17
+    |
+228 | /                 if phase == Phase::FreshArtifact {
+229 | |                     if let Err(error) = backend.invalidate_owned_derived_only(recipe) {
+230 | |                         backend.retain_error(fixture, phase, pair, position, *arm, &error)?;
+231 | |                         return Err(error);
+232 | |                     }
+233 | |                 }
+    | |_________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#collapsible_if
+    = note: `-D clippy::collapsible-if` implied by `-D clippy::all`
+    = help: to override `-D clippy::all` add `#[allow(clippy::collapsible_if)]`
+help: collapse nested if block
+    |
+228 ~                 if phase == Phase::FreshArtifact
+229 ~                     && let Err(error) = backend.invalidate_owned_derived_only(recipe) {
+230 |                         backend.retain_error(fixture, phase, pair, position, *arm, &error)?;
+231 |                         return Err(error);
+232 ~                     }
+    |
+
+error: could not compile `pg_accel` (lib) due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `pg_accel` (lib test) due to 2 previous errors

@@ -1,0 +1,1181 @@
+//! Custom Scan Provider for pg_accel.
+//!
+//! Implements the three Custom Scan vtables (`CustomPathMethods`,
+//! `CustomScanMethods`, `CustomExecMethods`) that let pg_accel inject
+//! GPU-accelerated executor nodes into PostgreSQL query plans.
+//!
+//! Strategy metadata is serialized into `custom_private` as a PG `List` of
+//! `Integer` nodes so it survives plan copying and EXPLAIN output.
+//!
+//! `ExplainCustomScan` reports strategy info for plain EXPLAIN and adds
+//! execution counters (rows dispatched, batches, dispatch time) for
+//! EXPLAIN ANALYZE.
+
+use std::ffi::{c_int, c_void};
+
+use pgrx::pg_sys;
+
+use super::super::gucs;
+use crate::engine::executor::agg::AggExecState;
+use crate::engine::executor::raster::RasterExecState;
+use crate::engine::registry::AccelStrategy;
+use crate::engine::residency::ResidentProofSnapshot;
+use crate::engine::stats;
+
+mod dsm;
+mod explain;
+mod private_data;
+pub(in crate::engine::ffi) use private_data::{
+    AGG_OUTPUT_PROJECTION_SENTINEL, AGG_QUERY_SPEC_SENTINEL,
+};
+
+use explain::{explain_custom_scan, resolve_thread_count};
+#[cfg(feature = "pg_test")]
+use private_data::CustomPrivateData;
+pub(super) use private_data::append_agg_query_plan;
+use private_data::deserialize_agg_query_path_contract;
+use private_data::{
+    MAX_PLAN_BATCH_SIZE, PlanExecMethod, RESIDENT_PROOF_TRAILER_INTS, append_plan_wire_footer,
+    validate_custom_private_wire, validate_projection_tuple_desc,
+};
+pub(in crate::engine::ffi) use private_data::{
+    append_raster_exec_plan, append_resident_proof_snapshot, raster_resident_proof,
+    resident_proof_default_for_strategy,
+};
+use private_data::{
+    deserialize_custom_private, deserialize_raster_exec_path_plan,
+    deserialize_resident_proof_snapshot,
+};
+
+// ---------------------------------------------------------------------------
+// Retired FunctionScan output-shape discriminants
+// ---------------------------------------------------------------------------
+
+/// Mirror of [`crate::engine::registry::OutputShape`] using a flat integer
+/// representation for validating retired FunctionScan plan-private payloads.
+///
+/// The mapping is fixed by the `to_i32` / `from_i32` pair below and is the
+/// compatibility wire format. No executable FunctionScan method table remains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OutputShapeDisc {
+    /// One Datum per input row (`OutputShape::Scalar`).
+    Scalar = 0,
+    /// Fixed `field_count` Datums per input row (`OutputShape::Record`).
+    Record = 1,
+    /// CSR-style variable-length per input row (`OutputShape::VarLen`).
+    VarLen = 2,
+}
+
+impl OutputShapeDisc {
+    /// Decode from the integer form. Unknown values are invalid.
+    #[must_use]
+    pub const fn from_i32(v: i32) -> Option<Self> {
+        match v {
+            0 => Some(Self::Scalar),
+            1 => Some(Self::Record),
+            2 => Some(Self::VarLen),
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Strategy constants (used in custom_private serialization + EXPLAIN)
+// ---------------------------------------------------------------------------
+
+/// Strategy enum values stored in `custom_private`.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuStrategy {
+    Scan = 0,
+    Join = 1,
+    Agg = 2,
+    Sort = 3,
+    Window = 4,
+    /// Fused star-join pre-aggregation: scan + N joins + aggregate in one node.
+    PreAgg = 5,
+    /// FunctionScan injection (Phase 2 F3): replace PG's `FunctionScan` for a
+    /// registered SRF / record-returning function with a Custom Scan that
+    /// dispatches the call through the GPU dispatch interface and emits the
+    /// resulting `AcceleratedVarLen` / `AcceleratedRecord` shapes as scan
+    /// tuples.
+    FunctionScan = 6,
+    /// SRF-in-target-list injection (Phase 2 F3 follow-up): replace PG's
+    /// `ProjectSet` plan node for `SELECT srf(col), passthrough_cols FROM t`
+    /// queries. Drives the underlying scan via `ExecProcNode` and expands
+    /// each input row's SRF call into multiple output tuples while
+    /// preserving non-SRF target-list columns.
+    SrfTargetList = 7,
+    /// Childless resident PostGIS Raster transform backed by an exact RQS2
+    /// contract and generation-stamped reconstructed-output artifact.
+    Raster = 8,
+}
+
+impl GpuStrategy {
+    /// Convert from raw integer. Unknown values are invalid.
+    #[must_use]
+    pub const fn from_i32(v: i32) -> Option<Self> {
+        match v {
+            0 => Some(Self::Scan),
+            1 => Some(Self::Join),
+            2 => Some(Self::Agg),
+            3 => Some(Self::Sort),
+            4 => Some(Self::Window),
+            5 => Some(Self::PreAgg),
+            6 => Some(Self::FunctionScan),
+            7 => Some(Self::SrfTargetList),
+            8 => Some(Self::Raster),
+            _ => None,
+        }
+    }
+
+    /// Decode state private data at execution time.
+    #[must_use]
+    pub fn decode(v: i32) -> Self {
+        Self::from_i32(v).unwrap_or_else(|| pgrx::error!("pg_accel: invalid GPU strategy tag {v}"))
+    }
+
+    /// Human-readable name for EXPLAIN output.
+    #[must_use]
+    pub const fn label(self) -> &'static std::ffi::CStr {
+        match self {
+            Self::Scan => c"GpuScan",
+            Self::Join => c"GpuJoin",
+            Self::Agg => c"GpuAgg",
+            Self::Sort => c"GpuSort",
+            Self::Window => c"GpuWindow",
+            Self::PreAgg => c"GpuPreAgg",
+            Self::FunctionScan => c"GpuFunctionScan",
+            Self::SrfTargetList => c"GpuAccelSrfTargetList",
+            Self::Raster => c"GpuRaster",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Extended scan state (embeds CustomScanState + our private data)
+// ---------------------------------------------------------------------------
+
+/// Extended executor state for pg_accel Custom Scan nodes.
+///
+/// PostgreSQL's `ExecInitCustomScan` calls `CreateCustomScanState` which
+/// returns a pointer to the `css` field. Because `css` is the first field
+/// and `#[repr(C)]` guarantees layout, PG treats this as a normal
+/// `CustomScanState*` while we can upcast to access `accel`.
+#[repr(C)]
+pub(super) struct GpuAccelScanState {
+    pub(super) css: pg_sys::CustomScanState,
+    pub(super) accel: GpuAccelState,
+    /// Registered on `EState.es_query_cxt` during BeginCustomScan. PostgreSQL
+    /// owns the callback link until that context is reset or deleted.
+    executor_cleanup: pg_sys::MemoryContextCallback,
+}
+
+type ExecutorDropFn = unsafe fn(*mut c_void);
+type ExecutorPrepareResetFn = unsafe fn(*mut c_void);
+
+#[cfg(any(test, feature = "pg_test"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct TestExecutorCleanupCounts {
+    pub(crate) installed: usize,
+    pub(crate) normal_end: usize,
+    pub(crate) query_reset: usize,
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+thread_local! {
+    static TEST_EXECUTOR_CLEANUP_COUNTS: std::cell::Cell<TestExecutorCleanupCounts> =
+        const { std::cell::Cell::new(TestExecutorCleanupCounts {
+            installed: 0,
+            normal_end: 0,
+            query_reset: 0,
+        }) };
+    // Direct Rust fetches, guarded PostgreSQL callbacks, eager error releases.
+    static TEST_SCAN_FETCH_COUNTS: std::cell::Cell<(usize, usize, usize)> =
+        const { std::cell::Cell::new((0, 0, 0)) };
+}
+
+#[cfg(feature = "pg_test")]
+pub(crate) fn test_executor_cleanup_counts() -> TestExecutorCleanupCounts {
+    TEST_EXECUTOR_CLEANUP_COUNTS.with(std::cell::Cell::get)
+}
+
+#[cfg(feature = "pg_test")]
+pub(crate) fn test_scan_fetch_counts() -> (usize, usize, usize) {
+    TEST_SCAN_FETCH_COUNTS.with(std::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+fn record_executor_install() {
+    TEST_EXECUTOR_CLEANUP_COUNTS.with(|slot| {
+        let mut counts = slot.get();
+        counts.installed += 1;
+        slot.set(counts);
+    });
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+fn record_executor_release(query_context_reset: bool) {
+    TEST_EXECUTOR_CLEANUP_COUNTS.with(|slot| {
+        let mut counts = slot.get();
+        if query_context_reset {
+            counts.query_reset += 1;
+        } else {
+            counts.normal_end += 1;
+        }
+        slot.set(counts);
+    });
+}
+
+/// Per-node execution counters, config, and batch executor pointer.
+#[repr(C)]
+pub(super) struct GpuAccelState {
+    pub(super) strategy: i32,
+    pub(super) exec_method: i32,
+    pub(super) batch_size: i32,
+    pub(super) expected_threads: i32,
+    pub(super) rows_dispatched: u64,
+    pub(super) batches_executed: u64,
+    pub(super) dispatch_time_us: u64,
+    pub(super) parallel_worker_number: i32,
+    pub(super) dsm_flags: u32,
+    pub(super) dsm_state: *mut dsm::GpuAccelDsmState,
+    pub(super) dsm_counters_recorded: bool,
+    pub(super) parallel_agg_participants: u32,
+    pub(super) parallel_agg_active_participants: u32,
+    pub(super) parallel_agg_rows_dispatched: u64,
+    pub(super) parallel_agg_batches_executed: u64,
+    pub(super) parallel_agg_dispatch_time_us: u64,
+    pub(super) resident_proof: ResidentProofSnapshot,
+    /// Opaque pointer to the selected `AggExecState` or `RasterExecState`.
+    /// Set in `begin_custom_scan` and released by normal end or query cleanup.
+    pub(super) executor: *mut c_void,
+    /// Concrete destructor paired with `executor`. Keeping the type-erased
+    /// pointer and destructor together lets abort cleanup remain independent
+    /// of mutable/corrupt strategy metadata.
+    executor_drop: Option<ExecutorDropFn>,
+    /// Optional typed preparation required after query-context children have
+    /// been deleted but before the executor destructor runs.
+    executor_prepare_reset: Option<ExecutorPrepareResetFn>,
+    /// Non-flushing detach while query children are still live in PG catch.
+    executor_abort: Option<ExecutorPrepareResetFn>,
+    /// Explicit fallible normal close, invoked before installed owner removal.
+    executor_close: Option<ExecutorPrepareResetFn>,
+}
+
+unsafe fn drop_boxed_executor<T>(executor: *mut c_void) {
+    // SAFETY: install_boxed_executor stores the pointer produced by Box<T>
+    // with this exact monomorphized destructor.
+    unsafe { drop(Box::from_raw(executor.cast::<T>())) };
+}
+
+fn install_boxed_executor<T>(
+    slot: &mut *mut c_void,
+    drop_slot: &mut Option<ExecutorDropFn>,
+    prepare_reset_slot: &mut Option<ExecutorPrepareResetFn>,
+    executor: T,
+    prepare_reset: Option<ExecutorPrepareResetFn>,
+) {
+    debug_assert!(slot.is_null());
+    debug_assert!(drop_slot.is_none());
+    debug_assert!(prepare_reset_slot.is_none());
+    *drop_slot = Some(drop_boxed_executor::<T>);
+    *prepare_reset_slot = prepare_reset;
+    *slot = Box::into_raw(Box::new(executor)).cast();
+    #[cfg(any(test, feature = "pg_test"))]
+    record_executor_install();
+}
+
+unsafe fn drop_installed_executor(
+    slot: &mut *mut c_void,
+    drop_slot: &mut Option<ExecutorDropFn>,
+    prepare_reset_slot: &mut Option<ExecutorPrepareResetFn>,
+) {
+    let executor = std::mem::replace(slot, std::ptr::null_mut());
+    let drop_executor = drop_slot.take();
+    prepare_reset_slot.take();
+    if let (false, Some(drop_executor)) = (executor.is_null(), drop_executor) {
+        // The pointer is cleared before invoking user destructors, so a normal
+        // EndCustomScan followed by the context callback is exactly-once.
+        // SAFETY: the drop function was installed with this exact pointer.
+        unsafe { drop_executor(executor) };
+    }
+}
+
+unsafe fn prepare_raster_executor_for_query_context_reset(executor: *mut c_void) {
+    // SAFETY: raster installation pairs this callback with RasterExecState.
+    unsafe { (*executor.cast::<RasterExecState>()).prepare_for_query_context_reset() };
+}
+
+unsafe fn abandon_aggregate_transport(executor: *mut c_void) {
+    // SAFETY: aggregate installation pairs this callback with AggExecState.
+    unsafe { (*executor.cast::<AggExecState>()).abandon_transport() };
+}
+
+unsafe fn close_aggregate_transport(executor: *mut c_void) {
+    // SAFETY: normal End/ReScan retains the installed executor/live context.
+    unsafe { (*executor.cast::<AggExecState>()).close_transport() };
+}
+
+unsafe fn release_executor(state: &mut GpuAccelState, query_context_reset: bool) {
+    if !query_context_reset
+        && !state.executor.is_null()
+        && let Some(close) = state.executor_close
+    {
+        // SAFETY: normal close may ERROR; caller's installed-owner boundary
+        // detaches without repeating close before preserving that error.
+        unsafe { close(state.executor) };
+    }
+    #[cfg(any(test, feature = "pg_test"))]
+    if !state.executor.is_null() {
+        record_executor_release(query_context_reset);
+    }
+    if query_context_reset && !state.executor.is_null() {
+        // PostgreSQL deletes es_query_cxt children before invoking callbacks
+        // on es_query_cxt. The typed callback, when present, makes its owner
+        // safe to drop after those child allocations have disappeared.
+        if let Some(prepare_reset) = state.executor_prepare_reset {
+            // SAFETY: installation paired this callback with the executor.
+            unsafe { prepare_reset(state.executor) };
+        }
+    }
+    // SAFETY: executor and its type-bound callbacks are installed and cleared
+    // as one ownership record.
+    unsafe {
+        state.executor_abort = None;
+        state.executor_close = None;
+        drop_installed_executor(
+            &mut state.executor,
+            &mut state.executor_drop,
+            &mut state.executor_prepare_reset,
+        );
+    }
+}
+
+/// Release an executor while a PostgreSQL ERROR is caught at our callback
+/// boundary. The query context is still live at this point, so raster's
+/// post-context-reset preparation must not run; the eventual registered
+/// callback observes the cleared owner and becomes an idempotent no-op.
+unsafe fn release_executor_after_caught_error(state: &mut GpuAccelState) {
+    if !state.executor.is_null()
+        && let Some(abort) = state.executor_abort.take()
+    {
+        // SAFETY: typed abort hook only invalidates handles, never invokes PG.
+        unsafe { abort(state.executor) };
+    }
+    state.executor_close = None;
+    #[cfg(any(test, feature = "pg_test"))]
+    if !state.executor.is_null() {
+        record_executor_release(true);
+        TEST_SCAN_FETCH_COUNTS.with(|slot| {
+            let (direct, callback, caught_error) = slot.get();
+            slot.set((direct, callback, caught_error + 1));
+        });
+    }
+    // SAFETY: the executor and its callbacks are one installed ownership
+    // record. PostgreSQL has not deleted query-context children yet.
+    unsafe {
+        drop_installed_executor(
+            &mut state.executor,
+            &mut state.executor_drop,
+            &mut state.executor_prepare_reset,
+        );
+    }
+}
+
+/// Restore entry context/owner before detaching on PG ERROR. Spilling can switch
+/// both globals internally; no child-owned pointer is dereferenced by abort.
+unsafe fn with_installed_executor_error_boundary<T>(
+    state: *mut GpuAccelScanState,
+    body: impl FnOnce() -> T,
+) -> T {
+    // SAFETY: callback runs on the main backend and these entry owners remain
+    // live until the caught error is rethrown to PostgreSQL's outer boundary.
+    let (context, owner) = unsafe { (pg_sys::CurrentMemoryContext, pg_sys::CurrentResourceOwner) };
+    pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(body))
+        .catch_others(|caught| {
+            // SAFETY: restore live entry globals before any Rust owner cleanup;
+            // never flush/close the abandoned spool or release unrelated owners.
+            unsafe {
+                pg_sys::CurrentMemoryContext = context;
+                pg_sys::CurrentResourceOwner = owner;
+                release_executor_after_caught_error(&mut (*state).accel);
+            }
+            caught.rethrow()
+        })
+        .execute()
+}
+
+unsafe extern "C-unwind" fn executor_query_context_reset(arg: *mut c_void) {
+    if arg.is_null() {
+        return;
+    }
+    // SAFETY: arg points to the GpuAccelState embedded in query-context-owned
+    // GpuAccelScanState storage. PostgreSQL invokes this before freeing that
+    // storage and removes the callback from its list before entering it.
+    unsafe { release_executor(&mut *arg.cast::<GpuAccelState>(), true) };
+}
+
+unsafe fn register_executor_cleanup(
+    state: *mut GpuAccelScanState,
+    query_context: pg_sys::MemoryContext,
+) {
+    // SAFETY: state is the live extended scan allocation and its embedded
+    // callback remains valid for the lifetime of query_context.
+    unsafe {
+        let callback = &raw mut (*state).executor_cleanup;
+        if (*callback).func.is_some() {
+            pgrx::error!("pg_accel: Custom Scan executor cleanup registered more than once");
+        }
+        (*callback).func = Some(executor_query_context_reset);
+        (*callback).arg = (&raw mut (*state).accel).cast();
+        (*callback).next = std::ptr::null_mut();
+        pg_sys::MemoryContextRegisterResetCallback(query_context, callback);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sync wrappers for static vtables (pg_sys structs contain *const c_char)
+// ---------------------------------------------------------------------------
+
+// SAFETY: All wrapped vtable structs contain only static string pointers and
+// function pointers. They are const-initialised and never mutated. PG only
+// accesses them from the main backend thread.
+#[repr(transparent)]
+struct SyncPathMethods(pg_sys::CustomPathMethods);
+// SAFETY: CustomPathMethods is a const-initialized vtable containing only a
+// static name pointer and immutable function pointers; PostgreSQL never mutates it.
+unsafe impl Sync for SyncPathMethods {}
+
+#[repr(transparent)]
+struct SyncScanMethods(pg_sys::CustomScanMethods);
+// SAFETY: CustomScanMethods is a const-initialized vtable containing only a
+// static name pointer and immutable function pointers; PostgreSQL never mutates it.
+unsafe impl Sync for SyncScanMethods {}
+
+#[repr(transparent)]
+struct SyncExecMethods(pg_sys::CustomExecMethods);
+// SAFETY: CustomExecMethods is a const-initialized vtable containing only a
+// static name pointer and immutable function pointers; PostgreSQL never mutates it.
+unsafe impl Sync for SyncExecMethods {}
+
+// ---------------------------------------------------------------------------
+// Static vtables
+// ---------------------------------------------------------------------------
+
+static AGG_PATH_METHODS: SyncPathMethods = SyncPathMethods(pg_sys::CustomPathMethods {
+    CustomName: c"GpuAccelAgg".as_ptr(),
+    PlanCustomPath: Some(plan_custom_path_agg),
+    ReparameterizeCustomPathByChild: None,
+});
+
+static RASTER_PATH_METHODS: SyncPathMethods = SyncPathMethods(pg_sys::CustomPathMethods {
+    CustomName: c"GpuAccelRaster".as_ptr(),
+    PlanCustomPath: Some(plan_custom_path_raster),
+    ReparameterizeCustomPathByChild: None,
+});
+
+static AGG_SCAN_METHODS: SyncScanMethods = SyncScanMethods(pg_sys::CustomScanMethods {
+    CustomName: c"GpuAccelAgg".as_ptr(),
+    CreateCustomScanState: Some(create_agg_state),
+});
+
+static RASTER_SCAN_METHODS: SyncScanMethods = SyncScanMethods(pg_sys::CustomScanMethods {
+    CustomName: c"GpuAccelRaster".as_ptr(),
+    CreateCustomScanState: Some(create_raster_state),
+});
+
+macro_rules! exec_methods {
+    ($name:ident, $label:literal) => {
+        static $name: SyncExecMethods = SyncExecMethods(pg_sys::CustomExecMethods {
+            CustomName: $label.as_ptr(),
+            BeginCustomScan: Some(begin_custom_scan),
+            ExecCustomScan: Some(exec_custom_scan),
+            EndCustomScan: Some(end_custom_scan),
+            ReScanCustomScan: Some(rescan_custom_scan),
+            MarkPosCustomScan: None,
+            RestrPosCustomScan: None,
+            EstimateDSMCustomScan: Some(dsm::estimate_dsm_custom_scan),
+            InitializeDSMCustomScan: Some(dsm::initialize_dsm_custom_scan),
+            ReInitializeDSMCustomScan: Some(dsm::reinitialize_dsm_custom_scan),
+            InitializeWorkerCustomScan: Some(dsm::initialize_worker_custom_scan),
+            ShutdownCustomScan: Some(dsm::shutdown_custom_scan),
+            ExplainCustomScan: Some(explain_custom_scan),
+        });
+    };
+}
+
+exec_methods!(AGG_EXEC_METHODS, c"GpuAccelAgg");
+exec_methods!(RASTER_EXEC_METHODS, c"GpuAccelRaster");
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// Pointer to agg `CustomPathMethods` vtable.
+#[inline]
+#[must_use]
+pub fn agg_path_methods() -> *const pg_sys::CustomPathMethods {
+    &raw const AGG_PATH_METHODS.0
+}
+
+/// Pointer to childless raster `CustomPathMethods` vtable.
+#[inline]
+#[must_use]
+pub fn raster_path_methods() -> *const pg_sys::CustomPathMethods {
+    &raw const RASTER_PATH_METHODS.0
+}
+
+/// Register Custom Scan methods with PostgreSQL. Must be called from `_PG_init`.
+pub fn register() {
+    // SAFETY: RegisterCustomScanMethods stores pointers to our static vtables
+    // which live for the entire process lifetime. Called on main thread during
+    // extension loading.
+    unsafe {
+        pg_sys::RegisterCustomScanMethods(&raw const AGG_SCAN_METHODS.0);
+        pg_sys::RegisterCustomScanMethods(&raw const RASTER_SCAN_METHODS.0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PlanCustomPath callbacks
+// ---------------------------------------------------------------------------
+
+/// Convert an exact childless RQS2 path into its distinct raster CustomScan.
+///
+/// # Safety
+/// Called by the PostgreSQL planner on the main backend thread.
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn plan_custom_path_raster(
+    _root: *mut pg_sys::PlannerInfo,
+    _rel: *mut pg_sys::RelOptInfo,
+    best_path: *mut pg_sys::CustomPath,
+    tlist: *mut pg_sys::List,
+    clauses: *mut pg_sys::List,
+    custom_plans: *mut pg_sys::List,
+) -> *mut pg_sys::Plan {
+    let _span = tracing::debug_span!("ffi.plan_custom_path_raster").entered();
+    // SAFETY: best_path and its private list are planner-owned values supplied
+    // to this exact CustomPathMethods callback.
+    let path_private = unsafe { (*best_path).custom_private };
+    // SAFETY: the selected raster path owns a List<Integer> emitted by pg_accel.
+    let raster_plan = unsafe { deserialize_raster_exec_path_plan(path_private) }
+        .unwrap_or_else(|error| pgrx::error!("pg_accel: malformed raster RQS2 path: {error}"));
+
+    // SAFETY: a non-null `custom_plans` is the planner-owned List supplied to
+    // this callback and remains valid while its length is inspected.
+    if !custom_plans.is_null() && unsafe { pg_sys::list_length(custom_plans) } != 0 {
+        pgrx::error!("pg_accel: childless raster path unexpectedly has child plans");
+    }
+    // SAFETY: a non-null `clauses` is the planner-owned List supplied to this
+    // callback and remains valid while its length is inspected.
+    if !clauses.is_null() && unsafe { pg_sys::list_length(clauses) } != 0 {
+        pgrx::error!("pg_accel: childless raster path unexpectedly has executor clauses");
+    }
+    // SAFETY: a non-null `tlist` is the planner-owned target List supplied to
+    // this callback and remains valid while its cardinality is checked.
+    if tlist.is_null() || unsafe { pg_sys::list_length(tlist) } != 1 {
+        pgrx::error!("pg_accel: childless raster path must have exactly one output expression");
+    }
+    // SAFETY: the target list was checked to contain exactly one planner-owned node.
+    let target = unsafe { pg_sys::list_nth(tlist, 0).cast::<pg_sys::TargetEntry>() };
+    // SAFETY: the singleton list entry is a planner-owned TargetEntry; the
+    // null check short-circuits before its fields are inspected.
+    if target.is_null() || unsafe { (*target).resjunk || (*target).expr.is_null() } {
+        pgrx::error!("pg_accel: childless raster path has an invalid output target");
+    }
+    // SAFETY: target is a valid TargetEntry with a non-null expression.
+    let output_type = unsafe { pg_sys::exprType((*target).expr.cast()) };
+    if u32::from(output_type) != raster_plan.spec().raster_type_oid {
+        pgrx::error!("pg_accel: raster output target type does not match its RQS2 contract");
+    }
+
+    // SAFETY: palloc0 returns zeroed memory in CurrentMemoryContext.
+    let cscan = unsafe {
+        pg_sys::palloc0(std::mem::size_of::<pg_sys::CustomScan>()).cast::<pg_sys::CustomScan>()
+    };
+    // SAFETY: cscan is freshly allocated; all source pointers are planner-owned.
+    unsafe {
+        (*cscan).scan.plan.type_ = pg_sys::NodeTag::T_CustomScan;
+        (*cscan).custom_scan_tlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
+        (*cscan).scan.plan.targetlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
+        (*cscan).scan.plan.qual = std::ptr::null_mut();
+        (*cscan).scan.plan.startup_cost = (*best_path).path.startup_cost;
+        (*cscan).scan.plan.total_cost = (*best_path).path.total_cost;
+        (*cscan).scan.plan.plan_rows = (*best_path).path.rows;
+        (*cscan).custom_plans = std::ptr::null_mut();
+        (*cscan).flags = (*best_path).flags;
+        (*cscan).scan.scanrelid = 0;
+        (*cscan).methods = &raw const RASTER_SCAN_METHODS.0;
+
+        let mut private: *mut pg_sys::List = std::ptr::null_mut();
+        private = pg_sys::lappend(
+            private,
+            pg_sys::makeInteger(GpuStrategy::Raster as c_int).cast(),
+        );
+        private = pg_sys::lappend(private, pg_sys::makeInteger(gucs::min_batch_size()).cast());
+        private = pg_sys::lappend(private, pg_sys::makeInteger(resolve_thread_count()).cast());
+        private = pg_sys::lappend(
+            private,
+            pg_sys::makeInteger(raster_plan.spec().function_oid as c_int).cast(),
+        );
+        private = pg_sys::lappend(
+            private,
+            pg_sys::makeInteger(raster_plan.spec().raster_attno).cast(),
+        );
+        private = pg_sys::lappend(
+            private,
+            pg_sys::makeInteger(AccelStrategy::GpuRaster as c_int).cast(),
+        );
+        private = append_raster_exec_plan(private, &raster_plan);
+        seal_custom_scan_private(cscan, private, path_private, GpuStrategy::Raster);
+    }
+    cscan.cast()
+}
+
+/// Append the proof carried by a planner CustomPath and seal the v2 frame.
+///
+/// # Safety
+///
+/// Must run in a valid PostgreSQL planner memory context. `path_private`, when
+/// non-null, must be a `List<Integer>` emitted by pg_accel.
+unsafe fn append_path_resident_proof(
+    list: *mut pg_sys::List,
+    path_private: *mut pg_sys::List,
+    strategy: GpuStrategy,
+) -> *mut pg_sys::List {
+    if path_private.is_null() {
+        pgrx::error!("pg_accel: selected CustomPath is missing private data and resident proof");
+    }
+    // SAFETY: path_private is non-null and is owned by the selected CustomPath.
+    let proof = unsafe { deserialize_resident_proof_snapshot(path_private) }
+        .unwrap_or_else(|| pgrx::error!("pg_accel: selected CustomPath is missing resident proof"));
+    // SAFETY: list and proof are planner-owned values in the active memory context.
+    let list = unsafe { append_resident_proof_snapshot(list, proof) };
+    let method = PlanExecMethod::for_strategy(strategy).unwrap_or_else(|| {
+        pgrx::error!(
+            "pg_accel: retired GPU strategy {strategy:?} has no CustomExecMethods identity"
+        )
+    });
+    // SAFETY: list is a planner-owned List<Integer> with a canonical proof trailer.
+    unsafe { append_plan_wire_footer(list, method) }
+}
+
+/// Attach proof/framing and validate the complete CustomScan wire while the
+/// planner's target list is still available.
+unsafe fn seal_custom_scan_private(
+    cscan: *mut pg_sys::CustomScan,
+    list: *mut pg_sys::List,
+    path_private: *mut pg_sys::List,
+    strategy: GpuStrategy,
+) {
+    let method = PlanExecMethod::for_strategy(strategy).unwrap_or_else(|| {
+        pgrx::error!("pg_accel: retired GPU strategy {strategy:?} cannot seal a plan")
+    });
+    // SAFETY: all pointers are planner-owned and strategy selected this path.
+    let list = unsafe { append_path_resident_proof(list, path_private, strategy) };
+    // SAFETY: cscan is the planner-owned node being sealed.
+    unsafe {
+        (*cscan).custom_private = list;
+    }
+    // SAFETY: cscan now owns the complete List<Integer> frame and both target lists.
+    unsafe { validate_custom_private_wire(cscan, method) }.unwrap_or_else(|error| {
+        pgrx::error!("pg_accel: planner emitted invalid CustomScan private data: {error}");
+    });
+}
+
+/// Convert a strict childless descriptor aggregate path into a `CustomScan`.
+///
+/// The AQS6/AOP2 contract is copied into framed plan-private data. No child
+/// plan or retired aggregate metadata is accepted.
+///
+/// # Safety
+///
+/// Called by the PostgreSQL planner on the main backend thread.
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn plan_custom_path_agg(
+    root: *mut pg_sys::PlannerInfo,
+    _rel: *mut pg_sys::RelOptInfo,
+    best_path: *mut pg_sys::CustomPath,
+    tlist: *mut pg_sys::List,
+    clauses: *mut pg_sys::List,
+    custom_plans: *mut pg_sys::List,
+) -> *mut pg_sys::Plan {
+    let _span = tracing::debug_span!("ffi.plan_custom_path_agg").entered();
+    tracing::info!("plan_custom_path_agg: start");
+    // SAFETY: palloc0 returns zeroed memory in CurrentMemoryContext.
+    let cscan = unsafe {
+        pg_sys::palloc0(std::mem::size_of::<pg_sys::CustomScan>()).cast::<pg_sys::CustomScan>()
+    };
+
+    // SAFETY: cscan is freshly palloc'd and zeroed; best_path is valid.
+    unsafe {
+        (*cscan).scan.plan.type_ = pg_sys::NodeTag::T_CustomScan;
+
+        let path_priv = (*best_path).custom_private;
+        let (spec, projection, selection) = deserialize_agg_query_path_contract(path_priv)
+            .unwrap_or_else(|error| {
+                pgrx::error!("pg_accel: malformed aggregate AQS6/AOP2 path contract: {error}")
+            });
+        if !custom_plans.is_null() && pg_sys::list_length(custom_plans) != 0 {
+            pgrx::error!("pg_accel: descriptor aggregate path unexpectedly has child plans");
+        }
+
+        if root.is_null() || (*root).parse.is_null() {
+            pgrx::error!("pg_accel: aggregate path has no planner query");
+        }
+        // Reconstruct the same deterministic internal layout used for shape
+        // extraction. It can include hidden HAVING aggregates and junk keys;
+        // PostgreSQL's result projection consumes only the requested columns.
+        (*cscan).custom_scan_tlist =
+            super::planner_hooks::shape::aggregate_scan_target_list(&*(*root).parse)
+                .unwrap_or_else(|error| {
+                    pgrx::error!("pg_accel: invalid internal projection: {error:?}")
+                });
+        (*cscan).scan.plan.targetlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
+
+        (*cscan).scan.plan.qual = pg_sys::extract_actual_clauses(clauses, false);
+        // Upper-relation CustomPaths do not receive HAVING in scan clauses.
+        // Preserve it as an ordinary PostgreSQL qual: setrefs rewrites its
+        // projected Aggrefs/keys to INDEX_VAR against custom_scan_tlist.
+        if !root.is_null() && !(*root).parse.is_null() {
+            let having = (*(*root).parse).havingQual;
+            if !having.is_null() {
+                (*cscan).scan.plan.qual = pg_sys::list_concat(
+                    (*cscan).scan.plan.qual,
+                    pg_sys::copyObjectImpl(having.cast()).cast(),
+                );
+            }
+        }
+        (*cscan).scan.plan.startup_cost = (*best_path).path.startup_cost;
+        (*cscan).scan.plan.total_cost = (*best_path).path.total_cost;
+        (*cscan).scan.plan.plan_rows = (*best_path).path.rows;
+        (*cscan).custom_plans = std::ptr::null_mut();
+        (*cscan).flags = (*best_path).flags;
+        (*cscan).scan.scanrelid = 0;
+        (*cscan).methods = &raw const AGG_SCAN_METHODS.0;
+
+        // Serialize the common header followed immediately by AQS6/AOP2.
+        let batch_size = gucs::min_batch_size();
+        let expected_threads = resolve_thread_count();
+
+        let mut list: *mut pg_sys::List = std::ptr::null_mut();
+        list = pg_sys::lappend(list, pg_sys::makeInteger(GpuStrategy::Agg as c_int).cast());
+        list = pg_sys::lappend(list, pg_sys::makeInteger(batch_size).cast());
+        list = pg_sys::lappend(list, pg_sys::makeInteger(expected_threads).cast());
+        list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast()); // fn_oid
+        list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast()); // target_attno
+        list = pg_sys::lappend(
+            list,
+            pg_sys::makeInteger(AccelStrategy::GpuReduce as c_int).cast(),
+        );
+        list = append_agg_query_plan(list, &spec, &projection, selection, cscan);
+
+        seal_custom_scan_private(cscan, list, path_priv, GpuStrategy::Agg);
+    }
+
+    tracing::info!("plan_custom_path_agg: end");
+    cscan.cast()
+}
+
+// ---------------------------------------------------------------------------
+// CreateCustomScanState callback
+// ---------------------------------------------------------------------------
+
+/// Allocate an extended `GpuAccelScanState` so we have room for our private
+/// counters alongside PG's `CustomScanState`.
+///
+/// # Safety
+///
+/// Called by the executor on the main backend thread.
+unsafe fn create_custom_scan_state(
+    cscan: *mut pg_sys::CustomScan,
+    method: PlanExecMethod,
+    exec_methods: *const pg_sys::CustomExecMethods,
+) -> *mut pg_sys::Node {
+    let _span = tracing::debug_span!("ffi.create_custom_scan_state").entered();
+    if cscan.is_null() {
+        pgrx::error!("pg_accel: CreateCustomScanState received a null plan");
+    }
+    // Validate the full frame and the serialized method identity before an
+    // executor state exists. This prevents a copied/corrupt plan from selecting
+    // one vtable while its payload names another concrete Rust state type.
+    // SAFETY: cscan was checked non-null and is owned by the executor callback.
+    unsafe { validate_custom_private_wire(cscan, method) }
+        .unwrap_or_else(|error| pgrx::error!("pg_accel: invalid CustomScan private data: {error}"));
+    // SAFETY: palloc0 returns zeroed, maximally-aligned memory. We allocate
+    // our extended struct which has CustomScanState as first field.
+    #[allow(clippy::cast_ptr_alignment)]
+    let state = unsafe {
+        pg_sys::palloc0(std::mem::size_of::<GpuAccelScanState>()).cast::<GpuAccelScanState>()
+    };
+
+    // SAFETY: state is freshly allocated and zeroed.
+    unsafe {
+        (*state).css.ss.ps.type_ = pg_sys::NodeTag::T_CustomScanState;
+        (*state).css.flags = (*cscan).flags;
+        (*state).css.methods = exec_methods;
+        (*state).accel.exec_method = method as i32;
+        (*state).accel.executor = std::ptr::null_mut();
+        (*state).accel.executor_drop = None;
+        (*state).accel.executor_prepare_reset = None;
+        (*state).accel.parallel_worker_number = -1;
+        (*state).accel.resident_proof = ResidentProofSnapshot::not_proven();
+
+        // All scan strategies use VirtualTupleTableSlot (PG default).
+        // ExecForceStoreHeapTuple triggers heap_deform_tuple (~50ns) which
+        // populates tts_values/tts_isnull for correct aggregate evaluation.
+    }
+
+    state.cast()
+}
+
+macro_rules! create_state_callback {
+    ($function:ident, $method:expr, $exec_methods:ident) => {
+        #[pgrx::pg_guard]
+        unsafe extern "C-unwind" fn $function(cscan: *mut pg_sys::CustomScan) -> *mut pg_sys::Node {
+            // SAFETY: PostgreSQL invokes this callback with the CustomScan node
+            // registered for this exact method table.
+            unsafe { create_custom_scan_state(cscan, $method, &raw const $exec_methods.0) }
+        }
+    };
+}
+
+create_state_callback!(create_agg_state, PlanExecMethod::Agg, AGG_EXEC_METHODS);
+create_state_callback!(
+    create_raster_state,
+    PlanExecMethod::Raster,
+    RASTER_EXEC_METHODS
+);
+
+/// Reset per-run counters while preserving the selected plan contract.
+fn reset_observability(state: &mut GpuAccelState) {
+    state.rows_dispatched = 0;
+    state.batches_executed = 0;
+    state.dispatch_time_us = 0;
+    state.dsm_counters_recorded = false;
+    state.parallel_agg_participants = 0;
+    state.parallel_agg_active_participants = 0;
+    state.parallel_agg_rows_dispatched = 0;
+    state.parallel_agg_batches_executed = 0;
+    state.parallel_agg_dispatch_time_us = 0;
+}
+
+/// Initialize one childless resident executor.
+///
+/// # Safety
+/// Called by PostgreSQL for one of the two registered method tables.
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn begin_custom_scan(
+    node: *mut pg_sys::CustomScanState,
+    _estate: *mut pg_sys::EState,
+    eflags: c_int,
+) {
+    crate::engine::otel::init();
+    stats::record_query_accelerated();
+
+    let state = node.cast::<GpuAccelScanState>();
+    // SAFETY: ExecInitCustomScan installed this plan for our extended state.
+    let cscan = unsafe { (*node).ss.ps.plan.cast::<pg_sys::CustomScan>() };
+    // SAFETY: create_custom_scan_state stored a validated method identity.
+    let method_raw = unsafe { (*state).accel.exec_method };
+    let method = PlanExecMethod::from_i32(method_raw)
+        .unwrap_or_else(|| pgrx::error!("pg_accel: invalid executor-method identity {method_raw}"));
+    // SAFETY: cscan is the initialized plan owned by this state.
+    let private = unsafe { deserialize_custom_private(cscan, method) };
+
+    if !matches!(private.gpu_strategy, GpuStrategy::Agg | GpuStrategy::Raster) {
+        pgrx::error!(
+            "pg_accel: retired {:?} strategy has no registered executor",
+            private.gpu_strategy
+        );
+    }
+    // Both selected architectures source data directly from pinned resident
+    // relations. A child plan would be a second, host-staged source of truth.
+    // SAFETY: node and cscan are live executor/planner objects.
+    if unsafe {
+        (!(*node).custom_ps.is_null() && pg_sys::list_length((*node).custom_ps) != 0)
+            || (!(*cscan).custom_plans.is_null() && pg_sys::list_length((*cscan).custom_plans) != 0)
+    } {
+        pgrx::error!("pg_accel: resident Custom Scan unexpectedly has child plans");
+    }
+
+    if let Some(projection) = &private.agg_output_projection {
+        // Only the internal scan slot has the device projection layout. The
+        // result slot is PostgreSQL's independently validated SQL projection.
+        // SAFETY: ExecInitCustomScan initialized the scan slot.
+        let slots = unsafe { [("scan", (*node).ss.ss_ScanTupleSlot)] };
+        for (name, slot) in slots {
+            if slot.is_null() {
+                pgrx::error!("pg_accel: aggregate output projection has no {name} tuple slot");
+            }
+            // SAFETY: the non-null slot is owned by this initialized state.
+            unsafe { validate_projection_tuple_desc(projection, (*slot).tts_tupleDescriptor) }
+                .unwrap_or_else(|error| {
+                    pgrx::error!(
+                        "pg_accel: aggregate output projection/{name} TupleDesc mismatch: {error}"
+                    );
+                });
+        }
+    }
+
+    // SAFETY: state is our extended allocation.
+    unsafe {
+        (*state).accel.strategy = private.gpu_strategy as c_int;
+        (*state).accel.batch_size = private.batch_size;
+        (*state).accel.expected_threads = private.expected_threads;
+        (*state).accel.resident_proof = private.resident_proof;
+        reset_observability(&mut (*state).accel);
+    }
+
+    // PostgreSQL does not guarantee EndCustomScan after ERROR, cancellation,
+    // or failed portal execution. Tie the Rust executor to es_query_cxt as an
+    // abort-safe backstop; normal EndCustomScan releases it early and leaves
+    // the eventual callback as an idempotent no-op.
+    // SAFETY: node is an initialized executor state.
+    let estate = unsafe { (*node).ss.ps.state };
+    if estate.is_null() {
+        pgrx::error!("pg_accel: resident CustomScan has no executor state");
+    }
+    // SAFETY: the non-null EState owns its query memory context.
+    let query_context = unsafe { (*estate).es_query_cxt };
+    if query_context.is_null() {
+        pgrx::error!("pg_accel: resident CustomScan has no query memory context");
+    }
+    // SAFETY: state and query_context share the executor-query lifetime.
+    unsafe { register_executor_cleanup(state, query_context) };
+
+    match private.gpu_strategy {
+        GpuStrategy::Agg => {
+            let (spec, projection) = private
+                .agg_query_spec
+                .zip(private.agg_output_projection)
+                .unwrap_or_else(|| {
+                    pgrx::error!("pg_accel: aggregate plan is missing its AQS6/AOP2 contract")
+                });
+            let explain_only = (eflags as u32 & pg_sys::EXEC_FLAG_EXPLAIN_ONLY) != 0;
+            let exec = AggExecState::new_selected_descriptor_unprepared(
+                spec,
+                projection,
+                explain_only,
+                private.agg_execution_selection,
+            )
+            .unwrap_or_else(|error| {
+                pgrx::error!(
+                    "pg_accel: generic aggregate Begin failed ({error}); refusing CPU fallback"
+                )
+            });
+            // SAFETY: state is our live extended allocation.
+            unsafe {
+                (*state).accel.executor_abort = Some(abandon_aggregate_transport);
+                (*state).accel.executor_close = Some(close_aggregate_transport);
+                install_boxed_executor(
+                    &mut (*state).accel.executor,
+                    &mut (*state).accel.executor_drop,
+                    &mut (*state).accel.executor_prepare_reset,
+                    exec,
+                    Some(abandon_aggregate_transport),
+                );
+                // Preparation can raise a PostgreSQL ERROR or cancellation.
+                // Install the concrete owner first so the registered query
+                // context callback releases it on every nonlocal exit.
+                (*(*state).accel.executor.cast::<AggExecState>()).set_query_context(query_context);
+                (*(*state).accel.executor.cast::<AggExecState>()).prepare_descriptor();
+            }
+        }
+        GpuStrategy::Raster => {
+            let plan = private.raster_exec_plan.unwrap_or_else(|| {
+                pgrx::error!("pg_accel: raster CustomScan is missing its exact RQS2 contract")
+            });
+            // SAFETY: the scan slot and query context belong to this node.
+            let exec = unsafe {
+                RasterExecState::begin(plan, (*node).ss.ss_ScanTupleSlot, query_context)
+            }
+            .unwrap_or_else(|error| {
+                pgrx::error!(
+                    "pg_accel: raster BeginCustomScan failed ({error}); refusing CPU fallback"
+                )
+            });
+            // Raster executes eagerly during Begin.
+            // SAFETY: state is our extended allocation.
+            unsafe {
+                (*state).accel.rows_dispatched =
+                    crate::engine::executor::ExecutorState::rows_dispatched(&exec);
+                (*state).accel.batches_executed =
+                    crate::engine::executor::ExecutorState::batches_executed(&exec);
+                (*state).accel.dispatch_time_us =
+                    crate::engine::executor::ExecutorState::dispatch_time_us(&exec);
+            }
+            // SAFETY: state is our live extended allocation.
+            unsafe {
+                install_boxed_executor(
+                    &mut (*state).accel.executor,
+                    &mut (*state).accel.executor_drop,
+                    &mut (*state).accel.executor_prepare_reset,
+                    exec,
+                    Some(prepare_raster_executor_for_query_context_reset),
+                );
+            }
+        }
+        _ => unreachable!("retired strategies rejected above"),
+    }
+}
+
+/// Return one tuple from the selected resident executor.
+///
+/// # Safety
+/// Called by PostgreSQL for a state initialized by begin_custom_scan.
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn exec_custom_scan(
+    node: *mut pg_sys::CustomScanState,
+) -> *mut pg_sys::TupleTableSlot {
+    if !gucs::enabled() {
+        pgrx::error!("pg_accel: Custom Scan reached execution while pg_accel.enabled=off");
+    }
+    let state = node.cast::<GpuAccelScanState>();
+    // SAFETY: state is our extended allocation.
+    let executor = unsafe { (*state).accel.executor };
+    if executor.is_null() {
+        pgrx::error!("pg_accel: resident Custom Scan has no executor");
+    }
+
+    // SAFETY: state is installed and its query context is live for this callback.
+    unsafe {
+        with_installed_executor_error_boundary(state, || {
+            // SAFETY: strategy and executor were installed together in Begin.
+            if (*node).ss.ps.qual.is_null() && (*node).ss.ps.ps_ProjInfo.is_null() {
+                #[cfg(any(test, feature = "pg_test"))]
+                TEST_SCAN_FETCH_COUNTS.with(|slot| {
+                    let (direct, callback, caught_error) = slot.get();
+                    slot.set((direct + 1, callback, caught_error));
+                });
+                // This is a Rust call, not a PostgreSQL callback boundary.
+                // Calling the pg_guard wrapper here would turn a Rust error
+                // into a longjmp before the enclosing cleanup handler sees it.
+                fetch_resident_tuple_rust(node.cast())
+            } else {
+                // ExecScan owns per-tuple memory reset, SQL NULL/Boolean
+                // semantics, projection and rows-removed instrumentation.
+                pg_sys::ExecScan(
+                    &raw mut (*node).ss,
+                    Some(fetch_resident_scan_tuple),
+                    Some(recheck_resident_scan_tuple),
+                )
+            }
+        })
+    }
+}
+
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn fetch_resident_scan_tuple(
+    scan: *mut pg_sys::ScanState,
+) -> *mut pg_sys::TupleTableSlot {
+    #[cfg(any(test, feature = "pg_test"))]
+    TEST_SCAN_FETCH_COUNTS.with(|slot| {
+        let (direct, callback, caught_error) = slot.get();
+        slot.set((direct, callback + 1, caught_error));
+    });
+    // SAFETY: ExecScan invokes this callback with the initialized scan state.
+    unsafe { fetch_resident_tuple_rust(scan) }
+}
+
+/// Fetch within Rust, allowing errors to unwind to the executor owner before
+/// the outer PostgreSQL callback converts them to PostgreSQL ERRORs.
+unsafe fn fetch_resident_tuple_rust(scan: *mut pg_sys::ScanState) -> *mut pg_sys::TupleTableSlot {
+    let node = scan.cast::<pg_sys::CustomScanState>();
+    let state = scan.cast::<GpuAccelScanState>();
+    // SAFETY: ScanState is the first field of CustomScanState, which is the
+    // first field of our allocation. Begin installed the matching executor.
+    unsafe {
+        let executor = (*state).accel.executor;
+        let strategy = GpuStrategy::decode((*state).accel.strategy);
+        let dyn_state: &mut dyn crate::engine::executor::ExecutorState = match strategy {
+            GpuStrategy::Agg => &mut *executor.cast::<AggExecState>(),
+            GpuStrategy::Raster => &mut *executor.cast::<RasterExecState>(),
+            _ => pgrx::error!("pg_accel: retired {strategy:?} strategy reached resident executor"),
+        };
+        let slot = dyn_state.exec(node);
+        (*state).accel.rows_dispatched = dyn_state.rows_dispatched();
+        (*state).accel.batches_executed = dyn_state.batches_executed();
+        (*state).accel.dispatch_time_us = dyn_state.dispatch_time_us();
+        dsm::record_parallel_agg_counters_once(
+            state,
+            strategy,
+            dyn_state.rows_dispatched(),
+            dyn_state.batches_executed(),
+            dyn_state.dispatch_time_us(),
+        );
+        slot
+    }
+}
+
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn recheck_resident_scan_tuple(
+    _scan: *mut pg_sys::ScanState,
+    _slot: *mut pg_sys::TupleTableSlot,
+) -> bool {
+    // Row-marked/modifying queries are rejected during shape extraction.
+    pgrx::error!("pg_accel: resident aggregate cannot perform EvalPlanQual rechecks");
+}
+
+/// Release one concrete resident executor.
+///
+/// # Safety
+/// Called by PostgreSQL after execution for our extended state.
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) {
+    let state = node.cast::<GpuAccelScanState>();
+    // SAFETY: executor and its concrete destructor were installed together in
+    // BeginCustomScan. Clearing the pointer first makes repeated End calls and
+    // the later query-context callback harmless.
+    unsafe {
+        with_installed_executor_error_boundary(state, || {
+            release_executor(&mut (*state).accel, false);
+        });
+    };
+}
+
+/// Reset an aggregate or raster executor without changing its exact contract.
+///
+/// # Safety
+/// Called by PostgreSQL for an initialized resident executor.
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn rescan_custom_scan(node: *mut pg_sys::CustomScanState) {
+    let state = node.cast::<GpuAccelScanState>();
+    // SAFETY: strategy and concrete executor were installed together.
+    unsafe {
+        with_installed_executor_error_boundary(state, || {
+            if (*state).accel.executor.is_null() {
+                pgrx::error!("pg_accel: resident rescan found no executor state");
+            }
+            match GpuStrategy::decode((*state).accel.strategy) {
+                GpuStrategy::Agg => {
+                    (*(*state).accel.executor.cast::<AggExecState>()).reset_for_rescan();
+                }
+                GpuStrategy::Raster => {
+                    (*(*state).accel.executor.cast::<RasterExecState>()).reset_for_rescan();
+                }
+                strategy => {
+                    pgrx::error!("pg_accel: retired {strategy:?} strategy reached resident rescan");
+                }
+            }
+            reset_observability(&mut (*state).accel);
+            if GpuStrategy::decode((*state).accel.strategy) == GpuStrategy::Raster {
+                let raster = &*(*state).accel.executor.cast::<RasterExecState>();
+                (*state).accel.rows_dispatched =
+                    crate::engine::executor::ExecutorState::rows_dispatched(raster);
+                (*state).accel.batches_executed =
+                    crate::engine::executor::ExecutorState::batches_executed(raster);
+                (*state).accel.dispatch_time_us =
+                    crate::engine::executor::ExecutorState::dispatch_time_us(raster);
+            }
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "pg_test")]
+mod tests;

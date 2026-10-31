@@ -1,0 +1,9 @@
+test_complete_synthetic_protocol (__main__.ProtocolTests) ... ok
+test_missing_unknown_and_symlink_files (__main__.ProtocolTests) ... ok
+test_negative_receipt_mutations (__main__.ProtocolTests) ... ok
+test_truncation_and_duplicate_json_field (__main__.ProtocolTests) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 19.444s
+
+OK

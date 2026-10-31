@@ -1,0 +1,4 @@
+engine::ffi::custom_scan::paired_sink::tests::bounded_sink_charges_partial_bytes_and_never_retries_after_limit
+engine::ffi::custom_scan::paired_sink::tests::bounded_sink_rejects_collisions_total_limit_and_record_limit
+engine::ffi::custom_scan::paired_sink::tests::bounded_sink_rejects_directory_replacement
+engine::ffi::custom_scan::paired_sink::tests::bounded_sink_retains_exact_records_and_rejects_reopen_aliases

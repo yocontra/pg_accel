@@ -1,0 +1,11 @@
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.40s
+     Running unittests src/lib.rs (target/debug/deps/pg_accel-ed206a68dc782b00)
+
+running 3 tests
+test engine::ffi::custom_scan::paired_driver::receipt_tests::failed_secondary_writer_does_not_replace_primary ... ok
+test engine::ffi::custom_scan::paired_driver::receipt_tests::receipt_failure_preserves_each_primary_and_rejects_success ... ok
+test engine::ffi::custom_scan::paired_driver::receipt_tests::secondary_receipt_is_bounded_and_never_retried ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1931 filtered out; finished in 0.00s
+

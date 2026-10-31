@@ -1,0 +1,4 @@
+d1f7e3930c1c300c0dd4890f8ad2d98d98ab1f1526c16c75d274ee47bf0649d7  .codex/scratch/hash-count-where-rust-20261030/run-paired-correctness.sh
+cb5f3804675debc7561f32f8eb9b798db481f1f8c180fb96a06f204a3a8ed791  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/pgrx/config.toml
+09a21188a8481066ba83d5b991498560676f43dbbd7f8726c4439221d6ae5614  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/check-live2.py
+a748577785066a6bf997e0899f140e68f6f7e80926b40adfaede03221783470e  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/paired-cleanup.expected

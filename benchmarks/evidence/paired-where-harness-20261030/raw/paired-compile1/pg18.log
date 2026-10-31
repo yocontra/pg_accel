@@ -1,0 +1,63 @@
+   Compiling pgrx-pg-sys v0.19.1
+   Compiling pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+   Compiling pgrx v0.19.1
+   Compiling pgrx-tests v0.19.1
+error: field `key_type_oid` is never read
+  --> pg_accel/src/engine/ffi/custom_scan/paired_driver.rs:19:9
+   |
+14 | pub struct Recipe {
+   |            ------ field in this struct
+...
+19 |     pub key_type_oid: u32,
+   |         ^^^^^^^^^^^^
+   |
+   = note: `Recipe` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+   = note: `-D dead-code` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error: multiple fields are never read
+  --> pg_accel/src/engine/ffi/custom_scan/paired_driver.rs:39:9
+   |
+28 | pub struct Evidence {
+   |            -------- fields in this struct
+...
+39 |     pub natural_capacity: usize,
+   |         ^^^^^^^^^^^^^^^^
+...
+42 |     pub construction_bytes: u64,
+   |         ^^^^^^^^^^^^^^^^^^
+43 |     pub construction_us: u64,
+   |         ^^^^^^^^^^^^^^^
+...
+48 |     pub preparation_ns: u128,
+   |         ^^^^^^^^^^^^^^
+49 |     pub dispatch_ns: Option<u128>,
+   |         ^^^^^^^^^^^
+50 |     pub consumption_ns: u128,
+   |         ^^^^^^^^^^^^^^
+51 |     pub end_to_end_ns: u128,
+   |         ^^^^^^^^^^^^^
+   |
+   = note: `Evidence` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+error: fields `artifact_summary` and `artifact_bytes` are never read
+  --> pg_accel/src/engine/ffi/custom_scan/paired_runner.rs:11:16
+   |
+ 4 | pub(super) struct PairedOwnedOutput {
+   |                   ----------------- fields in this struct
+...
+11 |     pub(super) artifact_summary: String,
+   |                ^^^^^^^^^^^^^^^^
+12 |     pub(super) artifact_outcome: Option<crate::engine::residency::ArtifactEnsureOutcome>,
+13 |     pub(super) artifact_bytes: Option<u64>,
+   |                ^^^^^^^^^^^^^^
+
+error: field `input` is never read
+ --> pg_accel/src/engine/ffi/custom_scan/paired_population.rs:2:68
+  |
+2 | pub(crate) struct V2Leaf { pub whole: u64, pub partition: u64, pub input: u64 }
+  |                   ------ field in this struct                      ^^^^^
+  |
+  = note: `V2Leaf` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+error: could not compile `pg_accel` (lib test) due to 4 previous errors

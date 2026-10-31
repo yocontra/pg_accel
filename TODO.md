@@ -2032,6 +2032,12 @@ complete objective is implemented and verified.
       coefficients or suppressing competing dense paths. Paired candidate
       measurements, the full WHERE performance matrix, unchanged released-workload
       controls and release/source-proof gates remain open.
+      The paired diagnostic harness is now correctness-qualified on PG18/19:
+      installed-owner cleanup/recovery, full result parity, actual kernel mode,
+      exact lifecycle counts, bounded durable receipts and primary-error
+      preservation pass. Preserve the original registration and completion-
+      telemetry test failures. No paired timings or ranking conclusions yet.
+      Evidence: `benchmarks/evidence/paired-where-harness-20261030/README.md`.
       - [x] Qualify adaptive WHERE COUNT correctness on PG18 and PG19. The final
         source passes 1,365 ordinary tests, strict Clippy, formatting, both-major
         test builds and 35 focused live tests per major (70 total), with exact

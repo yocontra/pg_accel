@@ -1,0 +1,2092 @@
+diff --git a/pg_accel/src/engine/executor/agg/descriptor.rs b/pg_accel/src/engine/executor/agg/descriptor.rs
+index c33af40a..f684099b 100644
+--- a/pg_accel/src/engine/executor/agg/descriptor.rs
++++ b/pg_accel/src/engine/executor/agg/descriptor.rs
+@@ -2959,6 +2959,10 @@ fn descriptor_artifact_policy_input(
+ }
+ 
+ impl DescriptorAggPlan {
++    #[cfg(feature = "pg_test")]
++    pub(super) fn paired_identity(&self) -> DerivedArtifactIdentity {
++        self.identity.clone()
++    }
+     #[cfg(feature = "pg_test")]
+     pub(super) fn new(spec: AggQuerySpec, projection: AggOutputProjection) -> Result<Self, String> {
+         Self::new_selected(spec, projection, super::AggExecutionSelection::Legacy)
+@@ -3999,6 +4003,31 @@ fn set_adaptive_hash_test_cap(capacity: Option<usize>) -> Option<usize> {
+     TEST_ADAPTIVE_HASH_CAP.with(|cap| cap.replace(capacity))
+ }
+ 
++#[cfg(feature = "pg_test")]
++pub fn paired_assert_no_overrides() -> Result<(), String> {
++    if TEST_ADAPTIVE_HASH_CAP.with(Cell::get).is_some()
++        || TEST_ADAPTIVE_MASK_INTERRUPT.with(Cell::get).is_some()
++        || TEST_DENSE_CHUNK_ROWS.load(Ordering::SeqCst) != 0
++        || TEST_DENSE_ONE_SHOT_MAX_ROWS.load(Ordering::SeqCst) != 0
++        || TEST_DENSE_TIMEOUT_AFTER_CALLS.load(Ordering::SeqCst) != 0
++    {
++        return Err("diagnostic rejects capacity/chunk/interrupt overrides".into());
++    }
++    Ok(())
++}
++
++#[cfg(feature = "pg_test")]
++pub fn paired_with_mask_cancel<T>(run: impl FnOnce() -> T) -> T {
++    struct Restore(Option<(u64, bool)>);
++    impl Drop for Restore {
++        fn drop(&mut self) {
++            set_adaptive_mask_test_interrupt(self.0);
++        }
++    }
++    let _restore = Restore(set_adaptive_mask_test_interrupt(Some((1, true))));
++    run()
++}
++
+ // Keep the owned output inline: this short-lived control transfer must not add
+ // a fallible heap allocation between native completion and installed ownership.
+ #[allow(clippy::large_enum_variant)]
+@@ -4428,6 +4457,14 @@ impl DescriptorAggPlan {
+         if let AdaptiveHashAttempt::Complete(output, selected, whole, emitted) = attempt {
+             let driver = state.driver.as_mut().expect("initialized driver");
+             driver.complete_population_leaf(selected, whole, state.fact_rows as u64)?;
++            #[cfg(feature = "pg_test")]
++            if hash_where_filter(&self.spec)?.is_some() {
++                crate::engine::ffi::custom_scan::paired_population::record_successful_leaf(
++                    whole,
++                    selected,
++                    state.fact_rows as u64,
++                );
++            }
+             let done = driver.attempt()?.is_none();
+             if done {
+                 state.filter = None;
+diff --git a/pg_accel/src/engine/executor/agg/execute.rs b/pg_accel/src/engine/executor/agg/execute.rs
+index cc73a9a0..b11559ed 100644
+--- a/pg_accel/src/engine/executor/agg/execute.rs
++++ b/pg_accel/src/engine/executor/agg/execute.rs
+@@ -150,6 +150,15 @@ pub struct AggExecState {
+ }
+ 
+ impl AggExecState {
++    #[cfg(feature = "pg_test")]
++    pub(crate) fn paired_completion_identity(
++        &self,
++    ) -> (bool, crate::engine::residency::DerivedArtifactIdentity) {
++        (
++            self.descriptor.completed,
++            self.descriptor.plan.paired_identity(),
++        )
++    }
+     /// Validate a strict neutral contract without beginning fallible artifact
+     /// preparation. The caller must install this state into its query-context
+     /// cleanup owner before calling [`Self::prepare_descriptor`], because that
+diff --git a/pg_accel/src/engine/executor/agg/mod.rs b/pg_accel/src/engine/executor/agg/mod.rs
+index c083f08d..96c26131 100644
+--- a/pg_accel/src/engine/executor/agg/mod.rs
++++ b/pg_accel/src/engine/executor/agg/mod.rs
+@@ -12,6 +12,9 @@
+ //! 3. **`end_custom_scan`** — reclaims via `Box::from_raw`.
+ 
+ mod artifact;
++
++#[cfg(feature = "pg_test")]
++pub(crate) use descriptor::{paired_assert_no_overrides, paired_with_mask_cancel};
+ mod descriptor;
+ mod execute;
+ mod hash_partition;
+diff --git a/pg_accel/src/engine/ffi/custom_scan/mod.rs b/pg_accel/src/engine/ffi/custom_scan/mod.rs
+index e0a112e7..146879e1 100644
+--- a/pg_accel/src/engine/ffi/custom_scan/mod.rs
++++ b/pg_accel/src/engine/ffi/custom_scan/mod.rs
+@@ -13,6 +13,21 @@
+ 
+ use std::ffi::{c_int, c_void};
+ 
++#[cfg(feature = "pg_test")]
++mod paired_backend;
++#[cfg(feature = "pg_test")]
++mod paired_cleanup_tests;
++#[cfg(feature = "pg_test")]
++mod paired_driver;
++#[cfg(feature = "pg_test")]
++mod paired_fixtures;
++#[cfg(feature = "pg_test")]
++pub(crate) mod paired_population;
++#[cfg(feature = "pg_test")]
++mod paired_runner;
++#[cfg(feature = "pg_test")]
++mod paired_sink;
++
+ use pgrx::pg_sys;
+ 
+ use super::super::gucs;
+diff --git a/pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs b/pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs
+index ad5f716c..a6f2e513 100644
+--- a/pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs
++++ b/pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs
+@@ -37,6 +37,11 @@ use crate::engine::spec::{
+ use crate::engine::stats;
+ use crate::gpu::GroupedAggKernelMode;
+ 
++#[cfg(feature = "pg_test")]
++mod paired_recipes;
++#[cfg(feature = "pg_test")]
++pub use paired_recipes::{PairedRecipe, capture_paired_recipes};
++
+ const GENERIC_SHAPE_PATH_CONTEXT: &str = "upper_paths_generic_groupagg";
+ use crate::engine::ffi::custom_scan::{AGG_OUTPUT_PROJECTION_SENTINEL, AGG_QUERY_SPEC_SENTINEL};
+ const WEIGHTED_GLOBAL_COUNT_MIN_FACT_ROWS: u64 = 1_000_000;
+@@ -2580,6 +2585,8 @@ unsafe fn try_inject_candidate(
+             },
+             &model,
+         )?;
++        #[cfg(feature = "pg_test")]
++        paired_recipes::paired_capture_recipe(&shape);
+         // SAFETY: root and parse belong to this live upper-path invocation.
+         let effective_cost = unsafe {
+             add_native_having_cost(
+@@ -2666,7 +2673,7 @@ unsafe fn try_inject_candidate(
+ // Test-only observation of real default admission; this does not alter candidate
+ // order, costs, cache identities, path pruning, or production EXPLAIN output.
+ #[cfg(feature = "pg_test")]
+-pub(crate) fn capture_candidate_observations<T>(run: impl FnOnce() -> T) -> (T, String) {
++pub fn capture_candidate_observations<T>(run: impl FnOnce() -> T) -> (T, String) {
+     struct Restore(Option<Vec<CandidateObservation>>);
+     impl Drop for Restore {
+         fn drop(&mut self) {
+@@ -2883,12 +2890,7 @@ mod tests {
+                     let inputs = CANDIDATE_INPUT_OBSERVATIONS
+                         .with(|slot| slot.borrow_mut().take().expect("active input observer"));
+                     assert_eq!(inputs.len(), 1, "{inputs:?}");
+-                    if !cached_legacy_decline {
+-                        assert_eq!(inputs[0].clones, 1, "{inputs:?}");
+-                        assert_eq!(inputs[0].fresh_legacy, 1, "{inputs:?}");
+-                        assert_eq!(inputs[0].reused_raw, 1, "{inputs:?}");
+-                        assert_eq!(inputs[0].fresh_raw, 0, "{inputs:?}");
+-                    } else {
++                    if cached_legacy_decline {
+                         legacy_cache_hits += 1;
+                         assert_eq!(inputs[0].clones, 0, "{inputs:?}");
+                         assert_eq!(
+@@ -2900,6 +2902,11 @@ mod tests {
+                             inputs[0].fresh_raw, 1,
+                             "raw must still extract after legacy cache decline: {inputs:?}"
+                         );
++                    } else {
++                        assert_eq!(inputs[0].clones, 1, "{inputs:?}");
++                        assert_eq!(inputs[0].fresh_legacy, 1, "{inputs:?}");
++                        assert_eq!(inputs[0].reused_raw, 1, "{inputs:?}");
++                        assert_eq!(inputs[0].fresh_raw, 0, "{inputs:?}");
+                     }
+                     pgrx::notice!(
+                         "candidate control kind={kind} rows={rows} repeat={repeat}: {observations:?}"
+diff --git a/pg_accel/src/engine/ffi/planner_hooks/mod.rs b/pg_accel/src/engine/ffi/planner_hooks/mod.rs
+index 353d1fbc..f12bc98b 100644
+--- a/pg_accel/src/engine/ffi/planner_hooks/mod.rs
++++ b/pg_accel/src/engine/ffi/planner_hooks/mod.rs
+@@ -6,6 +6,9 @@
+ 
+ use std::cell::Cell;
+ 
++#[cfg(feature = "pg_test")]
++pub(crate) use generic_groupagg::{PairedRecipe, capture_paired_recipes};
++
+ use pgrx::pg_sys::{
+     self, CustomPath, JoinPathExtraData, List, NodeTag, Path, PlannerInfo, RangeTblEntry,
+     RelOptInfo, RestrictInfo, UpperRelationKind,
+diff --git a/pg_accel/src/engine/residency/mod.rs b/pg_accel/src/engine/residency/mod.rs
+index e0740cf2..4c310ad6 100644
+--- a/pg_accel/src/engine/residency/mod.rs
++++ b/pg_accel/src/engine/residency/mod.rs
+@@ -14,6 +14,12 @@ mod numeric;
+ mod proof;
+ mod store;
+ 
++#[cfg(feature = "pg_test")]
++pub(crate) use store::{
++    paired_assert_eviction_rejections, paired_current_raw, paired_raw_evidence,
++    paired_remove_exact_derived,
++};
++
+ pub(crate) use ledger::ExecutionMemoryCharge;
+ pub(crate) use store::with_resident_dispatch_inputs;
+ 
+diff --git a/pg_accel/src/engine/residency/store.rs b/pg_accel/src/engine/residency/store.rs
+index c1ad7f47..a8d71d50 100644
+--- a/pg_accel/src/engine/residency/store.rs
++++ b/pg_accel/src/engine/residency/store.rs
+@@ -1,6 +1,14 @@
+ //! Backend-local two-tier resident relation store.
+ 
+ use std::any::Any;
++
++#[cfg(feature = "pg_test")]
++mod paired;
++#[cfg(feature = "pg_test")]
++pub use paired::{
++    paired_assert_eviction_rejections, paired_current_raw, paired_raw_evidence,
++    paired_remove_exact_derived,
++};
+ use std::cell::{Cell, RefCell};
+ use std::collections::{BTreeMap, BTreeSet};
+ use std::fmt;
+diff --git a/pg_accel/src/engine/stats.rs b/pg_accel/src/engine/stats.rs
+index 4c3b53c4..9f71d311 100644
+--- a/pg_accel/src/engine/stats.rs
++++ b/pg_accel/src/engine/stats.rs
+@@ -333,6 +333,19 @@ pub fn record_stock_exec() {
+     });
+ }
+ 
++#[cfg(feature = "pg_test")]
++pub(crate) fn paired_stock_count() -> u64 {
++    STATS.with(|stats| stats.borrow().stock_exec_count)
++}
++
++#[cfg(feature = "pg_test")]
++pub(crate) fn paired_verified_data_calls() -> u64 {
++    GROUPED_KERNEL_MODE_CALLS
++        .iter()
++        .map(|counter| counter.load(Ordering::Relaxed))
++        .sum()
++}
++
+ /// Record a GPU kernel batch completion.
+ pub fn record_gpu_batch(rows: u64, uncertain: u64) {
+     STATS.with(|s| {
+diff --git a/pg_accel/src/gpu/grouped_agg.rs b/pg_accel/src/gpu/grouped_agg.rs
+index f1ac8f28..f5e85d4b 100644
+--- a/pg_accel/src/gpu/grouped_agg.rs
++++ b/pg_accel/src/gpu/grouped_agg.rs
+@@ -2810,6 +2810,10 @@ fn execute_call_partition(
+         // remain live and exclusively accessible for this synchronous bridge call.
+         if let Some(partition) = partition {
+             if uses_v2 {
++                #[cfg(feature = "pg_test")]
++                crate::engine::ffi::custom_scan::paired_population::record_v2_call(
++                    desc.group_capacity,
++                );
+                 bridge::pgaccel_hash_count_partition_execute_v2(
+                     std::ptr::from_ref(&desc),
+                     std::ptr::from_ref(&partition.v2()),
+diff --git a/pg_accel/src/engine/ffi/custom_scan/paired_backend.rs b/pg_accel/src/engine/ffi/custom_scan/paired_backend.rs
+new file mode 100644
+index 00000000..413b6459
+--- /dev/null
++++ b/pg_accel/src/engine/ffi/custom_scan/paired_backend.rs
+@@ -0,0 +1,387 @@
++use super::paired_driver::{
++    Arm, Backend, Evidence, Key, Phase, Recipe, Rows, Run, Sample, SuccessfulV2Leaf,
++};
++use super::paired_sink::SharedSink;
++use crate::engine::{ffi::planner_hooks, residency, stats};
++use pgrx::{Spi, pg_sys};
++
++pub struct PgBackend {
++    raw: Option<residency::ResidentRelationEvidence>,
++    legacy_identity: Option<residency::DerivedArtifactIdentity>,
++    sequence: u64,
++    sink: SharedSink,
++    fixture: &'static str,
++    context: serde_json::Value,
++    oracle: Rows,
++}
++impl PgBackend {
++    pub(crate) fn new(sink: SharedSink, fixture: &'static str) -> Self {
++        Self {
++            raw: None,
++            legacy_identity: None,
++            sequence: 0,
++            sink,
++            fixture,
++            context: serde_json::Value::Null,
++            oracle: Vec::new(),
++        }
++    }
++    fn key(oid: u32, value: Option<i64>) -> Result<Key, String> {
++        match (oid, value) {
++            (_, None) => Ok(Key::Null),
++            (21, Some(v)) => Ok(Key::I16(v.try_into().map_err(|_| "INT2 range")?)),
++            (23, Some(v)) => Ok(Key::I32(v.try_into().map_err(|_| "INT4 range")?)),
++            (20, Some(v)) => Ok(Key::I64(v)),
++            _ => Err("unsupported result key".into()),
++        }
++    }
++}
++impl Backend for PgBackend {
++    fn begin_sample(
++        &mut self,
++        fixture: &'static str,
++        phase: Phase,
++        pair: usize,
++        position: usize,
++        arm: Arm,
++    ) -> Result<(), String> {
++        if fixture != self.fixture {
++            return Err("fixture binding mismatch".into());
++        }
++        self.context = serde_json::json!({"fixture":fixture,"phase":phase,"pair":pair,"position":position,"arm":arm});
++        self.sink.borrow_mut().record("begin", &self.context)
++    }
++    fn assert_default_gucs_and_no_overrides(&mut self) -> Result<(), String> {
++        let valid = Spi::get_one::<bool>("SELECT bool_and(setting=boot_val) FROM pg_settings WHERE name IN ('pg_accel.cost_multiplier','pg_accel.min_batch_size')")
++            .map_err(|e| e.to_string())? == Some(true);
++        if !valid || !crate::engine::gucs::enabled() {
++            return Err("nondefault admission settings".into());
++        }
++        crate::engine::executor::agg::paired_assert_no_overrides()
++    }
++    fn stock_full_result(&mut self, sql: &str) -> Result<Rows, String> {
++        // Output types come from the unchanged explicit fixture, not from casts
++        // applied to the tested query. Stock cast is only owned scalar decoding.
++        let oid = if sql.contains("raw_where") { 21 } else { 20 };
++        Spi::run("SET pg_accel.enabled=off").map_err(|e| e.to_string())?;
++        let before = crate::gpu::gpu_exec_count();
++        let result = Spi::connect(|client| -> Result<Rows, String> {
++            let selected = client
++                .select(
++                    &format!("SELECT k::bigint,n::bigint FROM ({sql}) paired_stock"),
++                    None,
++                    &[],
++                )
++                .map_err(|e| e.to_string())?;
++            let mut rows = Vec::new();
++            for row in selected {
++                let key = Self::key(oid, row.get::<i64>(1).map_err(|e| e.to_string())?)?;
++                let count = row
++                    .get::<i64>(2)
++                    .map_err(|e| e.to_string())?
++                    .ok_or("NULL COUNT")?;
++                if rows.len() == super::paired_sink::ROW_LIMIT {
++                    super::paired_sink::retain_row_bound(&rows, &vec![(key, count)]);
++                    return Err("stock collector exceeded fixed row bound".into());
++                }
++                rows.push((key, count));
++            }
++            Ok(rows)
++        });
++        Spi::run("SET pg_accel.enabled=on").map_err(|e| e.to_string())?;
++        if crate::gpu::gpu_exec_count() != before {
++            return Err("stock oracle dispatched GPU".into());
++        }
++        let result = result?;
++        if result.len() > super::paired_sink::ROW_LIMIT {
++            return Err("stock result exceeds row bound".into());
++        }
++        self.sink.borrow_mut().record(
++            "oracle",
++            &serde_json::json!({"fixture":self.fixture,"rows":result}),
++        )?;
++        self.oracle.clone_from(&result);
++        Ok(result)
++    }
++    fn capture_independent_recipes(&mut self, sql: &str) -> Result<[Recipe; 2], String> {
++        let ((), candidates) = planner_hooks::capture_paired_recipes(|| {
++            Spi::run(&format!("EXPLAIN (VERBOSE) {sql}"))
++                .expect("capture unchanged candidate pair");
++        })?;
++        let [legacy, raw] = candidates;
++        self.sink.borrow_mut().record("recipes",&serde_json::json!({
++            "fixture":self.fixture,"sql":sql,
++            "legacy_spec":legacy.spec.encode_i32().map_err(|e|e.to_string())?,
++            "legacy_projection":legacy.projection.encode_i32(&legacy.spec).map_err(|e|e.to_string())?,
++            "raw_spec":raw.spec.encode_i32().map_err(|e|e.to_string())?,
++            "raw_projection":raw.projection.encode_i32(&raw.spec).map_err(|e|e.to_string())?,
++            "legacy_cost":legacy.cost_components,"raw_cost":raw.cost_components
++        }))?;
++        if legacy.spec.fact_rel != raw.spec.fact_rel {
++            return Err("candidate owners differ".into());
++        }
++        let evidence = residency::paired_raw_evidence(raw.spec.fact_rel.into())?;
++        self.raw = Some(evidence);
++        let default_plan = Spi::connect(|client| -> Result<Vec<String>, String> {
++            client
++                .select(
++                    &format!("EXPLAIN (ANALYZE,VERBOSE,COSTS OFF) {sql}"),
++                    None,
++                    &[],
++                )
++                .map_err(|error| error.to_string())?
++                .map(|row| {
++                    row.get::<String>(1)
++                        .map_err(|error| error.to_string())?
++                        .ok_or("NULL plan line".into())
++                })
++                .collect()
++        })?;
++        self.sink.borrow_mut().record(
++            "default_plan",
++            &serde_json::json!({"fixture":self.fixture,"lines":default_plan}),
++        )?;
++        let make = |captured: planner_hooks::PairedRecipe, arm| Recipe {
++            arm,
++            key_type_oid: captured.projection.slots[0].result_type_oid,
++            cost_evidence: captured.cost_components.clone(),
++            relation_generation: evidence.generation,
++            captured,
++        };
++        Ok([make(legacy, Arm::Legacy), make(raw, Arm::Raw)])
++    }
++    fn prepare_jit_outside_measurements(&mut self, recipes: &[Recipe; 2]) -> Result<(), String> {
++        for recipe in recipes {
++            self.context =
++                serde_json::json!({"fixture":self.fixture,"phase":"Jit","arm":recipe.arm});
++            self.sink.borrow_mut().record("begin", &self.context)?;
++            let run = self.execute_owned_to_eof(recipe)?;
++            let verdict = super::paired_driver::validate(recipe, &run, &self.oracle)
++                .and_then(|()| self.verify_closed_owner_and_raw_residency());
++            self.sink.borrow_mut().record(
++                "verdict",
++                &serde_json::json!({"context":self.context,"error":verdict.as_ref().err()}),
++            )?;
++            verdict?;
++        }
++        Ok(())
++    }
++    fn invalidate_owned_derived_only(&mut self, recipe: &Recipe) -> Result<(), String> {
++        self.verify_closed_owner_and_raw_residency()?;
++        let expected = self.raw.ok_or("raw owner not captured")?;
++        if recipe.arm == Arm::Legacy {
++            let identity = self
++                .legacy_identity
++                .as_ref()
++                .ok_or("no successful Legacy artifact identity")?;
++            let bytes = residency::paired_remove_exact_derived(expected, identity)?;
++            self.sink.borrow_mut().record("invalidation",&serde_json::json!({"context":self.context,"bytes":bytes,"identity":identity.canonical_words()}))?;
++        } else {
++            // Raw owns query-local masks only; preserve the unrelated Legacy
++            // artifact and prove unchanged immutable raw ownership instead.
++            residency::paired_current_raw(expected)?;
++        }
++        Ok(())
++    }
++    fn execute_owned_to_eof(&mut self, recipe: &Recipe) -> Result<Run, String> {
++        self.sequence = self.sequence.checked_add(1).ok_or("sequence overflow")?;
++        let sequence = self.sequence;
++        let error_context = format!(
++            "fixture={} sequence={sequence} context={}",
++            self.fixture, self.context
++        );
++        let before_raw = residency::paired_current_raw(self.raw.ok_or("missing raw owner")?)?;
++        let before_bytes = residency::resident_live_bytes();
++        let stock = stats::paired_stock_count();
++        let gpu = crate::gpu::gpu_exec_count();
++        let verified = stats::paired_verified_data_calls();
++        let artifact = stats::read_artifact_lifecycle();
++        let (output, populations) = super::paired_population::capture(|| {
++            pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
++                // SAFETY: main-backend test entry; installed runner owns every
++                // executor resource through its real PG ERROR boundary.
++                unsafe {
++                    super::paired_runner::paired_run_installed(
++                        recipe.captured.spec.clone(),
++                        recipe.captured.projection.clone(),
++                        recipe.captured.selection,
++                    )
++                }
++            }))
++            .catch_others(|caught| {
++                // Immediate append to captured PG log before rethrow. Never
++                // turn ERROR into a timing sample or silently continue a pair.
++                super::paired_sink::active_error_before_rethrow(&error_context);
++                caught.rethrow()
++            })
++            .execute()
++        });
++        let after = stats::read_artifact_lifecycle();
++        let after_bytes = residency::resident_live_bytes();
++        self.sink.borrow_mut().record("raw",&serde_json::json!({
++            "context":self.context,"sequence":sequence,"key_type":output.key_type,
++            "completed":output.completed,"mode":output.mode.map(crate::gpu::GroupedAggKernelMode::label),
++            "calls":output.calls,"planned":output.scheduled,"dispatch_us":output.dispatch_us,
++            "policy":output.artifact_summary,"artifact_bytes":output.artifact_bytes,
++            "rows":output.rows,"populations":populations,
++            "preparation_ns":output.preparation_ns,"consumption_ns":output.consumption_ns,
++            "descriptor_executor_ns":output.descriptor_executor_ns,"diagnostic_capture_ns":output.diagnostic_capture_ns,
++            "bridge_delta":crate::gpu::gpu_exec_count()-gpu,"stock_delta":stats::paired_stock_count()-stock,
++            "verified_data_calls":stats::paired_verified_data_calls()-verified,
++            "construction_bytes":after.construction_bytes-artifact.construction_bytes,
++            "built_artifact_preparation_us":after.construction_us-artifact.construction_us,
++            "retained_bytes_before":before_bytes,"retained_bytes_after":after_bytes,
++            "derived_bytes_before":before_raw.derived_bytes,
++            "cost":recipe.cost_evidence
++        }))?;
++        let after_raw = residency::paired_current_raw(before_raw)?;
++        let [owner] = output.residency.as_slice() else {
++            return Err("expected one raw owner".into());
++        };
++        if output.key_type != recipe.key_type_oid
++            || output.artifact_bytes.is_none()
++            || output.artifact_summary.is_empty()
++        {
++            return Err("missing typed execution/artifact evidence".into());
++        }
++        if recipe.arm == Arm::Raw
++            && (populations.actual_v2_calls == 0
++                || populations.actual_v2_calls != populations.capacities.len() as u64
++                || populations
++                    .leaves
++                    .iter()
++                    .any(|leaf| leaf.input != owner.row_count))
++        {
++            return Err("actual v2 call/input observation mismatch".into());
++        }
++        let verified_data_calls = stats::paired_verified_data_calls() - verified;
++        let remaining_calls = output
++            .calls
++            .checked_sub(verified_data_calls)
++            .ok_or("physical calls exceed lifecycle")?;
++        let (mask_calls, control_calls) = if recipe.arm == Arm::Raw {
++            if !output.artifact_summary.contains("ephemeral_fused")
++                || output.artifact_outcome == Some(residency::ArtifactEnsureOutcome::Hit)
++                || after_bytes != before_bytes
++                || after_raw.derived_bytes != before_raw.derived_bytes
++                || populations.actual_v2_calls != verified_data_calls
++            {
++                return Err("Raw fused ownership/aggregate-call evidence mismatch".into());
++            }
++            let filter = &recipe.captured.spec.measures[0].filter;
++            let masks = if *filter == crate::engine::spec::FilterSpec::None
++                || *filter == recipe.captured.spec.fact_filter
++            {
++                1_u64
++            } else {
++                2_u64
++            };
++            let expected = masks
++                * owner
++                    .row_count
++                    .div_ceil(crate::gpu::SQL_BOOL_MASK_CHUNK_ROWS as u64);
++            if remaining_calls != expected {
++                return Err("distinct-mask conversion call count mismatch".into());
++            }
++            (remaining_calls, 0)
++        } else {
++            (0, remaining_calls)
++        };
++        if recipe.arm == Arm::Legacy {
++            self.legacy_identity = Some(output.identity.clone());
++        }
++        let rows = output
++            .rows
++            .into_iter()
++            .map(|(k, n)| Ok((Self::key(output.key_type, k)?, n)))
++            .collect::<Result<Rows, String>>()?;
++        let evidence = Evidence {
++            physical_mode: output
++                .mode
++                .ok_or("no actual physical mode")?
++                .label()
++                .to_owned(),
++            completed: output.completed,
++            bridge_delta: crate::gpu::gpu_exec_count() - gpu,
++            scheduled_calls: output.scheduled,
++            observed_calls: output.calls,
++            verified_data_calls,
++            mask_calls,
++            control_calls,
++            stock_fallback_delta: stats::paired_stock_count() - stock,
++            input_rows: owner.row_count,
++            generation: owner.generation,
++            natural_capacity: populations.capacities.first().copied(),
++            explicit_capacity_override: None,
++            artifact_cache_hit: output.artifact_outcome
++                == Some(residency::ArtifactEnsureOutcome::Hit),
++            construction_bytes: after.construction_bytes - artifact.construction_bytes,
++            built_artifact_preparation_us: after.construction_us - artifact.construction_us,
++            resident_load_included: !output.loaded_relations.is_empty(),
++            successful_v2_leaves: populations
++                .leaves
++                .into_iter()
++                .map(|leaf| SuccessfulV2Leaf {
++                    whole_where_rows: leaf.whole,
++                    partition_rows: leaf.partition,
++                })
++                .collect(),
++            preparation_ns: output.preparation_ns,
++            dispatch_ns: Some(u128::from(output.dispatch_us) * 1000),
++            consumption_ns: output.consumption_ns,
++            descriptor_executor_ns: output.descriptor_executor_ns,
++            diagnostic_capture_ns: output.diagnostic_capture_ns,
++        };
++        Ok(Run { rows, evidence })
++    }
++    fn retain(&mut self, s: &Sample) -> Result<(), String> {
++        self.sink.borrow_mut().record(
++            "computed",
++            &serde_json::json!({
++                "fixture":s.fixture,"phase":s.phase,"pair":s.pair,"position":s.position,
++                "arm":s.arm,"evidence":s.evidence,"rows":s.rows.len()
++            }),
++        )
++    }
++    fn retain_verdict(
++        &mut self,
++        fixture: &'static str,
++        phase: Phase,
++        pair: usize,
++        position: usize,
++        error: Option<&str>,
++    ) -> Result<(), String> {
++        self.sink.borrow_mut().record(
++            "verdict",
++            &serde_json::json!({
++                "fixture":fixture,"phase":phase,"pair":pair,"position":position,"error":error
++            }),
++        )
++    }
++    fn retain_error(
++        &mut self,
++        fixture: &'static str,
++        phase: Phase,
++        pair: usize,
++        position: usize,
++        arm: Arm,
++        error: &str,
++    ) -> Result<(), String> {
++        self.sink.borrow_mut().record("result_error",&serde_json::json!({
++            "fixture":fixture,"phase":phase,"pair":pair,"position":position,"arm":arm,"error":error
++        }))
++    }
++    fn verify_closed_owner_and_raw_residency(&mut self) -> Result<(), String> {
++        let counts = super::test_executor_cleanup_counts();
++        if counts.installed
++            != counts
++                .normal_end
++                .checked_add(counts.query_reset)
++                .ok_or("cleanup overflow")?
++        {
++            return Err("executor still installed".into());
++        }
++        residency::paired_current_raw(self.raw.ok_or("no raw baseline")?)?;
++        Ok(())
++    }
++}
+diff --git a/pg_accel/src/engine/ffi/custom_scan/paired_cleanup_tests.rs b/pg_accel/src/engine/ffi/custom_scan/paired_cleanup_tests.rs
+new file mode 100644
+index 00000000..00390ac2
+--- /dev/null
++++ b/pg_accel/src/engine/ffi/custom_scan/paired_cleanup_tests.rs
+@@ -0,0 +1,170 @@
++#[pgrx::pg_schema]
++mod paired_cleanup_tests {
++    use super::super::paired_runner::{PairedFault, paired_run_installed, paired_run_with_fault};
++    use crate::engine::ffi::planner_hooks::{PairedRecipe, capture_paired_recipes};
++    use pgrx::prelude::*;
++    thread_local! {
++        static RECIPE: std::cell::RefCell<Option<PairedRecipe>> = const { std::cell::RefCell::new(None) };
++    }
++
++    #[pg_extern]
++    fn paired_failure_entry(point: &str) -> i64 {
++        let recipe = RECIPE
++            .with(|slot| slot.borrow().clone())
++            .expect("owned failure recipe");
++        let fault = match point {
++            "prepare" => Some(PairedFault::Prepare),
++            "prepared" => Some(PairedFault::AfterPrepare),
++            "dispatch" => Some(PairedFault::AfterDispatch),
++            "close" | "close_receipt" => Some(PairedFault::Close),
++            "cancel" => None,
++            _ => panic!("unknown fixed failure point"),
++        };
++        let run = || {
++            // SAFETY: SQL entry runs on the backend main thread. The runner
++            // installs its production abort-safe owner before injected ERROR.
++            unsafe {
++                paired_run_with_fault(recipe.spec, recipe.projection, recipe.selection, fault)
++            }
++        };
++        let output = if point == "close_receipt" {
++            super::super::paired_sink::with_failed_sink(|| {
++                pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(run))
++                    .catch_others(|caught| {
++                        super::super::paired_sink::active_error_before_rethrow(
++                            "injected receipt failure during close ERROR",
++                        );
++                        caught.rethrow()
++                    })
++                    .execute()
++            })
++        } else if point == "cancel" {
++            crate::engine::executor::agg::paired_with_mask_cancel(run)
++        } else {
++            run()
++        };
++        i64::try_from(output.rows.len()).expect("bounded output")
++    }
++
++    #[pg_test]
++    fn pg_paired_installed_errors_restore_owners_and_recover() {
++        struct Restore;
++        impl Drop for Restore {
++            fn drop(&mut self) {
++                RECIPE.with(|slot| slot.borrow_mut().take());
++            }
++        }
++        let _restore = Restore;
++        Spi::run("RESET pg_accel.cost_multiplier; RESET pg_accel.min_batch_size; SET pg_accel.enabled=on; SET pg_accel.auto_load=on; SET work_mem='64kB'; CREATE FUNCTION pg_temp.paired_error(point text) RETURNS text LANGUAGE plpgsql AS $$ BEGIN PERFORM paired_cleanup_tests.paired_failure_entry(point); RETURN '00000'; EXCEPTION WHEN OTHERS THEN RETURN SQLSTATE || ':' || SQLERRM; WHEN query_canceled THEN RETURN SQLSTATE || ':' || SQLERRM; END $$").expect("fault subtransaction");
++        let rows =
++            1_000_017_usize.max(crate::engine::cost::device_limits().gpu_hash_agg_min_rows + 1);
++        Spi::run(&format!("CREATE TEMP TABLE where_masks AS SELECT (i%16388)*1000000-8194000000 k, CASE WHEN i%13=0 THEN NULL ELSE ((i-1)/16388)%4<>0 END w, CASE WHEN i%11=0 THEN NULL ELSE i%3<>0 END f FROM generate_series(1,{rows}::bigint)s(i); ANALYZE where_masks; SELECT pg_accel_pin('where_masks',ARRAY['k','w','f'])")).expect("unchanged masks fixture");
++        let query = "SELECT k,count(f) FILTER (WHERE f) n FROM where_masks WHERE w GROUP BY k";
++        Spi::run("SET pg_accel.enabled=off").expect("stock oracle");
++        let mut stock = Spi::connect(|client| {
++            client
++                .select(query, None, &[])
++                .expect("complete stock rows")
++                .map(|row| {
++                    (
++                        row.get::<i64>(1).expect("key"),
++                        row.get::<i64>(2).expect("count").expect("COUNT nonnull"),
++                    )
++                })
++                .collect::<Vec<_>>()
++        });
++        stock.sort();
++        Spi::run("SET pg_accel.enabled=on").expect("restore accelerated comparison");
++        let ((), recipes) = capture_paired_recipes(|| {
++            Spi::run(&format!("EXPLAIN {query}")).expect("capture actual candidate recipes");
++        })
++        .expect("independent pair");
++        let mut oracles = Vec::new();
++        for recipe in &recipes {
++            // SAFETY: warm both actual paths through the installed owner.
++            let output = unsafe {
++                paired_run_installed(
++                    recipe.spec.clone(),
++                    recipe.projection.clone(),
++                    recipe.selection,
++                )
++            };
++            let mut rows = output.rows;
++            rows.sort();
++            oracles.push(rows);
++            if recipe.selection == crate::engine::executor::agg::AggExecutionSelection::Legacy {
++                crate::engine::residency::paired_assert_eviction_rejections(
++                    output.residency[0],
++                    &output.identity,
++                )
++                .expect("all rejected evictions preserve store");
++            }
++        }
++        assert_eq!(oracles[0], stock, "complete Legacy-stock parity");
++        assert_eq!(oracles[1], stock, "complete Raw-stock parity");
++        for (index, recipe) in recipes.iter().enumerate() {
++            RECIPE.with(|slot| slot.borrow_mut().replace(recipe.clone()));
++            for point in [
++                "prepare",
++                "prepared",
++                "dispatch",
++                "close",
++                "close_receipt",
++                "cancel",
++            ] {
++                if point == "cancel" && index == 0 {
++                    continue;
++                }
++                crate::gpu::cleanup_grouped_allocation_pools();
++                let bytes = crate::engine::residency::resident_live_bytes();
++                let before = super::super::test_executor_cleanup_counts();
++                let state =
++                    Spi::get_one::<String>(&format!("SELECT pg_temp.paired_error('{point}')"))
++                        .expect("caught fault")
++                        .expect("state");
++                assert!(
++                    state.starts_with(if point == "cancel" {
++                        "57014:"
++                    } else {
++                        "XX000:"
++                    }),
++                    "{point}: {state}"
++                );
++                if point == "close" || point == "close_receipt" {
++                    assert!(
++                        state.contains("paired injected normal-close failure"),
++                        "primary close error was replaced: {state}"
++                    );
++                }
++                crate::gpu::cleanup_grouped_allocation_pools();
++                assert_eq!(
++                    crate::engine::residency::resident_live_bytes(),
++                    bytes,
++                    "{point} ledger"
++                );
++                let after = super::super::test_executor_cleanup_counts();
++                assert_eq!(after.installed, before.installed + 1, "{point} installed");
++                assert_eq!(
++                    after.installed,
++                    after.normal_end + after.query_reset,
++                    "{point} exactly-once release"
++                );
++                crate::engine::executor::agg::paired_assert_no_overrides()
++                    .expect("cancel hook restored");
++                // SAFETY: recovery uses identical captured lowering and no fault.
++                let recovery = unsafe {
++                    paired_run_installed(
++                        recipe.spec.clone(),
++                        recipe.projection.clone(),
++                        recipe.selection,
++                    )
++                };
++                let mut actual = recovery.rows;
++                actual.sort();
++                assert_eq!(actual, oracles[index], "{point} complete recovery parity");
++                assert!(recovery.completed);
++            }
++        }
++        Spi::run("SELECT pg_accel_unpin('where_masks'); SELECT pg_accel_evict('where_masks'); DROP TABLE where_masks; RESET work_mem").expect("owned fixture cleanup");
++    }
++}
+diff --git a/pg_accel/src/engine/ffi/custom_scan/paired_driver.rs b/pg_accel/src/engine/ffi/custom_scan/paired_driver.rs
+new file mode 100644
+index 00000000..a28a8e1c
+--- /dev/null
++++ b/pg_accel/src/engine/ffi/custom_scan/paired_driver.rs
+@@ -0,0 +1,279 @@
++#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
++pub enum Arm {
++    Legacy,
++    Raw,
++}
++#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
++pub enum Phase {
++    Warmup,
++    Warm,
++    FreshArtifact,
++}
++#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
++pub enum Key {
++    Null,
++    I16(i16),
++    I32(i32),
++    I64(i64),
++}
++// Preserve every produced tuple. Never silently overwrite a duplicate key.
++pub type Rows = Vec<(Key, i64)>;
++
++// Owned encoded neutral spec/projection only. Capture each candidate independently
++// AFTER actual ordinary lowering; never relabel Raw words as Legacy.
++#[derive(Clone)]
++pub struct Recipe {
++    pub arm: Arm,
++    pub captured: crate::engine::ffi::planner_hooks::PairedRecipe,
++    pub cost_evidence: String,
++    pub relation_generation: u64,
++    pub key_type_oid: u32,
++}
++
++#[derive(Clone, Debug, serde::Serialize)]
++pub struct SuccessfulV2Leaf {
++    pub whole_where_rows: u64,
++    pub partition_rows: u64,
++}
++#[derive(Clone, Debug, serde::Serialize)]
++pub struct Evidence {
++    pub physical_mode: String,
++    pub completed: bool,
++    pub bridge_delta: u64,
++    pub scheduled_calls: u64,
++    pub observed_calls: u64,
++    // Data-bearing verified calls exclude RESET/FINALIZE lifecycle controls.
++    pub verified_data_calls: u64,
++    pub mask_calls: u64,
++    pub control_calls: u64,
++    pub stock_fallback_delta: u64,
++    pub input_rows: u64,
++    pub generation: u64,
++    pub natural_capacity: Option<usize>,
++    pub explicit_capacity_override: Option<usize>,
++    pub artifact_cache_hit: bool,
++    pub construction_bytes: u64,
++    pub built_artifact_preparation_us: u64,
++    pub resident_load_included: bool,
++    // Must be sourced from native successful-v2 result boundary, never inferred
++    // from parallel_hash or from an absent overflow-only EXPLAIN block.
++    pub successful_v2_leaves: Vec<SuccessfulV2Leaf>,
++    pub preparation_ns: u128,
++    pub dispatch_ns: Option<u128>,
++    pub consumption_ns: u128,
++    pub descriptor_executor_ns: u128,
++    pub diagnostic_capture_ns: u128,
++}
++pub struct Run {
++    pub rows: Rows,
++    pub evidence: Evidence,
++}
++#[derive(serde::Serialize)]
++pub struct Sample {
++    pub fixture: &'static str,
++    pub phase: Phase,
++    pub pair: usize,
++    pub position: usize,
++    pub arm: Arm,
++    pub evidence: Evidence,
++    pub rows: Rows,
++}
++
++/// Implementation belongs inside the test-only PG module; MUST use production
++/// installed owner/error boundary/AggExecState, not execute_prepared directly.
++/// No method may hold a RefCell or residency borrow over PostgreSQL service.
++pub trait Backend {
++    fn begin_sample(
++        &mut self,
++        fixture: &'static str,
++        phase: Phase,
++        pair: usize,
++        position: usize,
++        arm: Arm,
++    ) -> Result<(), String>;
++    fn assert_default_gucs_and_no_overrides(&mut self) -> Result<(), String>;
++    fn stock_full_result(&mut self, sql: &str) -> Result<Rows, String>;
++    fn capture_independent_recipes(&mut self, sql: &str) -> Result<[Recipe; 2], String>;
++    fn prepare_jit_outside_measurements(&mut self, recipes: &[Recipe; 2]) -> Result<(), String>;
++    /// Missing targeted invalidation implementation MUST return Err, never
++    /// substitute global cleanup or falsely label a reload as artifact-only.
++    fn invalidate_owned_derived_only(&mut self, recipe: &Recipe) -> Result<(), String>;
++    fn execute_owned_to_eof(&mut self, recipe: &Recipe) -> Result<Run, String>;
++    /// Persist every sample immediately outside the timed interval; bounded,
++    /// append-only evidence output. Return Err on write failure.
++    fn retain(&mut self, sample: &Sample) -> Result<(), String>;
++    /// Append the verdict separately; the full raw sample must already exist.
++    fn retain_verdict(
++        &mut self,
++        fixture: &'static str,
++        phase: Phase,
++        pair: usize,
++        position: usize,
++        error: Option<&str>,
++    ) -> Result<(), String>;
++    fn retain_error(
++        &mut self,
++        fixture: &'static str,
++        phase: Phase,
++        pair: usize,
++        position: usize,
++        arm: Arm,
++        error: &str,
++    ) -> Result<(), String>;
++    fn verify_closed_owner_and_raw_residency(&mut self) -> Result<(), String>;
++}
++
++pub(super) fn validate(recipe: &Recipe, run: &Run, expected: &Rows) -> Result<(), String> {
++    let e = &run.evidence;
++    if run.rows.iter().any(|(key, _)| {
++        !matches!(
++            (recipe.key_type_oid, key),
++            (_, Key::Null) | (21, Key::I16(_)) | (23, Key::I32(_)) | (20, Key::I64(_))
++        )
++    }) {
++        return Err("result key did not retain its declared type".into());
++    }
++    if e.preparation_ns
++        .checked_add(e.consumption_ns)
++        .is_none_or(|n| n > e.descriptor_executor_ns)
++        || e.dispatch_ns.is_none()
++        || e.diagnostic_capture_ns > e.descriptor_executor_ns
++    {
++        return Err("invalid measured interval decomposition".into());
++    }
++    let mut actual = run.rows.clone();
++    let mut oracle = expected.clone();
++    actual.sort();
++    oracle.sort();
++    if actual != oracle
++        || !e.completed
++        || e.stock_fallback_delta != 0
++        || e.explicit_capacity_override.is_some()
++        || e.bridge_delta != e.scheduled_calls
++        || e.observed_calls != e.scheduled_calls
++        || e.verified_data_calls == 0
++        || e.verified_data_calls > e.observed_calls
++        || e.verified_data_calls
++            .checked_add(e.mask_calls)
++            .and_then(|calls| calls.checked_add(e.control_calls))
++            != Some(e.observed_calls)
++    {
++        return Err("parity/lifecycle/owner/generation proof failed".into());
++    }
++    if e.generation != recipe.relation_generation {
++        return Err("resident generation proof failed".into());
++    }
++    if recipe.arm == Arm::Raw {
++        if e.physical_mode != "parallel_hash"
++            || e.successful_v2_leaves.is_empty()
++            || e.natural_capacity.is_none_or(|capacity| capacity == 0)
++        {
++            return Err("Raw did not prove actual successful v2 routing".into());
++        }
++        let whole = e.successful_v2_leaves[0].whole_where_rows;
++        let mut sum = 0_u64;
++        for leaf in &e.successful_v2_leaves {
++            if leaf.whole_where_rows != whole || leaf.partition_rows > whole || whole > e.input_rows
++            {
++                return Err("v2 whole/leaf population mismatch".into());
++            }
++            sum = sum
++                .checked_add(leaf.partition_rows)
++                .ok_or("population overflow")?;
++        }
++        if sum != whole {
++            return Err("v2 disjoint population conservation failed".into());
++        }
++    } else if !matches!(
++        e.physical_mode.as_str(),
++        "parallel_dense_count" | "parallel_dense_integer"
++    ) {
++        return Err("Legacy actual mode outside diagnosed families".into());
++    }
++    Ok(())
++}
++
++// Frozen balanced schedule: five AB and five BA pairs per measured phase.
++pub const ORDER: [[Arm; 2]; 10] = [
++    [Arm::Legacy, Arm::Raw],
++    [Arm::Raw, Arm::Legacy],
++    [Arm::Legacy, Arm::Raw],
++    [Arm::Raw, Arm::Legacy],
++    [Arm::Legacy, Arm::Raw],
++    [Arm::Raw, Arm::Legacy],
++    [Arm::Legacy, Arm::Raw],
++    [Arm::Raw, Arm::Legacy],
++    [Arm::Legacy, Arm::Raw],
++    [Arm::Raw, Arm::Legacy],
++];
++
++pub fn run_fixture<B: Backend>(
++    backend: &mut B,
++    fixture: &'static str,
++    sql: &str,
++) -> Result<(), String> {
++    backend.assert_default_gucs_and_no_overrides()?;
++    let expected = backend.stock_full_result(sql)?;
++    let recipes = backend.capture_independent_recipes(sql)?;
++    if recipes[0].arm != Arm::Legacy || recipes[1].arm != Arm::Raw {
++        return Err("exact independent candidate pair required".into());
++    }
++    backend.prepare_jit_outside_measurements(&recipes)?;
++    for phase in [Phase::Warmup, Phase::Warm, Phase::FreshArtifact] {
++        let count = if phase == Phase::Warmup { 5 } else { 10 };
++        for (pair, order) in ORDER.iter().enumerate().take(count) {
++            for (position, arm) in order.iter().enumerate() {
++                let recipe = &recipes[usize::from(*arm == Arm::Raw)];
++                backend.begin_sample(fixture, phase, pair, position, *arm)?;
++                if phase == Phase::FreshArtifact
++                    && let Err(error) = backend.invalidate_owned_derived_only(recipe)
++                {
++                    backend.retain_error(fixture, phase, pair, position, *arm, &error)?;
++                    return Err(error);
++                }
++                let run = match backend.execute_owned_to_eof(recipe) {
++                    Ok(run) => run,
++                    Err(error) => {
++                        backend.retain_error(fixture, phase, pair, position, *arm, &error)?;
++                        return Err(error);
++                    }
++                };
++                // Persist unvalidated full output and evidence first. Failure
++                // is not permission to drop a sample or retry for a good one.
++                backend.retain(&Sample {
++                    fixture,
++                    phase,
++                    pair,
++                    position,
++                    arm: *arm,
++                    evidence: run.evidence.clone(),
++                    rows: run.rows.clone(),
++                })?;
++                let verdict = (|| {
++                    validate(recipe, &run, &expected)?;
++                    if phase == Phase::Warm
++                        && *arm == Arm::Legacy
++                        && !run.evidence.artifact_cache_hit
++                    {
++                        return Err("warm Legacy artifact miss; retain failure, no retry".into());
++                    }
++                    if phase == Phase::FreshArtifact
++                        && (run.evidence.artifact_cache_hit || run.evidence.resident_load_included)
++                    {
++                        return Err("fresh-artifact phase mislabeled".into());
++                    }
++                    backend.verify_closed_owner_and_raw_residency()
++                })();
++                backend.retain_verdict(
++                    fixture,
++                    phase,
++                    pair,
++                    position,
++                    verdict.as_ref().err().map(String::as_str),
++                )?;
++                verdict?;
++            }
++        }
++    }
++    Ok(())
++}
+diff --git a/pg_accel/src/engine/ffi/custom_scan/paired_fixtures.rs b/pg_accel/src/engine/ffi/custom_scan/paired_fixtures.rs
+new file mode 100644
+index 00000000..7f2781d9
+--- /dev/null
++++ b/pg_accel/src/engine/ffi/custom_scan/paired_fixtures.rs
+@@ -0,0 +1,81 @@
++//! Fixed diagnostic1 fixtures, not a new headline workload.
++#[pgrx::pg_schema]
++mod paired_tests {
++    use pgrx::prelude::*;
++    #[pg_extern]
++    fn run_paired_where_candidates() -> bool {
++        use super::super::paired_sink::{SharedSink, Sink};
++        let path = std::env::var("PGACCEL_PAIRED_RECEIPTS").expect("fixed owned receipt directory");
++        let sink: SharedSink = std::rc::Rc::new(std::cell::RefCell::new(
++            Sink::open_owned(std::path::Path::new(&path)).expect("fresh bounded durable sink"),
++        ));
++        sink.borrow_mut().record("header",&serde_json::json!({
++            "schema":1,"scheduled_executions":100,"jit_probes":4,
++            "file_limit":super::super::paired_sink::FILE_LIMIT,
++            "total_limit":super::super::paired_sink::TOTAL_LIMIT,
++            "record_limit":super::super::paired_sink::RECORD_LIMIT,
++            "row_limit":super::super::paired_sink::ROW_LIMIT,
++            "timer":"descriptor executor including setup/EOF/close/frees; excludes SQL planning; diagnostic capture overhead included"
++        })).expect("durable header");
++        super::super::paired_sink::with_sink(sink.clone(), || {
++            pgrx::pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
++                execute_fixed_fixtures(sink.clone());
++                sink.borrow_mut().record("complete",&serde_json::json!({"fixtures":2,"scheduled_executions":100,"jit_probes":4})).expect("durable complete");
++            })).catch_others(|caught| {
++                super::super::paired_sink::active_error_before_rethrow(&format!("fixture setup/capture/invalidation/execution: {caught:?}"));
++                caught.rethrow()
++            }).execute();
++        });
++        true
++    }
++    fn execute_fixed_fixtures(sink: super::super::paired_sink::SharedSink) {
++        Spi::run("RESET pg_accel.cost_multiplier; RESET pg_accel.min_batch_size; SET pg_accel.enabled=on; SET pg_accel.auto_load=on; SET work_mem='64kB'").expect("defaults");
++        let rows =
++            1_000_017_usize.max(crate::engine::cost::device_limits().gpu_hash_agg_min_rows + 1);
++        Spi::run(&format!("CREATE TEMP TABLE raw_where AS SELECT \
++            (CASE WHEN i%97=0 THEN NULL ELSE g*3-24582 END)::smallint k, \
++            CASE WHEN i%13=0 THEN NULL ELSE ((i-1)/16388)%4<>0 END w, \
++            CASE WHEN g=0 THEN false WHEN i%11=0 THEN NULL ELSE i%3<>0 END f, \
++            CASE WHEN i%7<>0 THEN i%2=0 END vb, \
++            (CASE WHEN i%7<>0 THEN i%1000-500 END)::smallint vi2, \
++            (CASE WHEN i%7<>0 THEN i%1000-500 END)::integer vi4, \
++            CASE WHEN i%7<>0 THEN i%1000-500 END vi8, \
++            (CASE WHEN i%7<>0 THEN i%1000-500 END)::real vf4, \
++            (CASE WHEN i%7<>0 THEN i%1000-500 END)::double precision vf8, \
++            CASE WHEN i%7<>0 THEN DATE '2000-01-01'+(i%1000)::int END vd, \
++            CASE WHEN i%7<>0 THEN TIMESTAMP '2000-01-01'+(i%1000)*INTERVAL '1 second' END vt, \
++            CASE WHEN i%7<>0 THEN TIMESTAMPTZ '2000-01-01 UTC'+(i%1000)*INTERVAL '1 second' END vz \
++            FROM (SELECT i, CASE WHEN i>16388 AND i%5=0 THEN 0 ELSE (i-1)%16388 END g \
++            FROM generate_series(1,{rows}::bigint)s(i))r; ANALYZE raw_where; \
++            SELECT pg_accel_pin('raw_where',ARRAY['k','w','f','vb','vi2','vi4','vi8','vf4','vf8','vd','vt','vz'])"))
++            .expect("unchanged first INT2 fixture");
++        super::super::paired_driver::run_fixture(
++            &mut super::super::paired_backend::PgBackend::new(sink.clone(), "int2_count_star"),
++            "int2_count_star",
++            "SELECT k,count(*) n FROM raw_where WHERE w GROUP BY k",
++        )
++        .expect("fixed first candidate comparison");
++        sink.borrow_mut()
++            .record(
++                "fixture_complete",
++                &serde_json::json!({"fixture":"int2_count_star"}),
++            )
++            .expect("durable fixture terminal");
++        Spi::run("SELECT pg_accel_unpin('raw_where'); SELECT pg_accel_evict('raw_where'); DROP TABLE raw_where").expect("release first owned fixture");
++        Spi::run(&format!("CREATE TEMP TABLE where_masks AS SELECT (i%16388)*1000000-8194000000 k, CASE WHEN i%13=0 THEN NULL ELSE ((i-1)/16388)%4<>0 END w, CASE WHEN i%11=0 THEN NULL ELSE i%3<>0 END f FROM generate_series(1,{rows}::bigint)s(i); ANALYZE where_masks; SELECT pg_accel_pin('where_masks',ARRAY['k','w','f'])"))
++            .expect("unchanged independent masks fixture");
++        super::super::paired_driver::run_fixture(
++            &mut super::super::paired_backend::PgBackend::new(sink.clone(), "int8_count_filter"),
++            "int8_count_filter",
++            "SELECT k,count(f) FILTER (WHERE f) n FROM where_masks WHERE w GROUP BY k",
++        )
++        .expect("fixed second candidate comparison");
++        sink.borrow_mut()
++            .record(
++                "fixture_complete",
++                &serde_json::json!({"fixture":"int8_count_filter"}),
++            )
++            .expect("durable fixture terminal");
++        Spi::run("SELECT pg_accel_unpin('where_masks'); SELECT pg_accel_evict('where_masks'); DROP TABLE where_masks; RESET work_mem").expect("release second owned fixture");
++    }
++}
+diff --git a/pg_accel/src/engine/ffi/custom_scan/paired_population.rs b/pg_accel/src/engine/ffi/custom_scan/paired_population.rs
+new file mode 100644
+index 00000000..ab697c03
+--- /dev/null
++++ b/pg_accel/src/engine/ffi/custom_scan/paired_population.rs
+@@ -0,0 +1,64 @@
++#[derive(Clone, Debug, serde::Serialize)]
++pub struct V2Leaf {
++    pub whole: u64,
++    pub partition: u64,
++    pub input: u64,
++}
++#[derive(Clone, Debug, Default, serde::Serialize)]
++pub struct PopulationTrace {
++    pub actual_v2_calls: u64,
++    pub leaves: Vec<V2Leaf>,
++    pub capacities: Vec<usize>,
++}
++thread_local! {
++    static CAPTURE: std::cell::RefCell<Option<PopulationTrace>> = const {
++        std::cell::RefCell::new(None)
++    };
++}
++pub fn record_v2_call(capacity: usize) {
++    CAPTURE.with(|slot| {
++        if let Some(trace) = slot.borrow_mut().as_mut() {
++            trace.actual_v2_calls = trace
++                .actual_v2_calls
++                .checked_add(1)
++                .expect("bounded diagnostic counter");
++            trace.capacities.push(capacity);
++        }
++    });
++}
++pub fn record_successful_leaf(whole: u64, partition: u64, input: u64) {
++    CAPTURE.with(|slot| {
++        if let Some(trace) = slot.borrow_mut().as_mut() {
++            trace.leaves.push(V2Leaf {
++                whole,
++                partition,
++                input,
++            });
++        }
++    });
++}
++pub fn capture<T>(body: impl FnOnce() -> T) -> (T, PopulationTrace) {
++    struct Restore(Option<PopulationTrace>);
++    impl Drop for Restore {
++        fn drop(&mut self) {
++            CAPTURE.with(|slot| *slot.borrow_mut() = self.0.take());
++        }
++    }
++    let _restore =
++        Restore(CAPTURE.with(|slot| slot.borrow_mut().replace(PopulationTrace::default())));
++    let result = body();
++    let trace = CAPTURE
++        .with(|slot| slot.borrow_mut().take())
++        .expect("active trace");
++    (result, trace)
++}
++
++// Module must be included under #[cfg(feature="pg_test")] only.
++// Call record_v2_call immediately before actual v2 bridge invocation in
++// grouped_agg.rs (not at a forecast/shape check). Failed calls count as calls,
++// not successful populations. Record leaf ONLY at descriptor.rs after
++// driver.complete_population_leaf(selected,whole,input) returns Ok and only
++// if validated SQL WHERE is present (v1 no-WHERE must not be mislabeled v2).
++// Natural one-shot completion is deliberately captured; EXPLAIN overflow-only
++// visibility is irrelevant. Separate aggregate verified/scanned counters and
++// mask lifecycle counters still require exact binding in the Backend adapter.
+diff --git a/pg_accel/src/engine/ffi/custom_scan/paired_runner.rs b/pg_accel/src/engine/ffi/custom_scan/paired_runner.rs
+new file mode 100644
+index 00000000..f6345ba4
+--- /dev/null
++++ b/pg_accel/src/engine/ffi/custom_scan/paired_runner.rs
+@@ -0,0 +1,204 @@
++use super::{
++    AggExecState, GpuAccelScanState, abandon_aggregate_transport, close_aggregate_transport,
++    install_boxed_executor, pg_sys, register_executor_cleanup, release_executor,
++    with_installed_executor_error_boundary,
++};
++
++#[cfg(feature = "pg_test")]
++pub(super) struct PairedOwnedOutput {
++    pub(super) rows: Vec<(Option<i64>, i64)>,
++    pub(super) key_type: u32,
++    pub(super) mode: Option<crate::gpu::GroupedAggKernelMode>,
++    pub(super) calls: u64,
++    pub(super) scheduled: u64,
++    pub(super) dispatch_us: u64,
++    pub(super) artifact_summary: String,
++    pub(super) artifact_outcome: Option<crate::engine::residency::ArtifactEnsureOutcome>,
++    pub(super) artifact_bytes: Option<u64>,
++    pub(super) residency: Vec<crate::engine::residency::ResidentRelationEvidence>,
++    pub(super) loaded_relations: Vec<pg_sys::Oid>,
++    pub(super) preparation_ns: u128,
++    pub(super) consumption_ns: u128,
++    pub(super) descriptor_executor_ns: u128,
++    pub(super) diagnostic_capture_ns: u128,
++    pub(super) completed: bool,
++    pub(super) identity: crate::engine::residency::DerivedArtifactIdentity,
++}
++
++#[cfg(feature = "pg_test")]
++pub(super) unsafe fn paired_run_installed(
++    spec: crate::engine::spec::AggQuerySpec,
++    projection: crate::engine::spec::AggOutputProjection,
++    selection: crate::engine::executor::agg::AggExecutionSelection,
++) -> PairedOwnedOutput {
++    // SAFETY: the normal diagnostic path never injects failures.
++    unsafe { paired_run_with_fault(spec, projection, selection, None) }
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(super) enum PairedFault {
++    Prepare,
++    AfterPrepare,
++    AfterDispatch,
++    Close,
++}
++
++unsafe fn failing_normal_close(executor: *mut std::ffi::c_void) {
++    // SAFETY: the real typed close must run while ownership remains installed.
++    unsafe { close_aggregate_transport(executor) };
++    pgrx::error!("paired injected normal-close failure");
++}
++
++pub(super) unsafe fn paired_run_with_fault(
++    spec: crate::engine::spec::AggQuerySpec,
++    projection: crate::engine::spec::AggOutputProjection,
++    selection: crate::engine::executor::agg::AggExecutionSelection,
++    fault: Option<PairedFault>,
++) -> PairedOwnedOutput {
++    let descriptor_started = std::time::Instant::now();
++    // These two diagnosed fixtures project one signed integer key and COUNT.
++    assert_eq!(projection.slots.len(), 2);
++    let key_type = projection.slots[0].result_type_oid;
++    assert!(matches!(key_type, 20 | 21 | 23));
++    assert_eq!(projection.slots[1].result_type_oid, 20);
++    // SAFETY: main backend only. PG owns this EState and its query context.
++    let estate = unsafe { pg_sys::CreateExecutorState() };
++    // SAFETY: CreateExecutorState returned its initialized query context.
++    let context = unsafe { (*estate).es_query_cxt };
++    // SAFETY: same zero-initialized extended state allocation as CustomScan;
++    // callback storage belongs to the query context, never a stack local.
++    let state = unsafe {
++        pg_sys::MemoryContextAllocZero(context, std::mem::size_of::<GpuAccelScanState>())
++            .cast::<GpuAccelScanState>()
++    };
++    // SAFETY: callback lifetime matches allocated state/context.
++    unsafe { register_executor_cleanup(state, context) };
++    // All PG ERROR paths below use the real transport-abort/owner-drop boundary.
++    // The outer diagnostic SQL subtransaction MUST retain and rethrow failures.
++    let mut output = unsafe {
++        with_installed_executor_error_boundary(state, || {
++            // SAFETY: switch only within the boundary restoring entry globals on error.
++            let previous = pg_sys::MemoryContextSwitchTo(context);
++            let descriptor = pg_sys::CreateTemplateTupleDesc(2);
++            for (index, field) in projection.slots.iter().enumerate() {
++                pg_sys::TupleDescInitEntry(
++                    descriptor,
++                    (index + 1) as i16,
++                    c"value".as_ptr(),
++                    field.result_type_oid.into(),
++                    -1,
++                    0,
++                );
++            }
++            let slot =
++                pg_sys::MakeSingleTupleTableSlot(descriptor, &raw const pg_sys::TTSOpsVirtual);
++            let exec = AggExecState::new_selected_descriptor_unprepared(
++                spec, projection, false, selection,
++            )
++            .unwrap_or_else(|error| pgrx::error!("paired descriptor construction failed: {error}"));
++            (*state).accel.executor_abort = Some(abandon_aggregate_transport);
++            (*state).accel.executor_close = Some(if fault == Some(PairedFault::Close) {
++                failing_normal_close
++            } else {
++                close_aggregate_transport
++            });
++            install_boxed_executor(
++                &mut (*state).accel.executor,
++                &mut (*state).accel.executor_drop,
++                &mut (*state).accel.executor_prepare_reset,
++                exec,
++                Some(abandon_aggregate_transport),
++            );
++            let exec = &mut *(*state).accel.executor.cast::<AggExecState>();
++            exec.set_query_context(context);
++            if fault == Some(PairedFault::Prepare) {
++                pgrx::error!("paired injected installed preparation failure");
++            }
++            let started = std::time::Instant::now();
++            exec.prepare_descriptor();
++            if fault == Some(PairedFault::AfterPrepare) {
++                pgrx::error!("paired injected prepared-owner failure");
++            }
++            let prepared = std::time::Instant::now();
++            let mut rows = Vec::new();
++            while !exec.next(slot).is_null() {
++                if fault == Some(PairedFault::AfterDispatch) {
++                    pgrx::error!("paired injected post-dispatch failure");
++                }
++                // Agg next supplies the complete virtual slot. Copy typed scalars
++                // now; no Datum or slot pointer escapes the consumption interval.
++                let key = if *(*slot).tts_isnull {
++                    None
++                } else {
++                    let datum = *(*slot).tts_values;
++                    Some(match key_type {
++                        21 => i64::from(
++                            <i16 as pgrx::FromDatum>::from_datum(datum, false).expect("INT2"),
++                        ),
++                        23 => i64::from(
++                            <i32 as pgrx::FromDatum>::from_datum(datum, false).expect("INT4"),
++                        ),
++                        20 => <i64 as pgrx::FromDatum>::from_datum(datum, false).expect("INT8"),
++                        _ => unreachable!("validated key type"),
++                    })
++                };
++                assert!(!*(*slot).tts_isnull.add(1), "COUNT must be non-NULL");
++                let count = <i64 as pgrx::FromDatum>::from_datum(*(*slot).tts_values.add(1), false)
++                    .expect("COUNT INT8");
++                if rows.len() == super::paired_sink::ROW_LIMIT {
++                    super::paired_sink::retain_row_bound(&rows, &vec![(key, count)]);
++                    pgrx::error!("paired typed collector exceeded fixed row bound");
++                }
++                rows.push((key, count));
++            }
++            let consumed = std::time::Instant::now();
++            let mode = exec.descriptor_dispatched_kernel_mode();
++            let calls = exec.batches_executed;
++            let scheduled = exec.descriptor_planned_batches();
++            let dispatch_us = exec.dispatch_time_us;
++            let artifact_summary = exec.descriptor_artifact_policy_summary();
++            let (completed, identity) = exec.paired_completion_identity();
++            let artifact_outcome = exec.descriptor_artifact_outcome();
++            let artifact_bytes = exec.descriptor_artifact_bytes();
++            let residency = exec
++                .descriptor_residency_evidence()
++                .unwrap_or_default()
++                .to_vec();
++            let loaded_relations = exec
++                .descriptor_loaded_relations()
++                .unwrap_or_default()
++                .to_vec();
++            let captured = std::time::Instant::now();
++            // Fallible normal close happens while ownership and the error boundary
++            // remain installed. No stack-owned raw executor bypass is permitted.
++            release_executor(&mut (*state).accel, false);
++            pg_sys::ExecDropSingleTupleTableSlot(slot);
++            pg_sys::FreeTupleDesc(descriptor);
++            pg_sys::MemoryContextSwitchTo(previous);
++            PairedOwnedOutput {
++                rows,
++                key_type,
++                mode,
++                calls,
++                scheduled,
++                dispatch_us,
++                artifact_summary,
++                artifact_outcome,
++                artifact_bytes,
++                residency,
++                loaded_relations,
++                completed,
++                identity,
++                preparation_ns: prepared.duration_since(started).as_nanos(),
++                consumption_ns: consumed.duration_since(prepared).as_nanos(),
++                descriptor_executor_ns: 0,
++                diagnostic_capture_ns: captured.duration_since(consumed).as_nanos(),
++            }
++        })
++    };
++    // SAFETY: normal close removed the executor. Delete the context outside
++    // the installed-state catch boundary, which must never see freed state.
++    unsafe { pg_sys::FreeExecutorState(estate) };
++    output.descriptor_executor_ns = descriptor_started.elapsed().as_nanos();
++    output
++}
+diff --git a/pg_accel/src/engine/ffi/custom_scan/paired_sink.rs b/pg_accel/src/engine/ffi/custom_scan/paired_sink.rs
+new file mode 100644
+index 00000000..43bcf395
+--- /dev/null
++++ b/pg_accel/src/engine/ffi/custom_scan/paired_sink.rs
+@@ -0,0 +1,340 @@
++//! Bounded, append-only test evidence, independent of disposable PGDATA.
++use std::fs::{File, OpenOptions};
++use std::io::{self, Write};
++use std::os::fd::{AsRawFd, FromRawFd};
++use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
++use std::path::{Path, PathBuf};
++
++pub const FILE_LIMIT: u64 = 4 * 1024 * 1024;
++pub const TOTAL_LIMIT: u64 = 512 * 1024 * 1024;
++pub const RECORD_LIMIT: u64 = 512;
++pub const ROW_LIMIT: usize = 32_768;
++pub type SharedSink = std::rc::Rc<std::cell::RefCell<Sink>>;
++
++thread_local! {
++    static ACTIVE: std::cell::RefCell<Option<SharedSink>> = const { std::cell::RefCell::new(None) };
++}
++pub fn with_sink<T>(sink: SharedSink, body: impl FnOnce() -> T) -> T {
++    struct Restore(Option<SharedSink>);
++    impl Drop for Restore {
++        fn drop(&mut self) {
++            ACTIVE.with(|slot| *slot.borrow_mut() = self.0.take());
++        }
++    }
++    let _restore = Restore(ACTIVE.with(|slot| slot.borrow_mut().replace(sink)));
++    body()
++}
++pub fn retain_row_bound<T: serde::Serialize>(rows: &T, next: &T) {
++    let active = ACTIVE.with(|slot| slot.borrow().clone());
++    if let Some(sink) = active {
++        let result = sink.borrow_mut().record(
++            "row_bound_failure",
++            &serde_json::json!({"prefix":rows,"rejected_next":next}),
++        );
++        if let Err(error) = result {
++            let _ = writeln!(
++                io::stderr(),
++                "paired row-bound secondary receipt error: {error}"
++            );
++        }
++    }
++}
++
++pub struct Sink {
++    directory: File,
++    path: PathBuf,
++    device: u64,
++    inode: u64,
++    ordinal: u64,
++    bytes: u64,
++    failed: bool,
++}
++
++impl Sink {
++    pub fn open_owned(path: &Path) -> Result<Self, String> {
++        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
++            .parent()
++            .ok_or("repository parent missing")?
++            .join(".codex/scratch/hash-count-where-rust-20261030");
++        if !path.is_absolute()
++            || !path.starts_with(&base)
++            || path
++                .components()
++                .any(|part| matches!(part, std::path::Component::ParentDir))
++            || std::fs::canonicalize(path).map_err(|e| e.to_string())? != path
++        {
++            return Err(
++                "sink path is outside exact owned scratch tree or aliases another path".into(),
++            );
++        }
++        let before = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
++        // SAFETY: geteuid reads this process's identity and has no PG effects.
++        let uid = unsafe { libc::geteuid() };
++        if !before.is_dir()
++            || before.uid() != uid
++            || before.mode() & 0o777 != 0o700
++            || std::fs::read_dir(path)
++                .map_err(|e| e.to_string())?
++                .next()
++                .is_some()
++        {
++            return Err("sink must be fresh, empty, owned0700 directory".into());
++        }
++        let directory = OpenOptions::new()
++            .read(true)
++            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
++            .open(path)
++            .map_err(|e| e.to_string())?;
++        let opened = directory.metadata().map_err(|e| e.to_string())?;
++        if (opened.dev(), opened.ino()) != (before.dev(), before.ino()) {
++            return Err("sink identity changed while opening".into());
++        }
++        Ok(Self {
++            directory,
++            path: path.to_owned(),
++            device: opened.dev(),
++            inode: opened.ino(),
++            ordinal: 0,
++            bytes: 0,
++            failed: false,
++        })
++    }
++
++    pub fn record<T: serde::Serialize>(&mut self, kind: &str, payload: &T) -> Result<(), String> {
++        let result = self.record_inner(kind, payload);
++        if result.is_err() {
++            self.failed = true;
++        }
++        result
++    }
++
++    fn record_inner<T: serde::Serialize>(&mut self, kind: &str, payload: &T) -> Result<(), String> {
++        if self.failed || self.ordinal >= RECORD_LIMIT || self.bytes >= TOTAL_LIMIT {
++            return Err("sink already failed or hard inventory/byte bound reached".into());
++        }
++        let current = std::fs::symlink_metadata(&self.path).map_err(|e| e.to_string())?;
++        if !current.is_dir() || (current.dev(), current.ino()) != (self.device, self.inode) {
++            return Err("sink directory replaced".into());
++        }
++        let ordinal = self.ordinal;
++        // Consume ordinal before opening. A partial file or failed create can
++        // never be overwritten/reused by another record or best-effort error.
++        self.ordinal += 1;
++        let name = std::ffi::CString::new(format!("record-{ordinal:06}.json"))
++            .map_err(|e| e.to_string())?;
++        // SAFETY: owned directory FD and fixed NUL-terminated basename remain
++        // live. O_EXCL/O_NOFOLLOW prohibit alias/overwrite; returned FD is owned.
++        let fd = unsafe {
++            libc::openat(
++                self.directory.as_raw_fd(),
++                name.as_ptr(),
++                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
++                0o600,
++            )
++        };
++        if fd < 0 {
++            return Err(io::Error::last_os_error().to_string());
++        }
++        // SAFETY: openat returned a fresh FD now transferred exactly once.
++        let mut file = unsafe { File::from_raw_fd(fd) };
++        #[derive(serde::Serialize)]
++        struct Envelope<'a, T> {
++            ordinal: u64,
++            kind: &'a str,
++            payload: &'a T,
++        }
++        let record = Envelope {
++            ordinal,
++            kind,
++            payload,
++        };
++        let mut limited = LimitedWriter {
++            file: &mut file,
++            total: &mut self.bytes,
++            written: 0,
++        };
++        // Streaming serializer cannot allocate a whole over-bound escaped row
++        // record before enforcing byte limits. Payloads themselves are bounded.
++        serde_json::to_writer(&mut limited, &record).map_err(|e| e.to_string())?;
++        limited.write_all(b"\n").map_err(|e| e.to_string())?;
++        file.sync_all().map_err(|e| e.to_string())?;
++        self.directory.sync_all().map_err(|e| e.to_string())?;
++        Ok(())
++    }
++}
++
++struct LimitedWriter<'a> {
++    file: &'a mut File,
++    total: &'a mut u64,
++    written: u64,
++}
++impl Write for LimitedWriter<'_> {
++    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
++        let size =
++            u64::try_from(bytes.len()).map_err(|_| io::Error::other("write length overflow"))?;
++        if size > FILE_LIMIT - self.written || size > TOTAL_LIMIT - *self.total {
++            return Err(io::Error::other("durable evidence byte bound reached"));
++        }
++        let written = self.file.write(bytes)?;
++        let count =
++            u64::try_from(written).map_err(|_| io::Error::other("write result overflow"))?;
++        self.written += count;
++        *self.total += count;
++        Ok(written)
++    }
++    fn flush(&mut self) -> io::Result<()> {
++        self.file.flush()
++    }
++}
++
++/// Preserve primary PostgreSQL ERROR even if its secondary receipt fails.
++pub fn error_before_rethrow(sink: &SharedSink, context: &str) {
++    let result = sink
++        .try_borrow_mut()
++        .map_err(|_| "sink borrow unavailable".to_owned())
++        .and_then(|mut sink| sink.record("pg_error", &serde_json::json!({"context":context})));
++    if let Err(error) = result {
++        let _ = writeln!(
++            io::stderr(),
++            "paired primary PGERROR retained; secondary receipt failure: {error}"
++        );
++    }
++}
++
++pub fn active_error_before_rethrow(context: &str) {
++    // Catch closures capture only immutable context strings, never a sink
++    // RefCell that might have been borrowed across a PostgreSQL error.
++    let sink = ACTIVE.with(|slot| slot.borrow().clone());
++    if let Some(sink) = sink {
++        error_before_rethrow(&sink, context);
++    } else {
++        let _ = writeln!(
++            io::stderr(),
++            "paired primary PGERROR; active receipt sink missing: {context}"
++        );
++    }
++}
++
++pub(super) fn owned_negative_sink(label: &str) -> Result<SharedSink, String> {
++    use std::os::unix::fs::DirBuilderExt;
++    use std::sync::atomic::{AtomicU64, Ordering};
++    static NEXT: AtomicU64 = AtomicU64::new(0);
++    if !label
++        .bytes()
++        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
++    {
++        return Err("invalid fixed negative-test label".into());
++    }
++    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
++        .parent()
++        .ok_or("missing repository root")?;
++    if std::fs::canonicalize(repository).map_err(|error| error.to_string())? != repository {
++        return Err("repository alias is not an owned test location".into());
++    }
++    let mut root = repository.to_owned();
++    for component in [".codex", "scratch", "hash-count-where-rust-20261030"] {
++        root.push(component);
++        match std::fs::symlink_metadata(&root) {
++            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
++            Ok(_) => return Err("test directory component is not a real directory".into()),
++            Err(error) if error.kind() == io::ErrorKind::NotFound => {
++                std::fs::DirBuilder::new()
++                    .mode(0o700)
++                    .create(&root)
++                    .map_err(|error| error.to_string())?;
++            }
++            Err(error) => return Err(error.to_string()),
++        }
++    }
++    let path = root.join(format!(
++        "paired-sink-test-{}-{}-{label}",
++        std::process::id(),
++        NEXT.fetch_add(1, Ordering::Relaxed)
++    ));
++    // Fresh deterministic owner+ordinal, no retry if stale artifacts collide.
++    std::fs::DirBuilder::new()
++        .mode(0o700)
++        .create(&path)
++        .map_err(|error| error.to_string())?;
++    Ok(std::rc::Rc::new(std::cell::RefCell::new(Sink::open_owned(
++        &path,
++    )?)))
++}
++
++pub(super) fn with_failed_sink<T>(body: impl FnOnce() -> T) -> T {
++    let sink = owned_negative_sink("primary-error").expect("owned failure sink");
++    sink.borrow_mut().failed = true;
++    with_sink(sink, body)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{FILE_LIMIT, RECORD_LIMIT, Sink, TOTAL_LIMIT, owned_negative_sink};
++    #[test]
++    fn bounded_sink_retains_exact_records_and_rejects_reopen_aliases() {
++        let sink = owned_negative_sink("exact").expect("fresh sink");
++        let path = sink.borrow().path.clone();
++        sink.borrow_mut()
++            .record("one", &vec![(Some(-17_i64), 0_i64), (None, 9)])
++            .expect("durable record");
++        let bytes = std::fs::read(path.join("record-000000.json")).expect("record");
++        let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON");
++        assert_eq!(parsed["ordinal"], 0);
++        assert_eq!(parsed["payload"], serde_json::json!([[-17, 0], [null, 9]]));
++        assert!(
++            Sink::open_owned(&path).is_err(),
++            "nonempty directory must reject"
++        );
++        let alias = path.with_extension("alias");
++        std::os::unix::fs::symlink(&path, &alias).expect("owned alias fixture");
++        assert!(Sink::open_owned(&alias).is_err());
++        assert_eq!(sink.borrow().bytes, bytes.len() as u64);
++    }
++    #[test]
++    fn bounded_sink_charges_partial_bytes_and_never_retries_after_limit() {
++        let sink = owned_negative_sink("partial").expect("fresh sink");
++        let path = sink.borrow().path.clone();
++        let oversized = "x".repeat(usize::try_from(FILE_LIMIT).expect("bounded size"));
++        assert!(sink.borrow_mut().record("oversized", &oversized).is_err());
++        let bytes = std::fs::metadata(path.join("record-000000.json"))
++            .expect("partial retained")
++            .len();
++        assert!(bytes > 0 && bytes <= FILE_LIMIT);
++        assert_eq!(sink.borrow().bytes, bytes);
++        assert!(sink.borrow_mut().record("never", &0).is_err());
++        assert!(!path.join("record-000001.json").exists());
++    }
++    #[test]
++    fn bounded_sink_rejects_collisions_total_limit_and_record_limit() {
++        let sink = owned_negative_sink("collision").expect("fresh sink");
++        let path = sink.borrow().path.join("record-000000.json");
++        std::fs::write(&path, b"retained sentinel").expect("owned collision");
++        assert!(sink.borrow_mut().record("collision", &0).is_err());
++        assert_eq!(
++            std::fs::read(&path).expect("sentinel"),
++            b"retained sentinel"
++        );
++        let total = owned_negative_sink("total").expect("fresh sink");
++        total.borrow_mut().bytes = TOTAL_LIMIT - 4;
++        assert!(total.borrow_mut().record("bound", &0).is_err());
++        assert!(total.borrow().bytes <= TOTAL_LIMIT);
++        let records = owned_negative_sink("records").expect("fresh sink");
++        records.borrow_mut().ordinal = RECORD_LIMIT;
++        assert!(records.borrow_mut().record("bound", &0).is_err());
++    }
++    #[test]
++    fn bounded_sink_rejects_directory_replacement() {
++        use std::os::unix::fs::DirBuilderExt;
++        let sink = owned_negative_sink("replacement").expect("fresh sink");
++        let path = sink.borrow().path.clone();
++        let retained = path.with_extension("retained");
++        std::fs::rename(&path, &retained).expect("retain original directory");
++        std::fs::DirBuilder::new()
++            .mode(0o700)
++            .create(&path)
++            .expect("replacement");
++        assert!(sink.borrow_mut().record("reject", &0).is_err());
++        assert_eq!(std::fs::read_dir(&path).expect("replacement").count(), 0);
++        assert_eq!(std::fs::read_dir(&retained).expect("original").count(), 0);
++    }
++}
+diff --git a/pg_accel/src/engine/ffi/planner_hooks/generic_groupagg/paired_recipes.rs b/pg_accel/src/engine/ffi/planner_hooks/generic_groupagg/paired_recipes.rs
+new file mode 100644
+index 00000000..a2517884
+--- /dev/null
++++ b/pg_accel/src/engine/ffi/planner_hooks/generic_groupagg/paired_recipes.rs
+@@ -0,0 +1,71 @@
++use super::{AggOutputProjection, ShapePlan};
++#[cfg(feature = "pg_test")]
++#[derive(Clone)]
++pub struct PairedRecipe {
++    pub(crate) selection: crate::engine::executor::agg::AggExecutionSelection,
++    pub(crate) spec: crate::engine::spec::AggQuerySpec,
++    pub(crate) projection: AggOutputProjection,
++    pub(crate) cost_components: String,
++}
++
++#[cfg(feature = "pg_test")]
++thread_local! {
++    static PAIRED_RECIPES: std::cell::RefCell<Option<Vec<PairedRecipe>>> = const {
++        std::cell::RefCell::new(None)
++    };
++}
++
++#[cfg(feature = "pg_test")]
++pub(super) fn paired_capture_recipe(shape: &ShapePlan) {
++    if !PAIRED_RECIPES.with(|slot| slot.borrow().is_some()) {
++        return;
++    }
++    let recipe = PairedRecipe {
++        selection: shape.execution_selection(),
++        spec: shape.spec.clone(),
++        projection: AggOutputProjection {
++            slots: shape.projections.clone(),
++        },
++        cost_components: format!("{:?}", shape.cost),
++    };
++    PAIRED_RECIPES.with(|slot| {
++        slot.borrow_mut()
++            .as_mut()
++            .expect("active diagnostic")
++            .push(recipe);
++    });
++}
++
++#[cfg(feature = "pg_test")]
++pub fn capture_paired_recipes<T>(
++    body: impl FnOnce() -> T,
++) -> Result<(T, [PairedRecipe; 2]), String> {
++    struct Restore(Option<Vec<PairedRecipe>>);
++    impl Drop for Restore {
++        fn drop(&mut self) {
++            PAIRED_RECIPES.with(|slot| *slot.borrow_mut() = self.0.take());
++        }
++    }
++    let _restore = Restore(PAIRED_RECIPES.with(|slot| slot.borrow_mut().replace(Vec::new())));
++    let value = body(); // guarded SPI EXPLAIN without ANALYZE; no TLS borrow held
++    let recipes = PAIRED_RECIPES
++        .with(|slot| slot.borrow_mut().take())
++        .ok_or("diagnostic capture was unexpectedly cleared")?;
++    let [legacy, raw]: [PairedRecipe; 2] = recipes
++        .try_into()
++        .map_err(|_| "need exactly two independently built candidates")?;
++    use crate::engine::executor::agg::AggExecutionSelection;
++    if legacy.selection != AggExecutionSelection::Legacy
++        || raw.selection != AggExecutionSelection::RawIntegerCount
++    {
++        return Err("unexpected candidate order/selection".into());
++    }
++    Ok((value, [legacy, raw]))
++}
++
++// Exact hook site: immediately after apply_exact_residency returns Ok in
++// try_inject_candidate, before effective_path_cost/add_native_having_cost/gate.
++// Add `#[cfg(feature="pg_test")] paired_capture_recipe(&shape);`.
++// Re-export capture_paired_recipes/PairedRecipe from planner_hooks/mod.rs ONLY
++// under pg_test. Early cache hits intentionally yield missing recipes and stop
++// the diagnostic; do not clear caches or manufacture the missing candidate.
+diff --git a/pg_accel/src/engine/residency/store/paired.rs b/pg_accel/src/engine/residency/store/paired.rs
+new file mode 100644
+index 00000000..842f178d
+--- /dev/null
++++ b/pg_accel/src/engine/residency/store/paired.rs
+@@ -0,0 +1,170 @@
++use super::{
++    DerivedArtifactIdentity, ResidentRelation, ResidentRelationEvidence, STORE, pg_sys,
++    process_invalidations,
++};
++#[cfg(feature = "pg_test")]
++pub fn paired_remove_exact_derived(
++    expected: ResidentRelationEvidence,
++    identity: &DerivedArtifactIdentity,
++) -> Result<u64, String> {
++    let owners = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
++    if owners.installed
++        != owners
++            .normal_end
++            .checked_add(owners.query_reset)
++            .ok_or("cleanup count overflow")?
++    {
++        return Err("targeted invalidation requires no installed executor".into());
++    }
++    if identity.canonical_words().is_empty() {
++        return Err("empty exact artifact identity".into());
++    }
++    // Reject an existing lease before invalidation processing, which itself
++    // borrows STORE and may consult PG catalogs. Drop this probe before PG.
++    STORE.with(|slot| {
++        slot.try_borrow_mut()
++            .map(drop)
++            .map_err(|_| "active residency lease".to_owned())
++    })?;
++    process_invalidations();
++    STORE.with(|slot| {
++        // Fail closed if any active residency lease exists, even if it was not
++        // created through a CustomScan. No PG service occurs under this borrow.
++        let mut store = slot
++            .try_borrow_mut()
++            .map_err(|_| "active residency lease")?;
++        let entry = store
++            .entries
++            .iter_mut()
++            .find(|entry| entry.relid == expected.relid)
++            .ok_or("raw owner is no longer resident")?;
++        let current = entry.evidence();
++        if (
++            current.generation,
++            current.global_generation,
++            current.relfilenode,
++            current.row_count,
++            current.raw_bytes,
++            current.raw_accounting,
++        ) != (
++            expected.generation,
++            expected.global_generation,
++            expected.relfilenode,
++            expected.row_count,
++            expected.raw_bytes,
++            expected.raw_accounting,
++        ) {
++            return Err("raw generation or exact footprint changed".into());
++        }
++        let matches = entry
++            .derived
++            .iter()
++            .enumerate()
++            .filter_map(|(index, derived)| derived.has_identity(identity).then_some(index))
++            .collect::<Vec<_>>();
++        let [index] = matches.as_slice() else {
++            return Err("fresh phase requires exactly one known cached artifact".into());
++        };
++        let removed = entry.derived[*index].bytes();
++        entry.remove_derived(*index);
++        let after = entry.evidence();
++        if after.raw_bytes != current.raw_bytes
++            || after.raw_accounting != current.raw_accounting
++            || after.generation != current.generation
++            || after.global_generation != current.global_generation
++            || after.relfilenode != current.relfilenode
++            || after.row_count != current.row_count
++            || after.derived_bytes.checked_add(removed) != Some(current.derived_bytes)
++        {
++            return Err("targeted derived removal violated footprint conservation".into());
++        }
++        Ok(removed)
++    })
++}
++
++// RawIntegerCount has no retained derived owner. Its fresh-artifact action must
++// be an explicit checked no-op: inspect current raw evidence and require the
++// captured raw recipe owns no derived identity; never evict unrelated Legacy.
++// Backend must preserve the last successful Legacy identity/evidence separately
++// from the Raw recipe because alternating arms share only immutable raw columns.
++
++#[cfg(feature = "pg_test")]
++pub fn paired_current_raw(
++    expected: ResidentRelationEvidence,
++) -> Result<ResidentRelationEvidence, String> {
++    process_invalidations();
++    STORE.with(|slot| {
++        let store = slot.try_borrow().map_err(|_| "active residency mutation")?;
++        let current = store
++            .entries
++            .iter()
++            .find(|entry| entry.relid == expected.relid)
++            .ok_or("raw owner no longer resident")?
++            .evidence();
++        if (
++            current.generation,
++            current.global_generation,
++            current.relfilenode,
++            current.row_count,
++            current.raw_bytes,
++            current.raw_accounting,
++        ) != (
++            expected.generation,
++            expected.global_generation,
++            expected.relfilenode,
++            expected.row_count,
++            expected.raw_bytes,
++            expected.raw_accounting,
++        ) {
++            return Err("raw owner changed".into());
++        }
++        Ok(current)
++    })
++}
++
++#[cfg(feature = "pg_test")]
++pub fn paired_raw_evidence(relid: pg_sys::Oid) -> Result<ResidentRelationEvidence, String> {
++    process_invalidations();
++    STORE.with(|slot| {
++        let store = slot.try_borrow().map_err(|_| "active residency mutation")?;
++        store
++            .entries
++            .iter()
++            .find(|entry| entry.relid == relid)
++            .map(ResidentRelation::evidence)
++            .ok_or("raw owner not resident".into())
++    })
++}
++
++pub fn paired_assert_eviction_rejections(
++    expected: ResidentRelationEvidence,
++    identity: &DerivedArtifactIdentity,
++) -> Result<(), String> {
++    let original = paired_current_raw(expected)?;
++    let mut words = identity.canonical_words().to_vec();
++    words.push(i32::MIN);
++    let wrong = DerivedArtifactIdentity::from_canonical_words(words);
++    if paired_remove_exact_derived(expected, &wrong).is_ok() {
++        return Err("wrong identity unexpectedly removed an artifact".into());
++    }
++    let mut stale = expected;
++    stale.generation = stale
++        .generation
++        .checked_add(1)
++        .ok_or("generation overflow")?;
++    if paired_remove_exact_derived(stale, identity).is_ok() {
++        return Err("stale owner unexpectedly removed an artifact".into());
++    }
++    STORE.with(|slot| {
++        let _active_lease = slot.borrow();
++        if paired_remove_exact_derived(expected, identity).is_ok() {
++            return Err("active store lease permitted eviction".to_owned());
++        }
++        Ok(())
++    })?;
++    let after = paired_current_raw(expected)?;
++    if after.derived_bytes != original.derived_bytes {
++        return Err("rejected eviction changed derived ownership".into());
++    }
++    Ok(())
++}
+

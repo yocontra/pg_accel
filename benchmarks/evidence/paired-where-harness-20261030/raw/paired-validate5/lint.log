@@ -1,0 +1,54 @@
+    Checking pg_accel v1.0.0-rc1 (/Users/contra/Projects/pg_accel/pg_accel)
+error: usage of wildcard import
+  --> pg_accel/src/engine/ffi/custom_scan/paired_cleanup_tests.rs:53:13
+   |
+53 |         use super::*;
+   |             ^^^^^^^^ help: try: `super::{pg_test, Spi, RECIPE, capture_paired_recipes, paired_run_installed}`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#wildcard_imports
+   = note: `-D clippy::wildcard-imports` implied by `-D clippy::pedantic`
+   = help: to override `-D clippy::pedantic` add `#[allow(clippy::wildcard_imports)]`
+
+error: pub(crate) function inside private module
+   --> pg_accel/src/engine/ffi/custom_scan/paired_driver.rs:212:1
+    |
+212 | pub(crate) fn preserve_primary(
+    | ----------^^^^^^^^^^^^^^^^^^^^
+    | |
+    | help: consider using: `pub`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_pub_crate
+    = note: `-D clippy::redundant-pub-crate` implied by `-D clippy::nursery`
+    = help: to override `-D clippy::nursery` add `#[allow(clippy::redundant_pub_crate)]`
+
+error: items after a test module
+   --> pg_accel/src/engine/ffi/custom_scan/paired_driver.rs:242:1
+    |
+242 |   mod receipt_tests {
+    |   ^^^^^^^^^^^^^^^^^
+...
+297 | / pub fn run_fixture<B: Backend>(
+298 | |     backend: &mut B,
+299 | |     fixture: &'static str,
+300 | |     sql: &str,
+301 | | ) -> Result<(), String> {
+    | |_______________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#items_after_test_module
+    = note: `-D clippy::items-after-test-module` implied by `-D clippy::all`
+    = help: to override `-D clippy::all` add `#[allow(clippy::items_after_test_module)]`
+    = help: move the items to before the test module was defined
+
+error: consider adding a `;` to the last statement for consistent formatting
+   --> pg_accel/src/engine/ffi/custom_scan/paired_driver.rs:270:21
+    |
+270 |                     secondary.push(value.to_owned())
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: add a `;` here: `secondary.push(value.to_owned());`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#semicolon_if_nothing_returned
+    = note: `-D clippy::semicolon-if-nothing-returned` implied by `-D clippy::pedantic`
+    = help: to override `-D clippy::pedantic` add `#[allow(clippy::semicolon_if_nothing_returned)]`
+
+error: could not compile `pg_accel` (lib) due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `pg_accel` (lib test) due to 3 previous errors

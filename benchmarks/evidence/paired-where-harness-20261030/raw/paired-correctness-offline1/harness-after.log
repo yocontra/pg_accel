@@ -1,0 +1,4 @@
+.codex/scratch/hash-count-where-rust-20261030/paired-correctness-offline1.sh: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/check-paired.py: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/test-paired-checker.py: OK
+/Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/paired-sink.expected: OK

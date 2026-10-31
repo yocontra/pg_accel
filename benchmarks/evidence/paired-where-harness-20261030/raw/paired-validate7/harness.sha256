@@ -1,0 +1,6 @@
+ce096a703b0f9e9c6b60b005187e6eab4671502ee3e2234d17cf088c7beeb983  .codex/scratch/hash-count-where-rust-20261030/paired-validate7.sh
+3964b2629dca78240ac3f185c1deaecdd89917bd45bf0c7a3cc1c20400b2f426  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/test-paired-exit-status.sh
+7a9d679f0bf43c8be5e77dd904444dd9a6231bd0e18b1cfde61c6390c6f22e55  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/paired-exit-status.sh
+36bcae788a55a74e1aebf7042beb24ab5b7dde3ddb48903419a8f6243f405568  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/paired-sink.expected
+d1f7e3930c1c300c0dd4890f8ad2d98d98ab1f1526c16c75d274ee47bf0649d7  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/run-paired-correctness.sh
+2040efd7e3435c3d5cf16a44a24fd2583f9d8c2d74dcc784938d0c78b5b36441  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/paired-cleanup.expected

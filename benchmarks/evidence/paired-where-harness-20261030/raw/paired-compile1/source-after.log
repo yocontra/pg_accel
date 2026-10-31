@@ -1,0 +1,17 @@
+pg_accel/src/engine/ffi/custom_scan/mod.rs: OK
+pg_accel/src/engine/ffi/custom_scan/paired_driver.rs: OK
+pg_accel/src/engine/ffi/custom_scan/paired_backend.rs: OK
+pg_accel/src/engine/ffi/custom_scan/paired_runner.rs: OK
+pg_accel/src/engine/ffi/custom_scan/paired_population.rs: OK
+pg_accel/src/engine/ffi/custom_scan/paired_fixtures.rs: OK
+pg_accel/src/engine/ffi/planner_hooks/mod.rs: OK
+pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs: OK
+pg_accel/src/engine/ffi/planner_hooks/generic_groupagg/paired_recipes.rs: OK
+pg_accel/src/engine/residency/mod.rs: OK
+pg_accel/src/engine/residency/store.rs: OK
+pg_accel/src/engine/residency/store/paired.rs: OK
+pg_accel/src/engine/executor/agg/mod.rs: OK
+pg_accel/src/engine/executor/agg/descriptor.rs: OK
+pg_accel/src/engine/executor/agg/execute.rs: OK
+pg_accel/src/engine/stats.rs: OK
+pg_accel/src/gpu/grouped_agg.rs: OK
