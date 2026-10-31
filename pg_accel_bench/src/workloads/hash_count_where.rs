@@ -215,6 +215,10 @@ impl Workload for HashCountWhere {
             ],
         ))
     }
+    fn expected_output_rows(&self, rows: usize) -> Option<usize> {
+        let c = contract(self.0).expect("registered WHERE fixture");
+        Some(counts(c, rows).1.iter().flatten().count())
+    }
     fn cleanup_sql(&self) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_hash_where".to_owned(),
@@ -273,6 +277,10 @@ mod tests {
             let c = contract(name).expect("contract");
             for (rows, accepted) in ROW_SCALES.iter().zip([681_055, 1_377_222]) {
                 let (actual, result) = counts(c, *rows);
+                assert_eq!(
+                    HashCountWhere(name).expected_output_rows(*rows),
+                    Some(result.iter().flatten().count())
+                );
                 if c.designated() {
                     assert_eq!(actual, accepted);
                     assert_eq!(result.iter().flatten().count(), 16_389);

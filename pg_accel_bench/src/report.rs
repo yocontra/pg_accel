@@ -395,6 +395,11 @@ pub struct WorkloadResult {
     pub where_count_native_kernel_deltas: Vec<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub where_count_execution_proof: Option<RawIntegerCountExecutionProof>,
+    /// Verified empty completion is distinct from positive-output GPU wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub empty_result_execution_proof: Option<EmptyResultExecutionProof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_query_completion: Option<RawQueryCompletion>,
     /// Per-pair, off-clock planner-stage deltas for native-decline benchmark
     /// cells. Entries index `iterations`; absent for non-native cells.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -436,6 +441,8 @@ pub struct WorkloadResult {
     /// node, but runtime counters did not prove GPU kernel dispatch.
     #[serde(default)]
     pub custom_scan_selected_not_dispatched: bool,
+    #[serde(default)]
+    pub empty_result_gpu_completed: bool,
     /// Derived release-gate count for credited function/SRF kernel executions.
     ///
     /// The harness currently has one kernel counter surface, so this is the
@@ -1119,6 +1126,7 @@ pub struct DispatchClassification {
     pub function_srf_kernel_dispatched: bool,
     pub planner_declined: bool,
     pub custom_scan_selected_not_dispatched: bool,
+    pub empty_result_gpu_completed: bool,
     pub function_kernel_count: u64,
     pub rows_returned_to_cpu: u64,
     pub gpu_resident_pipeline: GpuResidentPipelineStatus,
@@ -1307,6 +1315,7 @@ impl WorkloadResult {
             function_srf_kernel_dispatched: false,
             planner_declined: false,
             custom_scan_selected_not_dispatched: false,
+            empty_result_gpu_completed: false,
             function_kernel_count: 0,
             rows_returned_to_cpu: 0,
             gpu_resident_pipeline: GpuResidentPipelineStatus::NotReported,
@@ -1380,6 +1389,8 @@ impl WorkloadResult {
             where_count_settings: Vec::new(),
             where_count_native_kernel_deltas: Vec::new(),
             where_count_execution_proof: None,
+            empty_result_execution_proof: None,
+            raw_query_completion: None,
             planner_stage_captures: Vec::new(),
             native_parity_pair_captures: Vec::new(),
             artifact_lifecycle_probe: None,
@@ -1420,6 +1431,7 @@ impl WorkloadResult {
         self.planner_declined = classification.planner_declined;
         self.custom_scan_selected_not_dispatched =
             classification.custom_scan_selected_not_dispatched;
+        self.empty_result_gpu_completed = classification.empty_result_gpu_completed;
         self.function_kernel_count = classification.function_kernel_count;
         self.rows_returned_to_cpu = classification.rows_returned_to_cpu;
         self.gpu_resident_pipeline = classification.gpu_resident_pipeline;
@@ -1598,7 +1610,10 @@ fn infer_dispatch_classification(
     let gpu_kernel_dispatched = custom_scan_gpu_dispatched
         || function_srf_kernel_dispatched
         || lifecycle_artifact_reuse_credited;
-    let custom_scan_selected_not_dispatched = plan_selected && !gpu_kernel_dispatched;
+    let empty_result_gpu_completed =
+        plan_selected && !explicit_gpu_dispatch_disabled && empty_result_execution_verified(w);
+    let custom_scan_selected_not_dispatched =
+        plan_selected && !gpu_kernel_dispatched && !empty_result_gpu_completed;
     let planner_declined = !plan_selected && !function_srf_kernel_dispatched;
     let function_kernel_count = if function_srf_kernel_dispatched {
         w.gpu_kernel_execution_delta
@@ -1610,7 +1625,7 @@ fn infer_dispatch_classification(
         w,
         full_plan,
         plan_selected,
-        gpu_kernel_dispatched,
+        gpu_kernel_dispatched || empty_result_gpu_completed,
         function_srf_kernel_dispatched,
         planner_declined,
         custom_scan_selected_not_dispatched,
@@ -1622,6 +1637,7 @@ fn infer_dispatch_classification(
         function_srf_kernel_dispatched,
         planner_declined,
         custom_scan_selected_not_dispatched,
+        empty_result_gpu_completed,
         function_kernel_count,
         rows_returned_to_cpu,
         gpu_resident_pipeline,
@@ -1745,7 +1761,10 @@ fn no_dispatch_anomaly(w: &WorkloadResult) -> bool {
 }
 
 fn both_modes_appear_non_dispatching(w: &WorkloadResult) -> bool {
-    !w.dispatch_classification().gpu_kernel_dispatched && !baseline_plan_dispatches(w)
+    let classification = w.dispatch_classification();
+    !classification.gpu_kernel_dispatched
+        && !classification.empty_result_gpu_completed
+        && !baseline_plan_dispatches(w)
 }
 
 fn baseline_plan_dispatches(w: &WorkloadResult) -> bool {
@@ -2250,10 +2269,214 @@ fn plan_contains_raw_integer_count_descriptor(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawIntegerCountExecutionProof {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_sql: Option<String>,
     pub explain_analyze: String,
     pub gpu_kernel_execution_delta: u64,
     pub stock_exec_delta: u64,
     pub settings: GucSettings,
+}
+
+/// Exact SQL used by successful measured raw calls, after full result collection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawQueryCompletion {
+    pub accel_query_sql: String,
+    pub baseline_query_sql: String,
+    pub completed_pairs: usize,
+}
+
+impl RawQueryCompletion {
+    pub fn merge(cold: Option<&Self>, warm: Option<&Self>) -> Option<Self> {
+        let (cold, warm) = (cold?, warm?);
+        if cold.accel_query_sql != warm.accel_query_sql
+            || cold.baseline_query_sql != warm.baseline_query_sql
+        {
+            return None;
+        }
+        Some(Self {
+            accel_query_sql: cold.accel_query_sql.clone(),
+            baseline_query_sql: cold.baseline_query_sql.clone(),
+            completed_pairs: cold.completed_pairs.checked_add(warm.completed_pairs)?,
+        })
+    }
+}
+
+/// In-memory summary of the already validated full multiset/oracle check.
+/// The external qualification checker also authenticates its retained artifact.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmptyResultParity {
+    pub workload: String,
+    pub rows: usize,
+    pub accel_query_sql: String,
+    pub baseline_query_sql: String,
+    pub artifact: String,
+    pub accel_rows: i64,
+    pub baseline_rows: i64,
+    pub accel_minus_baseline: i64,
+    pub baseline_minus_accel: i64,
+    pub oracle_validated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmptyResultExecutionProof {
+    pub expected_output_rows: usize,
+    /// Successful raw simple_query calls fully consumed through EOF.
+    pub measured_queries_completed: usize,
+    pub parity: EmptyResultParity,
+    pub execution: RawIntegerCountExecutionProof,
+}
+
+/// Zero rows never earn positive-output dispatch/headline credit. This proves
+/// a separate, genuinely GPU-resident completion instead of a CPU boundary.
+pub fn empty_result_execution_verified(w: &WorkloadResult) -> bool {
+    let Some(proof) = w.empty_result_execution_proof.as_ref() else {
+        return false;
+    };
+    let parity = &proof.parity;
+    let execution = &proof.execution;
+    let Some(measured) = w.raw_query_completion.as_ref() else {
+        return false;
+    };
+    if (parity.workload.as_str(), parity.rows) != (w.name.as_str(), w.rows)
+        || measured.completed_pairs != w.iterations.len()
+        || measured.accel_query_sql != parity.accel_query_sql
+        || measured.baseline_query_sql != parity.baseline_query_sql
+        || execution.query_sql.as_deref() != Some(measured.accel_query_sql.as_str())
+    {
+        return false;
+    }
+    let queries = u64::try_from(w.iterations.len()).ok();
+    let minimum_input = u64::try_from(w.rows)
+        .ok()
+        .and_then(|rows| rows.checked_mul(queries?));
+    if proof.expected_output_rows != 0
+        || w.iterations.is_empty()
+        || proof.measured_queries_completed != w.iterations.len()
+        || queries != Some(w.pg_accel_queries_accelerated_delta)
+        || !w.dispatch_counter_captured
+        || w.gpu_kernel_execution_delta == 0
+        || w.pg_accel_stock_exec_delta != 0
+        || w.accel_output_rows_consumed != 0
+        || w.rows == 0
+        || minimum_input.is_none_or(|rows| w.pg_accel_rows_dispatched_delta < rows)
+        || w.pg_accel_batches_executed_delta != w.gpu_kernel_execution_delta
+        || !parity.oracle_validated
+        || parity.accel_rows != 0
+        || parity.baseline_rows != 0
+        || parity.accel_minus_baseline != 0
+        || parity.baseline_minus_accel != 0
+        || parity.accel_query_sql.trim().is_empty()
+        || parity.baseline_query_sql.trim().is_empty()
+        || parity.artifact.is_empty()
+        || w.correctness_diff_artifact.as_deref() != Some(parity.artifact.as_str())
+        || execution.gpu_kernel_execution_delta == 0
+        || execution.stock_exec_delta != 0
+        || !typed_h3_default_settings(Some(&execution.settings))
+        || !w.physical_kernel_mode_verified
+    {
+        return false;
+    }
+    let actual = pg_accel_custom_scan_blocks(&execution.explain_analyze);
+    let planned = pg_accel_custom_scan_blocks(w.plan_snippet.as_deref().unwrap_or_default());
+    let ([actual], [planned]) = (actual.as_slice(), planned.as_slice()) else {
+        return false;
+    };
+    let header = actual[0];
+    let number = |key: &str| {
+        header
+            .split_once(key)?
+            .1
+            .split_whitespace()
+            .next()?
+            .trim_end_matches(')')
+            .parse::<f64>()
+            .ok()
+    };
+    if !header.contains("(actual time=")
+        || number(" rows=") != Some(0.0)
+        || number(" loops=") != Some(1.0)
+    {
+        return false;
+    }
+    let actual = direct_custom_scan_property_lines(actual).join("\n");
+    let planned = direct_custom_scan_property_lines(planned).join("\n");
+    for property in [
+        "gpu descriptor group keys",
+        "gpu descriptor aggregates",
+        "gpu descriptor filter",
+        "gpu descriptor output",
+        "gpu physical kernel mode",
+    ] {
+        let a = plan_text_property(&actual, &[property]);
+        if a.as_ref().is_none_or(String::is_empty) || a != plan_text_property(&planned, &[property])
+        {
+            return false;
+        }
+    }
+    for property in [
+        "gpu resident pipeline",
+        "gpu kernel dispatched",
+        "gpu dispatched",
+        "gpu physical kernel mode verified",
+        "gpu lifecycle calls verified",
+    ] {
+        if plan_text_property(&actual, &[property]) != Some("true".to_owned()) {
+            return false;
+        }
+    }
+    if plan_text_property(&actual, &["gpu resident boundary"])
+        != Some("none: no CPU boundary".to_owned())
+        || plan_integer_property(&actual, &["rows returned to cpu"]) != Some(0)
+        || plan_integer_property(&actual, &["batches"])
+            != i64::try_from(execution.gpu_kernel_execution_delta).ok()
+        || plan_integer_property(&actual, &["gpu planned lifecycle calls"])
+            != i64::try_from(execution.gpu_kernel_execution_delta).ok()
+        || plan_integer_property(&actual, &["rows dispatched"])
+            .is_none_or(|rows| usize::try_from(rows).map_or(true, |rows| rows < w.rows))
+    {
+        return false;
+    }
+    let mode = plan_text_property(&actual, &["gpu physical kernel mode"]);
+    if mode != w.physical_kernel_mode
+        || mode != plan_text_property(&actual, &["gpu dispatched physical kernel mode"])
+    {
+        return false;
+    }
+    let modes = &w.physical_kernel_mode_counts;
+    match mode.as_deref() {
+        Some("parallel_dense_count") => {
+            modes.parallel_dense_count > 0
+                && modes.parallel_hash == 0
+                && modes.parallel_dense_integer == 0
+                && modes.parallel_dense_numeric == 0
+                && modes.serial_generic == 0
+        }
+        Some("parallel_dense_integer") => {
+            modes.parallel_dense_integer > 0
+                && modes.parallel_hash == 0
+                && modes.parallel_dense_count == 0
+                && modes.parallel_dense_numeric == 0
+                && modes.serial_generic == 0
+        }
+        Some("parallel_hash") => {
+            modes.parallel_hash > 0
+                && modes.parallel_dense_count == 0
+                && modes.parallel_dense_integer == 0
+                && modes.parallel_dense_numeric == 0
+                && modes.serial_generic == 0
+                && plan_text_property(&actual, &["gpu where population abi"])
+                    == Some("hash_partition_v2".to_owned())
+                && plan_text_property(&actual, &["gpu where population scope"])
+                    == Some("last completed execution (rescan-local)".to_owned())
+                && plan_integer_property(&actual, &["gpu where unique input rows"])
+                    == i64::try_from(w.rows).ok()
+                && plan_integer_property(&actual, &["gpu where whole rows"]) == Some(0)
+                && plan_integer_property(&actual, &["gpu where successful leaf rows"]) == Some(0)
+                && plan_integer_property(&actual, &["gpu where completed leaves"])
+                    .is_some_and(|leaves| leaves > 0)
+        }
+        _ => false,
+    }
 }
 
 fn raw_integer_count_plan_evidence_verified(
@@ -7191,6 +7414,7 @@ mod tests {
         let plan = "Custom Scan (GpuAccelAgg)\n  GPU Resident Operator Class: resident_groupagg\n  GPU Descriptor Strategy: descriptor_grouped_aggregate\n  GPU Descriptor Specialization: hash_count\n  GPU Physical Kernel Mode: parallel_hash\n  GPU Dispatched Physical Kernel Mode: parallel_hash\n  GPU Physical Kernel Mode Verified: true\n  GPU Lifecycle Calls Verified: true\n  GPU Descriptor Artifact Policy: ephemeral_fused reason=zero_retained_bytes\n  GPU Descriptor Group Keys: k0:fact(17000.1:type=21) type=21 collation=0 encoding=hash\n  GPU Descriptor Aggregates: m0:count_star -> value.count\n  GPU Descriptor Filter: fact=sql_mask(input=17000.2:type=16); measures=[m0=none]; dimensions=[none]\n  GPU Descriptor Output: slot0:group[k0] source_type=21 result_type=21 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false\n  GPU WHERE Population ABI: hash_partition_v2\n  GPU WHERE Population Scope: last completed execution (rescan-local)\n  GPU WHERE Unique Input Rows: 1000017\n  GPU WHERE Whole Rows: 681055\n  GPU WHERE Successful Leaf Rows: 681055\n  GPU WHERE Completed Leaves: 1".to_owned();
         w.plan_snippet = Some(plan.clone());
         w.where_count_execution_proof = Some(RawIntegerCountExecutionProof {
+            query_sql: None,
             explain_analyze: plan,
             gpu_kernel_execution_delta: 17,
             stock_exec_delta: 0,
@@ -7343,6 +7567,337 @@ mod tests {
                     "{name} malformed proof"
                 );
             }
+        }
+    }
+
+    fn verified_empty_workload(both: bool) -> WorkloadResult {
+        let mut w = mock_workload_result("independent_empty_contract", 100_000, 3.0, 20.0);
+        if both {
+            let mut cold = w.iterations.clone();
+            for sample in &mut cold {
+                sample.cache_state = CacheState::Cold;
+            }
+            w.iterations.extend(cold);
+        }
+        let count = u64::try_from(w.iterations.len()).expect("small fixture");
+        w.plan_selected = true;
+        w.gpu_kernel_dispatched = false;
+        w.dispatch_counter_captured = true;
+        w.gpu_kernel_execution_delta = 3 * count;
+        w.pg_accel_batches_executed_delta = 3 * count;
+        w.pg_accel_queries_accelerated_delta = count;
+        w.pg_accel_rows_dispatched_delta = 100_000 * count;
+        w.pg_accel_stock_exec_delta = 0;
+        w.accel_output_rows_consumed = 0;
+        w.physical_kernel_mode_verified = true;
+        w.physical_kernel_mode = Some("parallel_dense_count".to_owned());
+        w.physical_kernel_mode_counts = PhysicalKernelModeCounts::default();
+        w.physical_kernel_mode_counts.parallel_dense_count = 2 * count;
+        w.correctness_diff_artifact = Some("empty-parity.json".to_owned());
+        let plan = "Custom Scan (GpuAccelAgg) (actual time=1.0..1.1 rows=0.00 loops=1)\n  GPU Resident Pipeline: true\n  GPU Resident Proof Version: 2\n  GPU Resident Stage Mask: 1\n  GPU Resident Device Columns: 2\n  GPU Resident Operator Class: resident_groupagg\n  GPU Resident Boundary: none: no CPU boundary\n  GPU Kernel Dispatched: true\n  GPU Dispatched: true\n  GPU Physical Kernel Mode: parallel_dense_count\n  GPU Dispatched Physical Kernel Mode: parallel_dense_count\n  GPU Physical Kernel Mode Verified: true\n  GPU Lifecycle Calls Verified: true\n  GPU Planned Lifecycle Calls: 3\n  Batches: 3\n  Rows Returned To CPU: 0\n  Rows Dispatched: 100000\n  GPU Descriptor Group Keys: k0:fact(17000.1:type=20) type=20 collation=0 encoding=hash\n  GPU Descriptor Aggregates: m0:count_star -> value.count\n  GPU Descriptor Filter: fact=sql_mask(input=17000.2:type=16); measures=[m0=none]; dimensions=[none]\n  GPU Descriptor Output: slot0:group[k0]; slot1:aggregate[m0]".to_owned();
+        w.plan_snippet = Some(plan.clone());
+        w.empty_result_execution_proof = Some(EmptyResultExecutionProof {
+            expected_output_rows: 0,
+            measured_queries_completed: w.iterations.len(),
+            parity: EmptyResultParity {
+                workload: w.name.clone(),
+                rows: w.rows,
+                accel_query_sql: "SELECT k,count(*) FROM fixture WHERE w GROUP BY k".to_owned(),
+                baseline_query_sql: "SELECT k,count(*) FROM fixture WHERE w GROUP BY k".to_owned(),
+                artifact: "empty-parity.json".to_owned(),
+                accel_rows: 0,
+                baseline_rows: 0,
+                accel_minus_baseline: 0,
+                baseline_minus_accel: 0,
+                oracle_validated: true,
+            },
+            execution: RawIntegerCountExecutionProof {
+                query_sql: Some("SELECT k,count(*) FROM fixture WHERE w GROUP BY k".to_owned()),
+                explain_analyze: plan,
+                gpu_kernel_execution_delta: 3,
+                stock_exec_delta: 0,
+                settings: GucSettings {
+                    settings: vec![
+                        ("pg_accel.enabled".to_owned(), "on".to_owned()),
+                        ("pg_accel.gpu_enabled".to_owned(), "on".to_owned()),
+                        ("pg_accel.cost_multiplier".to_owned(), "1".to_owned()),
+                        ("pg_accel.min_batch_size".to_owned(), "65536".to_owned()),
+                    ],
+                },
+            },
+        });
+        w.raw_query_completion = Some(RawQueryCompletion {
+            accel_query_sql: "SELECT k,count(*) FROM fixture WHERE w GROUP BY k".to_owned(),
+            baseline_query_sql: "SELECT k,count(*) FROM fixture WHERE w GROUP BY k".to_owned(),
+            completed_pairs: w.iterations.len(),
+        });
+        w
+    }
+
+    #[test]
+    fn verified_empty_completion_preserves_residency_without_headline_credit() {
+        for both in [false, true] {
+            let w = verified_empty_workload(both);
+            assert!(empty_result_execution_verified(&w));
+            assert!(!both_modes_appear_non_dispatching(&w));
+            let classification = w.dispatch_classification();
+            assert!(classification.empty_result_gpu_completed);
+            assert!(!classification.gpu_kernel_dispatched);
+            assert!(!classification.custom_scan_selected_not_dispatched);
+            assert_eq!(
+                classification.gpu_resident_pipeline,
+                GpuResidentPipelineStatus::Reported
+            );
+            let report = mock_report(vec![w]);
+            assert!(!report.resident_boundary_audit().has_failures());
+            assert!(!report.with_normalized_dispatch().workloads[0].gpu_kernel_dispatched);
+        }
+        for (field, zero) in [
+            (
+                "  GPU Resident Stage Mask: 1\n",
+                "  GPU Resident Stage Mask: 0\n",
+            ),
+            (
+                "  GPU Resident Device Columns: 2\n",
+                "  GPU Resident Device Columns: 0\n",
+            ),
+        ] {
+            for replacement in ["", zero] {
+                let mut missing = verified_empty_workload(false);
+                missing.plan_snippet = missing
+                    .plan_snippet
+                    .map(|plan| plan.replace(field, replacement));
+                assert_ne!(
+                    missing.dispatch_classification().gpu_resident_pipeline,
+                    GpuResidentPipelineStatus::Reported
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn empty_completion_binds_actual_measured_and_parity_sql() {
+        for mutation in 0..8 {
+            let mut w = verified_empty_workload(false);
+            let proof = w.empty_result_execution_proof.as_mut().expect("proof");
+            let measured = w.raw_query_completion.as_mut().expect("measured");
+            match mutation {
+                0 => proof.parity.accel_query_sql = "SELECT unrelated".to_owned(),
+                1 => proof.parity.baseline_query_sql = "SELECT unrelated".to_owned(),
+                2 => measured.accel_query_sql = "SELECT unrelated".to_owned(),
+                3 => measured.baseline_query_sql = "SELECT unrelated".to_owned(),
+                4 => proof.execution.query_sql = Some("SELECT unrelated".to_owned()),
+                5 => proof.execution.query_sql = None,
+                6 => measured.completed_pairs -= 1,
+                _ => w.raw_query_completion = None,
+            }
+            assert!(!empty_result_execution_verified(&w), "mutation {mutation}");
+            assert!(both_modes_appear_non_dispatching(&w));
+        }
+    }
+
+    #[test]
+    fn raw_query_completion_merge_requires_identical_sql_and_checked_counts() {
+        let valid = verified_empty_workload(false);
+        let cold = valid.raw_query_completion.as_ref().expect("measured");
+        let merged = RawQueryCompletion::merge(Some(cold), Some(cold)).expect("same SQL");
+        assert_eq!(merged.completed_pairs, cold.completed_pairs * 2);
+        for mutation in 0..3 {
+            let mut warm = cold.clone();
+            match mutation {
+                0 => warm.accel_query_sql = "SELECT unrelated".to_owned(),
+                1 => warm.baseline_query_sql = "SELECT unrelated".to_owned(),
+                _ => warm.completed_pairs = usize::MAX,
+            }
+            assert!(RawQueryCompletion::merge(Some(cold), Some(&warm)).is_none());
+        }
+        assert!(RawQueryCompletion::merge(Some(cold), None).is_none());
+        let mut both = verified_empty_workload(true);
+        both.raw_query_completion = Some(merged);
+        assert!(empty_result_execution_verified(&both));
+        both.raw_query_completion
+            .as_mut()
+            .expect("measured")
+            .completed_pairs -= 1;
+        assert!(!empty_result_execution_verified(&both));
+    }
+
+    #[test]
+    fn empty_completion_rejects_missing_output_evidence_and_legacy_reports() {
+        for mutation in 0..22 {
+            let mut w = verified_empty_workload(false);
+            match mutation {
+                0 => w.empty_result_execution_proof = None,
+                1 => {
+                    w.empty_result_execution_proof
+                        .as_mut()
+                        .expect("proof")
+                        .expected_output_rows = 1;
+                }
+                2 => {
+                    w.empty_result_execution_proof
+                        .as_mut()
+                        .expect("proof")
+                        .parity
+                        .accel_rows = 1;
+                }
+                3 => {
+                    w.empty_result_execution_proof
+                        .as_mut()
+                        .expect("proof")
+                        .parity
+                        .baseline_rows = 1;
+                }
+                4 => {
+                    w.empty_result_execution_proof
+                        .as_mut()
+                        .expect("proof")
+                        .parity
+                        .accel_minus_baseline = 1;
+                }
+                5 => {
+                    w.empty_result_execution_proof
+                        .as_mut()
+                        .expect("proof")
+                        .parity
+                        .oracle_validated = false;
+                }
+                6 => {
+                    w.empty_result_execution_proof
+                        .as_mut()
+                        .expect("proof")
+                        .parity
+                        .rows += 1;
+                }
+                7 => {
+                    w.empty_result_execution_proof
+                        .as_mut()
+                        .expect("proof")
+                        .parity
+                        .workload = "other".to_owned();
+                }
+                8 => w.correctness_diff_artifact = None,
+                9 => w
+                    .empty_result_execution_proof
+                    .as_mut()
+                    .expect("proof")
+                    .execution
+                    .explain_analyze
+                    .clear(),
+                10 => w.gpu_kernel_execution_delta = 0,
+                11 => w.pg_accel_stock_exec_delta = 1,
+                12 => {
+                    w.empty_result_execution_proof
+                        .as_mut()
+                        .expect("proof")
+                        .execution
+                        .stock_exec_delta = 1;
+                }
+                13 => {
+                    w.empty_result_execution_proof
+                        .as_mut()
+                        .expect("proof")
+                        .measured_queries_completed -= 1;
+                }
+                14 => w.pg_accel_queries_accelerated_delta -= 1,
+                15 => w.physical_kernel_mode_verified = false,
+                16 => w.pg_accel_rows_dispatched_delta = 0,
+                17 => w.pg_accel_batches_executed_delta -= 1,
+                18 => {
+                    w.empty_result_execution_proof
+                        .as_mut()
+                        .expect("proof")
+                        .execution
+                        .explain_analyze = w
+                        .empty_result_execution_proof
+                        .as_ref()
+                        .expect("proof")
+                        .execution
+                        .explain_analyze
+                        .replace("GPU Dispatched: true", "GPU Dispatched: false");
+                }
+                19 => {
+                    w.empty_result_execution_proof
+                        .as_mut()
+                        .expect("proof")
+                        .execution
+                        .explain_analyze = w
+                        .empty_result_execution_proof
+                        .as_ref()
+                        .expect("proof")
+                        .execution
+                        .explain_analyze
+                        .replace("rows=0.00", "rows=1.00");
+                }
+                20 => {
+                    w.empty_result_execution_proof
+                        .as_mut()
+                        .expect("proof")
+                        .execution
+                        .explain_analyze = w
+                        .empty_result_execution_proof
+                        .as_ref()
+                        .expect("proof")
+                        .execution
+                        .explain_analyze
+                        .replace(
+                            "GPU Planned Lifecycle Calls: 3",
+                            "GPU Planned Lifecycle Calls: 2",
+                        );
+                }
+                _ => w
+                    .empty_result_execution_proof
+                    .as_mut()
+                    .expect("proof")
+                    .parity
+                    .accel_query_sql
+                    .clear(),
+            }
+            assert!(!empty_result_execution_verified(&w), "mutation {mutation}");
+            assert!(
+                w.dispatch_classification()
+                    .custom_scan_selected_not_dispatched,
+                "mutation {mutation}"
+            );
+        }
+        let mut encoded = serde_json::to_value(verified_empty_workload(false)).expect("serialize");
+        encoded
+            .as_object_mut()
+            .expect("object")
+            .remove("empty_result_execution_proof");
+        encoded
+            .as_object_mut()
+            .expect("object")
+            .remove("empty_result_gpu_completed");
+        let old: WorkloadResult = serde_json::from_value(encoded).expect("legacy report");
+        assert!(!empty_result_execution_verified(&old));
+    }
+
+    #[test]
+    fn empty_hash_completion_requires_completed_zero_population() {
+        let mut w = verified_empty_workload(false);
+        w.physical_kernel_mode = Some("parallel_hash".to_owned());
+        w.physical_kernel_mode_counts.parallel_dense_count = 0;
+        w.physical_kernel_mode_counts.parallel_hash = 10;
+        let proof = w.empty_result_execution_proof.as_mut().expect("proof");
+        proof.execution.explain_analyze = proof
+            .execution
+            .explain_analyze
+            .replace("parallel_dense_count", "parallel_hash");
+        w.plan_snippet = Some(proof.execution.explain_analyze.clone());
+        assert!(!empty_result_execution_verified(&w));
+        let proof = w.empty_result_execution_proof.as_mut().expect("proof");
+        proof.execution.explain_analyze.push_str("\n  GPU WHERE Population ABI: hash_partition_v2\n  GPU WHERE Population Scope: last completed execution (rescan-local)\n  GPU WHERE Unique Input Rows: 100000\n  GPU WHERE Whole Rows: 0\n  GPU WHERE Successful Leaf Rows: 0\n  GPU WHERE Completed Leaves: 1");
+        assert!(empty_result_execution_verified(&w));
+        for (old, new) in [
+            ("Completed Leaves: 1", "Completed Leaves: 0"),
+            ("Whole Rows: 0", "Whole Rows: 1"),
+            ("Successful Leaf Rows: 0", "Successful Leaf Rows: 1"),
+        ] {
+            let mut bad = w.clone();
+            let proof = bad.empty_result_execution_proof.as_mut().expect("proof");
+            proof.execution.explain_analyze = proof.execution.explain_analyze.replace(old, new);
+            assert!(!empty_result_execution_verified(&bad));
         }
     }
 
@@ -9220,6 +9775,7 @@ mod tests {
             let mut workload = mock_workload_result(name, 1_000_017, 10.0, 20.0);
             workload.plan_snippet = Some(static_plan.clone());
             workload.raw_integer_count_execution_proof = Some(RawIntegerCountExecutionProof {
+                query_sql: None,
                 explain_analyze: plan.clone(),
                 gpu_kernel_execution_delta: 1,
                 stock_exec_delta: 0,

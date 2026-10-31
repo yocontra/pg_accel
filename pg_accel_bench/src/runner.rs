@@ -362,7 +362,7 @@ struct DispatchWarningInput<'a> {
     function_kernel_candidate: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct CorrectnessDiffArtifact {
     schema_version: u32,
     workload: String,
@@ -1758,6 +1758,10 @@ fn run_with_timing_and_cache_internal(
         let mut warmup_iterations = cold.warmup_iterations.clone();
         warmup_iterations.extend(warm.warmup_iterations.clone());
         result.set_warmup_iterations(warmup_iterations);
+        result.raw_query_completion = report::RawQueryCompletion::merge(
+            cold.raw_query_completion.as_ref(),
+            warm.raw_query_completion.as_ref(),
+        );
         result
             .typed_h3_settings
             .extend(cold.typed_h3_settings.clone());
@@ -1851,6 +1855,7 @@ fn run_with_timing_and_cache_internal(
     let pre_query = workload.pre_query_sql();
     let total_runs = effective_warmup + iterations;
     let mut results = Vec::with_capacity(iterations);
+    let mut raw_completed_calls = [0_usize; 2];
     let mut warmup_results = Vec::with_capacity(effective_warmup);
     let mut rng = rand::thread_rng();
     let measured_accel_first = randomized_balanced_arm_order(iterations, &mut rng);
@@ -2057,6 +2062,15 @@ fn run_with_timing_and_cache_internal(
                 timing_mode,
                 capture_this_planner,
             )?;
+            if !is_warmup && timing_mode == TimingMode::RawWallClock {
+                let arm = match modes[idx] {
+                    BenchMode::Accel => 0,
+                    BenchMode::PgParallel => 1,
+                };
+                raw_completed_calls[arm] = raw_completed_calls[arm]
+                    .checked_add(1)
+                    .ok_or("raw completed-call count overflow")?;
+            }
             if let Some(before) = native_before {
                 let after = capture_dispatch_stats(&mut mode_clients[client_idx])?;
                 let delta = dispatch_stats_delta(before, after)?;
@@ -2278,6 +2292,13 @@ fn run_with_timing_and_cache_internal(
             report::CacheModeSummary::from_iterations(CacheState::Warm, &combined);
     }
     merge_dispatch_counter_capture(&mut result, counter_capture);
+    if timing_mode == TimingMode::RawWallClock && raw_completed_calls[0] == raw_completed_calls[1] {
+        result.raw_query_completion = Some(report::RawQueryCompletion {
+            accel_query_sql: query,
+            baseline_query_sql: baseline_query,
+            completed_pairs: raw_completed_calls[0],
+        });
+    }
     Ok(result)
 }
 
@@ -4521,17 +4542,18 @@ fn run_workload_with_config(
         );
     }
 
-    let correctness_diff_artifact = if let Some(artifact_writer) = artifacts {
-        Some(capture_and_write_correctness_diff(
+    let (correctness_diff_artifact, empty_parity) = if let Some(artifact_writer) = artifacts {
+        let (path, parity) = capture_and_write_correctness_diff(
             connection,
             workload,
             rows,
             &query_identity,
             artifact_writer,
-        )?)
+        )?;
+        (Some(path), parity)
     } else {
         validate_result_oracle_from_connection(connection, workload, rows)?;
-        None
+        (None, None)
     };
 
     // Always capture a plan snippet so the runner can tag the workload
@@ -4629,17 +4651,6 @@ fn run_workload_with_config(
         && report::derived_output_artifact_reuse_evidence_verified(&result);
     result.gpu_kernel_dispatched =
         dispatch_classification.gpu_kernel_dispatched || lifecycle_artifact_reuse_credited;
-    emit_dispatch_classification_warning(
-        DispatchWarningInput {
-            workload: workload.name(),
-            rows,
-            plan_selected,
-            plan_text_dispatched,
-            plan_explicitly_not_dispatched,
-            function_kernel_candidate,
-        },
-        &result,
-    );
     // Tagged native-decline evidence — sourced only from a real planner
     // rejection (PlannerReported) or an unconfirmed static expectation
     // (ExpectedUnconfirmed). Never synthesized into plan text.
@@ -4675,6 +4686,32 @@ fn run_workload_with_config(
             connection, workload,
         )?);
     }
+    if let Some(parity) = empty_parity
+        && config.timing_mode == TimingMode::RawWallClock
+    {
+        let execution = match result.where_count_execution_proof.as_ref() {
+            Some(proof) => proof.clone(),
+            None => capture_raw_integer_count_execution_proof(connection, workload)?,
+        };
+        result.empty_result_execution_proof = Some(report::EmptyResultExecutionProof {
+            expected_output_rows: 0,
+            measured_queries_completed: result.iterations.len(),
+            parity,
+            execution,
+        });
+        result.empty_result_gpu_completed = report::empty_result_execution_verified(&result);
+    }
+    emit_dispatch_classification_warning(
+        DispatchWarningInput {
+            workload: workload.name(),
+            rows,
+            plan_selected,
+            plan_text_dispatched,
+            plan_explicitly_not_dispatched,
+            function_kernel_candidate,
+        },
+        &result,
+    );
     result.thermal = thermal;
     // Cold-honesty tag: if the workload fixture fits within shared_buffers,
     // the data stays resident even after the OS page-cache purge, so a "cold"
@@ -4769,7 +4806,7 @@ fn capture_and_write_correctness_diff(
     rows: usize,
     query_identity: &BenchmarkQueryIdentity,
     artifact_writer: &ArtifactWriter,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<(String, Option<report::EmptyResultParity>), Box<dyn std::error::Error>> {
     let artifact = match capture_correctness_diff(connection, workload, rows, query_identity) {
         Ok(artifact) => artifact,
         // postgres::Error's Display can be only "db error"; retain the server
@@ -4783,7 +4820,8 @@ fn capture_and_write_correctness_diff(
         .display()
         .to_string();
     if artifact.status == "pass" {
-        return Ok(relative_path);
+        let parity = empty_result_parity(workload, rows, &artifact, &relative_path);
+        return Ok((relative_path, parity));
     }
     Err(format!(
         "correctness diff failed for {} @ {} rows: status={} accel_minus_baseline={:?} baseline_minus_accel={:?} error={}",
@@ -4795,6 +4833,46 @@ fn capture_and_write_correctness_diff(
         artifact.error.as_deref().unwrap_or("-")
     )
     .into())
+}
+
+fn empty_result_parity(
+    workload: &dyn Workload,
+    rows: usize,
+    artifact: &CorrectnessDiffArtifact,
+    path: &str,
+) -> Option<report::EmptyResultParity> {
+    if workload.expected_output_rows(rows) != Some(0)
+        || workload.result_oracle(rows).is_none()
+        || artifact.status != "pass"
+        || artifact.error.is_some()
+        || artifact.workload != workload.name()
+        || artifact.rows != rows
+        || artifact.accel_query_sql != workload.query_sql()
+        || artifact.baseline_query_sql
+            != workload
+                .baseline_query_sql()
+                .unwrap_or_else(|| workload.query_sql())
+        || artifact.accel_rows != Some(0)
+        || artifact.baseline_rows != Some(0)
+        || artifact.accel_minus_baseline_count != Some(0)
+        || artifact.baseline_minus_accel_count != Some(0)
+        || !artifact.accel_minus_baseline_samples.is_empty()
+        || !artifact.baseline_minus_accel_samples.is_empty()
+    {
+        return None;
+    }
+    Some(report::EmptyResultParity {
+        workload: artifact.workload.clone(),
+        rows,
+        accel_query_sql: artifact.accel_query_sql.clone(),
+        baseline_query_sql: artifact.baseline_query_sql.clone(),
+        artifact: path.to_owned(),
+        accel_rows: 0,
+        baseline_rows: 0,
+        accel_minus_baseline: 0,
+        baseline_minus_accel: 0,
+        oracle_validated: true,
+    })
 }
 
 fn capture_correctness_diff(
@@ -5457,11 +5535,9 @@ fn capture_raw_integer_count_execution_proof(
         client.batch_execute(&sql)?;
     }
     let before = capture_dispatch_stats(&mut client)?;
+    let query_sql = workload.query_sql();
     let rows = client.query(
-        &format!(
-            "EXPLAIN (ANALYZE, VERBOSE, COSTS OFF) {}",
-            workload.query_sql()
-        ),
+        &format!("EXPLAIN (ANALYZE, VERBOSE, COSTS OFF) {query_sql}"),
         &[],
     )?;
     let after = capture_dispatch_stats(&mut client)?;
@@ -5479,6 +5555,7 @@ fn capture_raw_integer_count_execution_proof(
     )?
     .settings;
     Ok(report::RawIntegerCountExecutionProof {
+        query_sql: Some(query_sql),
         explain_analyze,
         gpu_kernel_execution_delta: delta.gpu_kernel_executions,
         stock_exec_delta: delta.stock_exec_count,
@@ -5697,6 +5774,13 @@ fn classify_runner_dispatch(input: RunnerDispatchInput) -> RunnerDispatchClassif
 }
 
 fn emit_dispatch_classification_warning(input: DispatchWarningInput<'_>, result: &WorkloadResult) {
+    if report::empty_result_execution_verified(result) {
+        eprintln!(
+            "[dispatch] {} @ {}: verified GPU-resident empty completion; no positive-output GPU-win credit",
+            input.workload, input.rows
+        );
+        return;
+    }
     if !result.dispatch_counter_captured {
         eprintln!(
             "[dispatch] WARNING: {} @ {}: runtime counter capture unavailable; \
@@ -7425,6 +7509,111 @@ mod tests {
 
         fn cleanup_sql(&self) -> Vec<String> {
             vec!["DROP TABLE runner_primary, runner_secondary".to_owned()]
+        }
+    }
+
+    struct DeclaredEmptyWorkload {
+        expected: Option<usize>,
+        oracle: bool,
+    }
+
+    impl Workload for DeclaredEmptyWorkload {
+        fn name(&self) -> &'static str {
+            "declared_empty"
+        }
+        fn description(&self) -> &'static str {
+            "independent empty-cardinality test"
+        }
+        fn setup_sql(&self, _rows: usize) -> Vec<String> {
+            Vec::new()
+        }
+        fn cleanup_sql(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn query_sql(&self) -> String {
+            "SELECT NULL::bigint WHERE false".to_owned()
+        }
+        fn expected_output_rows(&self, _rows: usize) -> Option<usize> {
+            self.expected
+        }
+        fn result_oracle(&self, _rows: usize) -> Option<crate::workloads::ResultOracle> {
+            self.oracle.then(|| {
+                crate::workloads::ResultOracle::one_row(
+                    "SELECT count(*) FROM (SELECT NULL::bigint WHERE false) actual".to_owned(),
+                    vec![crate::workloads::ExpectedResultValue::I64(0)],
+                )
+            })
+        }
+    }
+
+    #[test]
+    fn empty_parity_requires_declared_zero_oracle_and_full_query_bound_diff() {
+        let workload = DeclaredEmptyWorkload {
+            expected: Some(0),
+            oracle: true,
+        };
+        let artifact = CorrectnessDiffArtifact {
+            schema_version: CORRECTNESS_DIFF_SCHEMA_VERSION,
+            workload: workload.name().to_owned(),
+            rows: 100_000,
+            status: "pass".to_owned(),
+            order_sensitive: false,
+            accel_rows: Some(0),
+            baseline_rows: Some(0),
+            accel_minus_baseline_count: Some(0),
+            baseline_minus_accel_count: Some(0),
+            sample_limit: CORRECTNESS_DIFF_SAMPLE_LIMIT,
+            accel_minus_baseline_samples: Vec::new(),
+            baseline_minus_accel_samples: Vec::new(),
+            accel_query_sql: workload.query_sql(),
+            baseline_query_sql: workload.query_sql(),
+            error: None,
+        };
+        assert!(empty_result_parity(&workload, 100_000, &artifact, "parity.json").is_some());
+        assert_eq!(RunnerWorkload.expected_output_rows(100_000), None);
+        for expected in [None, Some(1)] {
+            assert!(
+                empty_result_parity(
+                    &DeclaredEmptyWorkload {
+                        expected,
+                        oracle: true
+                    },
+                    100_000,
+                    &artifact,
+                    "parity.json"
+                )
+                .is_none()
+            );
+        }
+        assert!(
+            empty_result_parity(
+                &DeclaredEmptyWorkload {
+                    expected: Some(0),
+                    oracle: false
+                },
+                100_000,
+                &artifact,
+                "parity.json"
+            )
+            .is_none()
+        );
+        for mutation in 0..9 {
+            let mut bad = artifact.clone();
+            match mutation {
+                0 => bad.accel_rows = Some(1), // A row containing NULL is not empty.
+                1 => bad.baseline_rows = Some(1),
+                2 => bad.accel_minus_baseline_count = Some(1),
+                3 => bad.baseline_minus_accel_count = None,
+                4 => bad.status = "fail".to_owned(),
+                5 => bad.error = Some("oracle failed".to_owned()),
+                6 => bad.accel_query_sql = "SELECT NULL::bigint".to_owned(),
+                7 => bad.baseline_query_sql = "SELECT NULL::bigint".to_owned(),
+                _ => bad.rows += 1,
+            }
+            assert!(
+                empty_result_parity(&workload, 100_000, &bad, "parity.json").is_none(),
+                "mutation {mutation}"
+            );
         }
     }
 

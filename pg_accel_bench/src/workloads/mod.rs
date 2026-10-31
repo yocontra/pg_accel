@@ -268,6 +268,11 @@ impl ResultOracle {
 
 /// A benchmark workload that can set up tables, run a query, and clean up.
 pub trait Workload: Send + Sync {
+    /// Independently known query output cardinality, not oracle-wrapper rows.
+    /// Unknown by default; zero never follows merely from observed emptiness.
+    fn expected_output_rows(&self, _rows: usize) -> Option<usize> {
+        None
+    }
     /// Opt-in externally prepared fixture. Captured verbatim with run artifacts.
     /// Default synthetic suites never require downloads or corpus imports.
     fn external_fixture_manifest(&self) -> Option<&'static str> {
