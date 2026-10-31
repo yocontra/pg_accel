@@ -1,0 +1,7524 @@
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import textwrap
+import unittest
+
+
+SCRIPTS_DIR = pathlib.Path(__file__).resolve().parents[1]
+REPO_ROOT = SCRIPTS_DIR.parent
+sys.path.insert(0, str(SCRIPTS_DIR))
+
+import cpu_cheat_audit as audit  # noqa: E402
+
+
+FIXTURE_PATH = pathlib.Path("fixture.cpp")
+STATUS_BINDING_RE = re.compile(
+    r"\b(?:using\s+pgaccel_status\s*=|typedef\b[^;{}]*(?:\{[^}]*\}\s*)?pgaccel_status\s*;|enum(?:\s+class)?\s+pgaccel_status\b)",
+    re.DOTALL,
+)
+
+
+def audit_fixture(source: str) -> audit.FileAudit:
+    rendered = textwrap.dedent(source)
+    if STATUS_BINDING_RE.search(rendered) is None:
+        rendered = "using pgaccel_status = int;\n" + rendered
+    return audit.audit_source(FIXTURE_PATH, rendered)
+
+
+def audit_compiling_fixture(source: str) -> audit.FileAudit:
+    rendered = textwrap.dedent(source)
+    compiler = shutil.which("clang++")
+    if compiler is None:
+        raise unittest.SkipTest("clang++ is required for compile-valid regressions")
+    completed = subprocess.run(
+        [compiler, "-std=c++17", "-fsyntax-only", "-x", "c++", "-"],
+        input=rendered,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(f"fixture is not valid C++:\n{completed.stderr}")
+    return audit.audit_source(FIXTURE_PATH, rendered)
+
+
+def audit_compiling_fixture_with_headers(
+    source: str, headers: dict[str, str]
+) -> audit.FileAudit:
+    rendered = textwrap.dedent(source)
+    compiler = shutil.which("clang++")
+    if compiler is None:
+        raise unittest.SkipTest("clang++ is required for compile-valid regressions")
+    with tempfile.TemporaryDirectory(prefix="pgaccel-audit-header-") as directory:
+        root = pathlib.Path(directory)
+        source_path = root / "fixture.cpp"
+        source_path.write_text(rendered, encoding="utf-8")
+        for name, contents in headers.items():
+            header_path = root / name
+            header_path.parent.mkdir(parents=True, exist_ok=True)
+            header_path.write_text(textwrap.dedent(contents), encoding="utf-8")
+        completed = subprocess.run(
+            [
+                compiler,
+                "-std=c++17",
+                "-fsyntax-only",
+                "-I",
+                str(root),
+                str(source_path),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise AssertionError(f"fixture is not valid C++:\n{completed.stderr}")
+        return audit.audit_source(source_path, rendered)
+
+
+def finding_for(result: audit.FileAudit, name: str) -> audit.Finding:
+    return next(finding for finding in result.findings if finding.entrypoint == name)
+
+
+class EntrypointDiscoveryTests(unittest.TestCase):
+    def test_multiline_direct_extern_c_definition_is_found(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C"
+            pgaccel_status
+            pgaccel_multiline(
+                int* values,
+                size_t count) {
+              sycl::queue& queue = get_queue();
+              queue.parallel_for<Kernel>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                values[id[0]] = 1;
+              });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertEqual(result.entrypoints, 1)
+        self.assertFalse(result.findings)
+
+    def test_extern_c_linkage_block_definition_is_found(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" {
+            pgaccel_status pgaccel_in_block(int* values, size_t count) {
+              sycl::queue* q = get_queue();
+              q->single_task<Kernel>([=]() { values[0] = count; });
+              return PGACCEL_OK;
+            }
+            }
+            """
+        )
+        self.assertEqual(result.entrypoints, 1)
+        self.assertFalse(result.findings)
+
+    def test_non_c_linkage_function_is_not_an_entrypoint(self) -> None:
+        result = audit_fixture(
+            """
+            pgaccel_status pgaccel_cpp_only() { return PGACCEL_ERROR_NO_DEVICE; }
+            """
+        )
+        self.assertEqual(result.entrypoints, 0)
+        self.assertIn("no extern", result.findings[0].message)
+
+    def test_duplicate_entrypoint_definition_is_ambiguous(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_duplicate(int) {
+              return PGACCEL_ERROR_NO_DEVICE;
+            }
+            extern "C" pgaccel_status pgaccel_duplicate(float) {
+              return PGACCEL_ERROR_NO_DEVICE;
+            }
+            """
+        )
+        finding = finding_for(result, "pgaccel_duplicate")
+        self.assertIn("ambiguous_entrypoint", finding.classifications)
+
+    def test_unbalanced_source_fails_closed(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_broken() {
+              if (true) {
+                return PGACCEL_ERROR;
+            }
+            """
+        )
+        self.assertEqual(result.findings[0].entrypoint, "<parser>")
+        self.assertIn("parser_error", result.findings[0].classifications)
+
+    def test_preprocessor_directive_contents_are_not_code(self) -> None:
+        result = audit_fixture(
+            r"""
+            #define CHEAT_TEXT q.parallel_for( \
+                something_with_an_unbalanced_brace({)
+            extern "C" pgaccel_status pgaccel_preprocessed() {
+              return PGACCEL_ERROR_NO_DEVICE;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+
+
+class DeviceTerminalTests(unittest.TestCase):
+    def test_typed_queue_parallel_for_passes(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_direct(int* out, size_t count) {
+              sycl::queue& q = get_queue();
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+                out[id[0]] = 1;
+              });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertIn("device_dispatch", result.entrypoint_audits[0].classifications)
+
+    def test_typed_handler_submit_passes(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_submit(int* out, size_t count) {
+              sycl::queue* q = get_queue();
+              q->submit([&](sycl::handler& h) {
+                h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+                  out[id[0]] = 1;
+                });
+              });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+
+    def test_untyped_parallel_for_method_is_not_a_sycl_terminal(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_fake_method(FakeQueue& q) {
+              q.parallel_for(123);
+              return PGACCEL_OK;
+            }
+            """
+        )
+        finding = finding_for(result, "pgaccel_fake_method")
+        self.assertIn("missing_device_terminal", finding.classifications)
+
+    def test_comments_and_literals_cannot_masquerade_as_dispatch(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_fake_text(int* out, size_t count) {
+              // sycl::queue& q = get_queue(); q.parallel_for(...);
+              const char* normal = "q.submit([&] { h.parallel_for(...); })";
+              const char* raw = R"tag(queue.single_task<Kernel>([] {}))tag";
+              const char fake = '}';
+              for (size_t i = 0; i < count; ++i) out[i] = normal[0] + raw[0] + fake;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        finding = finding_for(result, "pgaccel_fake_text")
+        self.assertIn("host_computation", finding.classifications)
+
+    def test_function_try_block_dispatch_is_parsed(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_try_block(int* out) try {
+              sycl::queue& q = get_queue();
+              q.single_task<Kernel>([=]() { *out = 1; });
+              return PGACCEL_OK;
+            } catch (...) {
+              return PGACCEL_ERROR;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+
+
+class CallGraphTests(unittest.TestCase):
+    def test_kernel_derived_opaque_resource_return_and_publication_pass(self) -> None:
+        result = audit_fixture(
+            r"""
+            struct OpaqueState { std::vector<int> payload; };
+            OpaqueState* build_device_state(int* input, size_t count) {
+              sycl::queue q;
+              int* device_result = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<OpaqueBuild>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_result[id[0]] = input[id[0]] * 2;
+              }).wait();
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              q.memcpy(state->payload.data(), device_result, count * sizeof(int)).wait();
+              return state;
+            }
+            extern "C" OpaqueState* pgaccel_opaque_direct(int* input, size_t count) {
+              return build_device_state(input, count);
+            }
+            extern "C" pgaccel_status pgaccel_opaque_return_then_publish(
+                int* input, size_t count, OpaqueState** out) {
+              OpaqueState* state = build_device_state(input, count);
+              if (state == nullptr) return PGACCEL_ERROR;
+              *out = state;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_opaque_checked(
+                int* input, size_t count, OpaqueState** out) {
+              sycl::queue q;
+              int* device_result = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<OpaqueChecked>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_result[id[0]] = input[id[0]] * 3;
+              }).wait();
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              q.memcpy(state->payload.data(), device_result, count * sizeof(int)).wait();
+              *out = state;
+              return PGACCEL_OK;
+            }
+            extern "C" OpaqueState* pgaccel_opaque_checked_wrapper(
+                int* input, size_t count) {
+              OpaqueState* state = nullptr;
+              const pgaccel_status status =
+                  pgaccel_opaque_checked(input, count, &state);
+              if (status != PGACCEL_OK) return nullptr;
+              return state;
+            }
+            extern "C" OpaqueState* pgaccel_opaque_streamed(
+                int* input, size_t count) {
+              sycl::queue q;
+              int* device_result = sycl::malloc_shared<int>(count, q);
+              size_t begin = 0;
+              do {
+                q.parallel_for<OpaqueStream>(sycl::range<1>(1), [=](sycl::id<1>) {
+                  device_result[begin] = input[begin] * 4;
+                }).wait();
+                ++begin;
+              } while (begin < count);
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              q.memcpy(state->payload.data(), device_result, count * sizeof(int)).wait();
+              return state;
+            }
+            """
+        )
+        self.assertEqual(result.entrypoints, 5)
+        self.assertFalse(result.findings)
+        for entry in result.entrypoint_audits:
+            self.assertIn("opaque_device_resource", entry.classifications)
+
+    def test_zero_work_empty_resource_requires_default_unmodified_state(self) -> None:
+        result = audit_fixture(
+            r"""
+            struct OpaqueState { std::vector<int> payload; };
+            extern "C" pgaccel_status pgaccel_zero_empty_clean(
+                int* input, size_t count, OpaqueState** out) {
+              *out = nullptr;
+              if (count == 0) {
+                auto* empty = new OpaqueState();
+                if (empty == nullptr) return PGACCEL_OOM;
+                *out = empty;
+                return PGACCEL_OK;
+              }
+              sycl::queue q;
+              int* device_result = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<ZeroEmptyClean>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_result[id[0]] = input[id[0]];
+              }).wait();
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              q.memcpy(state->payload.data(), device_result, count * sizeof(int)).wait();
+              *out = state;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_zero_empty_mutated(
+                int* input, size_t count, OpaqueState** out) {
+              *out = nullptr;
+              if (count == 0) {
+                auto* empty = new OpaqueState();
+                if (empty == nullptr) return PGACCEL_OOM;
+                empty->payload.push_back(42);
+                *out = empty;
+                return PGACCEL_OK;
+              }
+              sycl::queue q;
+              int* device_result = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<ZeroEmptyMutated>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_result[id[0]] = input[id[0]];
+              }).wait();
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              q.memcpy(state->payload.data(), device_result, count * sizeof(int)).wait();
+              *out = state;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        clean = entries["pgaccel_zero_empty_clean"]
+        self.assertTrue(clean.ok, clean.detail)
+        self.assertIn("zero_work", clean.classifications)
+        hostile = entries["pgaccel_zero_empty_mutated"]
+        self.assertFalse(hostile.ok, hostile.detail)
+        self.assertIn("host_computation", hostile.classifications)
+
+    def test_opaque_resource_hostile_provenance_mutants_fail(self) -> None:
+        result = audit_fixture(
+            r"""
+            struct OpaqueState { std::vector<int> payload; };
+            extern "C" OpaqueState* pgaccel_opaque_host_created(size_t count) {
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              state->payload[0] = 42;
+              return state;
+            }
+            extern "C" OpaqueState* pgaccel_opaque_host_overwrite(
+                int* input, size_t count) {
+              sycl::queue q;
+              int* device_result = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<OpaqueOverwrite>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_result[id[0]] = input[id[0]];
+              }).wait();
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              q.memcpy(state->payload.data(), device_result, count * sizeof(int)).wait();
+              state->payload[0] = 42;
+              return state;
+            }
+            extern "C" OpaqueState* pgaccel_opaque_unawaited(
+                int* input, size_t count) {
+              sycl::queue q;
+              int* device_result = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<OpaqueUnawaited>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_result[id[0]] = input[id[0]];
+              }).wait();
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              q.memcpy(state->payload.data(), device_result, count * sizeof(int));
+              return state;
+            }
+            pgaccel_status publish_to_second(
+                OpaqueState* const* ignored, OpaqueState** out, int* input, size_t count) {
+              (void)ignored;
+              sycl::queue q;
+              int* device_result = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<OpaqueSecond>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_result[id[0]] = input[id[0]];
+              }).wait();
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              q.memcpy(state->payload.data(), device_result, count * sizeof(int)).wait();
+              *out = state;
+              return PGACCEL_OK;
+            }
+            extern "C" OpaqueState* pgaccel_opaque_wrong_binding(
+                int* input, size_t count) {
+              OpaqueState* state = nullptr;
+              OpaqueState* other = nullptr;
+              (void)publish_to_second(&state, &other, input, count);
+              return state;
+            }
+            struct SplitState {
+              std::vector<int> counts;
+              std::vector<double> results;
+            };
+            extern "C" SplitState* pgaccel_opaque_dummy_copy_direct(
+                int* input, size_t count, double host_value) {
+              sycl::queue q;
+              int* device_counts = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<DummyDirect>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_counts[id[0]] = input[id[0]];
+              }).wait();
+              auto* state = new SplitState();
+              state->counts.resize(count);
+              state->results.resize(count);
+              state->results[0] = host_value;
+              q.memcpy(state->counts.data(), device_counts, count * sizeof(int)).wait();
+              return state;
+            }
+            extern "C" SplitState* pgaccel_opaque_dummy_copy_fill(
+                int* input, size_t count, double host_value) {
+              sycl::queue q;
+              int* device_counts = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<DummyFill>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_counts[id[0]] = input[id[0]];
+              }).wait();
+              auto* state = new SplitState();
+              state->counts.resize(count);
+              state->results.resize(count);
+              std::fill(state->results.begin(), state->results.end(), host_value);
+              q.memcpy(state->counts.data(), device_counts, count * sizeof(int)).wait();
+              return state;
+            }
+            extern "C" SplitState* pgaccel_opaque_dummy_copy_memcpy(
+                int* input, size_t count, double host_value) {
+              sycl::queue q;
+              int* device_counts = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<DummyMemcpy>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_counts[id[0]] = input[id[0]];
+              }).wait();
+              auto* state = new SplitState();
+              state->counts.resize(count);
+              state->results.resize(count);
+              std::memcpy(state->results.data(), &host_value, sizeof(host_value));
+              q.memcpy(state->counts.data(), device_counts, count * sizeof(int)).wait();
+              return state;
+            }
+            void host_finalize(std::vector<double>& values, double host_value) {
+              values[0] = host_value;
+            }
+            extern "C" SplitState* pgaccel_opaque_dummy_copy_helper(
+                int* input, size_t count, double host_value) {
+              sycl::queue q;
+              int* device_counts = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<DummyHelper>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_counts[id[0]] = input[id[0]];
+              }).wait();
+              auto* state = new SplitState();
+              state->counts.resize(count);
+              state->results.resize(count);
+              host_finalize(state->results, host_value);
+              q.memcpy(state->counts.data(), device_counts, count * sizeof(int)).wait();
+              return state;
+            }
+            struct FixedState {
+              std::vector<int> counts;
+              double result[1];
+            };
+            extern "C" FixedState* pgaccel_opaque_dummy_copy_fixed_array(
+                int* input, size_t count, double host_value) {
+              sycl::queue q;
+              int* device_counts = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<DummyFixed>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_counts[id[0]] = input[id[0]];
+              }).wait();
+              auto* state = new FixedState();
+              state->counts.resize(count);
+              state->result[0] = host_value;
+              q.memcpy(state->counts.data(), device_counts, count * sizeof(int)).wait();
+              return state;
+            }
+            extern "C" OpaqueState* pgaccel_opaque_usm_overwrite_after_kernel(
+                int* input, size_t count, int host_value) {
+              sycl::queue q;
+              int* shared_result = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<OverwriteAfterKernel>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                shared_result[id[0]] = input[id[0]];
+              }).wait();
+              q.memcpy(shared_result, &host_value, sizeof(host_value)).wait();
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              q.memcpy(state->payload.data(), shared_result, count * sizeof(int)).wait();
+              return state;
+            }
+            """
+        )
+        self.assertEqual(result.entrypoints, 10)
+        self.assertEqual(len(result.findings), 10)
+        for entry in result.entrypoint_audits:
+            self.assertFalse(entry.ok, entry.detail)
+            self.assertNotIn("opaque_device_resource", entry.classifications)
+
+    def test_direct_pointer_return_requires_a_proven_opaque_helper(self) -> None:
+        result = audit_fixture(
+            r"""
+            struct OpaqueState { std::vector<int> payload; };
+            OpaqueState* build_device_state(size_t count) {
+              sycl::queue q;
+              int* device_result = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<DirectOpaque>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_result[id[0]] = static_cast<int>(id[0]);
+              }).wait();
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              q.memcpy(state->payload.data(), device_result, count * sizeof(int)).wait();
+              return state;
+            }
+            OpaqueState* build_host_state(size_t count) {
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              state->payload[0] = 42;
+              return state;
+            }
+            extern "C" OpaqueState* pgaccel_direct_device_state(size_t count) {
+              return build_device_state(count);
+            }
+            extern "C" OpaqueState* pgaccel_direct_host_state(size_t count) {
+              return build_host_state(count);
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        self.assertTrue(entries["pgaccel_direct_device_state"].ok)
+        self.assertIn(
+            "opaque_device_resource",
+            entries["pgaccel_direct_device_state"].classifications,
+        )
+        self.assertFalse(entries["pgaccel_direct_host_state"].ok)
+        self.assertNotIn(
+            "opaque_device_resource",
+            entries["pgaccel_direct_host_state"].classifications,
+        )
+
+    def test_cross_file_calls_require_unique_clean_device_proof_and_output_binding(
+        self,
+    ) -> None:
+        def run(sources: dict[str, str]) -> dict[str, audit.EntrypointAudit]:
+            with tempfile.TemporaryDirectory() as directory:
+                paths = []
+                for name, source in sources.items():
+                    path = pathlib.Path(directory) / name
+                    rendered = textwrap.dedent(source)
+                    if STATUS_BINDING_RE.search(rendered) is None:
+                        rendered = "using pgaccel_status = int;\n" + rendered
+                    path.write_text(rendered, encoding="utf-8")
+                    paths.append(path)
+                results = audit.audit_paths(paths)
+            return {
+                entry.entrypoint: entry
+                for result in results
+                for entry in result.entrypoint_audits
+            }
+
+        clean = run(
+            {
+                "target.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_external_gpu(int* out) {
+                      sycl::queue q;
+                      q.single_task<ExternalGpu>([=]() { *out = 7; }).wait();
+                      return PGACCEL_OK;
+                    }
+                """,
+                "caller.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_external_wrapper(int* out) {
+                      return pgaccel_external_gpu(out);
+                    }
+                """,
+            }
+        )
+        self.assertTrue(clean["pgaccel_external_gpu"].ok)
+        self.assertTrue(clean["pgaccel_external_wrapper"].ok)
+        self.assertIn(
+            "audited_external_call",
+            clean["pgaccel_external_wrapper"].classifications,
+        )
+
+        transitive = run(
+            {
+                "leaf.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_external_leaf(int* out) {
+                      sycl::queue q;
+                      q.single_task<ExternalLeaf>([=]() { *out = 7; }).wait();
+                      return PGACCEL_OK;
+                    }
+                """,
+                "middle.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_external_middle(int* out) {
+                      return pgaccel_external_leaf(out);
+                    }
+                """,
+                "top.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_external_top(int* out) {
+                      return pgaccel_external_middle(out);
+                    }
+                """,
+            }
+        )
+        self.assertTrue(transitive["pgaccel_external_leaf"].ok)
+        self.assertTrue(transitive["pgaccel_external_middle"].ok)
+        self.assertTrue(transitive["pgaccel_external_top"].ok)
+        self.assertIn(
+            "audited_external_call",
+            transitive["pgaccel_external_top"].classifications,
+        )
+
+        cyclic = run(
+            {
+                "cycle_a.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_external_cycle_a(int* out) {
+                      return pgaccel_external_cycle_b(out);
+                    }
+                """,
+                "cycle_b.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_external_cycle_b(int* out) {
+                      return pgaccel_external_cycle_a(out);
+                    }
+                """,
+            }
+        )
+        self.assertFalse(cyclic["pgaccel_external_cycle_a"].ok)
+        self.assertFalse(cyclic["pgaccel_external_cycle_b"].ok)
+        self.assertNotIn(
+            "audited_external_call",
+            cyclic["pgaccel_external_cycle_a"].classifications,
+        )
+
+        host_only = run(
+            {
+                "target.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_external_host(int* out) {
+                      *out = 7;
+                      return PGACCEL_OK;
+                    }
+                """,
+                "caller.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_host_target_wrapper(int* out) {
+                      return pgaccel_external_host(out);
+                    }
+                """,
+            }
+        )
+        self.assertFalse(host_only["pgaccel_external_host"].ok)
+        self.assertFalse(host_only["pgaccel_host_target_wrapper"].ok)
+        self.assertIn(
+            "unresolved_helper",
+            host_only["pgaccel_host_target_wrapper"].classifications,
+        )
+
+        unresolved = run(
+            {
+                "caller.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_missing_target_wrapper(int* out) {
+                      return pgaccel_missing_external(out);
+                    }
+                """
+            }
+        )
+        self.assertFalse(unresolved["pgaccel_missing_target_wrapper"].ok)
+        self.assertIn(
+            "unresolved_helper",
+            unresolved["pgaccel_missing_target_wrapper"].classifications,
+        )
+
+        failure_only = run(
+            {
+                "target.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_external_decline(int* out) {
+                      (void)out;
+                      return PGACCEL_UNSUPPORTED;
+                    }
+                """,
+                "caller.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_decline_target_wrapper(int* out) {
+                      return pgaccel_external_decline(out);
+                    }
+                """,
+            }
+        )
+        self.assertTrue(failure_only["pgaccel_external_decline"].ok)
+        self.assertFalse(failure_only["pgaccel_decline_target_wrapper"].ok)
+        self.assertIn(
+            "unresolved_helper",
+            failure_only["pgaccel_decline_target_wrapper"].classifications,
+        )
+
+        duplicate = run(
+            {
+                "target_a.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_external_duplicate(int* out) {
+                      sycl::queue q;
+                      q.single_task<ExternalDuplicateA>([=]() { *out = 1; }).wait();
+                      return PGACCEL_OK;
+                    }
+                """,
+                "target_b.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_external_duplicate(int* out) {
+                      sycl::queue q;
+                      q.single_task<ExternalDuplicateB>([=]() { *out = 2; }).wait();
+                      return PGACCEL_OK;
+                    }
+                """,
+                "caller.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_duplicate_target_wrapper(int* out) {
+                      return pgaccel_external_duplicate(out);
+                    }
+                """,
+            }
+        )
+        self.assertFalse(duplicate["pgaccel_duplicate_target_wrapper"].ok)
+        self.assertIn(
+            "unresolved_helper",
+            duplicate["pgaccel_duplicate_target_wrapper"].classifications,
+        )
+
+        wrong_binding = run(
+            {
+                "target.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_external_bound(
+                        const int* input, int* result) {
+                      sycl::queue q;
+                      q.single_task<ExternalBound>([=]() { *result = input[0]; }).wait();
+                      return PGACCEL_OK;
+                    }
+                """,
+                "caller.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_wrong_binding(int* out) {
+                      sycl::queue q;
+                      int* staging = sycl::malloc_shared<int>(1, q);
+                      return pgaccel_external_bound(out, staging);
+                    }
+                """,
+            }
+        )
+        self.assertTrue(wrong_binding["pgaccel_external_bound"].ok)
+        self.assertFalse(wrong_binding["pgaccel_wrong_binding"].ok)
+        self.assertNotIn(
+            "audited_external_call",
+            wrong_binding["pgaccel_wrong_binding"].classifications,
+        )
+
+    def test_neutral_output_init_requires_a_clean_returned_helper_on_every_success(
+        self,
+    ) -> None:
+        result = audit_fixture(
+            r"""
+            struct OpaqueState { std::vector<int> payload; };
+            pgaccel_status build_checked(
+                int* input, size_t count, OpaqueState** out) {
+              sycl::queue q;
+              int* device_result = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<CheckedBuild>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_result[id[0]] = input[id[0]];
+              }).wait();
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              q.memcpy(state->payload.data(), device_result, count * sizeof(int)).wait();
+              *out = state;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_checked_wrapper(
+                int* input, size_t count, OpaqueState** out) {
+              *out = nullptr;
+              return build_checked(input, count, out);
+            }
+            extern "C" pgaccel_status pgaccel_checked_partial_wrapper(
+                int* input, size_t count, bool run_device, OpaqueState** out) {
+              *out = nullptr;
+              if (run_device) return build_checked(input, count, out);
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        self.assertTrue(entries["pgaccel_checked_wrapper"].ok)
+        self.assertIn(
+            "opaque_device_resource",
+            entries["pgaccel_checked_wrapper"].classifications,
+        )
+        self.assertFalse(entries["pgaccel_checked_partial_wrapper"].ok)
+        self.assertIn(
+            "undominated_success",
+            entries["pgaccel_checked_partial_wrapper"].classifications,
+        )
+
+    def test_multihop_template_wrapper_reaches_dispatch(self) -> None:
+        result = audit_fixture(
+            r"""
+            template <typename T>
+            pgaccel_status launch_reduce(const T* data, size_t count, T* out) {
+              sycl::queue& q = get_queue();
+              q.submit([&](sycl::handler& h) {
+                h.parallel_for<ReduceKernel<T>>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                  out[id[0]] = data[id[0]];
+                });
+              });
+              return PGACCEL_OK;
+            }
+            template <typename T>
+            pgaccel_status typed_reduce(const T* data, size_t count, T* out) {
+              return launch_reduce<T>(data, count, out);
+            }
+            extern "C" pgaccel_status pgaccel_wrapped_reduce(
+                const int* data, size_t count, int* out) {
+              return typed_reduce<int>(data, count, out);
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertIn("typed_reduce", result.entrypoint_audits[0].detail)
+        self.assertIn("launch_reduce", result.entrypoint_audits[0].detail)
+
+    def test_template_void_helper_and_false_terminal_preserve_device_proof(self) -> None:
+        result = audit_fixture(
+            r"""
+            template <typename T>
+            void write_device(T* out) {
+              sycl::queue q;
+              q.single_task<WriteDevice<T>>([=]() { *out = T{7}; }).wait();
+            }
+            template <typename T>
+            bool write_if_ready(T* out, bool ready) {
+              if (!ready) return false;
+              write_device<T>(out);
+              return true;
+            }
+            extern "C" pgaccel_status pgaccel_template_bool_write(
+                int* out, bool ready) {
+              if (!write_if_ready<int>(out, ready)) return PGACCEL_ERROR;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertIn(
+            "large_input_gpu_chain",
+            result.entrypoint_audits[0].classifications,
+        )
+
+    def test_template_helper_with_trailing_default_reaches_dispatch(self) -> None:
+        result = audit_fixture(
+            r"""
+            template <typename T, typename Op>
+            pgaccel_status device_reduce(
+                const T* data, size_t count, T* out, T identity, Op op,
+                bool identity_from_first = false) {
+              sycl::queue& q = get_queue();
+              q.single_task<ReduceKernel<T>>([=]() {
+                *out = identity_from_first ? data[0] : op(identity, data[0]);
+              });
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_defaulted_reduce(
+                const int* data, size_t count, int* out) {
+              return device_reduce<int>(data, count, out, 0,
+                                        [](int a, int b) { return a + b; });
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertIn(
+            "large_input_gpu_chain", result.entrypoint_audits[0].classifications
+        )
+
+    def test_default_argument_does_not_bless_host_output_helper(self) -> None:
+        result = audit_fixture(
+            r"""
+            template <typename T>
+            pgaccel_status host_reduce(
+                const T* data, size_t count, T* out, bool ignored = false) {
+              sycl::queue& q = get_queue();
+              int unrelated = 0;
+              q.single_task<Decoy>([=]() mutable { unrelated = 1; });
+              for (size_t i = 0; i < count; ++i) *out += data[i];
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_defaulted_host_reduce(
+                const int* data, size_t count, int* out) {
+              return host_reduce<int>(data, count, out);
+            }
+            """
+        )
+        finding = finding_for(result, "pgaccel_defaulted_host_reduce")
+        self.assertIn("host_computation", finding.classifications)
+        self.assertNotIn(
+            "large_input_gpu_chain", result.entrypoint_audits[0].classifications
+        )
+
+    def test_sycl_queue_reference_is_service_context_not_output(self) -> None:
+        result = audit_fixture(
+            r"""
+            pgaccel_status copy_result(sycl::queue& q, int* out) {
+              int* device_result = sycl::malloc_device<int>(1, q);
+              q.single_task<Kernel>([=]() { *device_result = 42; }).wait_and_throw();
+              q.memcpy(out, device_result, sizeof(int)).wait_and_throw();
+              sycl::free(device_result, q);
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_queue_context(int* out) {
+              sycl::queue& q = get_queue();
+              return copy_result(q, out);
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertIn("device_copyback", result.entrypoint_audits[0].classifications)
+
+    def test_sycl_queue_reference_cannot_hide_host_output(self) -> None:
+        result = audit_fixture(
+            r"""
+            pgaccel_status host_result(sycl::queue& q, int* out) {
+              int* unrelated = sycl::malloc_device<int>(1, q);
+              q.single_task<Decoy>([=]() { *unrelated = 42; }).wait_and_throw();
+              *out = 42;
+              sycl::free(unrelated, q);
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_queue_context_host(int* out) {
+              sycl::queue& q = get_queue();
+              return host_result(q, out);
+            }
+            """
+        )
+        finding = finding_for(result, "pgaccel_queue_context_host")
+        self.assertIn("host_output_write", finding.classifications)
+
+    def test_const_helper_argument_is_validation_not_output_contribution(self) -> None:
+        result = audit_fixture(
+            r"""
+            bool validate_value(const int* value) { return *value >= 0; }
+            extern "C" pgaccel_status pgaccel_const_validation(
+                int* out, size_t count) {
+              if (!validate_value(out)) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for<Kernel>(sycl::range<1>(count),
+                  [=](sycl::id<1> i) { out[i] = 1; });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+
+    def test_cast_away_const_helper_remains_output_contributing(self) -> None:
+        result = audit_fixture(
+            r"""
+            pgaccel_status mutate_value(const int* value) {
+              *const_cast<int*>(value) = 42;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_const_mutation(
+                int* out, int* decoy) {
+              sycl::queue q;
+              q.single_task<Kernel>([=]() { *decoy = 1; });
+              pgaccel_status st = mutate_value(out);
+              return st;
+            }
+            """
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("undominated_success", entry.classifications)
+        self.assertIn("output helper mutate_value", entry.detail)
+
+    def test_else_output_assignment_is_not_a_shadow_declaration(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_else_assignment(
+                bool first, int* out) {
+              if (first) *out = 0; else *out = 1;
+              return PGACCEL_ERROR;
+            }
+            """
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertNotIn("output_identity_shadowing", entry.classifications)
+
+    def test_member_named_like_output_is_not_a_local_declaration(self) -> None:
+        for expression in ("layout.bytes", "metadata->bytes", "metadata::bytes"):
+            with self.subTest(expression=expression):
+                result = audit_compiling_fixture(
+                    "using pgaccel_status = int;\n"
+                    "constexpr int PGACCEL_OK = 0;\n"
+                    "struct Layout { unsigned long bytes; };\n"
+                    "namespace metadata { constexpr unsigned long bytes = 17; }\n"
+                    "extern \"C\" pgaccel_status pgaccel_size_query(unsigned long* bytes) {\n"
+                    "  Layout layout{17}; const Layout* metadata = &layout;\n"
+                    f"  *bytes = {expression};\n"
+                    "  return PGACCEL_OK;\n}"
+                )
+                entry = result.entrypoint_audits[0]
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("host_output_write", entry.classifications)
+                self.assertIn("undominated_success", entry.classifications)
+                self.assertNotIn("output_identity_shadowing", entry.classifications)
+
+    def test_same_named_member_does_not_hide_real_pointer_shadow(self) -> None:
+        result = audit_compiling_fixture(
+            r"""
+            using pgaccel_status = int;
+            constexpr int PGACCEL_OK = 0;
+            struct Layout { unsigned long bytes; };
+            extern "C" pgaccel_status pgaccel_shadowed_size(unsigned long* bytes) {
+              Layout layout{17};
+              {
+                unsigned long* bytes = &layout.bytes;
+                *bytes = layout.bytes;
+              }
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("output_identity_shadowing", entry.classifications)
+
+    def test_member_lookup_cannot_replace_typed_queue_binding(self) -> None:
+        for spelling in ("holder.q", "holder_pointer->q", "queues::q"):
+            with self.subTest(spelling=spelling):
+                result = audit_compiling_fixture(
+                    CompilerValidAdversarialTests.CPP_PRELUDE
+                    + r"""
+                    namespace queues { sycl::queue q; }
+                    struct Holder { sycl::queue q; };
+                    extern "C" pgaccel_status pgaccel_queue_member_assignment(int* out) {
+                      sycl::queue q;
+                      Holder holder;
+                      Holder* holder_pointer = &holder;
+                    """
+                    + f"q = {spelling};\n"
+                    + r"""
+                      q.parallel_for(sycl::range<1>(1),
+                          [=](sycl::id<1> i) { out[i] = 1; });
+                      return PGACCEL_OK;
+                    }
+                    """
+                )
+                self.assertFalse(result.findings)
+
+    def test_same_named_member_cannot_promote_fake_queue_or_host_finalization(self) -> None:
+        for finalize in (False, True):
+            with self.subTest(finalize=finalize):
+                result = audit_compiling_fixture(
+                    CompilerValidAdversarialTests.CPP_PRELUDE
+                    + r"""
+                    struct FakeQueue {
+                      template <class Function>
+                      void parallel_for(sycl::range<1>, Function fn) {
+                        fn(sycl::id<1>{});
+                      }
+                    };
+                    struct Holder { FakeQueue q; };
+                    extern "C" pgaccel_status pgaccel_queue_member_decoy(int* out) {
+                    """
+                    + ("sycl::queue q;" if finalize else "FakeQueue q;")
+                    + r"""
+                      Holder holder;
+                      auto copied = holder.q;
+                      q.parallel_for(sycl::range<1>(1),
+                          [=](sycl::id<1> i) { out[i] = 1; });
+                    """
+                    + ("*out = 42;" if finalize else "")
+                    + "return PGACCEL_OK; }"
+                )
+                entry = result.entrypoint_audits[0]
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("undominated_success", entry.classifications)
+                if finalize:
+                    self.assertIn("host_output_write", entry.classifications)
+
+    def test_qualified_member_using_cannot_inherit_outer_queue_proof(self) -> None:
+        for declaration in (
+            "using fake::q;",
+            "using fake::q, fake::other;",
+            "using fake::other, fake::q;",
+            "using ::fake::q;",
+        ):
+            with self.subTest(declaration=declaration):
+                result = audit_compiling_fixture(
+                    CompilerValidAdversarialTests.CPP_PRELUDE
+                    + r"""
+                    struct FakeQueue {
+                      template <class Function>
+                      void parallel_for(sycl::range<1>, Function fn) {
+                        fn(sycl::id<1>{});
+                      }
+                    };
+                    namespace fake { FakeQueue q; int other; }
+                    extern "C" pgaccel_status pgaccel_using_queue(int* out) {
+                      sycl::queue q;
+                      {
+                    """
+                    + declaration
+                    + r"""
+                        q.parallel_for(sycl::range<1>(1),
+                            [=](sycl::id<1> i) { out[i] = 1; });
+                      }
+                      return PGACCEL_OK;
+                    }
+                    """
+                )
+                entry = result.entrypoint_audits[0]
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("undominated_success", entry.classifications)
+
+    def test_qualified_member_using_still_shadows_output(self) -> None:
+        for declaration in (
+            "using fake::out;",
+            "using fake::out, fake::other;",
+            "using fake::other, fake::out;",
+        ):
+            with self.subTest(declaration=declaration):
+                result = audit_compiling_fixture(
+                    CompilerValidAdversarialTests.CPP_PRELUDE
+                    + r"""
+                    namespace fake { int value; int* out = &value; int other; }
+                    extern "C" pgaccel_status pgaccel_using_output(int* out) {
+                      {
+                    """
+                    + declaration
+                    + r"""
+                        sycl::queue q;
+                        q.parallel_for(sycl::range<1>(1),
+                            [=](sycl::id<1> i) { out[i] = 1; });
+                      }
+                      return PGACCEL_OK;
+                    }
+                    """
+                )
+                entry = result.entrypoint_audits[0]
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("output_identity_shadowing", entry.classifications)
+
+    def test_symbolic_validation_detail_can_accompany_device_output(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_validation_detail(
+                int* out, int* detail, size_t count) {
+              if (detail == nullptr) return PGACCEL_ERROR;
+              *detail = PGACCEL_TEST_DETAIL_NONE;
+              if (count == 0) return PGACCEL_OK;
+              if (out == nullptr) {
+                *detail = PGACCEL_TEST_DETAIL_CONTRACT;
+                return PGACCEL_INVALID_ARGUMENT;
+              }
+              sycl::queue q;
+              q.parallel_for<Kernel>(sycl::range<1>(count),
+                  [=](sycl::id<1> i) { out[i] = 1; });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertIn(
+            "validation_metadata", result.entrypoint_audits[0].classifications
+        )
+
+    def test_validation_detail_rejects_input_or_result_writes(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_computed_detail(
+                const int* data, int* out, int* detail, size_t count) {
+              *detail = PGACCEL_TEST_DETAIL_NONE;
+              if (data == nullptr) {
+                *detail = count;
+                return PGACCEL_INVALID_ARGUMENT;
+              }
+              sycl::queue q;
+              q.single_task<Kernel>([=]() { *out = data[0]; });
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_detail_decoy(
+                int* result, int* decoy) {
+              *result = PGACCEL_TEST_DETAIL_NONE;
+              sycl::queue q;
+              q.single_task<Decoy>([=]() { *decoy = 1; });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        for entry in result.entrypoint_audits:
+            with self.subTest(entry.entrypoint):
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("host_output_write", entry.classifications)
+        self.assertFalse(result.entrypoint_audits[0].ok)
+
+    def test_explicit_trailing_return_device_lambda_is_structural(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_trailing_lambda(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              q.parallel_for<Kernel>(sycl::range<1>(count),
+                  [=](sycl::id<1> i) -> void { out[i] = i[0] ? 1 : 0; });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertIn("device_dispatch", result.entrypoint_audits[0].classifications)
+
+    def test_explicit_trailing_return_host_lambda_remains_deferred(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_trailing_host_lambda(
+                int* out, size_t count) {
+              sycl::queue q;
+              q.parallel_for<Kernel>(sycl::range<1>(count),
+                  [=](sycl::id<1> i) { out[i] = 1; });
+              auto finish = [&]() -> int { *out = 42; return 0; };
+              finish();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        finding = finding_for(result, "pgaccel_trailing_host_lambda")
+        self.assertIn("deferred_host_output_write", finding.classifications)
+
+    def test_device_if_constexpr_does_not_require_host_specialization(self) -> None:
+        result = audit_fixture(
+            r"""
+            template <bool First>
+            pgaccel_status constexpr_device(sycl::queue& q, int* out) {
+              q.single_task<Kernel<First>>([=]() {
+                if constexpr (First) { *out = 1; } else { *out = 2; }
+              });
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_constexpr_device(int* out) {
+              sycl::queue q;
+              return constexpr_device<true>(q, out);
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertNotIn(
+            "template_specialization_review",
+            result.entrypoint_audits[0].classifications,
+        )
+
+    def test_exact_ternary_device_selection_proves_every_success_arm(self) -> None:
+        result = audit_fixture(
+            r"""
+            pgaccel_status launch_a(sycl::queue& q, int* out) {
+              q.single_task<KernelA>([=]() { *out = 1; });
+              return PGACCEL_OK;
+            }
+            pgaccel_status launch_b(sycl::queue& q, int* out) {
+              q.single_task<KernelB>([=]() { *out = 2; });
+              return PGACCEL_OK;
+            }
+            pgaccel_status host_branch(int* out) {
+              *out = 42;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_device_selection(
+                bool first, int* out) {
+              sycl::queue q;
+              return first ? launch_a(q, out) : launch_b(q, out);
+            }
+            extern "C" pgaccel_status pgaccel_host_selection(
+                bool first, int* out) {
+              sycl::queue q;
+              return first ? launch_a(q, out) : host_branch(out);
+            }
+            extern "C" pgaccel_status pgaccel_success_selection(
+                bool first, int* out) {
+              sycl::queue q;
+              return first ? launch_a(q, out) : PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        valid = entries["pgaccel_device_selection"]
+        self.assertTrue(valid.ok, valid.detail)
+        self.assertIn("validated_device_selection", valid.classifications)
+        for name in ("pgaccel_host_selection", "pgaccel_success_selection"):
+            with self.subTest(name):
+                self.assertFalse(entries[name].ok, entries[name].detail)
+                self.assertIn("ambiguous_control_flow", entries[name].classifications)
+
+    def test_typed_constant_identity_is_exact_zero_work(self) -> None:
+        result = audit_fixture(
+            r"""
+            template <typename T>
+            pgaccel_status typed_reduce(const T* data, size_t count, T* out) {
+              if (count == 0) {
+                *out = static_cast<T>(~T{0});
+                return PGACCEL_OK;
+              }
+              sycl::queue& q = get_queue();
+              q.single_task<Kernel<T>>([=]() { *out = data[0]; });
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_typed_identity(
+                const int* data, size_t count, int* out) {
+              return typed_reduce<int>(data, count, out);
+            }
+            extern "C" pgaccel_status pgaccel_unit_identity(
+                const uint8_t* data, size_t count, uint8_t* out) {
+              if (count == 0) { *out = 1; return PGACCEL_OK; }
+              sycl::queue& q = get_queue();
+              q.single_task<UnitKernel>([=]() { *out = data[0]; });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        for entry in result.entrypoint_audits:
+            self.assertIn("zero_work", entry.classifications)
+
+    def test_zero_work_identity_cannot_read_input_or_call_host(self) -> None:
+        result = audit_fixture(
+            r"""
+            int host_identity();
+            extern "C" pgaccel_status pgaccel_zero_reads_input(
+                const int* data, size_t count, int* out) {
+              if (count == 0) { *out = data[0]; return PGACCEL_OK; }
+              sycl::queue& q = get_queue();
+              q.single_task<ReadKernel>([=]() { *out = data[0]; });
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_zero_calls_host(
+                const int* data, size_t count, int* out) {
+              if (count == 0) { *out = host_identity(); return PGACCEL_OK; }
+              sycl::queue& q = get_queue();
+              q.single_task<CallKernel>([=]() { *out = data[0]; });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        for name in ("pgaccel_zero_reads_input", "pgaccel_zero_calls_host"):
+            with self.subTest(name=name):
+                finding = finding_for(result, name)
+                self.assertIn("host_output_write", finding.classifications)
+
+
+class ControlFlowEvasionTests(unittest.TestCase):
+    def assert_rejected(self, source: str, name: str) -> audit.Finding:
+        result = audit_fixture(source)
+        finding = finding_for(result, name)
+        self.assertFalse(
+            result.entrypoint_audits[0].ok,
+            f"{name} unexpectedly passed: {result.entrypoint_audits[0].detail}",
+        )
+        return finding
+
+    def test_return_before_dispatch_is_not_dominated(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_return_first(int* out) {
+              sycl::queue& q = get_queue();
+              return PGACCEL_OK;
+              q.single_task<Kernel>([=]() { *out = 1; });
+            }
+            """,
+            "pgaccel_return_first",
+        )
+        self.assertIn("undominated_success", finding.classifications)
+
+    def test_if_false_dispatch_is_dead(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_false_branch(int* out) {
+              sycl::queue& q = get_queue();
+              if (false) { q.single_task<Kernel>([=]() { *out = 1; }); }
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_false_branch",
+        )
+        self.assertIn("rejected_terminal", finding.classifications)
+
+    def test_if_zero_preprocessor_dispatch_is_absent(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_if_zero(int* out) {
+              sycl::queue& q = get_queue();
+            #if 0
+              q.single_task<Kernel>([=]() { *out = 1; });
+            #endif
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_if_zero",
+        )
+        self.assertIn("missing_device_terminal", finding.classifications)
+
+    def test_cpu_success_sibling_does_not_share_gpu_proof(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_sibling(bool gpu, int* out) {
+              sycl::queue& q = get_queue();
+              if (gpu) {
+                q.single_task<Kernel>([=]() { *out = 1; });
+                return PGACCEL_OK;
+              } else {
+                *out = 2;
+                return PGACCEL_OK;
+              }
+            }
+            """,
+            "pgaccel_sibling",
+        )
+        self.assertIn("host_output_write", finding.classifications)
+
+    def test_empty_submit_is_not_a_terminal(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_empty_submit(int* out) {
+              sycl::queue& q = get_queue();
+              q.submit([&](sycl::handler& h) { (void)h; });
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_empty_submit",
+        )
+        self.assertIn("rejected_terminal", finding.classifications)
+
+    def test_uncalled_lambda_dispatch_is_deferred(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_uncalled(int* out) {
+              sycl::queue& q = get_queue();
+              auto never = [&]() { q.single_task<Kernel>([=]() { *out = 1; }); };
+              (void)never;
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_uncalled",
+        )
+        self.assertIn("rejected_terminal", finding.classifications)
+
+    def test_nearest_scoped_fake_queue_shadows_real_queue(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_shadowed(int* out) {
+              sycl::queue& q = get_queue();
+              { FakeQueue q; q.single_task<Kernel>([=]() { *out = 1; }); }
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_shadowed",
+        )
+        self.assertIn("rejected_terminal", finding.classifications)
+
+    def test_cpu_success_catch_is_an_independent_path(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_success_catch(int* out) try {
+              sycl::queue& q = get_queue();
+              q.single_task<Kernel>([=]() { *out = 1; });
+              return PGACCEL_OK;
+            } catch (...) {
+              *out = 2;
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_success_catch",
+        )
+        self.assertIn("CPU-success catch", finding.message)
+
+    def test_unknown_preprocessor_condition_fails_closed(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_pp(int* out) {
+              sycl::queue& q = get_queue();
+            #if GPU_FEATURE_AVAILABLE
+              q.single_task<Kernel>([=]() { *out = 1; });
+            #else
+              q.single_task<Kernel>([=]() { *out = 2; });
+            #endif
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_pp",
+        )
+        self.assertIn("ambiguous_preprocessor_condition", finding.classifications)
+
+    def test_false_identifier_preprocessor_condition_is_not_literal_false(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            #define GPU_FEATURE_AVAILABLE 0
+            extern "C" pgaccel_status pgaccel_pp_false(int* out) {
+              sycl::queue& q = get_queue();
+            #if GPU_FEATURE_AVAILABLE
+              q.single_task<Kernel>([=]() { *out = 1; });
+            #else
+              q.single_task<Kernel>([=]() { *out = 2; });
+            #endif
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_pp_false",
+        )
+        self.assertIn("ambiguous_preprocessor_condition", finding.classifications)
+
+    def test_switch_bypass_fails_closed(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_switch(int mode, int* out) {
+              sycl::queue& q = get_queue();
+              switch (mode) {
+                case 0: return PGACCEL_OK;
+                default: break;
+              }
+              q.single_task<Kernel>([=]() { *out = 1; });
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_switch",
+        )
+        self.assertIn("ambiguous_control_flow", finding.classifications)
+
+    def test_goto_bypass_remains_rejected(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_goto(bool bypass, int* out) {
+              sycl::queue& q = get_queue();
+              if (bypass) goto cpu_success;
+              q.single_task<Kernel>([=]() { *out = 1; });
+            cpu_success:
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_goto",
+        )
+        self.assertIn("ambiguous_control_flow", finding.classifications)
+
+    def test_read_only_kernel_does_not_prove_output_contribution(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_read_only(int* out) {
+              sycl::queue& q = get_queue();
+              q.single_task<Kernel>([=]() {
+                int observed = *out;
+                observed = 7;
+              });
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_read_only",
+        )
+        self.assertIn("rejected_terminal", finding.classifications)
+
+    def test_alias_host_overwrite_is_tracked(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_alias_write(int* out) {
+              int* alias = out;
+              sycl::queue& q = get_queue();
+              q.single_task<Kernel>([=]() { *out = 1; });
+              *alias = 2;
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_alias_write",
+        )
+        self.assertIn("host_output_write", finding.classifications)
+        self.assertIn("output_alias_tracking", finding.classifications)
+
+    def test_unresolved_host_finalizer_on_output_fails_closed(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_host_finalize(int* out, size_t count) {
+              sycl::queue& q = get_queue();
+              q.parallel_for<Kernel>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                out[id[0]] = 1;
+              });
+              host_finalize(out);
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_host_finalize",
+        )
+        self.assertIn("unresolved_output_helper", finding.classifications)
+
+    def test_unresolved_member_finalizer_on_output_fails_closed(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_member_finalize(
+                Output* out, size_t count) {
+              sycl::queue& q = get_queue();
+              q.single_task<Kernel>([=]() { out->value = count; });
+              out->finalize();
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_member_finalize",
+        )
+        self.assertIn("unresolved_output_helper", finding.classifications)
+
+    def test_invoked_host_lambda_output_write_is_not_hidden(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_host_lambda(int* out) {
+              sycl::queue& q = get_queue();
+              q.single_task<Kernel>([=]() { *out = 1; });
+              auto finalize = [&]() { *out = 2; };
+              finalize();
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_host_lambda",
+        )
+        self.assertIn("deferred_host_output_write", finding.classifications)
+
+    def test_ternary_success_path_requires_review(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            pgaccel_status launch(int* out) {
+              sycl::queue& q = get_queue();
+              q.single_task<Kernel>([=]() { *out = 1; });
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_ternary(bool gpu, int* out) {
+              return gpu ? launch(out) : PGACCEL_OK;
+            }
+            """,
+            "pgaccel_ternary",
+        )
+        self.assertIn("ambiguous_control_flow", finding.classifications)
+
+    def test_failure_only_path_with_host_compute_is_not_exempt(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_fail_compute(
+                const int* input, size_t count, int* out) {
+              for (size_t index = 0; index < count; ++index) out[index] = input[index];
+              return PGACCEL_ERROR_NO_DEVICE;
+            }
+            """,
+            "pgaccel_fail_compute",
+        )
+        self.assertIn("host_computation", finding.classifications)
+
+    def test_lifecycle_evidence_in_dead_decoy_is_rejected(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_shutdown() {
+              if (false) {
+                g_queue->wait_and_throw();
+                delete g_queue;
+              }
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_shutdown",
+        )
+        self.assertIn("invalid_lifecycle_contract", finding.classifications)
+
+    def test_lifecycle_evidence_after_return_is_rejected(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_shutdown() {
+              return PGACCEL_OK;
+              g_queue->wait_and_throw();
+              delete g_queue;
+            }
+            """,
+            "pgaccel_shutdown",
+        )
+        self.assertIn("invalid_lifecycle_contract", finding.classifications)
+
+    def test_not_identifier_is_not_a_zero_work_contract(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_not_gpu(bool gpu, int* out) {
+              if (!gpu) {
+                *out = 42;
+                return PGACCEL_OK;
+              }
+              sycl::queue& q = get_queue();
+              q.single_task<Kernel>([=]() { *out = 1; });
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_not_gpu",
+        )
+        self.assertIn("host_output_write", finding.classifications)
+        self.assertNotIn("zero_work", finding.classifications)
+
+    def test_macro_hidden_export_fails_inventory(self) -> None:
+        result = audit_fixture(
+            r"""
+            #define HIDDEN_EXPORT(name) extern "C" pgaccel_status pgaccel_##name
+            HIDDEN_EXPORT(hidden)(int* out) { *out = 1; return PGACCEL_OK; }
+            """
+        )
+        classifications = {
+            classification
+            for finding in result.findings
+            for classification in finding.classifications
+        }
+        self.assertIn("macro_hidden_export", classifications)
+
+    def test_return_alias_export_is_inventoried(self) -> None:
+        result = audit_fixture(
+            r"""
+            using status_alias = pgaccel_status;
+            extern "C" status_alias pgaccel_alias(int* out) {
+              sycl::queue& q = get_queue();
+              q.single_task<Kernel>([=]() { *out = 1; });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertEqual(result.entrypoints, 1)
+        self.assertEqual(result.non_status_entrypoints, 1)
+        self.assertFalse(result.findings)
+
+    def test_trailing_return_export_is_inventoried(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" auto pgaccel_trailing(int* out) -> pgaccel_status {
+              sycl::queue& q = get_queue();
+              q.single_task<Kernel>([=]() { *out = 1; });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertEqual(result.status_entrypoints, 1)
+        self.assertFalse(result.findings)
+
+    def test_impossible_if_constexpr_specialization_fails_closed(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            template <typename T>
+            pgaccel_status typed(int* out) {
+              if constexpr (std::is_same_v<T, float>) {
+                sycl::queue& q = get_queue();
+                q.single_task<Kernel>([=]() { *out = 1; });
+                return PGACCEL_OK;
+              }
+              *out = 2;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_i64(int* out) {
+              return typed<int64_t>(out);
+            }
+            """,
+            "pgaccel_i64",
+        )
+        self.assertIn("template_specialization_review", finding.classifications)
+
+    def test_unrelated_gpu_helper_cannot_bless_cpu_output(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            pgaccel_status launch_unrelated(int* scratch) {
+              sycl::queue& q = get_queue();
+              q.single_task<Kernel>([=]() { *scratch = 7; });
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_unrelated(int* out) {
+              int scratch = 0;
+              launch_unrelated(&scratch);
+              *out = scratch + 1;
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_unrelated",
+        )
+        self.assertIn("host_output_write", finding.classifications)
+
+    def test_singleton_cpu_success_is_not_zero_work(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_singleton(
+                const int* data, size_t count, int* out) {
+              if (count <= 1) { *out = data[0]; return PGACCEL_OK; }
+              sycl::queue& q = get_queue();
+              q.single_task<Kernel>([=]() { *out = data[0]; });
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_singleton",
+        )
+        self.assertIn("host_output_write", finding.classifications)
+        self.assertNotIn("zero_work", finding.classifications)
+
+    def test_recursive_output_helper_invalidates_later_dispatch(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            pgaccel_status recurse(int* out) { return recurse(out); }
+            extern "C" pgaccel_status pgaccel_recursive_first(int* out) {
+              recurse(out);
+              sycl::queue& q = get_queue();
+              q.single_task<Kernel>([=]() { *out = 1; });
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_recursive_first",
+        )
+        self.assertIn("recursive_helper", finding.classifications)
+
+    def test_output_copy_is_distinguished_as_ambiguous_staging(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_staging(int* out) {
+              sycl::queue& q = get_queue();
+              int* device_value = sycl::malloc_device<int>(1, q);
+              q.single_task<Kernel>([=]() { *device_value = 1; });
+              q.memcpy(out, device_value, sizeof(int));
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_staging",
+        )
+        self.assertIn("host_staging_review", finding.classifications)
+        self.assertNotIn("host_output_write", finding.classifications)
+
+    def test_pure_gpu_wrapper_shapes_pass_without_name_allowlists(self) -> None:
+        bit_wrappers = "\n".join(
+            f"""
+            extern "C" pgaccel_status pgaccel_reduce_bit_{operation}_i{width}(
+                const int* data, size_t count, int* out) {{
+              return reduce_bit_{operation}_kernel<int>(data, count, out);
+            }}
+            """
+            for operation in ("and", "or", "xor")
+            for width in (16, 32, 64)
+        )
+        result = audit_fixture(
+            f"""
+            template <typename T>
+            pgaccel_status tree_reduce_sycl(const T* data, size_t count, T* out) {{
+              sycl::queue& queue = get_queue();
+              queue.parallel_for<ReduceKernel<T>>(sycl::range<1>(count), [=](sycl::id<1> id) {{
+                out[id[0]] = data[id[0]];
+              }});
+              return PGACCEL_OK;
+            }}
+            template <typename T>
+            pgaccel_status reduce_bit_and_kernel(const T* data, size_t count, T* out) {{
+              return tree_reduce_sycl(data, count, out);
+            }}
+            template <typename T>
+            pgaccel_status reduce_bit_or_kernel(const T* data, size_t count, T* out) {{
+              return tree_reduce_sycl(data, count, out);
+            }}
+            template <typename T>
+            pgaccel_status reduce_bit_xor_kernel(const T* data, size_t count, T* out) {{
+              return tree_reduce_sycl(data, count, out);
+            }}
+            extern "C" pgaccel_status pgaccel_grouped_agg_execute_ex(int* out) {{
+              sycl::queue& queue = get_queue();
+              queue.single_task<GroupedKernel>([=]() {{ *out = 1; }});
+              return PGACCEL_OK;
+            }}
+            extern "C" pgaccel_status pgaccel_grouped_agg_execute(int* out) {{
+              return pgaccel_grouped_agg_execute_ex(out);
+            }}
+            extern "C" pgaccel_status pgaccel_h3_cell_to_parent_resident_ex(int* out) {{
+              sycl::queue& queue = get_queue();
+              queue.parallel_for<H3Kernel>(sycl::range<1>(1), [=](sycl::id<1>) {{ *out = 1; }});
+              return PGACCEL_OK;
+            }}
+            extern "C" pgaccel_status pgaccel_h3_cell_to_parent_resident(int* out) {{
+              return pgaccel_h3_cell_to_parent_resident_ex(out);
+            }}
+            {bit_wrappers}
+            """
+        )
+        self.assertEqual(result.entrypoints, 13)
+        self.assertFalse(result.findings)
+
+    def test_wrapper_to_host_implementation_fails(self) -> None:
+        result = audit_fixture(
+            r"""
+            pgaccel_status host_implementation(const int* in, size_t count, int* out) {
+              for (size_t i = 0; i < count; ++i) out[i] = in[i] * 2;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_host_wrapper(
+                const int* in, size_t count, int* out) {
+              return host_implementation(in, count, out);
+            }
+            """
+        )
+        finding = finding_for(result, "pgaccel_host_wrapper")
+        self.assertIn("host_computation", finding.classifications)
+        self.assertIn("host_implementation", finding.message)
+
+    def test_unresolved_helper_fails(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_missing(int* out) {
+              return missing_device_helper(out);
+            }
+            """
+        )
+        finding = finding_for(result, "pgaccel_missing")
+        self.assertIn("unresolved_helper", finding.classifications)
+        self.assertIn("missing_device_helper", finding.message)
+
+    def test_nonstatus_exact_null_decline_is_failure_only(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" void* pgaccel_decline_nullptr(const int* data, size_t count) {
+              (void)data;
+              (void)count;
+              return nullptr;
+            }
+            extern "C" void* pgaccel_decline_null(const int* data) {
+              (void)data;
+              return NULL;
+            }
+            """
+        )
+        self.assertEqual(result.entrypoints, 2)
+        self.assertFalse(result.findings)
+        for entry in result.entrypoint_audits:
+            self.assertIn("failure_only", entry.classifications)
+            self.assertIn("exact null", entry.detail)
+
+    def test_nonstatus_decline_hostile_success_and_gpu_mutants_fail(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" void* pgaccel_nonnull_mutant() {
+              static int value = 1;
+              return &value;
+            }
+            extern "C" void* pgaccel_conditional_mutant(bool succeed) {
+              static int value = 1;
+              if (succeed) return &value;
+              return nullptr;
+            }
+            extern "C" void* pgaccel_launch_then_null_mutant(int* out) {
+              sycl::queue q;
+              q.single_task<LaunchThenNull>([=]() { *out = 1; }).wait();
+              return nullptr;
+            }
+            extern "C" void* pgaccel_counter_then_null_mutant() {
+              pgaccel_record_gpu_exec();
+              return nullptr;
+            }
+            extern "C" int pgaccel_integer_zero_mutant() {
+              return 0;
+            }
+            pgaccel_status clean_gpu_helper(int* out) {
+              sycl::queue q;
+              q.single_task<HelperThenNull>([=]() { *out = 1; }).wait();
+              return PGACCEL_OK;
+            }
+            extern "C" void* pgaccel_helper_then_null_mutant(int* out) {
+              (void)clean_gpu_helper(out);
+              return nullptr;
+            }
+            """
+        )
+        self.assertEqual(result.entrypoints, 6)
+        self.assertEqual(len(result.findings), 6)
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        for entry in entries.values():
+            self.assertFalse(entry.ok, entry.detail)
+            self.assertNotIn("failure_only", entry.classifications)
+        self.assertIn(
+            "missing_device_terminal", entries["pgaccel_nonnull_mutant"].classifications
+        )
+        self.assertIn(
+            "missing_device_terminal",
+            entries["pgaccel_conditional_mutant"].classifications,
+        )
+        self.assertIn(
+            "device_dispatch",
+            entries["pgaccel_launch_then_null_mutant"].classifications,
+        )
+        self.assertIn(
+            "fake_gpu_counter",
+            entries["pgaccel_counter_then_null_mutant"].classifications,
+        )
+
+    def test_recursive_helper_cycle_fails(self) -> None:
+        result = audit_fixture(
+            r"""
+            pgaccel_status first(int* out);
+            pgaccel_status second(int* out) { return first(out); }
+            pgaccel_status first(int* out) { return second(out); }
+            extern "C" pgaccel_status pgaccel_cycle(int* out) { return first(out); }
+            """
+        )
+        finding = finding_for(result, "pgaccel_cycle")
+        self.assertIn("recursive_helper", finding.classifications)
+        self.assertIn("recursive helper cycle", finding.message)
+        self.assertIn("first", finding.message)
+        self.assertIn("second", finding.message)
+
+    def test_same_arity_overload_is_ambiguous(self) -> None:
+        result = audit_fixture(
+            r"""
+            pgaccel_status overloaded(int* out) {
+              sycl::queue& q = get_queue();
+              q.single_task<IntKernel>([=]() { *out = 1; });
+              return PGACCEL_OK;
+            }
+            pgaccel_status overloaded(float* out) {
+              sycl::queue& q = get_queue();
+              q.single_task<FloatKernel>([=]() { *out = 1; });
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_ambiguous(int* out) {
+              return overloaded(out);
+            }
+            """
+        )
+        finding = finding_for(result, "pgaccel_ambiguous")
+        self.assertIn("ambiguous_helper", finding.classifications)
+
+    def test_arity_disambiguates_local_overloads(self) -> None:
+        result = audit_fixture(
+            r"""
+            pgaccel_status launch(int* out) {
+              sycl::queue& q = get_queue();
+              q.single_task<Kernel>([=]() { *out = 1; });
+              return PGACCEL_OK;
+            }
+            pgaccel_status launch(int* out, int value) {
+              *out = value;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_arity(int* out) { return launch(out); }
+            """
+        )
+        self.assertFalse(result.findings)
+
+
+class CompilerValidAdversarialTests(unittest.TestCase):
+    CPP_PRELUDE = r"""
+        using pgaccel_status = int;
+        constexpr pgaccel_status PGACCEL_OK = 0;
+        constexpr pgaccel_status PGACCEL_UNSUPPORTED = 9;
+        namespace std {
+        using size_t = decltype(sizeof(0));
+        using uint32_t = unsigned int;
+        template <class Output, class Size, class Value>
+        Output fill_n(Output first, Size count, const Value& value) {
+          while (count-- != 0) *first++ = value;
+          return first;
+        }
+        }
+        namespace sycl {
+        template <int> struct range { explicit range(std::size_t) {} };
+        template <int> struct id { operator std::size_t() const { return 0; } };
+        struct queue {
+          template <class Function> void parallel_for(range<1>, Function) {}
+          void wait_and_throw() {}
+          bool is_in_order() const { return false; }
+        };
+        struct device { static void get_devices() {} };
+        }
+        void observe() {}
+    """
+
+    def test_queue_identity_mutation_through_aliases_invalidates_later_wait(
+        self,
+    ) -> None:
+        result = audit_compiling_fixture(
+            self.CPP_PRELUDE
+            + r"""
+            void mutate_queue(sycl::queue&);
+            void mutate_queue_pointer(sycl::queue*);
+            sycl::queue* choose_queue(sycl::queue*);
+
+            extern "C" pgaccel_status pgaccel_queue_reference_rebind(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              sycl::queue other;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              sycl::queue& alias = q;
+              alias = other;
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_pointer_rebind(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              sycl::queue other;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              sycl::queue* alias = &q;
+              *alias = other;
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_explicit_assignment(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              sycl::queue other;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              q.operator=(other);
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_alias_escape(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              auto& alias = q;
+              mutate_queue(alias);
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_pointer_escape(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              auto* alias = &q;
+              mutate_queue_pointer(alias);
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_predispatch_alias_rebind(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              sycl::queue other;
+              sycl::queue& alias = q;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              alias = other;
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_reference_alias_chain(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              sycl::queue other;
+              sycl::queue& alias = q;
+              auto& alias2 = alias;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              alias2 = other;
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_pointer_alias_chain(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              sycl::queue other;
+              sycl::queue* alias = &q;
+              auto* alias2 = alias;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              *alias2 = other;
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_paren_reference_rebind(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              sycl::queue replacement;
+              sycl::queue& alias(q);
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              alias = replacement;
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_brace_reference_rebind(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              sycl::queue replacement;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              sycl::queue& alias{q};
+              alias = replacement;
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_brace_pointer_rebind(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              sycl::queue replacement;
+              sycl::queue* alias{&q};
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              (*alias) = replacement;
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_brace_pointer_explicit_rebind(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              sycl::queue replacement;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              sycl::queue* alias{&q};
+              (*alias).operator=(replacement);
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_mixed_alias_rebind(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              sycl::queue replacement;
+              sycl::queue* pointer = &q;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              sycl::queue& reference = *pointer;
+              reference.operator=(replacement);
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_brace_alias_escape(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              sycl::queue& alias{q};
+              mutate_queue(alias);
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_unknown_initializer(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              sycl::queue* alias = choose_queue(&q);
+              (void)alias;
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_observer_before_wait(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              (void)q.is_in_order();
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_dispatch_before_wait(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 2; });
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_paren_alias_observer(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              sycl::queue& alias(q);
+              (void)alias.is_in_order();
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_brace_alias_dispatch(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              sycl::queue& alias{q};
+              alias.parallel_for(sycl::range<1>(count),
+                                 [=](sycl::id<1> i) { out[i] = 2; });
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        for name in (
+            "pgaccel_queue_reference_rebind",
+            "pgaccel_queue_pointer_rebind",
+            "pgaccel_queue_explicit_assignment",
+            "pgaccel_queue_alias_escape",
+            "pgaccel_queue_pointer_escape",
+            "pgaccel_queue_predispatch_alias_rebind",
+            "pgaccel_queue_reference_alias_chain",
+            "pgaccel_queue_pointer_alias_chain",
+            "pgaccel_queue_paren_reference_rebind",
+            "pgaccel_queue_brace_reference_rebind",
+            "pgaccel_queue_brace_pointer_rebind",
+            "pgaccel_queue_brace_pointer_explicit_rebind",
+            "pgaccel_queue_mixed_alias_rebind",
+            "pgaccel_queue_brace_alias_escape",
+            "pgaccel_queue_unknown_initializer",
+        ):
+            with self.subTest(name=name):
+                self.assertFalse(entries[name].ok, entries[name].detail)
+                self.assertIn("missing_device_terminal", entries[name].classifications)
+                self.assertIn("queue receiver is rebound", entries[name].detail)
+        for name in (
+            "pgaccel_queue_observer_before_wait",
+            "pgaccel_queue_dispatch_before_wait",
+            "pgaccel_queue_paren_alias_observer",
+            "pgaccel_queue_brace_alias_dispatch",
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(entries[name].ok, entries[name].detail)
+
+    def test_non_status_opaque_resource_rejects_host_mutation_after_device_work(
+        self,
+    ) -> None:
+        result = audit_compiling_fixture(
+            self.CPP_PRELUDE
+            + r"""
+            namespace sycl {
+            template <class T>
+            T* malloc_device(std::size_t, queue&);
+            }
+            struct OpaqueState { int* device_index; };
+
+            extern "C" OpaqueState* pgaccel_nonstatus_device_resource(
+                std::size_t count) {
+              if (count == 0) return nullptr;
+              sycl::queue q;
+              int* device_index = sycl::malloc_device<int>(count, q);
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device_index[i] = 1;
+              });
+              q.wait_and_throw();
+              auto* state = new OpaqueState();
+              state->device_index = device_index;
+              return state;
+            }
+
+            extern "C" OpaqueState* pgaccel_nonstatus_host_mutated_resource(
+                std::size_t count) {
+              if (count == 0) return nullptr;
+              sycl::queue q;
+              int* device_index = sycl::malloc_device<int>(count, q);
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device_index[i] = 1;
+              });
+              q.wait_and_throw();
+              device_index[0] = 42;
+              auto* state = new OpaqueState();
+              state->device_index = device_index;
+              return state;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        clean = entries["pgaccel_nonstatus_device_resource"]
+        hostile = entries["pgaccel_nonstatus_host_mutated_resource"]
+        self.assertFalse(clean.is_status)
+        self.assertTrue(clean.ok, clean.detail)
+        self.assertIn("opaque_device_resource", clean.classifications)
+        self.assertFalse(hostile.is_status)
+        self.assertFalse(hostile.ok, hostile.detail)
+        self.assertIn("missing_device_terminal", hostile.classifications)
+        self.assertNotIn("opaque_device_resource", hostile.classifications)
+
+    def test_seven_compiler_valid_output_bypasses_fail_closed(self) -> None:
+        result = audit_compiling_fixture(
+            self.CPP_PRELUDE
+            + r"""
+            struct Holder { int* out; };
+            static void finish(int* out, std::size_t count) {
+              std::fill_n(out, count, 7);
+            }
+            static auto host_finalize = &finish;
+            #define EARLY_SUCCESS() if (flag) return PGACCEL_OK
+            #define HOST_WRITE() out[0] = 7
+
+            extern "C" pgaccel_status pgaccel_macro_early(
+                bool flag, int mode, std::size_t count, int* out) {
+              (void)mode;
+              sycl::queue q;
+              EARLY_SUCCESS();
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_macro_write(
+                bool flag, int mode, std::size_t count, int* out) {
+              (void)flag; (void)mode;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              HOST_WRITE();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_namespaced_finalizer(
+                bool flag, int mode, std::size_t count, int* out) {
+              (void)flag; (void)mode;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              std::fill_n(out, count, 7);
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_pointer_finalizer(
+                bool flag, int mode, std::size_t count, int* out) {
+              (void)flag; (void)mode;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              (*host_finalize)(out, count);
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_false_zero(
+                bool flag, int mode, std::size_t count, int* out) {
+              (void)flag;
+              sycl::queue q;
+              if (mode == 0) return PGACCEL_OK;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_nested_deferred(
+                bool flag, int mode, std::size_t count, int* out) {
+              (void)flag; (void)mode;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                auto deferred = [=]() { out[i] = 1; };
+                (void)deferred;
+              });
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_member_collision(
+                bool flag, int mode, std::size_t count, int* out) {
+              (void)flag; (void)mode; (void)out;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                Holder holder{};
+                holder.out[i] = 1;
+              });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        self.assertEqual(
+            set(entries),
+            {
+                "pgaccel_macro_early",
+                "pgaccel_macro_write",
+                "pgaccel_namespaced_finalizer",
+                "pgaccel_pointer_finalizer",
+                "pgaccel_false_zero",
+                "pgaccel_nested_deferred",
+                "pgaccel_member_collision",
+            },
+        )
+        for name, entry in entries.items():
+            with self.subTest(name=name):
+                self.assertFalse(entry.ok, entry.detail)
+        self.assertIn(
+            "macro_expanded_body", entries["pgaccel_macro_early"].classifications
+        )
+        self.assertIn(
+            "host_output_write", entries["pgaccel_macro_write"].classifications
+        )
+        self.assertIn(
+            "qualified_helper", entries["pgaccel_namespaced_finalizer"].classifications
+        )
+        self.assertIn(
+            "unresolved_indirect_output_call",
+            entries["pgaccel_pointer_finalizer"].classifications,
+        )
+        self.assertNotIn("zero_work", entries["pgaccel_false_zero"].classifications)
+        self.assertIn(
+            "rejected_terminal", entries["pgaccel_nested_deferred"].classifications
+        )
+        self.assertIn(
+            "rejected_terminal", entries["pgaccel_member_collision"].classifications
+        )
+        self.assertNotIn(
+            "output_identity_shadowing",
+            entries["pgaccel_member_collision"].classifications,
+        )
+
+    def test_two_exact_signature_contract_bypasses_fail_closed(self) -> None:
+        result = audit_compiling_fixture(
+            self.CPP_PRELUDE
+            + r"""
+            struct pgaccel_geometry {};
+            static bool runtime_skip() { return true; }
+            extern "C" pgaccel_status pgaccel_init() {
+              if (!runtime_skip()) sycl::device::get_devices();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_spatial_intersects(
+                const pgaccel_geometry*, std::size_t count_a,
+                const pgaccel_geometry*, std::size_t count_b,
+                std::uint32_t*, std::size_t*, std::uint32_t*, std::size_t*,
+                std::uint32_t*, std::size_t*) {
+              if (count_a == 0 && count_b == 0) return PGACCEL_OK;
+              if (count_a != count_b) return PGACCEL_UNSUPPORTED;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        self.assertFalse(entries["pgaccel_init"].ok)
+        self.assertIn(
+            "invalid_lifecycle_contract",
+            entries["pgaccel_init"].classifications,
+        )
+        self.assertFalse(entries["pgaccel_spatial_intersects"].ok)
+        self.assertIn(
+            "invalid_failure_only_contract",
+            entries["pgaccel_spatial_intersects"].classifications,
+        )
+
+    def test_contract_and_zero_work_adversarial_corpus_compiles(self) -> None:
+        cases = {
+            "lifecycle_runtime_conditional_evidence": r"""
+                extern "C" pgaccel_status pgaccel_init(bool skip) {
+                  if (!skip) sycl::device::get_devices();
+                  return PGACCEL_OK;
+                }
+            """,
+            "lifecycle_dead_evidence": r"""
+                extern "C" pgaccel_status pgaccel_init() {
+                  if (false) sycl::device::get_devices();
+                  return PGACCEL_OK;
+                }
+            """,
+            "lifecycle_after_return_evidence": r"""
+                extern "C" pgaccel_status pgaccel_init() {
+                  return PGACCEL_OK;
+                  sycl::device::get_devices();
+                }
+            """,
+            "fail_contract_scattered_evidence": r"""
+                extern "C" pgaccel_status pgaccel_spatial_intersects(
+                    std::size_t count_a, std::size_t count_b) {
+                  if (count_a == 0 && count_b == 0) return PGACCEL_OK;
+                  if (count_a != 0) return PGACCEL_UNSUPPORTED;
+                  return PGACCEL_OK;
+                }
+            """,
+            "fail_contract_unconditional_success_with_decoys": r"""
+                extern "C" pgaccel_status pgaccel_spatial_intersects(
+                    std::size_t count_a, std::size_t count_b) {
+                  if (count_a == 0) observe();
+                  if (count_b == 0) observe();
+                  if (count_a != count_b) return PGACCEL_UNSUPPORTED;
+                  return PGACCEL_OK;
+                }
+            """,
+            "failure_only_host_write_macro": r"""
+                #define HOST_WRITE() out[0] = 42
+                extern "C" pgaccel_status pgaccel_spatial_intersects(
+                    std::size_t count_a, std::size_t count_b, int* out) {
+                  if (count_a == 0 || count_b == 0) return PGACCEL_OK;
+                  HOST_WRITE();
+                  return PGACCEL_UNSUPPORTED;
+                }
+            """,
+            "false_zero_count_expected_conservative": r"""
+                extern "C" pgaccel_status pgaccel_case(
+                    std::size_t count, int* out) {
+                  sycl::queue q;
+                  if (count == 0) return PGACCEL_OK;
+                  q.parallel_for(sycl::range<1>(count),
+                                 [=](sycl::id<1> i) { out[i] = 1; });
+                  return PGACCEL_OK;
+                }
+            """,
+            "pointer_null_falsely_zero": r"""
+                extern "C" pgaccel_status pgaccel_case(
+                    std::size_t count, int* out) {
+                  sycl::queue q;
+                  if (out == 0) return PGACCEL_OK;
+                  q.parallel_for(sycl::range<1>(count),
+                                 [=](sycl::id<1> i) { out[i] = 1; });
+                  return PGACCEL_OK;
+                }
+            """,
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name):
+                result = audit_compiling_fixture(self.CPP_PRELUDE + source)
+                entry = result.entrypoint_audits[0]
+                if name == "false_zero_count_expected_conservative":
+                    self.assertTrue(entry.ok, entry.detail)
+                    self.assertIn("zero_work", entry.classifications)
+                else:
+                    self.assertFalse(entry.ok, entry.detail)
+
+
+class HostComputationAndContractTests(unittest.TestCase):
+    def test_host_loop_success_is_classified(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_cpu_loop(int* out, size_t count) {
+              for (size_t i = 0; i < count; ++i) out[i] = 42;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        finding = finding_for(result, "pgaccel_cpu_loop")
+        self.assertIn("host_computation", finding.classifications)
+        self.assertIn("missing_device_terminal", finding.classifications)
+
+    def test_fake_gpu_counter_is_classified_but_comment_is_not(self) -> None:
+        real = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_fake_counter(int* out) {
+              *out = 42;
+              pgaccel_record_gpu_exec();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertIn(
+            "fake_gpu_counter",
+            finding_for(real, "pgaccel_fake_counter").classifications,
+        )
+
+        comment = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_counter_comment(int* out) {
+              // pgaccel_record_gpu_exec();
+              *out = 42;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertNotIn(
+            "fake_gpu_counter",
+            finding_for(comment, "pgaccel_counter_comment").classifications,
+        )
+
+    def test_explicit_failure_only_function_passes(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_decline() {
+              if (something_bad()) return PGACCEL_INVALID_ARGUMENT;
+              return PGACCEL_ERROR_NO_DEVICE;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertEqual(result.entrypoint_audits[0].classifications, ("failure_only",))
+
+    def test_neutral_output_init_on_unconditional_failure_edge(self) -> None:
+        valid = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_failure_init(
+                int* out, size_t count, bool invalid) {
+              if (invalid) {
+                if (out != nullptr) *out = 0;
+                return PGACCEL_ERROR;
+              }
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count),
+                  [=](sycl::id<1> i) { out[i] = 1; });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(valid.findings)
+        self.assertIn(
+            "failure_neutral_init", valid.entrypoint_audits[0].classifications
+        )
+
+        hostile = {
+            "non_neutral": r"""
+                extern "C" pgaccel_status pgaccel_non_neutral(
+                    int* out, size_t count, bool invalid) {
+                  if (invalid) { *out = 42; return PGACCEL_ERROR; }
+                  sycl::queue q;
+                  q.parallel_for(sycl::range<1>(count),
+                      [=](sycl::id<1> i) { out[i] = 1; });
+                  return PGACCEL_OK;
+                }
+            """,
+            "conditional_failure": r"""
+                extern "C" pgaccel_status pgaccel_conditional_failure(
+                    int* out, size_t count, bool invalid, bool fatal) {
+                  if (invalid) {
+                    *out = 0;
+                    if (fatal) return PGACCEL_ERROR;
+                  }
+                  sycl::queue q;
+                  q.parallel_for(sycl::range<1>(count),
+                      [=](sycl::id<1> i) { out[i] = 1; });
+                  return PGACCEL_OK;
+                }
+            """,
+            "early_success": r"""
+                extern "C" pgaccel_status pgaccel_early_success(
+                    int* out, size_t count, bool invalid, bool recover) {
+                  if (invalid) {
+                    *out = 0;
+                    if (recover) return PGACCEL_OK;
+                    return PGACCEL_ERROR;
+                  }
+                  sycl::queue q;
+                  q.parallel_for(sycl::range<1>(count),
+                      [=](sycl::id<1> i) { out[i] = 1; });
+                  return PGACCEL_OK;
+                }
+            """,
+            "later_failure": r"""
+                extern "C" pgaccel_status pgaccel_later_failure(
+                    int* out, size_t count, bool invalid, bool fatal) {
+                  if (invalid) *out = 0;
+                  if (fatal) return PGACCEL_ERROR;
+                  sycl::queue q;
+                  q.parallel_for(sycl::range<1>(count),
+                      [=](sycl::id<1> i) { out[i] = 1; });
+                  return PGACCEL_OK;
+                }
+            """,
+            "break_escape": r"""
+                extern "C" pgaccel_status pgaccel_break_escape(
+                    int* out, size_t count, bool invalid, bool recover) {
+                  if (invalid) {
+                    while (recover) { *out = 0; break; }
+                    return PGACCEL_ERROR;
+                  }
+                  sycl::queue q;
+                  q.parallel_for(sycl::range<1>(count),
+                      [=](sycl::id<1> i) { out[i] = 1; });
+                  return PGACCEL_OK;
+                }
+            """,
+            "goto_escape": r"""
+                extern "C" pgaccel_status pgaccel_goto_escape(
+                    int* out, size_t count, bool invalid) {
+                  if (invalid) { *out = 0; goto failed; }
+                  sycl::queue q;
+                  q.parallel_for(sycl::range<1>(count),
+                      [=](sycl::id<1> i) { out[i] = 1; });
+                  return PGACCEL_OK;
+                failed:
+                  return PGACCEL_ERROR;
+                }
+            """,
+            "escaping_alias": r"""
+                extern "C" pgaccel_status pgaccel_alias_failure_init(
+                    int* out, size_t count, bool invalid) {
+                  int* alias = out;
+                  if (invalid) { *alias = 0; return PGACCEL_ERROR; }
+                  sycl::queue q;
+                  q.parallel_for(sycl::range<1>(count),
+                      [=](sycl::id<1> i) { out[i] = 1; });
+                  return PGACCEL_OK;
+                }
+            """,
+        }
+        for name, source in hostile.items():
+            with self.subTest(name):
+                result = audit_fixture(source)
+                self.assertTrue(result.findings)
+                self.assertIn(
+                    "host_output_write", result.entrypoint_audits[0].classifications
+                )
+
+    def test_zero_work_only_success_with_nonempty_failure_passes(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_zero_only(
+                const int* data, size_t count, int* out) {
+              if (count == 0) {
+                if (out != nullptr) *out = 0;
+                return PGACCEL_OK;
+              }
+              if (data == nullptr || out == nullptr) return PGACCEL_ERROR;
+              return PGACCEL_UNSUPPORTED;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        entry = result.entrypoint_audits[0]
+        self.assertIn("failure_only", entry.classifications)
+        self.assertIn("zero_work", entry.classifications)
+
+    def test_zero_work_only_contract_rejects_nonempty_host_output(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_zero_only_host(
+                const int* data, size_t count, int* out) {
+              if (count == 0) { *out = 0; return PGACCEL_OK; }
+              *out = data[0];
+              return PGACCEL_UNSUPPORTED;
+            }
+            """
+        )
+        finding = finding_for(result, "pgaccel_zero_only_host")
+        self.assertIn("host_output_write", finding.classifications)
+
+    def test_success_return_prevents_failure_only_classification(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_not_failure_only(bool empty) {
+              if (empty) return PGACCEL_OK;
+              return PGACCEL_ERROR_NO_DEVICE;
+            }
+            """
+        )
+        self.assertTrue(result.findings)
+
+    def test_lifecycle_contract_requires_source_evidence(self) -> None:
+        valid = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_shutdown() {
+              g_queue->wait_and_throw();
+              delete g_queue;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(valid.findings)
+        self.assertEqual(valid.entrypoint_audits[0].classifications, ("lifecycle",))
+
+        invalid = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_shutdown() {
+              return PGACCEL_OK;
+            }
+            """
+        )
+        finding = finding_for(invalid, "pgaccel_shutdown")
+        self.assertIn("invalid_lifecycle_contract", finding.classifications)
+
+        host_work = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_shutdown(int* out, size_t count) {
+              g_queue->wait_and_throw();
+              for (size_t i = 0; i < count; ++i) out[i] = 1;
+              delete g_queue;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        finding = finding_for(host_work, "pgaccel_shutdown")
+        self.assertIn("invalid_lifecycle_contract", finding.classifications)
+
+    def test_native_error_handoff_lifecycle_contracts_are_exact(self) -> None:
+        valid = audit_fixture(
+            r"""
+            extern "C" void pgaccel_clear_last_error() {
+              tl_last_error[0] = 0;
+            }
+            extern "C" size_t pgaccel_copy_last_error(
+                char* buffer, size_t capacity) {
+              const size_t length = 0;
+              if (buffer == nullptr || capacity == 0) return length;
+              std::memcpy(buffer, tl_last_error, length);
+              buffer[length] = 0;
+              return length;
+            }
+            """
+        )
+        self.assertFalse(valid.findings)
+        self.assertEqual(
+            {entry.entrypoint: entry.classifications for entry in valid.entrypoint_audits},
+            {
+                "pgaccel_clear_last_error": ("lifecycle",),
+                "pgaccel_copy_last_error": ("lifecycle",),
+            },
+        )
+
+        invalid = audit_fixture(
+            r"""
+            extern "C" void pgaccel_clear_last_error() {
+              tl_last_error[1] = 0;
+            }
+            extern "C" size_t pgaccel_copy_last_error(
+                char* buffer, size_t capacity) {
+              const size_t length = 0;
+              if (buffer == nullptr || capacity == 0) return length;
+              for (size_t i = 0; i < length; ++i) buffer[i] = tl_last_error[i];
+              buffer[length] = 0;
+              return length;
+            }
+            """
+        )
+        for entry in invalid.entrypoint_audits:
+            self.assertFalse(entry.ok, entry.detail)
+            self.assertIn("invalid_lifecycle_contract", entry.classifications)
+
+    def test_failure_only_contract_rejects_new_host_work(self) -> None:
+        valid = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_spatial_intersects(
+                size_t count_a, size_t count_b, int* out) {
+              *out = 0;
+              if (count_a == 0 || count_b == 0) return PGACCEL_OK;
+              return PGACCEL_UNSUPPORTED;
+            }
+            """
+        )
+        self.assertFalse(valid.findings)
+        self.assertEqual(valid.entrypoint_audits[0].classifications, ("failure_only",))
+
+        invalid = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_spatial_intersects(
+                size_t count_a, size_t count_b, int* out) {
+              if (count_a == 0 || count_b == 0) return PGACCEL_OK;
+              for (size_t i = 0; i < count_a; ++i) out[i] = 1;
+              return PGACCEL_UNSUPPORTED;
+            }
+            """
+        )
+        finding = finding_for(invalid, "pgaccel_spatial_intersects")
+        self.assertIn("invalid_failure_only_contract", finding.classifications)
+
+    def test_failure_only_named_detail_is_diagnostic_only(self) -> None:
+        valid = audit_compiling_fixture(
+            r"""
+            using pgaccel_status = int;
+            constexpr pgaccel_status PGACCEL_OK = 0;
+            constexpr pgaccel_status PGACCEL_ERROR = 1;
+            constexpr pgaccel_status PGACCEL_UNSUPPORTED = 2;
+            constexpr int PGACCEL_WIDGET_DETAIL_INVALID = 9;
+            extern "C" pgaccel_status pgaccel_detail_decline(bool invalid, int* detail) {
+              if (invalid) {
+                *detail = PGACCEL_WIDGET_DETAIL_INVALID;
+                return PGACCEL_ERROR;
+              }
+              return PGACCEL_UNSUPPORTED;
+            }
+            """
+        )
+        self.assertFalse(valid.findings)
+
+        hostile = {
+            "numeric": r"""
+                using pgaccel_status = int;
+                constexpr pgaccel_status PGACCEL_ERROR = 1;
+                extern "C" pgaccel_status pgaccel_numeric_detail(int* detail) {
+                  *detail = 9;
+                  return PGACCEL_ERROR;
+                }
+            """,
+            "result": r"""
+                using pgaccel_status = int;
+                constexpr pgaccel_status PGACCEL_ERROR = 1;
+                constexpr int PGACCEL_WIDGET_DETAIL_INVALID = 9;
+                extern "C" pgaccel_status pgaccel_named_result(int* result) {
+                  *result = PGACCEL_WIDGET_DETAIL_INVALID;
+                  return PGACCEL_ERROR;
+                }
+            """,
+            "detail_offset": r"""
+                using pgaccel_status = int;
+                constexpr pgaccel_status PGACCEL_ERROR = 1;
+                constexpr int PGACCEL_WIDGET_DETAIL_INVALID = 9;
+                extern "C" pgaccel_status pgaccel_detail_offset(int* detail) {
+                  detail[1] = PGACCEL_WIDGET_DETAIL_INVALID;
+                  return PGACCEL_ERROR;
+                }
+            """,
+            "success": r"""
+                using pgaccel_status = int;
+                constexpr pgaccel_status PGACCEL_OK = 0;
+                constexpr pgaccel_status PGACCEL_ERROR = 1;
+                constexpr int PGACCEL_WIDGET_DETAIL_INVALID = 9;
+                extern "C" pgaccel_status pgaccel_detail_success(bool invalid, int* detail) {
+                  *detail = PGACCEL_WIDGET_DETAIL_INVALID;
+                  if (invalid) return PGACCEL_ERROR;
+                  return PGACCEL_OK;
+                }
+            """,
+        }
+        for name, source in hostile.items():
+            with self.subTest(name=name):
+                result = audit_compiling_fixture(source)
+                self.assertTrue(result.findings)
+                self.assertIn(
+                    "host_output_write", result.entrypoint_audits[0].classifications
+                )
+
+    def test_zero_row_contract_allows_only_failure_terminal_detail(self) -> None:
+        result = audit_compiling_fixture(
+            r"""
+            using pgaccel_status = int;
+            constexpr pgaccel_status PGACCEL_OK = 0;
+            constexpr pgaccel_status PGACCEL_UNSUPPORTED = 1;
+            constexpr pgaccel_status PGACCEL_INVALID_ARGUMENT = 2;
+            constexpr int PGACCEL_SPATIAL_DETAIL_NONE = 0;
+            constexpr int PGACCEL_SPATIAL_DETAIL_CONTRACT = 1;
+            struct Request { unsigned long count; };
+            static pgaccel_status resident_validate_request_contract(
+                const Request* request, int* detail) {
+              if (request == nullptr) return PGACCEL_INVALID_ARGUMENT;
+              *detail = PGACCEL_SPATIAL_DETAIL_NONE;
+              return request->count == 0 ? PGACCEL_OK : PGACCEL_INVALID_ARGUMENT;
+            }
+            extern "C" pgaccel_status pgaccel_spatial_eval_resident_ex(
+                const Request* request, int* detail) {
+              if (detail == nullptr) return PGACCEL_INVALID_ARGUMENT;
+              if (request == nullptr) {
+                *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
+                return PGACCEL_INVALID_ARGUMENT;
+              }
+              if (request->count != 0) {
+                *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
+                return PGACCEL_UNSUPPORTED;
+              }
+              return resident_validate_request_contract(request, detail);
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertIn("failure_diagnostic", result.entrypoint_audits[0].classifications)
+
+
+class ConstDescriptorMemberProvenanceTests(unittest.TestCase):
+    def test_const_descriptor_helper_cannot_hide_mutable_member_write(self) -> None:
+        result = audit_fixture(
+            r"""
+            struct Request { size_t count; int* output; };
+            void overwrite_descriptor_output(const Request* request) {
+              for (size_t index = 0; index < request->count; ++index) {
+                request->output[index] = 41;
+              }
+            }
+            extern "C" pgaccel_status pgaccel_const_descriptor_helper_write(
+                const Request* request) {
+              overwrite_descriptor_output(request);
+              int* output = request->output;
+              sycl::queue q;
+              q.parallel_for<DescriptorWrite>(sycl::range<1>(request->count),
+                  [=](sycl::id<1> id) { output[id[0]] = 42; }).wait();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("host_output_write", entry.classifications)
+
+    def test_only_exact_mutable_pointer_member_alias_proves_output(self) -> None:
+        result = audit_compiling_fixture(
+            CompilerValidAdversarialTests.CPP_PRELUDE
+            + r"""
+            typedef struct {
+              int* output;
+              const int* input;
+              int scalar;
+            } Descriptor;
+
+            extern "C" pgaccel_status pgaccel_member_alias(
+                const Descriptor* descriptor, std::size_t count) {
+              int* output = descriptor->output;
+              sycl::queue queue;
+              queue.parallel_for(sycl::range<1>(count),
+                  [=](sycl::id<1> id) { output[id] = 1; });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertIn(
+            "output_alias_tracking", result.entrypoint_audits[0].classifications
+        )
+
+    def test_atomic_ref_mutation_preserves_derived_output_provenance(self) -> None:
+        prelude = (
+            CompilerValidAdversarialTests.CPP_PRELUDE
+            + r"""
+            namespace sycl {
+            template <class T> struct atomic_ref {
+              T& value;
+              explicit atomic_ref(T& target) : value(target) {}
+              T fetch_or(T operand) {
+                T previous = value; value |= operand; return previous;
+              }
+              T load() const { return value; }
+            };
+            }
+            struct Descriptor { unsigned int* flags; };
+            """
+        )
+        valid = audit_compiling_fixture(
+            prelude
+            + r"""
+            extern "C" pgaccel_status pgaccel_atomic_write(
+                const Descriptor* descriptor, std::size_t count) {
+              unsigned int* flags = descriptor->flags;
+              sycl::queue queue;
+              queue.parallel_for(sycl::range<1>(count), [=](sycl::id<1>) {
+                sycl::atomic_ref<unsigned int> atomic(flags[0]);
+                atomic.fetch_or(1u);
+              });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(valid.findings)
+
+        load_only = audit_compiling_fixture(
+            prelude
+            + r"""
+            extern "C" pgaccel_status pgaccel_atomic_load(
+                const Descriptor* descriptor, std::size_t count) {
+              unsigned int* flags = descriptor->flags;
+              sycl::queue queue;
+              queue.parallel_for(sycl::range<1>(count), [=](sycl::id<1>) {
+                sycl::atomic_ref<unsigned int> atomic(flags[0]);
+                (void)atomic.load();
+              });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = load_only.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("rejected_terminal", entry.classifications)
+
+        hostile = {
+            "host": r"""
+                unsigned int* flags = descriptor->flags;
+                sycl::atomic_ref<unsigned int> atomic(flags[0]);
+                atomic.fetch_or(1u);
+            """,
+            "direct_root": r"""
+                sycl::queue queue;
+                queue.parallel_for(sycl::range<1>(count), [=](sycl::id<1>) {
+                  sycl::atomic_ref<unsigned int> atomic(descriptor->flags[0]);
+                  atomic.fetch_or(1u);
+                });
+            """,
+        }
+        for name, body in hostile.items():
+            with self.subTest(name=name):
+                result = audit_compiling_fixture(
+                    prelude
+                    + f"""extern "C" pgaccel_status pgaccel_atomic_{name}(
+                            const Descriptor* descriptor, std::size_t count) {{
+                          {body}
+                          return PGACCEL_OK;
+                        }}"""
+                )
+                self.assertFalse(result.entrypoint_audits[0].ok)
+
+    def test_const_and_unselected_descriptor_members_stay_red(self) -> None:
+        sources = {
+            "const_member": r"""
+                const int* input = descriptor->input;
+                sycl::queue queue;
+                queue.parallel_for(sycl::range<1>(count),
+                    [=](sycl::id<1> id) { (void)input[id]; });
+            """,
+            "direct_root": r"""
+                const Descriptor* alias = descriptor;
+                sycl::queue queue;
+                queue.parallel_for(sycl::range<1>(count),
+                    [=](sycl::id<1> id) { alias->output[id] = 1; });
+            """,
+            "aggregate_view": r"""
+                View view{descriptor->output};
+                sycl::queue queue;
+                queue.parallel_for(sycl::range<1>(count),
+                    [=](sycl::id<1> id) { view.output[id] = 1; });
+            """,
+            "assigned_view": r"""
+                View view{};
+                view.output = descriptor->output;
+                sycl::queue queue;
+                queue.parallel_for(sycl::range<1>(count),
+                    [=](sycl::id<1> id) { view.output[id] = 1; });
+            """,
+        }
+        prelude = (
+            CompilerValidAdversarialTests.CPP_PRELUDE
+            + r"""
+            struct Descriptor { int* output; const int* input; int scalar; };
+            struct View { int* output; };
+            """
+        )
+        for name, body in sources.items():
+            with self.subTest(name=name):
+                result = audit_compiling_fixture(
+                    prelude
+                    + f"""extern "C" pgaccel_status pgaccel_{name}(
+                            const Descriptor* descriptor, std::size_t count) {{
+                          {body}
+                          return PGACCEL_OK;
+                        }}"""
+                )
+                entry = result.entrypoint_audits[0]
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("missing_device_terminal", entry.classifications)
+
+    def test_member_alias_selection_and_unrelated_calls_stay_red(self) -> None:
+        prelude = (
+            CompilerValidAdversarialTests.CPP_PRELUDE
+            + r"""
+            struct Descriptor { int* output; };
+            static int* pick_host(int* host, int*) { return host; }
+            static void observe_pointer(int*) {}
+            """
+        )
+        initializers = {
+            "ternary": "choose_host ? host : descriptor->output",
+            "helper": "pick_host(host, descriptor->output)",
+            "unrelated_call": "(observe_pointer(descriptor->output), host)",
+        }
+        for name, initializer in initializers.items():
+            with self.subTest(name=name):
+                result = audit_compiling_fixture(
+                    prelude
+                    + f"""extern "C" pgaccel_status pgaccel_member_{name}(
+                            const Descriptor* descriptor, bool choose_host,
+                            std::size_t count) {{
+                          int host_value = 0;
+                          int* host = &host_value;
+                          int* output = {initializer};
+                          sycl::queue queue;
+                          queue.parallel_for(sycl::range<1>(count),
+                              [=](sycl::id<1> id) {{ output[id] = 1; }});
+                          return PGACCEL_OK;
+                        }}"""
+                )
+                entry = result.entrypoint_audits[0]
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertNotIn("output_alias_tracking", entry.classifications)
+
+
+class ResidentV5RegressionTests(unittest.TestCase):
+    COPYBACK_PRELUDE = r"""
+        using size_t = decltype(sizeof(0));
+        using uint64_t = unsigned long long;
+        using pgaccel_status = int;
+        constexpr pgaccel_status PGACCEL_OK = 0;
+        constexpr pgaccel_status PGACCEL_ERROR = 1;
+        namespace sycl {
+        namespace usm { enum class alloc { unknown, host, shared, device }; }
+        struct context {};
+        template <int> struct range { explicit range(size_t) {} };
+        template <int> struct id { operator size_t() const { return 0; } };
+        struct event { void wait_and_throw() {} };
+        struct handler {
+          template <class Function> void parallel_for(range<1>, Function) {}
+          template <class Function> void single_task(Function) {}
+        };
+        template <class T, int Dimensions> struct local_accessor {
+          local_accessor(range<Dimensions>, handler&) {}
+          T& operator[](size_t) const { static T value{}; return value; }
+        };
+        struct queue {
+          template <class Function> event parallel_for(range<1>, Function) { return {}; }
+          template <class Function> event submit(Function fn) {
+            handler h;
+            fn(h);
+            return {};
+          }
+          event memcpy(void*, const void*, size_t);
+          event memset(void*, int, size_t);
+          void wait_and_throw() {}
+          context get_context() const { return {}; }
+        };
+        struct device { static void get_devices() {} };
+        inline void* malloc_shared(size_t, queue&) { static int value; return &value; }
+        inline void* malloc_device(size_t, queue&) { static int value; return &value; }
+        inline void free(void*, queue&) {}
+        usm::alloc get_pointer_type(const void*, const context&);
+        }
+        namespace std {
+        void* memcpy(void*, const void*, size_t);
+        void* memset(void*, int, size_t);
+        template <class T> void swap(T& left, T& right) {
+          T value = left;
+          left = right;
+          right = value;
+        }
+        }
+        static bool initialized = false;
+        static uint64_t counter = 0;
+        static sycl::queue queue_value;
+        static sycl::queue* g_queue = &queue_value;
+    """
+    STATUS_ALIAS_DECLARATION = """using pgaccel_status = int;
+        constexpr pgaccel_status PGACCEL_OK = 0;
+        constexpr pgaccel_status PGACCEL_ERROR = 1;"""
+
+    def test_returned_helper_cannot_substitute_local_detail_for_abi_output(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static pgaccel_status detail_only(
+                int* out, int* detail, size_t count) {
+              (void)out;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                detail[i] = 7;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_detail_only_wrapper(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              int detail = 0;
+              return detail_only(out, &detail, 1);
+            }
+            """
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("undominated_success", entry.classifications)
+
+    def test_helper_output_positions_survive_reordered_and_duplicate_arguments(
+        self,
+    ) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static pgaccel_status write_first(int* first, int* second) {
+              (void)second;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                first[0] = 1;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            static pgaccel_status write_detail(
+                int* first, int* detail, int* third) {
+              (void)first;
+              (void)third;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                detail[0] = 2;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_reordered_output(int* out) {
+              int local = 0;
+              return write_first(&local, out);
+            }
+            extern "C" pgaccel_status pgaccel_duplicate_unwritten_output(int* out) {
+              int local = 0;
+              return write_detail(out, &local, out);
+            }
+            """
+        )
+        self.assertEqual(len(result.entrypoint_audits), 2)
+        for entry in result.entrypoint_audits:
+            self.assertFalse(entry.ok, entry.detail)
+            self.assertIn("undominated_success", entry.classifications)
+
+    def test_conditional_and_call_rhs_do_not_invent_output_aliases(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static int* select_local(int* local, int*) { return local; }
+            extern "C" pgaccel_status pgaccel_conditional_alias_red(
+                int* out, bool choose_out) {
+              int local = 0;
+              int* selected = choose_out ? out : &local;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                selected[0] = 1;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_call_alias_red(int* out) {
+              int local = 0;
+              int* selected = select_local(&local, out);
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                selected[0] = 2;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        for entry in result.entrypoint_audits:
+            self.assertFalse(entry.ok, entry.detail)
+            self.assertNotIn("output_alias_tracking", entry.classifications)
+
+    def test_helper_binding_rejects_unbounded_and_overloaded_projections(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            struct SmallOutput { int values[1]; };
+            struct IndexedOutput {
+              int values[1];
+              int& operator[](size_t index) { return values[index]; }
+            };
+            static pgaccel_status write_value(int* value) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                value[0] = 1;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_out_of_range_binding(
+                SmallOutput* out) {
+              return write_value(&out->values[999]);
+            }
+            extern "C" pgaccel_status pgaccel_overloaded_index_binding(
+                IndexedOutput* out) {
+              return write_value(&out[0][0]);
+            }
+            extern "C" pgaccel_status pgaccel_pointer_offset_binding(int* out) {
+              return write_value(out + 999);
+            }
+            """
+        )
+        self.assertEqual(len(result.entrypoint_audits), 3)
+        for entry in result.entrypoint_audits:
+            self.assertFalse(entry.ok, entry.detail)
+            self.assertIn("undominated_success", entry.classifications)
+
+    def test_branch_output_variants_require_each_caller_binding(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static pgaccel_status select_output(
+                bool first, int* first_out, int* second_out) {
+              sycl::queue q;
+              if (first) {
+                q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                  first_out[0] = 1;
+                }).wait_and_throw();
+                return PGACCEL_OK;
+              }
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                second_out[0] = 2;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_branch_output_red(
+                bool first, int* out) {
+              int local = 0;
+              return select_output(first, out, &local);
+            }
+            extern "C" pgaccel_status pgaccel_branch_output_green(
+                bool first, int* first_out, int* second_out) {
+              return select_output(first, first_out, second_out);
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        red = entries["pgaccel_branch_output_red"]
+        self.assertFalse(red.ok, red.detail)
+        self.assertTrue(
+            entries["pgaccel_branch_output_green"].ok,
+            entries["pgaccel_branch_output_green"].detail,
+        )
+        self.assertEqual(
+            entries["pgaccel_branch_output_green"].output_parameter_position_variants,
+            ((1,), (2,)),
+        )
+
+    def test_output_position_proof_survives_three_levels_and_local_detail(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static pgaccel_status detail_leaf(int* out, int* detail) {
+              (void)out;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                detail[0] = 3;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            static pgaccel_status detail_middle(int* out, int* detail) {
+              return detail_leaf(out, detail);
+            }
+            static pgaccel_status write_both(int* out, int* detail) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 4;
+                detail[0] = 5;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_three_level_detail_red(int* out) {
+              int local = 0;
+              return detail_middle(out, &local);
+            }
+            extern "C" pgaccel_status pgaccel_out_with_local_detail_green(int* out) {
+              int local = 0;
+              return write_both(out, &local);
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        self.assertFalse(entries["pgaccel_three_level_detail_red"].ok)
+        green = entries["pgaccel_out_with_local_detail_green"]
+        self.assertTrue(green.ok, green.detail)
+        self.assertEqual(green.guaranteed_output_parameter_positions, (0,))
+        self.assertEqual(green.output_parameter_position_variants, ((0,),))
+
+    def test_top_level_const_pointer_preserves_borrowed_workspace_output(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static pgaccel_status write_borrowed_workspace(int* const workspace) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                workspace[0] = 10;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_borrowed_workspace_wrapper(int* out) {
+              return write_borrowed_workspace(out);
+            }
+            """
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertTrue(entry.ok, entry.detail)
+        self.assertEqual(entry.guaranteed_output_parameter_positions, (0,))
+        self.assertEqual(entry.output_parameter_position_variants, ((0,),))
+
+    def test_descriptor_scratch_and_finalize_outputs_remain_path_variants(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            struct GroupedDesc { int* scratch; };
+            static pgaccel_status finalize(int* out, int* detail) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 6;
+                detail[0] = 7;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            static pgaccel_status accumulate(int* scratch, int* detail) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                scratch[0] = 8;
+                detail[0] = 9;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            static pgaccel_status execute_ex(
+                const GroupedDesc* desc, int* out, int* detail, bool final) {
+              int* scratch_output = desc->scratch;
+              if (final) return finalize(out, detail);
+              return accumulate(scratch_output, detail);
+            }
+            extern "C" pgaccel_status pgaccel_grouped_variant_wrapper(
+                const GroupedDesc* desc, int* out, bool final) {
+              int local_detail = 0;
+              return execute_ex(desc, out, &local_detail, final);
+            }
+            """
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertTrue(entry.ok, entry.detail)
+        self.assertEqual(entry.guaranteed_output_parameter_positions, ())
+        self.assertEqual(entry.output_parameter_position_variants, ((0,), (1,)))
+
+    def test_grouped_completion_detail_requires_awaited_device_copyback(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            struct GroupedCompletion {
+              pgaccel_status status;
+              int detail;
+            };
+            void pgaccel_record_gpu_exec();
+
+            static void launch_grouped_completion(
+                sycl::queue& q, GroupedCompletion* const workspace) {
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                workspace->status = PGACCEL_OK;
+                workspace->detail = 7;
+              });
+              q.wait_and_throw();
+            }
+
+            extern "C" pgaccel_status pgaccel_grouped_detail_copyback(int* detail) {
+              sycl::queue q;
+              auto* workspace = static_cast<GroupedCompletion*>(
+                  sycl::malloc_device(sizeof(GroupedCompletion), q));
+              launch_grouped_completion(q, workspace);
+              GroupedCompletion completion{};
+              const auto* workspace_bytes =
+                  reinterpret_cast<const unsigned char*>(workspace);
+              q.memcpy(&completion, workspace, sizeof(completion)).wait_and_throw();
+              q.memcpy(detail,
+                       workspace_bytes + sizeof(pgaccel_status),
+                       sizeof(completion.detail)).wait_and_throw();
+              return completion.status;
+            }
+
+            extern "C" pgaccel_status pgaccel_grouped_detail_host_publish(int* detail) {
+              sycl::queue q;
+              auto* workspace = static_cast<GroupedCompletion*>(
+                  sycl::malloc_device(sizeof(GroupedCompletion), q));
+              launch_grouped_completion(q, workspace);
+              GroupedCompletion completion{};
+              q.memcpy(&completion, workspace, sizeof(completion)).wait_and_throw();
+              *detail = completion.detail;
+              pgaccel_record_gpu_exec();
+              return completion.status;
+            }
+
+            extern "C" pgaccel_status pgaccel_grouped_detail_unawaited(int* detail) {
+              sycl::queue q;
+              auto* workspace = static_cast<GroupedCompletion*>(
+                  sycl::malloc_device(sizeof(GroupedCompletion), q));
+              launch_grouped_completion(q, workspace);
+              GroupedCompletion completion{};
+              q.memcpy(&completion, workspace, sizeof(completion)).wait_and_throw();
+              const auto* workspace_bytes =
+                  reinterpret_cast<const unsigned char*>(workspace);
+              q.memcpy(detail,
+                       workspace_bytes + sizeof(pgaccel_status),
+                       sizeof(completion.detail));
+              return completion.status;
+            }
+
+            extern "C" pgaccel_status pgaccel_grouped_detail_host_source(int* detail) {
+              sycl::queue q;
+              auto* workspace = static_cast<GroupedCompletion*>(
+                  sycl::malloc_device(sizeof(GroupedCompletion), q));
+              launch_grouped_completion(q, workspace);
+              GroupedCompletion completion{};
+              q.memcpy(&completion, workspace, sizeof(completion)).wait_and_throw();
+              q.memcpy(detail, &completion.detail, sizeof(completion.detail)).wait_and_throw();
+              return completion.status;
+            }
+
+            extern "C" pgaccel_status pgaccel_grouped_detail_ignored_launch(int* detail) {
+              sycl::queue q;
+              auto* workspace = static_cast<GroupedCompletion*>(
+                  sycl::malloc_device(sizeof(GroupedCompletion), q));
+              auto deferred = [&]() { launch_grouped_completion(q, workspace); };
+              (void)deferred;
+              *detail = 7;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        green = entries["pgaccel_grouped_detail_copyback"]
+        self.assertTrue(green.ok, green.detail)
+        self.assertIn("device_copyback", green.classifications)
+
+        host_publish = entries["pgaccel_grouped_detail_host_publish"]
+        self.assertFalse(host_publish.ok, host_publish.detail)
+        self.assertIn("host_output_write", host_publish.classifications)
+        self.assertIn("fake_gpu_counter", host_publish.classifications)
+
+        for name in (
+            "pgaccel_grouped_detail_unawaited",
+            "pgaccel_grouped_detail_host_source",
+            "pgaccel_grouped_detail_ignored_launch",
+        ):
+            with self.subTest(name=name):
+                entry = entries[name]
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertNotIn("device_copyback", entry.classifications)
+
+    def test_kernel_written_usm_copyback_forms_are_proven(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_queue_copyback(int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* device_result = static_cast<int*>(sycl::malloc_device(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device_result[i] = 1;
+              }).wait_and_throw();
+              q.memcpy(out, device_result, count).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_shared_copyback(int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* shared_result = static_cast<int*>(sycl::malloc_shared(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                shared_result[i] = 1;
+              }).wait_and_throw();
+              std::memcpy(out, shared_result, count);
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        for entry in result.entrypoint_audits:
+            self.assertIn("device_copyback", entry.classifications)
+
+    def test_exact_shared_device_publication_facade_is_proven_and_fail_closed(
+        self,
+    ) -> None:
+        facade = r"""
+            namespace std::chrono {
+            struct steady_clock {
+              using time_point = int;
+              static time_point now() { return 0; }
+            };
+            }
+            static uint64_t g_grouped_shared_copy_calls = 0;
+            static uint64_t g_grouped_device_copy_calls = 0;
+            static void saturating_add(uint64_t* target, uint64_t value) {
+              *target += value;
+            }
+            static void record_grouped_wait(std::chrono::steady_clock::time_point) {}
+            class PublishedCopyQueue {
+             public:
+              PublishedCopyQueue(sycl::queue& queue, const void* const workspace)
+                  : queue_(queue),
+                    shared_(sycl::get_pointer_type(workspace, queue.get_context()) ==
+                            sycl::usm::alloc::shared) {}
+
+              void memcpy(void* const destination, const void* const source, size_t bytes) {
+                if (shared_) {
+                  std::memcpy(destination, source, bytes);
+                  saturating_add(&g_grouped_shared_copy_calls, 1);
+                  return;
+                }
+                queue_.memcpy(destination, source, bytes);
+                saturating_add(&g_grouped_device_copy_calls, 1);
+              }
+
+              void wait_and_throw() {
+                if (shared_)
+                  return;
+                const auto started = std::chrono::steady_clock::now();
+                try {
+                  queue_.wait_and_throw();
+                } catch (...) {
+                  record_grouped_wait(started);
+                  throw;
+                }
+                record_grouped_wait(started);
+              }
+
+             private:
+              sycl::queue& queue_;
+              bool shared_;
+            };
+        """
+        launch = r"""
+            static void publish_value(sycl::queue& queue, int* const workspace) {
+              queue.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                workspace[0] = 7;
+              });
+              queue.wait_and_throw();
+            }
+        """
+        valid_entrypoint = r"""
+            extern "C" pgaccel_status pgaccel_exact_publication_facade(
+                int* out, int* const workspace) {
+              sycl::queue queue;
+              publish_value(queue, workspace);
+              PublishedCopyQueue publication(queue, workspace);
+              publication.memcpy(out, workspace, sizeof(*out));
+              publication.wait_and_throw();
+              return PGACCEL_OK;
+            }
+        """
+        valid = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE + facade + launch + valid_entrypoint
+        )
+        self.assertFalse(valid.findings)
+        entry = valid.entrypoint_audits[0]
+        self.assertTrue(entry.ok, entry.detail)
+        self.assertIn("device_copyback", entry.classifications)
+
+        instrumented_facade = facade.replace(
+            """              void memcpy(void* const destination, const void* const source, size_t bytes) {
+                if (shared_) {""",
+            """              void memcpy(void* const destination, const void* const source, size_t bytes) {
+#if defined(PGACCEL_TEST_HOOKS)
+                test_fail_stage(kTestFailurePublishedCopy);
+#endif
+                if (shared_) {""",
+        ).replace(
+            """              void wait_and_throw() {
+                if (shared_)""",
+            """              void wait_and_throw() {
+#if defined(PGACCEL_TEST_HOOKS)
+                test_fail_stage(kTestFailurePublishedWait);
+#endif
+                if (shared_)""",
+        )
+        instrumented = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE + instrumented_facade + launch + valid_entrypoint
+        )
+        self.assertFalse(instrumented.findings)
+        instrumented_entry = instrumented.entrypoint_audits[0]
+        self.assertTrue(instrumented_entry.ok, instrumented_entry.detail)
+        self.assertIn("device_copyback", instrumented_entry.classifications)
+
+        mutants = {
+            "host_finalizer": facade.replace(
+                "std::memcpy(destination, source, bytes);",
+                "*static_cast<int*>(destination) = 42;",
+            )
+            + launch
+            + valid_entrypoint,
+            "missing_device_wait": facade.replace(
+                "queue_.wait_and_throw();", "(void)queue_;"
+            )
+            + launch
+            + valid_entrypoint,
+            "wrong_workspace": facade
+            + launch
+            + valid_entrypoint.replace(
+                "PublishedCopyQueue publication(queue, workspace);",
+                "int other = 0;\n"
+                "              PublishedCopyQueue publication(queue, &other);",
+            ),
+            "missing_final_wait": facade
+            + launch
+            + valid_entrypoint.replace(
+                "publication.wait_and_throw();", "(void)publication;"
+            ),
+            "instrumented_host_finalizer": instrumented_facade.replace(
+                "test_fail_stage(kTestFailurePublishedCopy);",
+                "test_fail_stage(kTestFailurePublishedCopy);\n"
+                "                *static_cast<int*>(destination) = 42;",
+            )
+            + launch
+            + valid_entrypoint,
+            "instrumented_wrong_stage": instrumented_facade.replace(
+                "kTestFailurePublishedWait", "kTestFailurePublishedCopy"
+            )
+            + launch
+            + valid_entrypoint,
+        }
+        for name, source in mutants.items():
+            with self.subTest(name=name):
+                result = audit_compiling_fixture(self.COPYBACK_PRELUDE + source)
+                self.assertTrue(result.findings)
+                mutant = result.entrypoint_audits[0]
+                self.assertFalse(mutant.ok, mutant.detail)
+                self.assertNotIn("device_copyback", mutant.classifications)
+
+    def test_pointer_const_borrowed_workspace_requires_device_provenance(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_borrowed_workspace(
+                int* out, int* const workspace) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                workspace[0] = 7;
+              }).wait_and_throw();
+              q.memcpy(out, workspace, sizeof(*out)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_pointee_const_workspace(
+                int* out, const int* workspace) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                const_cast<int*>(workspace)[0] = 7;
+              }).wait_and_throw();
+              q.memcpy(out, workspace, sizeof(*out)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_unawaited_borrowed_workspace(
+                int* out, int* const workspace) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                workspace[0] = 7;
+              });
+              q.memcpy(out, workspace, sizeof(*out)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_host_only_borrowed_workspace(
+                int* out, int* const workspace) {
+              sycl::queue q;
+              q.memcpy(out, workspace, sizeof(*out)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            struct BorrowedOutput { int* values; int scalar; };
+            extern "C" pgaccel_status pgaccel_borrowed_member_copyback(
+                BorrowedOutput* out, int* const workspace) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                workspace[0] = 7;
+              }).wait_and_throw();
+              q.memcpy(out->values, workspace, sizeof(*out->values)).wait_and_throw();
+              q.memcpy(&out->scalar, workspace, sizeof(out->scalar)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_computed_member_copyback(
+                BorrowedOutput* out, int* const workspace, size_t offset) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                workspace[0] = 7;
+              }).wait_and_throw();
+              q.memcpy(out->values + offset, workspace, sizeof(*out->values))
+                  .wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        self.assertTrue(entries["pgaccel_borrowed_workspace"].ok)
+        self.assertIn(
+            "device_copyback",
+            entries["pgaccel_borrowed_workspace"].classifications,
+        )
+        self.assertTrue(entries["pgaccel_borrowed_member_copyback"].ok)
+        self.assertIn(
+            "device_copyback",
+            entries["pgaccel_borrowed_member_copyback"].classifications,
+        )
+        for name in (
+            "pgaccel_pointee_const_workspace",
+            "pgaccel_unawaited_borrowed_workspace",
+            "pgaccel_host_only_borrowed_workspace",
+            "pgaccel_computed_member_copyback",
+        ):
+            with self.subTest(name=name):
+                self.assertFalse(entries[name].ok, entries[name].detail)
+                self.assertNotIn("device_copyback", entries[name].classifications)
+
+    def test_typed_slab_projection_with_intermediate_readback_is_proven(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_projected_slab(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* slab = static_cast<int*>(
+                  sycl::malloc_shared(2 * count * sizeof(int), q));
+              const size_t output_offset = count;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                const int* input = reinterpret_cast<const int*>(slab);
+                int* projected = reinterpret_cast<int*>(slab + output_offset);
+                projected[i] = input[i] + 1;
+              }).wait_and_throw();
+              int completion = 0;
+              q.memcpy(&completion, slab + output_offset, sizeof(int)).wait_and_throw();
+              if (completion < 0) {
+                sycl::free(slab, q);
+                return PGACCEL_ERROR;
+              }
+              q.memcpy(out, slab + output_offset, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertIn("device_copyback", result.entrypoint_audits[0].classifications)
+
+    def test_resident_raw_usm_resource_binding_is_terminal_safe(self) -> None:
+        result = audit_fixture(
+            r"""
+            struct ResidentState {
+              int* device_index;
+              std::vector<int> host_payload;
+            };
+            void build_index(int* device_index, size_t count) {
+              sycl::queue q;
+              q.parallel_for<BuildIndex>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_index[id[0]] = static_cast<int>(id[0]);
+              }).wait();
+            }
+            void host_overwrite(int* output) { output[0] = 0; }
+            int* choose_host(int* output) {
+              static int host_value = 0;
+              return output == nullptr ? output : &host_value;
+            }
+            extern "C" ResidentState* pgaccel_resident_raw_usm(size_t count) {
+              sycl::queue q;
+              int* device_index = sycl::malloc_device<int>(count, q);
+              build_index(device_index, count);
+              auto* state = new ResidentState();
+              state->device_index = device_index;
+              return state;
+            }
+            extern "C" ResidentState* pgaccel_resident_overwritten(size_t count) {
+              sycl::queue q;
+              int* device_index = sycl::malloc_device<int>(count, q);
+              build_index(device_index, count);
+              auto* state = new ResidentState();
+              state->device_index = device_index;
+              q.fill(device_index, 0, count).wait();
+              return state;
+            }
+            extern "C" ResidentState* pgaccel_resident_freed(size_t count) {
+              sycl::queue q;
+              int* device_index = sycl::malloc_device<int>(count, q);
+              build_index(device_index, count);
+              auto* state = new ResidentState();
+              state->device_index = device_index;
+              sycl::free(device_index, q);
+              return state;
+            }
+            extern "C" ResidentState* pgaccel_resident_copied_over(
+                const int* host_values, size_t count) {
+              sycl::queue q;
+              int* device_index = sycl::malloc_device<int>(count, q);
+              build_index(device_index, count);
+              auto* state = new ResidentState();
+              state->device_index = device_index;
+              q.copy(host_values, device_index, count).wait();
+              return state;
+            }
+            extern "C" ResidentState* pgaccel_resident_alias_host_write(
+                size_t count, int host_value) {
+              sycl::queue q;
+              int* device_index = sycl::malloc_device<int>(count, q);
+              int* alias = device_index;
+              build_index(device_index, count);
+              alias[0] = host_value;
+              auto* state = new ResidentState();
+              state->device_index = alias;
+              return state;
+            }
+            extern "C" ResidentState* pgaccel_resident_mixed_host_payload(
+                size_t count, int host_value) {
+              sycl::queue q;
+              int* device_index = sycl::malloc_device<int>(count, q);
+              build_index(device_index, count);
+              auto* state = new ResidentState();
+              state->device_index = device_index;
+              state->host_payload.resize(count);
+              state->host_payload[0] = host_value;
+              return state;
+            }
+            extern "C" ResidentState* pgaccel_resident_std_fill_after_binding(
+                size_t count) {
+              sycl::queue q;
+              int* device_index = sycl::malloc_device<int>(count, q);
+              build_index(device_index, count);
+              auto* state = new ResidentState();
+              state->device_index = device_index;
+              std::fill(device_index, device_index + count, 0);
+              return state;
+            }
+            extern "C" ResidentState* pgaccel_resident_unknown_host_call_after_binding(
+                size_t count) {
+              sycl::queue q;
+              int* device_index = sycl::malloc_device<int>(count, q);
+              build_index(device_index, count);
+              auto* state = new ResidentState();
+              state->device_index = device_index;
+              host_overwrite(device_index);
+              return state;
+            }
+            extern "C" ResidentState* pgaccel_resident_host_rebind_before_binding(
+                size_t count) {
+              sycl::queue q;
+              int* device_index = sycl::malloc_device<int>(count, q);
+              build_index(device_index, count);
+              int host_value = 0;
+              device_index = &host_value;
+              auto* state = new ResidentState();
+              state->device_index = device_index;
+              return state;
+            }
+            extern "C" ResidentState* pgaccel_resident_call_rebind_before_binding(
+                size_t count) {
+              sycl::queue q;
+              int* device_index = sycl::malloc_device<int>(count, q);
+              build_index(device_index, count);
+              device_index = choose_host(device_index);
+              auto* state = new ResidentState();
+              state->device_index = device_index;
+              return state;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        self.assertTrue(entries["pgaccel_resident_raw_usm"].ok)
+        self.assertIn(
+            "opaque_device_resource",
+            entries["pgaccel_resident_raw_usm"].classifications,
+        )
+        for name in (
+            "pgaccel_resident_overwritten",
+            "pgaccel_resident_freed",
+            "pgaccel_resident_copied_over",
+            "pgaccel_resident_alias_host_write",
+            "pgaccel_resident_mixed_host_payload",
+            "pgaccel_resident_std_fill_after_binding",
+            "pgaccel_resident_unknown_host_call_after_binding",
+            "pgaccel_resident_host_rebind_before_binding",
+            "pgaccel_resident_call_rebind_before_binding",
+        ):
+            with self.subTest(name):
+                self.assertFalse(entries[name].ok, entries[name].detail)
+                self.assertNotIn(
+                    "opaque_device_resource", entries[name].classifications
+                )
+
+    def test_member_count_batched_queue_work_is_collectively_awaited(self) -> None:
+        positive = audit_fixture(
+            r"""
+            struct BatchRequest { size_t count; int* output; };
+            extern "C" pgaccel_status pgaccel_member_count_batches(
+                const BatchRequest* request) {
+              const size_t selected_count = request->count;
+              if (selected_count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              auto* output = request->output;
+              q.memset(output, 0, selected_count * sizeof(int));
+              for (size_t start = 0; start < selected_count;) {
+                const size_t batch = std::min(size_t{64}, selected_count - start);
+                q.parallel_for<BatchWrite>(sycl::range<1>(batch), [=](sycl::id<1> id) {
+                  output[start + id[0]] = 7;
+                });
+                start += batch;
+              }
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(positive.findings)
+        entry = positive.entrypoint_audits[0]
+        self.assertIn("zero_work", entry.classifications)
+        self.assertIn("device_launch_orchestration", entry.classifications)
+
+        unawaited = audit_fixture(
+            r"""
+            struct BatchRequest { size_t count; int* output; };
+            extern "C" pgaccel_status pgaccel_unawaited_batches(
+                const BatchRequest* request) {
+              const size_t selected_count = request->count;
+              if (selected_count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              auto* output = request->output;
+              for (size_t start = 0; start < selected_count;) {
+                const size_t batch = std::min(size_t{64}, selected_count - start);
+                q.parallel_for<UnawaitedBatch>(sycl::range<1>(batch), [=](sycl::id<1> id) {
+                  output[start + id[0]] = 7;
+                });
+                start += batch;
+              }
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertTrue(unawaited.findings)
+        self.assertIn(
+            "host_computation",
+            unawaited.entrypoint_audits[0].classifications,
+        )
+
+        rebound_queue = audit_fixture(
+            r"""
+            struct BatchRequest { size_t count; int* output; };
+            extern "C" pgaccel_status pgaccel_rebound_batch_queue(
+                const BatchRequest* request) {
+              const size_t selected_count = request->count;
+              if (selected_count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              sycl::queue other;
+              auto* output = request->output;
+              q.parallel_for<ReboundBatch>(sycl::range<1>(selected_count),
+                  [=](sycl::id<1> id) { output[id[0]] = 7; });
+              q = other;
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertTrue(rebound_queue.findings)
+        self.assertIn(
+            "missing_device_terminal",
+            rebound_queue.entrypoint_audits[0].classifications,
+        )
+
+        nonzero_initializer = audit_fixture(
+            r"""
+            struct BatchRequest { size_t count; int* output; };
+            extern "C" pgaccel_status pgaccel_nonzero_batch_init(
+                const BatchRequest* request) {
+              const size_t selected_count = request->count;
+              if (selected_count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              auto* output = request->output;
+              q.memset(output, 42, selected_count * sizeof(int));
+              q.parallel_for<NonzeroBatch>(sycl::range<1>(selected_count), [=](sycl::id<1> id) {
+                output[id[0]] = 7;
+              });
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertTrue(nonzero_initializer.findings)
+        self.assertIn(
+            "unresolved_output_helper",
+            nonzero_initializer.entrypoint_audits[0].classifications,
+        )
+
+    def test_zero_initializer_requires_known_memset_and_full_launch(self) -> None:
+        arbitrary_global = audit_fixture(
+            r"""
+            void memset(int*, int, size_t);
+            extern "C" pgaccel_status pgaccel_arbitrary_global_memset(
+                int* output, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              memset(output, 0, count * sizeof(int));
+              sycl::queue q;
+              q.parallel_for<GlobalMemsetWrite>(sycl::range<1>(count),
+                  [=](sycl::id<1> id) { output[id[0]] = 7; }).wait();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertTrue(arbitrary_global.findings)
+        self.assertIn(
+            "unresolved_output_helper",
+            arbitrary_global.entrypoint_audits[0].classifications,
+        )
+
+        arbitrary_member = audit_fixture(
+            r"""
+            struct Initializer { void memset(int*, int, size_t); };
+            extern "C" pgaccel_status pgaccel_arbitrary_member_memset(
+                int* output, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              Initializer initializer;
+              initializer.memset(output, 0, count * sizeof(int));
+              sycl::queue q;
+              q.parallel_for<MemberMemsetWrite>(sycl::range<1>(count),
+                  [=](sycl::id<1> id) { output[id[0]] = 7; }).wait();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertTrue(arbitrary_member.findings)
+        self.assertIn(
+            "unresolved_output_helper",
+            arbitrary_member.entrypoint_audits[0].classifications,
+        )
+
+        partial_kernel = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_partial_after_std_memset(
+                int* output, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              std::memset(output, 0, count * sizeof(int));
+              sycl::queue q;
+              q.single_task<PartialMemsetWrite>([=]() { output[0] = 7; }).wait();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertTrue(partial_kernel.findings)
+        self.assertIn(
+            "unresolved_output_helper",
+            partial_kernel.entrypoint_audits[0].classifications,
+        )
+
+        full_kernel = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_full_after_std_memset(
+                int* output, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              std::memset(output, 0, count * sizeof(int));
+              sycl::queue q;
+              q.parallel_for<FullMemsetWrite>(sycl::range<1>(count),
+                  [=](sycl::id<1> id) { output[id[0]] = 7; }).wait();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(full_kernel.findings)
+
+    def test_neutral_initializer_requires_a_proven_full_overwrite(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_mutable_copyback_size(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* device = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              size_t bytes = count * sizeof(int);
+              std::memset(out, 0, bytes);
+              bytes = sizeof(int);
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device[i] = 1;
+              }).wait_and_throw();
+              q.memcpy(out, device, bytes).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_offset_copyback_after_init(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* device = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              std::memset(out, 0, count * sizeof(int));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device[i] = 1;
+              }).wait_and_throw();
+              q.memcpy(out + 1, device, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertEqual(result.entrypoints, 2)
+        for entry in result.entrypoint_audits:
+            self.assertFalse(entry.ok, entry.detail)
+            self.assertIn("unresolved_output_helper", entry.classifications)
+
+    def test_read_only_typed_slab_projection_does_not_prove_copyback(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_read_only_projection(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* slab = static_cast<int*>(
+                  sycl::malloc_shared(2 * count * sizeof(int), q));
+              const size_t output_offset = count;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                const int* projected = reinterpret_cast<const int*>(slab + output_offset);
+                int ignored = projected[i];
+                (void)ignored;
+              }).wait_and_throw();
+              q.memcpy(out, slab + output_offset, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertNotIn("device_copyback", entry.classifications)
+
+    def test_terminal_offset_zero_output_path_is_exact(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_terminal_offset_zero(
+                const int* offsets, size_t count, int* out) {
+              if (count == 0) return PGACCEL_OK;
+              const size_t output_count = offsets[count];
+              if (output_count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(output_count), [=](sycl::id<1> i) {
+                out[i] = 1;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_computed_offset_zero(
+                const int* offsets, size_t count, int* out) {
+              if (count == 0) return PGACCEL_OK;
+              const size_t output_count = offsets[count] + 1;
+              if (output_count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(output_count), [=](sycl::id<1> i) {
+                out[i] = 1;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        self.assertTrue(entries["pgaccel_terminal_offset_zero"].ok)
+        self.assertFalse(entries["pgaccel_computed_offset_zero"].ok)
+
+    def test_guaranteed_once_device_launch_orchestration_is_proven(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_orchestrated_copyback(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* device_result = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              size_t stage = 0;
+              do {
+                q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                  device_result[i] = static_cast<int>(stage + 1);
+                }).wait_and_throw();
+                ++stage;
+              } while (stage < 2);
+              q.memcpy(out, device_result, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertIn(
+            "device_launch_orchestration",
+            result.entrypoint_audits[0].classifications,
+        )
+
+    def test_proven_device_helper_can_orchestrate_streamed_local_chunks(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static void device_chunk(int* device_result, size_t count) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device_result[i] = 1;
+              }).wait_and_throw();
+            }
+
+            static void host_chunk(int* device_result, size_t) { device_result[0] = 7; }
+
+            extern "C" pgaccel_status pgaccel_streamed_device_chunks(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* streamed = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              size_t start = 0;
+              do {
+                size_t chunk = count - start;
+                if (chunk > 64) chunk = 64;
+                device_chunk(streamed + start, chunk);
+                start += chunk;
+              } while (start < count);
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                streamed[i] += 1;
+              }).wait_and_throw();
+              q.memcpy(out, streamed, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_streamed_host_helper(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* streamed = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              size_t start = 0;
+              do {
+                host_chunk(streamed + start, 1);
+                ++start;
+              } while (start < count);
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                streamed[i] += 1;
+              }).wait_and_throw();
+              q.memcpy(out, streamed, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_streamed_hidden_host_write(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* streamed = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              size_t start = 0;
+              do {
+                device_chunk(streamed + start, 1);
+                out[0] = 9;
+                ++start;
+              } while (start < count);
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                streamed[i] += 1;
+              }).wait_and_throw();
+              q.memcpy(out, streamed, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        streamed = entries["pgaccel_streamed_device_chunks"]
+        self.assertTrue(streamed.ok, streamed.detail)
+        self.assertIn("device_launch_orchestration", streamed.classifications)
+        self.assertFalse(entries["pgaccel_streamed_host_helper"].ok)
+        self.assertFalse(entries["pgaccel_streamed_hidden_host_write"].ok)
+        self.assertIn(
+            "host_computation",
+            entries["pgaccel_streamed_hidden_host_write"].classifications,
+        )
+
+    def test_device_launch_orchestration_mutants_fail_closed(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static void host_prepare(const int*) {}
+
+            extern "C" pgaccel_status pgaccel_zero_iteration_loop(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* device_result = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              for (size_t stage = 0; stage < 2; ++stage) {
+                q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                  device_result[i] = 1;
+                }).wait_and_throw();
+              }
+              q.memcpy(out, device_result, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_loop_host_output(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* device_result = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              do {
+                out[0] = 7;
+                q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                  device_result[i] = 1;
+                }).wait_and_throw();
+              } while (false);
+              q.memcpy(out, device_result, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_loop_host_staging(
+                const int* input, size_t count, int* out) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* device_result = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              do {
+                device_result[0] = input[0];
+                q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                  device_result[i] = 1;
+                }).wait_and_throw();
+              } while (false);
+              q.memcpy(out, device_result, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_loop_host_helper(
+                const int* input, size_t count, int* out) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* device_result = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              do {
+                host_prepare(input);
+                q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                  device_result[i] = 1;
+                }).wait_and_throw();
+              } while (false);
+              q.memcpy(out, device_result, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_loop_unawaited_launch(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* device_result = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              do {
+                q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                  device_result[i] = 1;
+                });
+              } while (false);
+              q.memcpy(out, device_result, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_unconstrained_direct_loop(
+                int* out, size_t count, size_t chunks) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              for (size_t chunk = 0; chunk < chunks; ++chunk) {
+                q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                  out[i] = 1;
+                }).wait_and_throw();
+              }
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertEqual(result.entrypoints, 6)
+        for entry in result.entrypoint_audits:
+            self.assertFalse(entry.ok, entry.entrypoint)
+            if entry.entrypoint == "pgaccel_zero_iteration_loop":
+                self.assertIn("missing_device_terminal", entry.classifications)
+            else:
+                self.assertIn("host_computation", entry.classifications)
+
+    def test_radix_style_device_orchestration_is_proven(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static pgaccel_status prepare_device(
+                sycl::queue& q, int* device, size_t count) {
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device[i] = 1;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_radix_orchestration(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue* q = &queue_value;
+              int* first = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), *q));
+              int* second = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), *q));
+              int* result = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), *q));
+              size_t stage = 0;
+              do {
+                q->memset(second, 0, count * sizeof(int)).wait_and_throw();
+                prepare_device(*q, second, count);
+                q->submit([&](sycl::handler& h) {
+                  sycl::local_accessor<int, 1> scratch(sycl::range<1>(1), h);
+                  h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                    scratch[0] = second[i];
+                    second[i] = scratch[0] + 1;
+                  });
+                }).wait_and_throw();
+                std::swap(first, second);
+                ++stage;
+              } while (stage < 1);
+              q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                result[i] = first[i];
+              }).wait_and_throw();
+              q->memcpy(out, result, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertIn(
+            "device_launch_orchestration",
+            result.entrypoint_audits[0].classifications,
+        )
+
+    def test_radix_style_orchestration_mutants_fail_closed(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static void host_prepare(int* device) { device[0] = 9; }
+
+            extern "C" pgaccel_status pgaccel_command_group_host_staging(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* shared = static_cast<int*>(
+                  sycl::malloc_shared(count * sizeof(int), q));
+              int* result = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              do {
+                q.submit([&](sycl::handler& h) {
+                  shared[0] = 7;
+                  h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                    result[i] = shared[i];
+                  });
+                }).wait_and_throw();
+              } while (false);
+              q.memcpy(out, result, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_loop_memset_output(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* result = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              do {
+                q.memset(out, 0, count * sizeof(int)).wait_and_throw();
+                q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                  result[i] = 1;
+                }).wait_and_throw();
+              } while (false);
+              q.memcpy(out, result, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_loop_scalar_swap(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* result = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              size_t first = 0;
+              size_t second = 1;
+              do {
+                std::swap(first, second);
+                q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                  result[i] = static_cast<int>(first);
+                }).wait_and_throw();
+              } while (false);
+              q.memcpy(out, result, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_loop_unproven_helper(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* result = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              do {
+                host_prepare(result);
+                q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                  result[i] = 1;
+                }).wait_and_throw();
+              } while (false);
+              q.memcpy(out, result, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertEqual(result.entrypoints, 4)
+        for entry in result.entrypoint_audits:
+            self.assertFalse(entry.ok, entry.entrypoint)
+            self.assertIn("host_computation", entry.classifications)
+
+    def test_unawaited_wrong_space_and_unwritten_copybacks_fail(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_unawaited(int* out, size_t count) {
+              sycl::queue q;
+              int* buffer = static_cast<int*>(sycl::malloc_shared(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { buffer[i] = 1; });
+              q.memcpy(out, buffer, count).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_host_reads_device(int* out, size_t count) {
+              sycl::queue q;
+              int* buffer = static_cast<int*>(sycl::malloc_device(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { buffer[i] = 1; })
+                  .wait_and_throw();
+              std::memcpy(out, buffer, count);
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_unwritten_source(int* out, size_t count) {
+              sycl::queue q;
+              int* source = static_cast<int*>(sycl::malloc_shared(count, q));
+              int* other = static_cast<int*>(sycl::malloc_shared(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { other[i] = 1; })
+                  .wait_and_throw();
+              q.memcpy(out, source, count).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_host_staging_overwrite(
+                int* out, size_t count) {
+              sycl::queue q;
+              int* buffer = static_cast<int*>(sycl::malloc_shared(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { buffer[i] = 1; })
+                  .wait_and_throw();
+              buffer[0] = 7;
+              std::memcpy(out, buffer, count);
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertEqual(len(result.entrypoint_audits), 4)
+        for entry in result.entrypoint_audits:
+            with self.subTest(entry.entrypoint):
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertNotIn("device_copyback", entry.classifications)
+
+    def test_copyback_requires_exact_pointer_expressions_and_positive_size(
+        self,
+    ) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_exact_copyback(int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* buffer = static_cast<int*>(sycl::malloc_shared(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { buffer[i] = 1; })
+                  .wait_and_throw();
+              q.memcpy(out + 0, buffer + 0, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_comma_destination(int* out, size_t count) {
+              static int scratch;
+              sycl::queue q;
+              int* buffer = static_cast<int*>(sycl::malloc_shared(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { buffer[i] = 1; })
+                  .wait_and_throw();
+              q.memcpy((out, &scratch), buffer, sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_comma_source(int* out, size_t count) {
+              static int host_value;
+              sycl::queue q;
+              int* buffer = static_cast<int*>(sycl::malloc_shared(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { buffer[i] = 1; })
+                  .wait_and_throw();
+              q.memcpy(out, (buffer, &host_value), sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_zero_copyback(int* out, size_t count) {
+              sycl::queue q;
+              int* buffer = static_cast<int*>(sycl::malloc_shared(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { buffer[i] = 1; })
+                  .wait_and_throw();
+              q.memcpy(out, buffer, 0).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        self.assertTrue(entries["pgaccel_exact_copyback"].ok)
+        self.assertIn(
+            "device_copyback", entries["pgaccel_exact_copyback"].classifications
+        )
+        for name in {
+            "pgaccel_comma_destination",
+            "pgaccel_comma_source",
+            "pgaccel_zero_copyback",
+        }:
+            with self.subTest(name):
+                self.assertFalse(entries[name].ok, entries[name].detail)
+                self.assertNotIn("device_copyback", entries[name].classifications)
+
+    def test_sequential_constant_offset_copybacks_share_device_producer(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_offset_copybacks(
+                int* out_first, int* out_second) {
+              sycl::queue q;
+              int* buffer = static_cast<int*>(sycl::malloc_device(2 * sizeof(int), q));
+              q.parallel_for(sycl::range<1>(2), [=](sycl::id<1> i) {
+                buffer[i] = 1;
+              }).wait_and_throw();
+              q.memcpy(out_first, buffer, sizeof(int)).wait_and_throw();
+              q.memcpy(out_second, buffer + 1, sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertIn("device_copyback", result.entrypoint_audits[0].classifications)
+
+    def test_batched_queue_copybacks_share_one_dominating_wait(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_batched_copybacks(
+                int* out_first, int* out_second, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* first = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              int* second = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                first[i] = 1;
+                second[i] = 2;
+              }).wait_and_throw();
+              q.memcpy(out_first, first, count * sizeof(int));
+              q.memcpy(out_second, second, count * sizeof(int));
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        entry = result.entrypoint_audits[0]
+        self.assertTrue(entry.ok, entry.detail)
+        self.assertIn("device_copyback", entry.classifications)
+
+    def test_batched_copyback_wait_and_producer_mutants_fail_closed(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_batched_missing_wait(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* device = static_cast<int*>(sycl::malloc_device(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device[i] = 1;
+              }).wait_and_throw();
+              q.memcpy(out, device, count);
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_batched_other_queue_wait(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              sycl::queue other;
+              int* device = static_cast<int*>(sycl::malloc_device(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device[i] = 1;
+              }).wait_and_throw();
+              q.memcpy(out, device, count);
+              other.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_batched_conditional_wait(
+                int* out, size_t count, bool should_wait) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* device = static_cast<int*>(sycl::malloc_device(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device[i] = 1;
+              }).wait_and_throw();
+              q.memcpy(out, device, count);
+              if (should_wait) q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_batched_early_return(
+                int* out, size_t count, bool skip_wait) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* device = static_cast<int*>(sycl::malloc_device(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device[i] = 1;
+              }).wait_and_throw();
+              q.memcpy(out, device, count);
+              if (skip_wait) return PGACCEL_OK;
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_batched_receiver_rebind(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              sycl::queue replacement;
+              int* device = static_cast<int*>(sycl::malloc_device(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device[i] = 1;
+              }).wait_and_throw();
+              q.memcpy(out, device, count);
+              q = replacement;
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_batched_alias_rebind(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              sycl::queue replacement;
+              sycl::queue& alias = q;
+              int* device = static_cast<int*>(sycl::malloc_device(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device[i] = 1;
+              }).wait_and_throw();
+              q.memcpy(out, device, count);
+              alias = replacement;
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_ooo_producer_before_copy(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* device = static_cast<int*>(sycl::malloc_device(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device[i] = 1;
+              });
+              q.memcpy(out, device, count);
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertEqual(result.entrypoints, 7)
+        for entry in result.entrypoint_audits:
+            with self.subTest(entrypoint=entry.entrypoint):
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertNotIn("device_copyback", entry.classifications)
+
+    def test_runtime_pointer_offset_does_not_prove_copyback(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_runtime_offset(
+                int* out, size_t offset) {
+              sycl::queue q;
+              int* buffer = static_cast<int*>(sycl::malloc_device(2 * sizeof(int), q));
+              q.parallel_for(sycl::range<1>(2), [=](sycl::id<1> i) {
+                buffer[i] = 1;
+              }).wait_and_throw();
+              q.memcpy(out, buffer + offset, sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertNotIn("device_copyback", entry.classifications)
+
+    def test_same_line_copyback_does_not_mask_later_host_overwrite(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_same_line_overwrite(
+                int* out, size_t count) {
+              sycl::queue q;
+              int* buffer = static_cast<int*>(sycl::malloc_shared(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { buffer[i] = 1; })
+                  .wait_and_throw();
+              std::memcpy(out, buffer, count); out[0] = 7;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("host_output_write", entry.classifications)
+
+    def test_copyback_requires_live_sycl_usm_provenance(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            namespace fake {
+            inline void* malloc_shared(size_t, sycl::queue&) {
+              static int host_value;
+              return &host_value;
+            }
+            }
+            extern "C" pgaccel_status pgaccel_fake_usm(int* out, size_t count) {
+              sycl::queue q;
+              int* buffer = static_cast<int*>(fake::malloc_shared(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { buffer[i] = 1; })
+                  .wait_and_throw();
+              std::memcpy(out, buffer, sizeof(int));
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_reassigned_usm(int* out, size_t count) {
+              static int host_value;
+              sycl::queue q;
+              int* buffer = static_cast<int*>(sycl::malloc_shared(count, q));
+              buffer = &host_value;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { buffer[i] = 1; })
+                  .wait_and_throw();
+              std::memcpy(out, buffer, sizeof(int));
+              return PGACCEL_OK;
+            }
+            """
+        )
+        for entry in result.entrypoint_audits:
+            with self.subTest(entry.entrypoint):
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertNotIn("device_copyback", entry.classifications)
+
+    def test_post_declaration_member_aliases_propagate_through_casts(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            struct AliasHolder { int* ptr; };
+            extern "C" pgaccel_status pgaccel_member_cast(int* out, size_t count) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { out[i] = 1; })
+                  .wait_and_throw();
+              AliasHolder holder{};
+              holder.ptr = static_cast<int*>(out);
+              holder.ptr[0] = 7;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_member_paren(int* out, size_t count) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { out[i] = 1; })
+                  .wait_and_throw();
+              AliasHolder holder{};
+              holder.ptr = (out);
+              holder.ptr[0] = 7;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        for entry in result.entrypoint_audits:
+            with self.subTest(entry.entrypoint):
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("host_output_write", entry.classifications)
+
+    def test_dead_lambda_writes_do_not_prove_copyback(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_dead_lambda_write(
+                int* out, size_t count) {
+              sycl::queue q;
+              int* buffer = static_cast<int*>(sycl::malloc_shared(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                if (false) buffer[i] = 1;
+              }).wait_and_throw();
+              std::memcpy(out, buffer, sizeof(int));
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertNotIn("device_copyback", entry.classifications)
+
+    def test_post_kernel_alias_member_and_pointer_arithmetic_overwrites_fail(
+        self,
+    ) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            struct Holder { int* ptr; };
+            extern "C" pgaccel_status pgaccel_brace(int* out, size_t count) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { out[i] = 1; })
+                  .wait_and_throw();
+              auto alias{out}; alias[0] = 7; return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_aggregate(int* out, size_t count) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { out[i] = 1; })
+                  .wait_and_throw();
+              Holder holder{out}; holder.ptr[0] = 7; return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_arithmetic(int* out, size_t count) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { out[i] = 1; })
+                  .wait_and_throw();
+              *(out + 0) = 7; return PGACCEL_OK;
+            }
+            """
+        )
+        for entry in result.entrypoint_audits:
+            with self.subTest(entry.entrypoint):
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("host_output_write", entry.classifications)
+
+    def test_local_status_is_not_an_output_alias_and_nested_zero_is_neutral(
+        self,
+    ) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static pgaccel_status launch(int* out, size_t count) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { out[i] = 1; })
+                  .wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_status_local(int* out, size_t count) {
+              pgaccel_status st = launch(out, count);
+              return st;
+            }
+            extern "C" pgaccel_status pgaccel_nested_zero(int* out, size_t count) {
+              if (count == 0) { if (out) *out = 0; return PGACCEL_OK; }
+              return launch(out, count);
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        self.assertNotIn(
+            "output_alias_tracking", entries["pgaccel_status_local"].classifications
+        )
+        self.assertIn("zero_work", entries["pgaccel_nested_zero"].classifications)
+
+    def test_exact_support_contracts_are_immutable_and_evidence_bound(self) -> None:
+        with self.assertRaises(TypeError):
+            audit.LIFECYCLE_CONTRACTS["pgaccel_fake"] = object()  # type: ignore[index]
+        valid = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" uint64_t pgaccel_gpu_exec_count() { return counter; }
+            extern "C" void pgaccel_reset_gpu_exec_count() { counter = 0; }
+            extern "C" pgaccel_status pgaccel_init() {
+              if (initialized) return PGACCEL_OK;
+              sycl::device::get_devices(); initialized = true; return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_shutdown() {
+              if (!initialized) return PGACCEL_OK;
+              g_queue->wait_and_throw(); delete g_queue; return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_expr_device_copy_to_host(
+                void* dst, const void* src, size_t bytes) {
+              if (bytes == 0) return PGACCEL_OK;
+              if (!dst || !src) return PGACCEL_ERROR;
+              sycl::queue q; q.memcpy(dst, src, bytes).wait_and_throw(); return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(valid.findings)
+
+        invalid = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static bool runtime_skip() { return true; }
+            extern "C" pgaccel_status pgaccel_init() {
+              if (runtime_skip()) return PGACCEL_OK;
+              sycl::device::get_devices(); return PGACCEL_OK;
+            }
+            extern "C" uint64_t pgaccel_gpu_exec_count() { return 42; }
+            """
+        )
+        for entry in invalid.entrypoint_audits:
+            self.assertFalse(entry.ok, entry.detail)
+            self.assertIn("invalid_lifecycle_contract", entry.classifications)
+
+        wrong_polarity = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_init() {
+              if (!initialized) return PGACCEL_OK;
+              sycl::device::get_devices(); return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_shutdown() {
+              if (initialized) return PGACCEL_OK;
+              g_queue->wait_and_throw(); delete g_queue; return PGACCEL_OK;
+            }
+            """
+        )
+        for entry in wrong_polarity.entrypoint_audits:
+            self.assertFalse(entry.ok, entry.detail)
+            self.assertIn("invalid_lifecycle_contract", entry.classifications)
+
+        compound_guard = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static bool runtime_skip() { return true; }
+            extern "C" pgaccel_status pgaccel_init() {
+              if (initialized || runtime_skip()) return PGACCEL_OK;
+              sycl::device::get_devices(); return PGACCEL_OK;
+            }
+            """
+        )
+        entry = compound_guard.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("invalid_lifecycle_contract", entry.classifications)
+
+    def test_grouped_telemetry_contracts_are_exact(self) -> None:
+        definitions = r"""
+            static uint64_t g_grouped_transition_launches = 0;
+            static uint64_t g_grouped_queue_waits = 0;
+            static uint64_t g_grouped_queue_wait_ns = 0;
+            static uint64_t g_grouped_output_bytes = 0;
+            static uint64_t g_grouped_shared_copy_calls = 0;
+            static uint64_t g_grouped_device_copy_calls = 0;
+            extern "C" uint64_t pgaccel_grouped_agg_transition_launch_count() {
+              return g_grouped_transition_launches;
+            }
+            extern "C" uint64_t pgaccel_grouped_agg_queue_wait_count() {
+              return g_grouped_queue_waits;
+            }
+            extern "C" uint64_t pgaccel_grouped_agg_queue_wait_ns() {
+              return g_grouped_queue_wait_ns;
+            }
+            extern "C" uint64_t pgaccel_grouped_agg_output_bytes() {
+              return g_grouped_output_bytes;
+            }
+            extern "C" uint64_t pgaccel_grouped_agg_shared_copy_calls() {
+              return g_grouped_shared_copy_calls;
+            }
+            extern "C" uint64_t pgaccel_grouped_agg_device_copy_calls() {
+              return g_grouped_device_copy_calls;
+            }
+            extern "C" void pgaccel_reset_grouped_agg_telemetry() {
+              g_grouped_transition_launches = 0;
+              g_grouped_queue_waits = 0;
+              g_grouped_queue_wait_ns = 0;
+              g_grouped_output_bytes = 0;
+              g_grouped_shared_copy_calls = 0;
+              g_grouped_device_copy_calls = 0;
+            }
+        """
+        valid = audit_compiling_fixture(self.COPYBACK_PRELUDE + definitions)
+        self.assertFalse(valid.findings)
+        self.assertEqual(
+            {entry.classifications for entry in valid.entrypoint_audits},
+            {("lifecycle",)},
+        )
+
+        mutants = {
+            "fabricated_accessor": definitions.replace(
+                "return g_grouped_output_bytes;", "return 42;"
+            ),
+            "partial_reset": definitions.replace(
+                "g_grouped_device_copy_calls = 0;\n            }",
+                "}",
+            ),
+        }
+        expected = {
+            "fabricated_accessor": "pgaccel_grouped_agg_output_bytes",
+            "partial_reset": "pgaccel_reset_grouped_agg_telemetry",
+        }
+        for name, source in mutants.items():
+            with self.subTest(name=name):
+                result = audit_compiling_fixture(self.COPYBACK_PRELUDE + source)
+                entries = {
+                    entry.entrypoint: entry for entry in result.entrypoint_audits
+                }
+                entry = entries[expected[name]]
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("invalid_lifecycle_contract", entry.classifications)
+
+    def test_transfer_contract_requires_exact_awaited_queue_copy(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(
+                void* dst, const void* src, size_t bytes) {
+              if (bytes == 0) return PGACCEL_OK;
+              std::memcpy(dst, src, bytes);
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_expr_device_copy_to_host(
+                void* dst, const void* src, size_t bytes) {
+              if (bytes == 0) return PGACCEL_OK;
+              sycl::queue q;
+              q.memcpy(dst, src, 0).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertEqual(len(result.entrypoint_audits), 2)
+        for entry in result.entrypoint_audits:
+            with self.subTest(entry.entrypoint):
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("invalid_lifecycle_contract", entry.classifications)
+
+    def test_transfer_contract_accepts_only_exact_guarded_host_usm_copy(self) -> None:
+        valid = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(
+                void* dst, const void* src, size_t bytes) {
+              if (bytes == 0) return PGACCEL_OK;
+              sycl::queue q;
+              const sycl::usm::alloc allocation =
+                  sycl::get_pointer_type(static_cast<const void*>(dst), q.get_context());
+              if (allocation == sycl::usm::alloc::shared ||
+                  allocation == sycl::usm::alloc::host) {
+                std::memcpy(dst, src, bytes);
+                return PGACCEL_OK;
+              }
+              q.memcpy(dst, src, bytes).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_expr_device_copy_to_host(
+                void* dst, const void* src, size_t bytes) {
+              if (bytes == 0) return PGACCEL_OK;
+              sycl::queue q;
+              const sycl::usm::alloc allocation =
+                  sycl::get_pointer_type(src, q.get_context());
+              if (allocation == sycl::usm::alloc::shared ||
+                  allocation == sycl::usm::alloc::host) {
+                std::memcpy(dst, src, bytes);
+                return PGACCEL_OK;
+              }
+              q.memcpy(dst, src, bytes).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(valid.findings)
+        self.assertEqual(
+            {entry.classifications for entry in valid.entrypoint_audits},
+            {("lifecycle",)},
+        )
+
+        mutants = (
+            r"""
+            extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(
+                void* dst, const void* src, size_t bytes) {
+              sycl::queue q;
+              auto allocation = sycl::get_pointer_type(
+                  static_cast<const void*>(dst), q.get_context());
+              allocation = sycl::usm::alloc::shared;
+              if (allocation == sycl::usm::alloc::shared ||
+                  allocation == sycl::usm::alloc::host) {
+                std::memcpy(dst, src, bytes); return PGACCEL_OK;
+              }
+              q.memcpy(dst, src, bytes).wait_and_throw(); return PGACCEL_OK;
+            }
+            """,
+            r"""
+            extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(
+                void* dst, const void* src, size_t bytes) {
+              sycl::queue q;
+              const auto allocation = sycl::get_pointer_type(
+                  static_cast<const void*>(dst), q.get_context());
+              const_cast<sycl::usm::alloc&>(allocation) = sycl::usm::alloc::shared;
+              if (allocation == sycl::usm::alloc::shared ||
+                  allocation == sycl::usm::alloc::host) {
+                std::memcpy(dst, src, bytes); return PGACCEL_OK;
+              }
+              q.memcpy(dst, src, bytes).wait_and_throw(); return PGACCEL_OK;
+            }
+            """,
+            r"""
+            namespace sycl {
+            inline usm::alloc get_pointer_type(void* output, const context&) {
+              static_cast<unsigned char*>(output)[0] = 7;
+              return usm::alloc::shared;
+            }
+            }
+            extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(
+                void* dst, const void* src, size_t bytes) {
+              sycl::queue q;
+              const auto allocation = sycl::get_pointer_type(dst, q.get_context());
+              if (allocation == sycl::usm::alloc::shared ||
+                  allocation == sycl::usm::alloc::host) {
+                std::memcpy(dst, src, bytes); return PGACCEL_OK;
+              }
+              q.memcpy(dst, src, bytes).wait_and_throw(); return PGACCEL_OK;
+            }
+            """,
+            r"""
+            extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(
+                void* dst, const void* src, size_t bytes) {
+              sycl::queue q;
+              const auto allocation = sycl::get_pointer_type(src, q.get_context());
+              if (allocation == sycl::usm::alloc::shared ||
+                  allocation == sycl::usm::alloc::host) {
+                std::memcpy(dst, src, bytes); return PGACCEL_OK;
+              }
+              q.memcpy(dst, src, bytes).wait_and_throw(); return PGACCEL_OK;
+            }
+            """,
+            r"""
+            namespace hostile {
+            inline sycl::usm::alloc get_pointer_type(void* output) {
+              static_cast<unsigned char*>(output)[0] = 7;
+              return sycl::usm::alloc::shared;
+            }
+            }
+            extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(
+                void* dst, const void* src, size_t bytes) {
+              sycl::queue q;
+              const auto allocation = sycl::get_pointer_type(
+                  static_cast<const void*>(dst), q.get_context());
+              hostile::get_pointer_type(dst);
+              if (allocation == sycl::usm::alloc::shared ||
+                  allocation == sycl::usm::alloc::host) {
+                std::memcpy(dst, src, bytes); return PGACCEL_OK;
+              }
+              q.memcpy(dst, src, bytes).wait_and_throw(); return PGACCEL_OK;
+            }
+            """,
+            r"""
+            extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(
+                void* dst, const void* src, size_t bytes) {
+              sycl::queue q;
+              sycl::queue other;
+              const auto allocation = sycl::get_pointer_type(
+                  static_cast<const void*>(dst), q.get_context());
+              if (allocation == sycl::usm::alloc::shared ||
+                  allocation == sycl::usm::alloc::host) {
+                std::memcpy(dst, src, bytes); return PGACCEL_OK;
+              }
+              const auto decoy = sycl::get_pointer_type(
+                  static_cast<const void*>(dst), other.get_context());
+              if (decoy == sycl::usm::alloc::shared ||
+                  decoy == sycl::usm::alloc::host) {
+                std::memcpy(dst, src, bytes);
+              }
+              other.memcpy(dst, src, bytes).wait_and_throw(); return PGACCEL_OK;
+            }
+            """,
+            r"""
+            extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(
+                void* dst, const void* src, size_t bytes) {
+              sycl::queue q;
+              const auto allocation = sycl::get_pointer_type(
+                  static_cast<const void*>(dst), q.get_context());
+              if (allocation == sycl::usm::alloc::shared ||
+                  allocation == sycl::usm::alloc::host) {
+                std::memcpy(dst, src, bytes); return PGACCEL_OK;
+              }
+              q.memcpy(dst, src, bytes); return PGACCEL_OK;
+            }
+            """,
+            r"""
+            extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(
+                void* dst, const void* src, size_t bytes) {
+              sycl::queue q;
+              const auto allocation = sycl::get_pointer_type(
+                  static_cast<const void*>(dst), q.get_context());
+              if (allocation == sycl::usm::alloc::shared ||
+                  allocation == sycl::usm::alloc::host) {
+                std::memcpy(dst, src, bytes - 1); return PGACCEL_OK;
+              }
+              q.memcpy(dst, src, bytes).wait_and_throw(); return PGACCEL_OK;
+            }
+            """,
+            r"""
+            extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(
+                void* dst, const void* src, size_t bytes) {
+              sycl::queue q;
+              if (dst != nullptr) {
+                std::memcpy(dst, src, bytes); return PGACCEL_OK;
+              }
+              q.memcpy(dst, src, bytes).wait_and_throw(); return PGACCEL_OK;
+            }
+            """,
+            r"""
+            extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(
+                void* dst, const void* src, size_t bytes) {
+              sycl::queue q;
+              const auto allocation = sycl::get_pointer_type(
+                  static_cast<const void*>(dst), q.get_context());
+              if (allocation == sycl::usm::alloc::shared ||
+                  allocation == sycl::usm::alloc::host) {
+                std::memcpy(dst, src, bytes); return PGACCEL_OK;
+              }
+              sycl::queue other;
+              other.memcpy(dst, src, bytes).wait_and_throw(); return PGACCEL_OK;
+            }
+            """,
+            r"""
+            extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(
+                void* dst, const void* src, size_t bytes) {
+              sycl::queue q;
+              const auto allocation = sycl::get_pointer_type(
+                  static_cast<const void*>(dst), q.get_context());
+              if (allocation == sycl::usm::alloc::shared ||
+                  allocation == sycl::usm::alloc::host) {
+                std::memcpy(dst, src, bytes);
+                auto* alias = static_cast<unsigned char*>(dst);
+                alias[0] = 7;
+                return PGACCEL_OK;
+              }
+              q.memcpy(dst, src, bytes).wait_and_throw(); return PGACCEL_OK;
+            }
+            """,
+        )
+        for source in mutants:
+            with self.subTest(source=source):
+                result = audit_compiling_fixture(self.COPYBACK_PRELUDE + source)
+                entry = result.entrypoint_audits[0]
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("invalid_lifecycle_contract", entry.classifications)
+
+    def test_const_descriptor_member_memcpy_source_is_an_observer(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            struct Descriptor { int* values; size_t count; };
+            static void stage_source(const Descriptor* descriptor, int* scratch) {
+              std::memcpy(scratch, descriptor->values, sizeof(int));
+            }
+            static void overwrite_destination(
+                const Descriptor* descriptor, const int* scratch) {
+              std::memcpy(descriptor->values, scratch, sizeof(int));
+            }
+            extern "C" pgaccel_status pgaccel_descriptor_source_observer(
+                const Descriptor* descriptor, int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              int staged = 0;
+              stage_source(descriptor, &staged);
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                out[i] = staged;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_descriptor_destination_mutation(
+                const Descriptor* descriptor, int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              int staged = 7;
+              overwrite_destination(descriptor, &staged);
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                out[i] = staged;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        self.assertTrue(
+            entries["pgaccel_descriptor_source_observer"].ok,
+            entries["pgaccel_descriptor_source_observer"].detail,
+        )
+        hostile = entries["pgaccel_descriptor_destination_mutation"]
+        self.assertFalse(hostile.ok, hostile.detail)
+        self.assertIn("host_computation", hostile.classifications)
+
+        poisoned = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            namespace std {
+            inline void* memcpy(void* destination, int* source, size_t) {
+              source[0] = 99;
+              return destination;
+            }
+            }
+            struct Descriptor { int* values; };
+            static void poisoned_stage(const Descriptor* descriptor, int* scratch) {
+              std::memcpy(scratch, descriptor->values, sizeof(int));
+            }
+            extern "C" pgaccel_status pgaccel_poisoned_descriptor_observer(
+                const Descriptor* descriptor, int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              int staged = 0;
+              poisoned_stage(descriptor, &staged);
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                out[i] = staged;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = poisoned.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("host_computation", entry.classifications)
+
+    def test_allocation_and_free_contracts_bind_output_to_usm_evidence(self) -> None:
+        valid = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_expr_shared_alloc(size_t bytes, void** out) {
+              if (out == nullptr) return PGACCEL_ERROR;
+              *out = nullptr;
+              if (bytes == 0) return PGACCEL_OK;
+              sycl::queue q;
+              void* ptr = sycl::malloc_shared(bytes, q);
+              if (ptr == nullptr) return PGACCEL_ERROR;
+              *out = ptr;
+              return PGACCEL_OK;
+            }
+            extern "C" void pgaccel_expr_shared_free(void* ptr) {
+              if (ptr == nullptr) return;
+              sycl::queue q;
+              sycl::free(ptr, q);
+            }
+            """
+        )
+        self.assertFalse(valid.findings)
+
+        invalid = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_expr_shared_alloc(size_t bytes, void** out) {
+              sycl::queue q;
+              void* ptr = sycl::malloc_shared(bytes, q);
+              (void)ptr;
+              *out = reinterpret_cast<void*>(42);
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = invalid.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("invalid_lifecycle_contract", entry.classifications)
+
+        discarded = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_expr_shared_alloc(size_t bytes, void** out) {
+              *out = nullptr;
+              if (bytes == 0) return PGACCEL_OK;
+              sycl::queue q;
+              void* ptr = sycl::malloc_shared(bytes, q);
+              (void)ptr;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = discarded.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("invalid_lifecycle_contract", entry.classifications)
+
+        uncopied = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_expr_device_alloc_copy(
+                const void* src, size_t bytes, void** out) {
+              if (bytes == 0) { *out = nullptr; return PGACCEL_OK; }
+              sycl::queue q;
+              void* copied = sycl::malloc_shared(bytes, q);
+              void* published = sycl::malloc_shared(bytes, q);
+              std::memcpy(copied, src, bytes);
+              *out = published;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = uncopied.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("invalid_lifecycle_contract", entry.classifications)
+
+        poisoned_cleanup = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            namespace hostile {
+            inline void free(void** output) {
+              *output = reinterpret_cast<void*>(42);
+            }
+            }
+            extern "C" pgaccel_status pgaccel_expr_device_alloc_copy(
+                const void* src, size_t bytes, void** out) {
+              if (bytes == 0) { *out = nullptr; return PGACCEL_OK; }
+              sycl::queue q;
+              void* ptr = sycl::malloc_shared(bytes, q);
+              std::memcpy(ptr, src, bytes);
+              *out = ptr;
+              hostile::free(out);
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = poisoned_cleanup.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("invalid_lifecycle_contract", entry.classifications)
+
+    def test_helper_evidence_requires_exact_execution_and_status_propagation(
+        self,
+    ) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            struct Holder { pgaccel_status status; };
+            struct Cleanup {
+              int* out;
+              ~Cleanup() { out[0] = 99; }
+            };
+            static void pgaccel_record_gpu_exec();
+            static pgaccel_status write_or_fail(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 7;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            static pgaccel_status always_write(int* out) {
+              return write_or_fail(false, out);
+            }
+            static bool write_bool_or_fail(bool ready, int* out) {
+              if (!ready) return false;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 8;
+              }).wait_and_throw();
+              return true;
+            }
+            static void force_true(bool& value) { value = true; }
+            extern "C" pgaccel_status pgaccel_helper_ignored(int* out) {
+              write_or_fail(false, out);
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_helper_status_ignored(int* out) {
+              pgaccel_status status = write_or_fail(false, out);
+              (void)status;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_helper_comma(int* out) {
+              return (write_or_fail(false, out), PGACCEL_OK);
+            }
+            extern "C" pgaccel_status pgaccel_helper_and(bool run, int* out) {
+              run && (always_write(out) == PGACCEL_OK);
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_helper_or(bool skip, int* out) {
+              skip || (always_write(out) == PGACCEL_OK);
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_helper_sizeof(int* out) {
+              (void)sizeof(always_write(out));
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_helper_bad_math_guard(int* out) {
+              pgaccel_status status = write_or_fail(false, out);
+              if (status - status != PGACCEL_OK) return PGACCEL_ERROR;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_helper_nested_guard(int* out) {
+              pgaccel_status status = write_or_fail(false, out);
+              if (status != PGACCEL_OK) {
+                if (false) return PGACCEL_ERROR;
+              }
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_helper_nested_success_guard(
+                int* out) {
+              pgaccel_status status = write_or_fail(false, out);
+              if (status != PGACCEL_OK) {
+                { return PGACCEL_OK; }
+                return status;
+              }
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_helper_raii_cleanup(
+                bool fail, int* out) {
+              Cleanup cleanup{out};
+              pgaccel_status status = write_or_fail(fail, out);
+              if (status != PGACCEL_OK) return status;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_helper_mutated_guard(int* out) {
+              pgaccel_status status = write_or_fail(false, out);
+              if (status != PGACCEL_OK) {
+                status = PGACCEL_OK;
+                return status;
+              }
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_helper_success_branch_bypass(
+                bool fail, int* out) {
+              pgaccel_status status = write_or_fail(fail, out);
+              if (status == PGACCEL_OK) {
+                pgaccel_record_gpu_exec();
+                return status;
+              }
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_helper_bool_guard_bypass(
+                bool ready, bool bypass, int* out) {
+              bool written = write_bool_or_fail(ready, out);
+              if (bypass) return PGACCEL_OK;
+              if (!written) return PGACCEL_ERROR;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_helper_bool_call_rebind(
+                bool ready, int* out) {
+              bool written = write_bool_or_fail(ready, out);
+              force_true(written);
+              if (!written) return PGACCEL_ERROR;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_helper_bool_swap_rebind(
+                bool ready, int* out) {
+              bool written = write_bool_or_fail(ready, out);
+              bool forced = true;
+              std::swap(written, forced);
+              if (!written) return PGACCEL_ERROR;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_helper_member_lhs(int* out) {
+              Holder holder{};
+              pgaccel_status status = PGACCEL_OK;
+              holder.status = write_or_fail(false, out);
+              if (status != PGACCEL_OK) return PGACCEL_ERROR;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_helper_checked(
+                bool fail, int* out) {
+              pgaccel_status status = write_or_fail(fail, out);
+              if (status != PGACCEL_OK) return status;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_helper_returned(
+                bool fail, int* out) {
+              return write_or_fail(fail, out);
+            }
+            extern "C" pgaccel_status pgaccel_helper_assigned_returned(
+                bool fail, int* out) {
+              pgaccel_status status = write_or_fail(fail, out);
+              return status;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        for name in (
+            "pgaccel_helper_checked",
+            "pgaccel_helper_returned",
+            "pgaccel_helper_assigned_returned",
+        ):
+            self.assertTrue(entries[name].ok, entries[name].detail)
+        for name, entry in entries.items():
+            if name in {
+                "pgaccel_helper_checked",
+                "pgaccel_helper_returned",
+                "pgaccel_helper_assigned_returned",
+            }:
+                continue
+            with self.subTest(name=name):
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("undominated_success", entry.classifications)
+
+    def test_helper_copyback_and_usm_aliases_bind_the_written_allocation(
+        self,
+    ) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static pgaccel_status fill_or_fail(bool fail, int* workspace) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                workspace[0] = 8;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_copyback_ignored(
+                bool fail, int* out) {
+              sycl::queue q;
+              int* first = static_cast<int*>(sycl::malloc_shared(sizeof(int), q));
+              fill_or_fail(fail, first);
+              q.memcpy(out, first, sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_copyback_short_circuit(
+                bool run, int* out) {
+              sycl::queue q;
+              int* first = static_cast<int*>(sycl::malloc_shared(sizeof(int), q));
+              run && (fill_or_fail(false, first) == PGACCEL_OK);
+              q.memcpy(out, first, sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_copyback_sizeof(int* out) {
+              sycl::queue q;
+              int* first = static_cast<int*>(sycl::malloc_shared(sizeof(int), q));
+              (void)sizeof(fill_or_fail(false, first));
+              q.memcpy(out, first, sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_copyback_checked(
+                bool fail, int* out) {
+              sycl::queue q;
+              int* first = static_cast<int*>(sycl::malloc_shared(sizeof(int), q));
+              pgaccel_status status = fill_or_fail(fail, first);
+              if (status != PGACCEL_OK) return status;
+              q.memcpy(out, first, sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_stale_alias_direct(int* out) {
+              sycl::queue q;
+              int* first = static_cast<int*>(sycl::malloc_shared(sizeof(int), q));
+              int* alias = first;
+              int* second = static_cast<int*>(sycl::malloc_shared(sizeof(int), q));
+              alias = second;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                alias[0] = 9;
+              }).wait_and_throw();
+              q.memcpy(out, first, sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_stale_alias_helper(int* out) {
+              sycl::queue q;
+              int* first = static_cast<int*>(sycl::malloc_shared(sizeof(int), q));
+              int* alias = first;
+              int* second = static_cast<int*>(sycl::malloc_shared(sizeof(int), q));
+              alias = second;
+              pgaccel_status status = fill_or_fail(false, alias);
+              if (status != PGACCEL_OK) return status;
+              q.memcpy(out, first, sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        checked = entries.pop("pgaccel_copyback_checked")
+        self.assertTrue(checked.ok, checked.detail)
+        for name, entry in entries.items():
+            with self.subTest(name=name):
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("undominated_success", entry.classifications)
+
+    def test_overloaded_status_inequality_cannot_prove_failure_guard(self) -> None:
+        prelude = self.COPYBACK_PRELUDE.replace(
+            """using pgaccel_status = int;
+        constexpr pgaccel_status PGACCEL_OK = 0;
+        constexpr pgaccel_status PGACCEL_ERROR = 1;""",
+            """typedef enum { PGACCEL_OK = 0, PGACCEL_ERROR = 1 } pgaccel_status;
+        static bool operator!=(pgaccel_status, pgaccel_status) { return false; }""",
+        )
+        result = audit_compiling_fixture(
+            prelude
+            + r"""
+            static pgaccel_status write_or_fail(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 7;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_overloaded_status_guard(
+                bool fail, int* out) {
+              pgaccel_status status = write_or_fail(fail, out);
+              if (status != PGACCEL_OK) return status;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("undominated_success", entry.classifications)
+
+    def test_alternative_status_inequality_cannot_prove_failure_guard(self) -> None:
+        prelude = self.COPYBACK_PRELUDE.replace(
+            """using pgaccel_status = int;
+        constexpr pgaccel_status PGACCEL_OK = 0;
+        constexpr pgaccel_status PGACCEL_ERROR = 1;""",
+            """typedef enum { PGACCEL_OK = 0, PGACCEL_ERROR = 1 } pgaccel_status;
+        static bool operator not_eq(pgaccel_status, pgaccel_status) { return false; }""",
+        )
+        result = audit_compiling_fixture(
+            prelude
+            + r"""
+            static pgaccel_status write_or_fail(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 7;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_alternative_status_guard(
+                bool fail, int* out) {
+              pgaccel_status status = write_or_fail(fail, out);
+              if (status != PGACCEL_OK) return status;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("undominated_success", entry.classifications)
+
+    def test_status_helper_propagation_requires_exact_status_scalar(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            struct StatusWrapper {
+              StatusWrapper(pgaccel_status value) : value(value) {}
+              operator pgaccel_status() const { return PGACCEL_OK; }
+              pgaccel_status value;
+            };
+            using status_alias = pgaccel_status;
+            static pgaccel_status write_or_fail(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 7;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_converted_status_guard(
+                bool fail, int* out) {
+              StatusWrapper status = write_or_fail(fail, out);
+              if (status != PGACCEL_OK) return status;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_converted_status_return(
+                bool fail, int* out) {
+              StatusWrapper status = write_or_fail(fail, out);
+              return status;
+            }
+            extern "C" pgaccel_status pgaccel_auto_status_guard(
+                bool fail, int* out) {
+              auto status = write_or_fail(fail, out);
+              if (status != PGACCEL_OK) return status;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_aliased_status_return(
+                bool fail, int* out) {
+              status_alias status = write_or_fail(fail, out);
+              return status;
+            }
+            extern "C" pgaccel_status pgaccel_exact_status_guard(
+                bool fail, int* out) {
+              pgaccel_status status = write_or_fail(fail, out);
+              if (status != PGACCEL_OK) return status;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_exact_cv_status_return(
+                bool fail, int* out) {
+              const volatile pgaccel_status status = write_or_fail(fail, out);
+              return status;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        for name in (
+            "pgaccel_exact_status_guard",
+            "pgaccel_exact_cv_status_return",
+        ):
+            self.assertTrue(entries[name].ok, entries[name].detail)
+        for name in (
+            "pgaccel_converted_status_guard",
+            "pgaccel_converted_status_return",
+            "pgaccel_auto_status_guard",
+            "pgaccel_aliased_status_return",
+        ):
+            self.assertFalse(entries[name].ok, entries[name].detail)
+            self.assertIn("undominated_success", entries[name].classifications)
+
+    def test_gpu_exec_observer_requires_one_exact_definition(self) -> None:
+        exact = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static thread_local uint64_t tl_gpu_exec_count = 0;
+            void pgaccel_record_gpu_exec() { tl_gpu_exec_count++; }
+            static pgaccel_status observed_write(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 9;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_exact_observer(
+                bool fail, int* out) {
+              pgaccel_status status = observed_write(fail, out);
+              if (status == PGACCEL_OK) {
+                pgaccel_record_gpu_exec();
+                return status;
+              }
+              return PGACCEL_ERROR;
+            }
+            """
+        )
+        self.assertTrue(exact.entrypoint_audits[0].ok, exact.entrypoint_audits[0].detail)
+
+        shadowed = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static int global_output = 0;
+            static void pgaccel_record_gpu_exec() { global_output = 99; }
+            static pgaccel_status observed_write(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 9;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_shadowed_observer(
+                bool fail, int* out) {
+              pgaccel_status status = observed_write(fail, out);
+              if (status == PGACCEL_OK) {
+                pgaccel_record_gpu_exec();
+                return status;
+              }
+              return PGACCEL_ERROR;
+            }
+            """
+        )
+        entry = shadowed.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("untrusted_gpu_observer", entry.classifications)
+
+    def test_observed_status_ternary_requires_exact_device_arms_and_propagation(
+        self,
+    ) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static thread_local uint64_t tl_gpu_exec_count = 0;
+            void pgaccel_record_gpu_exec() { tl_gpu_exec_count++; }
+            static pgaccel_status write_first(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 10;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            static pgaccel_status write_second(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 11;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            static void force_ok(pgaccel_status& status) {
+              status = PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_observed_status_selection(
+                bool first, bool fail, int* out) {
+              pgaccel_status status = first ? write_first(fail, out)
+                                             : write_second(fail, out);
+              if (status == PGACCEL_OK)
+                pgaccel_record_gpu_exec();
+              return status;
+            }
+            extern "C" pgaccel_status pgaccel_mismatched_status_selection(
+                bool first, bool fail, int* first_out, int* second_out) {
+              pgaccel_status status = first ? write_first(fail, first_out)
+                                             : write_second(fail, second_out);
+              if (status == PGACCEL_OK)
+                pgaccel_record_gpu_exec();
+              return status;
+            }
+            extern "C" pgaccel_status pgaccel_mutated_status_selection(
+                bool first, bool fail, int* out) {
+              pgaccel_status status = first ? write_first(fail, out)
+                                             : write_second(fail, out);
+              status = PGACCEL_OK;
+              if (status == PGACCEL_OK)
+                pgaccel_record_gpu_exec();
+              return status;
+            }
+            extern "C" pgaccel_status pgaccel_rebound_status_selection(
+                bool first, bool fail, int* out) {
+              pgaccel_status status = first ? write_first(fail, out)
+                                             : write_second(fail, out);
+              force_ok(status);
+              if (status == PGACCEL_OK)
+                pgaccel_record_gpu_exec();
+              return status;
+            }
+            extern "C" pgaccel_status pgaccel_unguarded_status_selection(
+                bool first, bool fail, int* out) {
+              pgaccel_status status = first ? write_first(fail, out)
+                                             : write_second(fail, out);
+              pgaccel_record_gpu_exec();
+              return status;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        green = entries["pgaccel_observed_status_selection"]
+        self.assertTrue(green.ok, green.detail)
+        self.assertIn("validated_device_selection", green.classifications)
+        self.assertEqual(green.guaranteed_output_parameter_positions, (2,))
+        self.assertEqual(green.output_parameter_position_variants, ((2,),))
+        for name in (
+            "pgaccel_mismatched_status_selection",
+            "pgaccel_mutated_status_selection",
+            "pgaccel_rebound_status_selection",
+            "pgaccel_unguarded_status_selection",
+        ):
+            with self.subTest(name=name):
+                entry = entries[name]
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("undominated_success", entry.classifications)
+
+    def test_status_selection_rejects_local_status_proxy_aliases(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static thread_local uint64_t tl_gpu_exec_count = 0;
+            void pgaccel_record_gpu_exec() { tl_gpu_exec_count++; }
+            static pgaccel_status write_first(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 10;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            static pgaccel_status write_second(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 11;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            struct StatusProxy {
+              StatusProxy(::pgaccel_status) {}
+              operator ::pgaccel_status() const { return PGACCEL_OK; }
+            };
+            extern "C" pgaccel_status pgaccel_shadowed_status_ternary(
+                bool first, bool fail, int* out) {
+              using pgaccel_status = StatusProxy;
+              pgaccel_status status = first ? write_first(fail, out)
+                                             : write_second(fail, out);
+              if (status == PGACCEL_OK)
+                pgaccel_record_gpu_exec();
+              return status;
+            }
+            extern "C" pgaccel_status pgaccel_shadowed_status_guard(
+                bool fail, int* out) {
+              using pgaccel_status = StatusProxy;
+              pgaccel_status status = write_first(fail, out);
+              if (status != PGACCEL_OK)
+                return status;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        for entry in result.entrypoint_audits:
+            self.assertFalse(entry.ok, entry.detail)
+            self.assertIn("ambiguous_status_type", entry.classifications)
+
+        namespace_shadow = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            struct StatusProxy {
+              StatusProxy(::pgaccel_status) {}
+              operator ::pgaccel_status() const { return PGACCEL_OK; }
+            };
+            namespace hostile { using pgaccel_status = StatusProxy; }
+            extern "C" pgaccel_status pgaccel_namespace_status_shadow(int* out) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 12;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = namespace_shadow.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("ambiguous_status_type", entry.classifications)
+
+        anonymous_typedef = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_local_anonymous_status(int* out) {
+              typedef struct { int value; } pgaccel_status;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 13;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = anonymous_typedef.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("ambiguous_status_type", entry.classifications)
+
+        declaration_cases = (
+            "struct Holder { public: using pgaccel_status = StatusProxy; };",
+            "struct Holder { public: typedef StatusProxy pgaccel_status, *Other; };",
+            "struct Base { using pgaccel_status = StatusProxy; }; "
+            "struct Holder : Base { using Base::pgaccel_status; };",
+        )
+        for declaration in declaration_cases:
+            with self.subTest(declaration=declaration):
+                class_shadow = audit_compiling_fixture(
+                    self.COPYBACK_PRELUDE
+                    + r"""
+                    struct StatusProxy {
+                      StatusProxy(::pgaccel_status) {}
+                      operator ::pgaccel_status() const { return PGACCEL_OK; }
+                    };
+                    """
+                    + declaration
+                    + r"""
+                    extern "C" pgaccel_status pgaccel_class_status_shadow(
+                        int* out) {
+                      sycl::queue q;
+                      q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                        out[0] = 14;
+                      }).wait_and_throw();
+                      return PGACCEL_OK;
+                    }
+                    """
+                )
+                entry = class_shadow.entrypoint_audits[0]
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("ambiguous_status_type", entry.classifications)
+
+        ordinary_alias = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            using status_alias = pgaccel_status;
+            typedef pgaccel_status legacy_status;
+            extern "C" pgaccel_status pgaccel_ordinary_status_alias(int* out) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 15;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = ordinary_alias.entrypoint_audits[0]
+        self.assertTrue(entry.ok, entry.detail)
+        self.assertNotIn("ambiguous_status_type", entry.classifications)
+
+        decorated_bindings = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static pgaccel_status write_or_fail(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 17;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            struct StatusProxy {
+              StatusProxy(::pgaccel_status) {}
+              operator ::pgaccel_status() const { return PGACCEL_OK; }
+            };
+            struct StatusProxyBase {
+              StatusProxyBase(::pgaccel_status) {}
+              operator ::pgaccel_status() const { return PGACCEL_OK; }
+            };
+            extern "C" pgaccel_status pgaccel_parenthesized_status_typedef(
+                bool fail, int* out) {
+              typedef StatusProxy (pgaccel_status);
+              pgaccel_status status = write_or_fail(fail, out);
+              if (status != PGACCEL_OK) return status;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_attributed_status_class(
+                bool fail, int* out) {
+              struct [[maybe_unused]] pgaccel_status : StatusProxyBase {
+                using StatusProxyBase::StatusProxyBase;
+              };
+              pgaccel_status status = write_or_fail(fail, out);
+              if (status != PGACCEL_OK) return status;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_aligned_status_class(
+                bool fail, int* out) {
+              struct alignas(8) pgaccel_status : StatusProxyBase {
+                using StatusProxyBase::StatusProxyBase;
+              };
+              pgaccel_status status = write_or_fail(fail, out);
+              if (status != PGACCEL_OK) return status;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        for entry in decorated_bindings.entrypoint_audits:
+            self.assertFalse(entry.ok, entry.detail)
+            self.assertIn("ambiguous_status_type", entry.classifications)
+
+    def test_included_header_status_operator_cannot_mutate_failure_to_ok(
+        self,
+    ) -> None:
+        statusless_prelude = self.COPYBACK_PRELUDE.replace(
+            self.STATUS_ALIAS_DECLARATION, ""
+        )
+        result = audit_compiling_fixture_with_headers(
+            '#include "outer_status.hpp"\n'
+            + statusless_prelude
+            + r"""
+            static thread_local uint64_t tl_gpu_exec_count = 0;
+            void pgaccel_record_gpu_exec() { tl_gpu_exec_count++; }
+            static pgaccel_status write_first(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 10;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            static pgaccel_status write_second(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 11;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_header_operator_status(
+                bool first, bool fail, int* out) {
+              pgaccel_status status = first ? write_first(fail, out)
+                                             : write_second(fail, out);
+              if (status == PGACCEL_OK)
+                pgaccel_record_gpu_exec();
+              return status;
+            }
+            """,
+            {
+                "outer_status.hpp": '#include "status_override.hpp"\n',
+                "status_override.hpp": r"""
+                    typedef enum {
+                      PGACCEL_STATUS_OK = 0,
+                      PGACCEL_ERROR = 1,
+                    } pgaccel_status;
+                    struct PgaccelOkTag {
+                      constexpr operator pgaccel_status() const {
+                        return PGACCEL_STATUS_OK;
+                      }
+                    };
+                    constexpr PgaccelOkTag PGACCEL_OK{};
+                    inline bool operator==(pgaccel_status& status, PgaccelOkTag) {
+                      status = PGACCEL_STATUS_OK;
+                      return true;
+                    }
+                """,
+            },
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("undominated_success", entry.classifications)
+
+    def test_macro_operator_in_transitive_angle_header_cannot_fake_guard(
+        self,
+    ) -> None:
+        statusless_prelude = self.COPYBACK_PRELUDE.replace(
+            self.STATUS_ALIAS_DECLARATION, ""
+        )
+        result = audit_compiling_fixture_with_headers(
+            "#include <angle_outer.hpp>\n"
+            + statusless_prelude
+            + r"""
+            static pgaccel_status write_or_fail(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 16;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_angle_macro_status_guard(
+                bool fail, int* out) {
+              pgaccel_status status = write_or_fail(fail, out);
+              if (status != PGACCEL_OK) return status;
+              return PGACCEL_OK;
+            }
+            """,
+            {
+                "angle_outer.hpp": "#include <nested/status_override.hpp>\n",
+                "nested/status_override.hpp": r"""
+                    typedef enum {
+                      PGACCEL_OK = 0,
+                      PGACCEL_ERROR = 1,
+                    } pgaccel_status;
+                    #define NOT_EQUAL !=
+                    inline bool operator NOT_EQUAL(
+                        pgaccel_status, pgaccel_status) {
+                      return false;
+                    }
+                """,
+            },
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("undominated_success", entry.classifications)
+
+    def test_nonproject_header_overloads_fail_preprocessing_closed(self) -> None:
+        compiler = shutil.which("clang++")
+        if compiler is None:
+            raise unittest.SkipTest("clang++ is required for compile-valid regressions")
+        prelude = self.COPYBACK_PRELUDE.replace(
+            self.STATUS_ALIAS_DECLARATION,
+            "typedef enum { PGACCEL_OK = 0, PGACCEL_ERROR = 1 } pgaccel_status;",
+        )
+        body = r"""
+            static pgaccel_status write_or_fail(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 18;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_external_header_guard(
+                bool fail, int* out) {
+              pgaccel_status status = write_or_fail(fail, out);
+              if (status != PGACCEL_OK) return status;
+              return PGACCEL_OK;
+            }
+        """
+        with (
+            tempfile.TemporaryDirectory(
+                prefix="pgaccel-audit-source-"
+            ) as source_directory,
+            tempfile.TemporaryDirectory(
+                prefix="pgaccel-audit-external-"
+            ) as external_directory,
+        ):
+            source_root = pathlib.Path(source_directory)
+            external_header = pathlib.Path(external_directory) / "status_op.hpp"
+            external_header.write_text(
+                "inline bool operator!=(pgaccel_status, pgaccel_status) "
+                "{ return false; }\n",
+                encoding="utf-8",
+            )
+            symlink_header = source_root / "status_op.hpp"
+            symlink_header.symlink_to(external_header)
+            include_lines = (
+                f'#include "{external_header}"\n',
+                '#include "status_op.hpp"\n',
+            )
+            for index, include_line in enumerate(include_lines):
+                with self.subTest(include=include_line.strip()):
+                    rendered = textwrap.dedent(prelude + include_line + body)
+                    source_path = source_root / f"fixture_{index}.cpp"
+                    source_path.write_text(rendered, encoding="utf-8")
+                    completed = subprocess.run(
+                        [compiler, "-std=c++17", "-fsyntax-only", str(source_path)],
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+                    result = audit.audit_source(source_path, rendered)
+                    entry = result.entrypoint_audits[0]
+                    self.assertFalse(entry.ok, entry.detail)
+                    self.assertIn("preprocessor_expansion_error", entry.classifications)
+
+    def test_borrowed_workspace_is_in_host_hazard_and_shadow_analysis(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static void overwrite(int* workspace) { workspace[0] = 99; }
+            extern "C" pgaccel_status pgaccel_borrowed_host_write(
+                int* const workspace) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                workspace[0] = 10;
+              }).wait_and_throw();
+              workspace[0] = 99;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_borrowed_helper_write(
+                int* const workspace) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                workspace[0] = 11;
+              }).wait_and_throw();
+              overwrite(workspace);
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_borrowed_shadow(
+                int* const workspace) {
+              {
+                int local = 0;
+                int* workspace = &local;
+                sycl::queue q;
+                q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                  workspace[0] = 12;
+                }).wait_and_throw();
+              }
+              return PGACCEL_OK;
+            }
+            """
+        )
+        for entry in result.entrypoint_audits:
+            with self.subTest(name=entry.entrypoint):
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("undominated_success", entry.classifications)
+
+    def test_opaque_helper_resources_require_exact_live_nonnull_lineage(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            struct State { int* data; };
+            static State* build_device_state() {
+              sycl::queue q;
+              int* data = static_cast<int*>(sycl::malloc_shared(sizeof(int), q));
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                data[0] = 13;
+              }).wait_and_throw();
+              State* state = new State{};
+              state->data = data;
+              return state;
+            }
+            static State* maybe_build_device_state(bool decline) {
+              if (decline) return nullptr;
+              return build_device_state();
+            }
+            static pgaccel_status build_or_fail(bool fail, State** out) {
+              if (fail) return PGACCEL_ERROR;
+              State* state = build_device_state();
+              if (state == nullptr) return PGACCEL_ERROR;
+              *out = state;
+              return PGACCEL_OK;
+            }
+            static pgaccel_status build_second(State** ignored, State** out) {
+              (void)ignored;
+              return build_or_fail(false, out);
+            }
+            struct ConvertedState {
+              State* stored{};
+              ConvertedState() = default;
+              ConvertedState(State* state) : stored(state) {}
+              State** operator&() { return &stored; }
+              operator State*() const { return new State{}; }
+            };
+            extern "C" State* pgaccel_resource_direct() {
+              return build_device_state();
+            }
+            extern "C" State* pgaccel_resource_assigned() {
+              State* state = build_device_state();
+              return state;
+            }
+            extern "C" State* pgaccel_resource_comma() {
+              return (build_device_state(), nullptr);
+            }
+            extern "C" State* pgaccel_resource_rebound() {
+              State* state = build_device_state();
+              state = new State{};
+              return state;
+            }
+            extern "C" State* pgaccel_resource_ignored_status() {
+              State* state = nullptr;
+              build_or_fail(false, &state);
+              return state;
+            }
+            extern "C" State* pgaccel_resource_short_status(bool run) {
+              State* state = nullptr;
+              run && (build_or_fail(false, &state) == PGACCEL_OK);
+              return state;
+            }
+            extern "C" pgaccel_status pgaccel_resource_status_rebound(
+                State** out) {
+              State* state = build_device_state();
+              state = nullptr;
+              *out = state;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_resource_wrong_position(
+                State** out) {
+              State host{};
+              State* wrong = &host;
+              State* right = nullptr;
+              pgaccel_status status = build_second(&wrong, &right);
+              if (status != PGACCEL_OK) return status;
+              *out = wrong;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_resource_nullable(
+                bool decline, State** out) {
+              State* state = maybe_build_device_state(decline);
+              *out = state;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_resource_nullable_checked(
+                bool decline, State** out) {
+              State* state = maybe_build_device_state(decline);
+              if (state == nullptr) return PGACCEL_ERROR;
+              *out = state;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_resource_conversion_status(
+                State** out) {
+              ConvertedState state;
+              pgaccel_status status = build_or_fail(false, &state);
+              if (status != PGACCEL_OK) return status;
+              *out = state;
+              return PGACCEL_OK;
+            }
+            extern "C" State* pgaccel_resource_conversion_return() {
+              ConvertedState state = build_device_state();
+              return state;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        for name in (
+            "pgaccel_resource_direct",
+            "pgaccel_resource_assigned",
+            "pgaccel_resource_nullable_checked",
+        ):
+            self.assertTrue(entries[name].ok, entries[name].detail)
+            self.assertIn("opaque_device_resource", entries[name].classifications)
+        for name, entry in entries.items():
+            if name in {
+                "pgaccel_resource_direct",
+                "pgaccel_resource_assigned",
+                "pgaccel_resource_nullable_checked",
+            }:
+                continue
+            with self.subTest(name=name):
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertNotIn("opaque_device_resource", entry.classifications)
+
+
+class AbiInventoryTests(unittest.TestCase):
+    def test_alias_and_trailing_return_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            header = root / "fixture.h"
+            source = root / "fixture.cpp"
+            header.write_text(
+                textwrap.dedent(
+                    r"""
+                    using status_alias = pgaccel_status;
+                    extern "C" {
+                    status_alias pgaccel_alias(int* out);
+                    auto pgaccel_trailing(int* out) -> status_alias;
+                    }
+                    """
+                ),
+                encoding="utf-8",
+            )
+            source.write_text(
+                textwrap.dedent(
+                    r"""
+                    using status_alias = pgaccel_status;
+                    extern "C" status_alias pgaccel_alias(int* out) {
+                      return PGACCEL_ERROR_NO_DEVICE;
+                    }
+                    extern "C" auto pgaccel_trailing(int* out) -> status_alias {
+                      return PGACCEL_ERROR_NO_DEVICE;
+                    }
+                    """
+                ),
+                encoding="utf-8",
+            )
+            inventory = audit.audit_abi([source], [header])
+        self.assertFalse(inventory.findings)
+        self.assertEqual(len(inventory.definitions), 2)
+        self.assertEqual(len(inventory.declarations), 2)
+        self.assertEqual(inventory.definition_hash, inventory.declaration_hash)
+
+    def test_missing_extra_and_inactive_definitions_fail_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            header = root / "fixture.h"
+            source = root / "fixture.cpp"
+            header.write_text(
+                'extern "C" pgaccel_status pgaccel_declared_only();\n',
+                encoding="utf-8",
+            )
+            source.write_text(
+                textwrap.dedent(
+                    r"""
+                    extern "C" pgaccel_status pgaccel_defined_only() {
+                      return PGACCEL_ERROR_NO_DEVICE;
+                    }
+                    #if 0
+                    extern "C" pgaccel_status pgaccel_inactive() {
+                      return PGACCEL_OK;
+                    }
+                    #endif
+                    """
+                ),
+                encoding="utf-8",
+            )
+            inventory = audit.audit_abi([source], [header])
+        classifications = {
+            item for finding in inventory.findings for item in finding.classifications
+        }
+        self.assertIn("missing_abi_definition", classifications)
+        self.assertIn("extra_abi_definition", classifications)
+        self.assertIn("preprocessor_inventory_mismatch", classifications)
+        self.assertNotEqual(inventory.source_definition_hash, inventory.definition_hash)
+
+    def test_parameter_type_mismatch_changes_full_signature_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            header = root / "fixture.h"
+            source = root / "fixture.cpp"
+            header.write_text(
+                'extern "C" pgaccel_status pgaccel_typed(float* out);\n',
+                encoding="utf-8",
+            )
+            source.write_text(
+                textwrap.dedent(
+                    r"""
+                    extern "C" pgaccel_status pgaccel_typed(int* out) {
+                      return PGACCEL_ERROR_NO_DEVICE;
+                    }
+                    """
+                ),
+                encoding="utf-8",
+            )
+            inventory = audit.audit_abi([source], [header])
+        classifications = {
+            item for finding in inventory.findings for item in finding.classifications
+        }
+        self.assertIn("abi_signature_mismatch", classifications)
+        self.assertNotEqual(inventory.definition_hash, inventory.declaration_hash)
+        self.assertEqual(inventory.definitions[0].parameter_types, ("int *",))
+        self.assertEqual(inventory.declarations[0].parameter_types, ("float *",))
+
+    def test_compiler_inventory_expands_token_pasted_c_export(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            header = pathlib.Path(directory) / "token_paste.h"
+            header.write_text(
+                textwrap.dedent(
+                    r"""
+                    #define ABI_JOIN_INNER(left, right) left##right
+                    #define ABI_JOIN(left, right) ABI_JOIN_INNER(left, right)
+                    extern "C" int ABI_JOIN(pgaccel_, hidden)(float* out);
+                    """
+                ),
+                encoding="utf-8",
+            )
+            compiler_inventory = audit.compiler_header_inventory([header])
+            _, findings = audit.parse_declarations(
+                header, header.read_text(encoding="utf-8")
+            )
+        self.assertEqual(
+            [symbol.name for symbol in compiler_inventory.symbols],
+            ["pgaccel_hidden"],
+        )
+        classifications = {
+            item for finding in findings for item in finding.classifications
+        }
+        self.assertIn("token_paste_export_risk", classifications)
+
+    def test_mutated_immutable_manifest_is_rejected(self) -> None:
+        original = audit.DEFAULT_ABI_MANIFEST.read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as directory:
+            mutated = pathlib.Path(directory) / "manifest.txt"
+            mutated.write_text(original.replace("void", "int", 1), encoding="utf-8")
+            with self.assertRaisesRegex(audit.ParseError, "SHA-256 mismatch"):
+                audit.load_abi_manifest(mutated)
+
+    def test_checked_in_manifest_has_literal_integrity_anchor(self) -> None:
+        manifest = audit.load_abi_manifest(audit.DEFAULT_ABI_MANIFEST)
+        self.assertEqual(manifest.count, 136)
+        self.assertEqual(audit.EXPECTED_ABI_MANIFEST_COUNT, 136)
+        self.assertEqual(
+            manifest.sha256,
+            "a121e9b7305e3c2482df966ed5c63ef0b81e838b012ffd640c56df89a6bd9e01",
+        )
+        self.assertEqual(manifest.sha256, audit.EXPECTED_ABI_MANIFEST_SHA256)
+
+    def test_nm_object_union_is_bound_to_manifest_names(self) -> None:
+        compiler = shutil.which("clang++")
+        self.assertIsNotNone(compiler)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            object_paths: list[pathlib.Path] = []
+            for suffix in ("first", "second"):
+                source = root / f"{suffix}.cpp"
+                object_path = root / f"{suffix}.o"
+                source.write_text(
+                    f'extern "C" int pgaccel_object_{suffix}() {{ return 1; }}\n',
+                    encoding="utf-8",
+                )
+                subprocess.run(
+                    [compiler, "-c", str(source), "-o", str(object_path)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                object_paths.append(object_path)
+            manifest = audit.AbiManifest(
+                root / "manifest.txt",
+                2,
+                "fixture",
+                {
+                    "pgaccel_object_first": "int ()",
+                    "pgaccel_object_second": "int ()",
+                },
+            )
+            evidence, findings = audit._object_abi_evidence(object_paths, manifest)
+        self.assertFalse(findings)
+        self.assertEqual(evidence[0]["status"], "collected")
+        self.assertEqual(evidence[0]["count"], 1)
+        self.assertIn("binary_sha256", evidence[0])
+        self.assertEqual(evidence[1]["status"], "collected")
+        self.assertEqual(evidence[2]["kind"], "combined_object_inventory")
+        self.assertEqual(evidence[2]["status"], "verified")
+        self.assertEqual(evidence[2]["count"], 2)
+
+    def test_release_object_validation_is_mandatory_exact_and_fresh(self) -> None:
+        missing_evidence, missing = audit._release_object_validation([], [])
+        self.assertTrue(missing)
+        self.assertEqual(missing_evidence[0]["status"], "missing")
+        self.assertIn("missing_object_inventory", missing[0].classifications)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            input_path = root / "kernel.cpp"
+            input_path.write_text("// input\n", encoding="utf-8")
+            build_marker = root / "build.marker"
+            build_marker.touch()
+            wrong = root / "unrelated.so"
+            wrong.write_bytes(b"not the kernel library")
+            _, wrong_findings = audit._release_object_validation(
+                [wrong], [input_path], build_marker
+            )
+            self.assertIn("wrong_release_object", wrong_findings[0].classifications)
+
+            shared = root / "libpgaccel_kernels_shared.so"
+            shared.write_bytes(b"kernel library")
+            base = max(
+                input_path.stat().st_mtime,
+                shared.stat().st_mtime,
+                build_marker.stat().st_mtime,
+            )
+            os.utime(build_marker, (base - 1, base - 1))
+            os.utime(shared, (base, base))
+            os.utime(input_path, (base + 2, base + 2))
+            stale_evidence, stale = audit._release_object_validation(
+                [shared], [input_path], build_marker
+            )
+            self.assertEqual(stale_evidence[0]["status"], "invalid")
+            self.assertIn("stale_release_object", stale[0].classifications)
+
+            os.utime(shared, (base + 4, base + 4))
+            fresh_evidence, fresh = audit._release_object_validation(
+                [shared], [input_path], build_marker
+            )
+            self.assertFalse(fresh)
+            self.assertEqual(fresh_evidence[0]["status"], "verified")
+            self.assertEqual(fresh_evidence[0]["input_count"], 1)
+            self.assertIn("input_inventory_sha256", fresh_evidence[0])
+
+            missing_marker_evidence, missing_marker = audit._release_object_validation(
+                [shared], [input_path]
+            )
+            self.assertEqual(missing_marker_evidence[0]["status"], "invalid")
+            self.assertIn("missing_build_marker", missing_marker[0].classifications)
+
+
+class ReleaseWiringTests(unittest.TestCase):
+    def test_precommit_keeps_fixture_gate_and_real_recipe_has_headers(self) -> None:
+        justfile = (REPO_ROOT / "Justfile").read_text(encoding="utf-8")
+        precommit = next(
+            line for line in justfile.splitlines() if line.startswith("pre-commit:")
+        )
+        self.assertIn("audit-cpu-cheats-test", precommit)
+        recipe = justfile[justfile.index("audit-cpu-cheats: audit-cpu-cheats-test") :]
+        self.assertLess(recipe.index("just gpu-build"), recipe.index("--objects"))
+        self.assertLess(recipe.index("-delete"), recipe.index("just gpu-build"))
+        self.assertIn("libpgaccel_kernels_shared", recipe)
+        self.assertIn('--objects "$objects"', recipe)
+        self.assertIn('--build-marker "$build_marker"', recipe)
+        self.assertIn("--headers pgaccel-kernels/include/*.h --", recipe)
+        self.assertIn("--abi-manifest scripts/cpu_cheat_abi_manifest.txt", recipe)
+        self.assertIn("update-cpu-cheat-abi-manifest:", justfile)
+
+    def test_release_matrix_builds_before_real_audit(self) -> None:
+        matrix = (REPO_ROOT / "scripts/release_verification_matrix.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertLess(
+            matrix.index('run_logged "gpu-build"'),
+            matrix.index('run_logged "cpu-cheat-audit"'),
+        )
+        self.assertLess(
+            matrix.index('run_logged "cpu-cheat-audit"'),
+            matrix.index('run_logged "install-pg-accel"'),
+        )
+        self.assertLess(
+            matrix.index('run_logged "candidate-provenance"'),
+            matrix.index('run_logged "gpu-build"'),
+        )
+        self.assertIn("capture-candidate", matrix)
+        self.assertIn("--repo-root \"$PWD\"", matrix)
+        benchmark_sweep = matrix[
+            matrix.index('run_logged "benchmark-sweep"') : matrix.index(
+                'if [ "$(uname -s)"', matrix.index('run_logged "benchmark-sweep"')
+            )
+        ]
+        self.assertIn("--cache-mode warm", benchmark_sweep)
+        self.assertNotIn("--cache-mode both", benchmark_sweep)
+        self.assertIn("> SHA256SUMS", matrix)
+        self.assertIn("shasum -a 256 -c SHA256SUMS", matrix)
+        self.assertNotIn("        TODO.md docs README.md", matrix)
+
+    def test_cli_never_implicitly_discovers_release_objects(self) -> None:
+        analyzer = (REPO_ROOT / "scripts/cpu_cheat_audit.py").read_text(
+            encoding="utf-8"
+        )
+        main = analyzer[analyzer.index("def main(") :]
+        self.assertIn("require_release_object=True", main)
+        self.assertIn("build_marker=args.build_marker", main)
+        self.assertNotIn("libpgaccel_kernels_shared.*", main)
+
+    def test_local_packages_run_real_audit_before_creating_artifacts(self) -> None:
+        justfile = (REPO_ROOT / "Justfile").read_text(encoding="utf-8")
+        package = justfile[
+            justfile.index('package pg="":') : justfile.index("package-matrix:")
+        ]
+        package_matrix = justfile[
+            justfile.index("package-matrix:") : justfile.index(
+                "install-pg-accel", justfile.index("package-matrix:")
+            )
+        ]
+        self.assertLess(
+            package.index("just audit-cpu-cheats"),
+            package.index("python3 scripts/package_extension.py"),
+        )
+        self.assertLess(
+            package_matrix.index("just audit-cpu-cheats"),
+            package_matrix.index("for pg in"),
+        )
+        self.assertIn("intentionally remains blocked", package)
+        helper = (REPO_ROOT / "scripts/package_extension.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('environment["PGACCEL_PACKAGE_RELOCATABLE"] = "1"', helper)
+        self.assertIn('"pgrx",\n        "package",', helper)
+
+    def test_green_ci_uses_integrity_suite_and_release_keeps_real_gate(self) -> None:
+        ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        release = (REPO_ROOT / ".github/workflows/release.yml").read_text(
+            encoding="utf-8"
+        )
+        release_plz = (REPO_ROOT / ".github/workflows/release-plz.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Run CPU-cheat analyzer and ABI integrity gate", ci)
+        self.assertNotIn("Run real CPU-cheat audit", ci)
+        for workflow in (ci, release, release_plz):
+            self.assertIn("libclang-dev", workflow)
+            self.assertIn("libomp-dev", workflow)
+        self.assertLess(
+            release.index("Build kernels before CPU-cheat release gate"),
+            release.index("Run CPU-cheat release gate"),
+        )
+        self.assertLess(
+            release_plz.index("Run real CPU-cheat release gate"),
+            release_plz.index("MarcoIeni/release-plz-action"),
+        )
+        real_gate = release_plz[
+            release_plz.index("Run real CPU-cheat release gate") : release_plz.index(
+                "MarcoIeni/release-plz-action"
+            )
+        ]
+        self.assertIn("just audit-cpu-cheats", real_gate)
+
+
+class ProductionWitnessTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.source_paths = sorted((REPO_ROOT / "pgaccel-kernels/src").glob("*.cpp"))
+        cls.header_paths = sorted((REPO_ROOT / "pgaccel-kernels/include").glob("*.h"))
+        cls.audits = audit.audit_paths(cls.source_paths)
+        cls.by_name = {
+            entry.entrypoint: entry
+            for file_audit in cls.audits
+            for entry in file_audit.entrypoint_audits
+        }
+        cls.findings = {
+            finding.entrypoint: finding
+            for file_audit in cls.audits
+            for finding in file_audit.findings
+        }
+        cls.abi = audit.audit_abi(
+            cls.source_paths,
+            cls.header_paths,
+            manifest_path=audit.DEFAULT_ABI_MANIFEST,
+        )
+
+    def test_complete_real_abi_baseline_and_violation_floor(self) -> None:
+        self.assertEqual(len(self.abi.definitions), 136)
+        self.assertEqual(len({item.name for item in self.abi.definitions}), 136)
+        self.assertEqual(len({item.name for item in self.abi.declarations}), 136)
+        self.assertFalse(self.abi.findings)
+        self.assertEqual(self.abi.definition_hash, self.abi.declaration_hash)
+        self.assertEqual(self.abi.source_definition_hash, self.abi.definition_hash)
+        self.assertEqual(self.abi.manifest["status"], "verified")
+        self.assertEqual(self.abi.compiler["status"], "verified")
+        self.assertEqual(self.abi.compiler["inventory_count"], 136)
+        status_names = sorted(
+            entry.entrypoint for entry in self.by_name.values() if entry.is_status
+        )[:82]
+        # Preserve the original production-name floor as code turns green: a
+        # name-specific/file-specific exemption would bless one of these exact
+        # ABI entrypoints even though its body is replaced by hostile host work.
+        mutant_source = "\n".join(
+            f"""extern "C" pgaccel_status {name}(int* out) {{
+                  *out = 42;
+                  return PGACCEL_OK;
+                }}"""
+            for name in status_names
+        )
+        mutant_audit = audit.audit_source(
+            pathlib.Path("production-name-mutants.cpp"), mutant_source
+        )
+        status_failed = sum(
+            entry.is_status and not entry.ok for entry in mutant_audit.entrypoint_audits
+        )
+        self.assertEqual(len(status_names), 82)
+        self.assertGreaterEqual(status_failed, 82)
+
+    def test_partition_v2_inventory_does_not_grant_source_proof(self) -> None:
+        manifest = audit.load_abi_manifest(audit.DEFAULT_ABI_MANIFEST)
+        for name in (
+            "pgaccel_hash_count_partition_workspace_requirements_v2",
+            "pgaccel_hash_count_partition_execute_v2",
+        ):
+            with self.subTest(name=name):
+                self.assertIn(name, manifest.signatures)
+                self.assertNotIn(name, audit.LIFECYCLE_CONTRACTS)
+                entry = self.by_name[name]
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn(name, self.findings)
+
+    def test_count_work_inventory_does_not_grant_metadata_proof(self) -> None:
+        name = "pgaccel_grouped_agg_count_work_requirements_v1"
+        manifest = audit.load_abi_manifest(audit.DEFAULT_ABI_MANIFEST)
+        self.assertEqual(
+            manifest.signatures[name],
+            "pgaccel_status (const pgaccel_grouped_agg_desc *, "
+            "pgaccel_grouped_agg_count_work_v1 *)",
+        )
+        self.assertNotIn(name, audit.LIFECYCLE_CONTRACTS)
+        entry = self.by_name[name]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn(name, self.findings)
+
+    def test_join_workspace_member_is_not_an_output_shadow(self) -> None:
+        for name in (
+            "pgaccel_join_rows_workspace_bytes",
+            "pgaccel_join_rows_controlled_workspace_bytes",
+        ):
+            with self.subTest(name=name):
+                entry = self.by_name[name]
+                self.assertNotIn("output_identity_shadowing", entry.classifications)
+
+    def test_inventory_hashes_are_deterministic(self) -> None:
+        second = audit.audit_abi(
+            self.source_paths,
+            self.header_paths,
+            manifest_path=audit.DEFAULT_ABI_MANIFEST,
+        )
+        self.assertEqual(second.definition_hash, self.abi.definition_hash)
+        self.assertEqual(second.declaration_hash, self.abi.declaration_hash)
+        self.assertEqual(second.per_file, self.abi.per_file)
+
+    def test_production_gpu_sources_have_no_empty_catch_blocks(self) -> None:
+        empty_catches = []
+        for path in [*self.source_paths, *self.header_paths]:
+            tokens = audit.lex_cpp(path.read_text(encoding="utf-8"))
+            forward, _ = audit._delimiter_pairs(tokens)
+            for index, token in enumerate(tokens):
+                if token.value != "catch" or index + 1 >= len(tokens):
+                    continue
+                catch_open = index + 1
+                catch_close = forward.get(catch_open)
+                if catch_close is None or catch_close + 1 >= len(tokens):
+                    continue
+                body_open = catch_close + 1
+                body_close = forward.get(body_open)
+                if body_close == body_open + 1:
+                    empty_catches.append(f"{path.relative_to(REPO_ROOT)}:{token.line}")
+
+        self.assertEqual(empty_catches, [])
+
+    def test_point_in_polygon_staged_copyback_is_proven(self) -> None:
+        entry = self.by_name["pgaccel_point_in_polygon_bulk"]
+        self.assertTrue(entry.ok, entry.detail)
+        self.assertEqual(entry.path.name, "spatial_dispatch.cpp")
+        self.assertIn("large_input_gpu_chain", entry.classifications)
+        self.assertIn("awaited queue memcpy", entry.detail)
+
+    def test_reduction_device_finalize_is_source_proven(self) -> None:
+        entry = self.by_name["pgaccel_reduce_sum_f32"]
+        self.assertTrue(entry.ok, entry.detail)
+        self.assertEqual(entry.path.name, "reduce.cpp")
+        self.assertIn("large_input_gpu_chain", entry.classifications)
+        self.assertIn("zero_work", entry.classifications)
+        self.assertNotIn("host_output_write", entry.classifications)
+
+    def test_f64_reduction_status_selection_is_source_proven(self) -> None:
+        for name in (
+            "pgaccel_reduce_min_f64",
+            "pgaccel_reduce_max_f64",
+            "pgaccel_reduce_multi_f64",
+        ):
+            with self.subTest(name=name):
+                entry = self.by_name[name]
+                self.assertTrue(entry.ok, entry.detail)
+                self.assertEqual(entry.path.name, "reduce.cpp")
+                self.assertIn("large_input_gpu_chain", entry.classifications)
+                self.assertIn("validated_device_selection", entry.classifications)
+                self.assertNotIn("ambiguous_status_type", entry.classifications)
+                self.assertNotIn("host_output_write", entry.classifications)
+
+    def test_resident_hash_join_build_has_device_resource_proof(self) -> None:
+        entry = self.by_name["pgaccel_hash_join_build_device_count"]
+        self.assertFalse(entry.is_status)
+        self.assertTrue(entry.ok, entry.detail)
+        self.assertEqual(entry.path.name, "hash_join.cpp")
+        self.assertEqual(entry.return_type, "pgaccel_hash_table *")
+        self.assertIn("opaque_device_resource", entry.classifications)
+        self.assertIn("kernel-derived opaque resource", entry.detail)
+
+    def test_repaired_expr_and_hash_outputs_have_device_proof(self) -> None:
+        repaired = (
+            ("pgaccel_expr_eval_predicate", "expr_eval.cpp", (2,)),
+            ("pgaccel_expr_eval_project", "expr_eval.cpp", (2,)),
+            ("pgaccel_hash_join_count_device", "hash_join.cpp", (4,)),
+        )
+        required = {
+            "device_copyback",
+            "device_dispatch",
+            "large_input_gpu_chain",
+            "zero_work",
+        }
+        forbidden = {
+            "host_output_write",
+            "host_staging_review",
+            "rejected_terminal",
+            "undominated_success",
+        }
+        for name, source, output_positions in repaired:
+            with self.subTest(name=name):
+                entry = self.by_name[name]
+                self.assertTrue(entry.ok, entry.detail)
+                self.assertEqual(entry.path.name, source)
+                self.assertEqual(
+                    entry.guaranteed_output_parameter_positions, output_positions
+                )
+                self.assertEqual(
+                    entry.output_parameter_position_variants, (output_positions,)
+                )
+                self.assertTrue(required.issubset(entry.classifications))
+                self.assertTrue(forbidden.isdisjoint(entry.classifications))
+                if name == "pgaccel_hash_join_count_device":
+                    self.assertIn("failure_neutral_init", entry.classifications)
+
+    def test_resident_count_publishes_only_device_derived_state(self) -> None:
+        checked = self.by_name[
+            "pgaccel_hash_count_i64_device_hash_execute_bounded_checked"
+        ]
+        self.assertTrue(checked.ok, checked.detail)
+        self.assertEqual(checked.path.name, "resident_count.cpp")
+        self.assertEqual(checked.guaranteed_output_parameter_positions, (3,))
+        self.assertEqual(checked.output_parameter_position_variants, ((3,),))
+        self.assertIn("kernel-derived opaque resource", checked.detail)
+
+        wrapper = self.by_name[
+            "pgaccel_hash_count_i64_device_hash_execute_bounded"
+        ]
+        self.assertTrue(wrapper.ok, wrapper.detail)
+        self.assertFalse(wrapper.is_status)
+        self.assertEqual(wrapper.path.name, "resident_count.cpp")
+        self.assertIn("opaque_device_resource", wrapper.classifications)
+        self.assertIn("publishes kernel-derived opaque resource", wrapper.detail)
+
+    def test_original_eleven_wrappers_keep_large_input_gpu_evidence(self) -> None:
+        wrappers = [
+            *(
+                f"pgaccel_reduce_bit_{operation}_i{width}"
+                for operation in ("and", "or", "xor")
+                for width in (16, 32, 64)
+            ),
+            "pgaccel_grouped_agg_execute",
+            "pgaccel_h3_cell_to_parent_resident",
+        ]
+        self.assertEqual(len(wrappers), 11)
+        for name in wrappers:
+            with self.subTest(name=name):
+                entry = self.by_name[name]
+                self.assertIn("large_input_gpu_chain", entry.classifications)
+
+
+class ReportTests(unittest.TestCase):
+    def test_json_report_contains_complete_classified_inventory(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_bad(int* out, size_t count) {
+              for (size_t i = 0; i < count; ++i) out[i] = 1;
+              pgaccel_record_gpu_exec();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            report_path = pathlib.Path(directory) / "report.json"
+            audit._write_json_report(report_path, [result])
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report["schema_version"], 4)
+        self.assertIn("guaranteed_output_parameter_positions", report["entrypoints"][0])
+        self.assertIn("output_parameter_position_variants", report["entrypoints"][0])
+        self.assertEqual(report["status"], "fail")
+        self.assertEqual(report["summary"]["entrypoints"], 1)
+        self.assertEqual(report["summary"]["entrypoints_failed"], 1)
+        self.assertEqual(report["summary"]["findings"], 1)
+        self.assertEqual(
+            report["summary"]["classification_counts"]["fake_gpu_counter"], 1
+        )
+        self.assertEqual(report["entrypoints"][0]["name"], "pgaccel_bad")
+        self.assertIn("host_computation", report["findings"][0]["classifications"])
+        self.assertIn("fake_gpu_counter", report["findings"][0]["classifications"])
+
+
+class PartitionForwardingObligationTests(unittest.TestCase):
+    """Actual-source obligations, deliberately not an overall positive proof."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.source = (REPO_ROOT / "pgaccel-kernels/src/grouped_agg.cpp").read_text()
+
+    def obligations(self, source: str) -> dict[str, tuple[str, ...]]:
+        normalized, _ = audit.normalize_preprocessor(source)
+        tokens = audit.lex_cpp(normalized)
+        return audit._partition_forwarding_obligations(
+            tokens, audit.parse_functions(tokens)
+        )
+
+    def mutated(self, before: str, after: str) -> str:
+        self.assertEqual(self.source.count(before), 1, before)
+        return self.source.replace(before, after)
+
+    def test_actual_source_preserves_forwarding_obligations(self) -> None:
+        # Empty obligations only mean forwarding has this exact syntax. The
+        # normal analyzer still has to prove the entire helper and its callees.
+        self.assertEqual(self.obligations(self.source), {})
+
+    def test_each_nullable_snapshot_arm_is_required(self) -> None:
+        original = "partition == nullptr ? pgaccel_hash_count_partition_v1{} : *partition"
+        for replacement in (
+            "partition == nullptr ? *partition : *partition",
+            "partition == nullptr ? pgaccel_hash_count_partition_v1{} "
+            ": pgaccel_hash_count_partition_v1{}",
+            "partition != nullptr ? pgaccel_hash_count_partition_v1{} : *partition",
+        ):
+            with self.subTest(replacement=replacement):
+                failures = self.obligations(self.mutated(original, replacement))
+                self.assertEqual(len(failures), 3)
+                self.assertTrue(
+                    all(
+                        "nullable partition snapshot" in errors[0]
+                        for errors in failures.values()
+                    )
+                )
+
+    def test_each_nullable_forwarding_arm_is_required(self) -> None:
+        original = "partition == nullptr ? nullptr : &partition_snapshot"
+        for replacement in (
+            "partition == nullptr ? &partition_snapshot : &partition_snapshot",
+            "partition == nullptr ? nullptr : nullptr",
+            "partition == nullptr ? nullptr : partition",
+            "partition != nullptr ? nullptr : &partition_snapshot",
+        ):
+            with self.subTest(replacement=replacement):
+                failures = self.obligations(self.mutated(original, replacement))
+                self.assertEqual(len(failures), 3)
+                self.assertTrue(
+                    all(
+                        "partition snapshot forwarding" in errors[0]
+                        for errors in failures.values()
+                    )
+                )
+
+    def test_wrapper_cannot_redirect_arguments_or_status(self) -> None:
+        original = "return execute_grouped_agg_impl(desc, out, detail, partition);"
+        for replacement in (
+            "return execute_grouped_agg_impl(desc, out, detail, nullptr);",
+            "return execute_grouped_agg_impl(desc, nullptr, detail, partition);",
+            "execute_grouped_agg_impl(desc, out, detail, partition); return PGACCEL_OK;",
+            "return unrecognized_helper(desc, out, detail, partition);",
+        ):
+            with self.subTest(replacement=replacement):
+                failures = self.obligations(self.mutated(original, replacement))
+                self.assertIn("pgaccel_hash_count_partition_execute_v1", failures)
+
+    def test_legacy_wrapper_cannot_forward_partition_or_discard_status(self) -> None:
+        original = "return execute_grouped_agg_impl(desc, out, detail, nullptr);"
+        for replacement in (
+            "return execute_grouped_agg_impl(desc, out, detail, partition);",
+            "execute_grouped_agg_impl(desc, out, detail, nullptr); return PGACCEL_OK;",
+        ):
+            with self.subTest(replacement=replacement):
+                failures = self.obligations(self.mutated(original, replacement))
+                self.assertIn("pgaccel_grouped_agg_execute_ex", failures)
+
+    def test_legacy_execute_cannot_redirect_output_or_hide_failure(self) -> None:
+        original = "return pgaccel_grouped_agg_execute_ex(desc, out, &detail);"
+        for replacement in (
+            "return pgaccel_grouped_agg_execute_ex(desc, nullptr, &detail);",
+            "pgaccel_grouped_agg_execute_ex(desc, out, &detail); return PGACCEL_OK;",
+        ):
+            with self.subTest(replacement=replacement):
+                failures = self.obligations(self.mutated(original, replacement))
+                self.assertIn("pgaccel_grouped_agg_execute", failures)
+
+    def test_forwarding_rejection_preserves_underlying_proof_failures(self) -> None:
+        # A small deliberately unsafe implementation tests the report seam,
+        # independently of the actual-source forwarding mutations above.
+        source = """
+        using pgaccel_status = int;
+        static pgaccel_status execute_grouped_agg_impl(
+            const int* desc, int* out, int* detail, const int* partition) {
+          *out = desc[0];
+          return PGACCEL_OK;
+        }
+        extern "C" pgaccel_status pgaccel_hash_count_partition_execute_v1(
+            const int* desc, const int* partition, int* out, int* detail) {
+          return execute_grouped_agg_impl(desc, out, detail, partition);
+        }
+        """
+        result = audit._audit_source_literal(FIXTURE_PATH, source)
+        finding = finding_for(result, "pgaccel_hash_count_partition_execute_v1")
+        ordinary = audit._audit_source_literal(
+            FIXTURE_PATH,
+            source.replace(
+                "pgaccel_hash_count_partition_execute_v1", "pgaccel_unsafe_wrapper"
+            ),
+        )
+        underlying = finding_for(ordinary, "pgaccel_unsafe_wrapper")
+        self.assertIn("partition_forwarding_unproved", finding.classifications)
+        self.assertTrue(set(underlying.classifications) <= set(finding.classifications))
+        self.assertTrue(underlying.classifications)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -75,7 +75,7 @@ typedef enum {
   PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW = 2,
   PGACCEL_GROUPED_AGG_DEVICE_ERROR_DIVISION_BY_ZERO = 3,
   PGACCEL_GROUPED_AGG_DEVICE_ERROR_DATE_OUT_OF_RANGE = 4,
-  /* Returned only by hash_count_partition_execute_v1 with ERROR. Legacy
+  /* Returned only by hash_count_partition_execute_v1/v2 with ERROR. Legacy
    * execute/_ex preserve UNSUPPORTED/NONE for capacity exhaustion. */
   PGACCEL_GROUPED_AGG_DEVICE_ERROR_HASH_CAPACITY = 5,
   PGACCEL_GROUPED_AGG_DEVICE_ERROR_H3_RESOLUTION = 6,
@@ -94,6 +94,26 @@ typedef struct {
   uint32_t reserved;
   uint64_t prefix;
 } pgaccel_hash_count_partition_v1;
+
+#define PGACCEL_HASH_COUNT_PARTITION_VERSION_V2 2u
+/* Additive WHERE-only contract. Never pass this control to a v1 entry point. */
+typedef struct {
+  uint32_t version;
+  uint32_t struct_size;
+  uint32_t flags;
+  uint32_t kind;
+  uint32_t prefix_bits;
+  uint32_t reserved;
+  uint64_t prefix;
+} pgaccel_hash_count_partition_v2;
+typedef struct {
+  uint32_t version;
+  uint32_t struct_size;
+  uint32_t flags;
+  uint32_t reserved;
+  uint64_t where_rows;
+  uint64_t partition_rows;
+} pgaccel_hash_count_population_v2;
 
 typedef enum {
   PGACCEL_GROUPED_AGG_MEASURE_COLUMN = 0,
@@ -581,6 +601,42 @@ pgaccel_status pgaccel_hash_count_partition_workspace_requirements_v1(
 pgaccel_status pgaccel_hash_count_partition_execute_v1(
     const pgaccel_grouped_agg_desc* desc, const pgaccel_hash_count_partition_v1* partition,
     pgaccel_grouped_agg_out* out, int32_t* detail);
+
+/* V2 requires exact SQL WHERE. Both populations are before aggregate FILTER;
+ * WHERE precedes key/H3 evaluation. The caller supplies a version2/size32,
+ * flags/reserved0 population control with both counts zero. Counts publish only
+ * on OK; partition_rows equals out->selected_count and is <= where_rows <= rows.
+ * ALL requires equal populations. Invalid controls leave all outputs untouched.
+ * V1 and non-WHERE callers retain their original workspace and dispatch. */
+pgaccel_status pgaccel_hash_count_partition_workspace_requirements_v2(
+    const pgaccel_grouped_agg_desc* desc, const pgaccel_hash_count_partition_v2* partition,
+    pgaccel_grouped_agg_workspace_req* out);
+pgaccel_status pgaccel_hash_count_partition_execute_v2(
+    const pgaccel_grouped_agg_desc* desc, const pgaccel_hash_count_partition_v2* partition,
+    pgaccel_grouped_agg_out* out, pgaccel_hash_count_population_v2* population, int32_t* detail);
+
+PGACCEL_ABI_PIN(sizeof(pgaccel_hash_count_partition_v2) == 32, "partition v2 size");
+PGACCEL_ABI_PIN(sizeof(pgaccel_hash_count_population_v2) == 32, "population v2 size");
+#ifdef __cplusplus
+PGACCEL_ABI_PIN(alignof(pgaccel_hash_count_partition_v2) == 8, "partition v2 alignment");
+PGACCEL_ABI_PIN(alignof(pgaccel_hash_count_population_v2) == 8, "population v2 alignment");
+#else
+PGACCEL_ABI_PIN(_Alignof(pgaccel_hash_count_partition_v2) == 8, "partition v2 alignment");
+PGACCEL_ABI_PIN(_Alignof(pgaccel_hash_count_population_v2) == 8, "population v2 alignment");
+#endif
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v2, version) == 0, "partition v2.version");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v2, struct_size) == 4, "partition v2.size");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v2, flags) == 8, "partition v2.flags");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v2, kind) == 12, "partition v2.kind");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v2, prefix_bits) == 16, "partition v2.bits");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v2, reserved) == 20, "partition v2.reserved");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v2, prefix) == 24, "partition v2.prefix");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_population_v2, version) == 0, "population v2.version");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_population_v2, struct_size) == 4, "population v2.size");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_population_v2, flags) == 8, "population v2.flags");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_population_v2, reserved) == 12, "population v2.reserved");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_population_v2, where_rows) == 16, "population v2.where");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_population_v2, partition_rows) == 24, "population v2.partition");
 
 PGACCEL_ABI_PIN(sizeof(pgaccel_hash_count_partition_v1) == 32, "partition size");
 #ifdef __cplusplus

@@ -1,0 +1,552 @@
+{
+  "status": "final audit3 passed; exact copy allowlist",
+  "files": [
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/audit1.sh",
+      "destination": "raw/audit1.sh",
+      "bytes": 1308,
+      "sha256": "dd69a2ffbf6d6de6945ed8e67d45c0c6af3ef813453b4f6a97ce3395b0c316a7"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/audit1/source-after.log",
+      "destination": "raw/audit1/source-after.log",
+      "bytes": 246,
+      "sha256": "003bf3a792d74d4a4113e5d5531ced1934bd445038044ab52c60d79b90ed5285"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/audit1/source.sha256",
+      "destination": "raw/audit1/source.sha256",
+      "bytes": 618,
+      "sha256": "e75ae0ebf6c3e941dbb3419d860a7b8e0a0305e9536373a7d836eb1a6cd8b2d4"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/audit1/terminal.log",
+      "destination": "raw/audit1/terminal.log",
+      "bytes": 11,
+      "sha256": "bfcb8ac376faa75e470d436a61cb87dc4242a2795de8149b2c9471f5145a3da7"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/audit1/tests.log",
+      "destination": "raw/audit1/tests.log",
+      "bytes": 7042,
+      "sha256": "5a81d1c39efc94c31545d68d9f67cc323f11d04ab14c735f4d1c9e904508ed2e"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/audit2.sh",
+      "destination": "raw/audit2.sh",
+      "bytes": 961,
+      "sha256": "e3e7a8c0ab74d83619d4649e00c2027f61e17676fb83aae44f6ddfa8800266ee"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/audit2/source-after.log",
+      "destination": "raw/audit2/source-after.log",
+      "bytes": 246,
+      "sha256": "003bf3a792d74d4a4113e5d5531ced1934bd445038044ab52c60d79b90ed5285"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/audit2/source.sha256",
+      "destination": "raw/audit2/source.sha256",
+      "bytes": 618,
+      "sha256": "8a0f83b48ff14da7c4870b0e75ab4e28fe3fa144857116c930ccb1a96e675b11"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/audit2/terminal.log",
+      "destination": "raw/audit2/terminal.log",
+      "bytes": 11,
+      "sha256": "d02e3480e89209ee1fd2c65d68cdd947e4001292c7e4d4594b8fc9c8e70c2fdc"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/audit2/tests.log",
+      "destination": "raw/audit2/tests.log",
+      "bytes": 1571,
+      "sha256": "54a615015da9e096246346b46faa634b655501dfc4f1762b774c4b09e853c46f"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/audit3.sh",
+      "destination": "raw/audit3.sh",
+      "bytes": 1429,
+      "sha256": "8bc3c4d5313b45e61d9bafa01238cb852ea482352e04209b16d71b1a89a47fd5"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/audit3/harness-after.log",
+      "destination": "raw/audit3/harness-after.log",
+      "bytes": 62,
+      "sha256": "c6b65ee9510c7e425d6ca4db2c74c449882fc53a248dff6b725471a98cb39395"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/audit3/harness.sha256",
+      "destination": "raw/audit3/harness.sha256",
+      "bytes": 124,
+      "sha256": "44466c9578e04977c7c4cd56341b853eaf64dbffcb934d632d4cc8c642647166"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/audit3/source-after.log",
+      "destination": "raw/audit3/source-after.log",
+      "bytes": 246,
+      "sha256": "003bf3a792d74d4a4113e5d5531ced1934bd445038044ab52c60d79b90ed5285"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/audit3/source.sha256",
+      "destination": "raw/audit3/source.sha256",
+      "bytes": 618,
+      "sha256": "905c0b4afdc61c4e0289353b5135d073412bcb654a045ba7efb6a80f7d862d5c"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/audit3/terminal.log",
+      "destination": "raw/audit3/terminal.log",
+      "bytes": 11,
+      "sha256": "d02e3480e89209ee1fd2c65d68cdd947e4001292c7e4d4594b8fc9c8e70c2fdc"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/audit3/tests.log",
+      "destination": "raw/audit3/tests.log",
+      "bytes": 2103,
+      "sha256": "a781a13738f2b4da44e11b6e0cff373d4513f18c03742a72f73edf31852dc85b"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract1.sh",
+      "destination": "raw/build-contract1.sh",
+      "bytes": 1696,
+      "sha256": "78388e85b7877a3a006cf82d49666ab125ec393aed503052e17db7d985a27458"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract1/binaries.sha256",
+      "destination": "raw/build-contract1/binaries.sha256",
+      "bytes": 392,
+      "sha256": "ddb0ec58373772ee4df6af6828b5c82142d767fc16f29bcca4b0d3e875081a6e"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract1/build.log",
+      "destination": "raw/build-contract1/build.log",
+      "bytes": 2082,
+      "sha256": "117006bad132776a9c2d63ce96f33e988feaa5e6afe298c1c1ee85e903ee0ef1"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract1/configure.log",
+      "destination": "raw/build-contract1/configure.log",
+      "bytes": 714,
+      "sha256": "e53e7c245fee91364bee55602d87162ba59d343a9e987e5562ff9d026863ad61"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract1/contract.log",
+      "destination": "raw/build-contract1/contract.log",
+      "bytes": 184,
+      "sha256": "a980b38bd24641e95677c72b61af44c697190758293101b7ca9e9bc3f55e84a9"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract1/disk.log",
+      "destination": "raw/build-contract1/disk.log",
+      "bytes": 164,
+      "sha256": "92d295e5cce3f77b26edd9542b327545f62a27f1f2ee4b28aadf2853254fd3aa"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract1/harness-after.log",
+      "destination": "raw/build-contract1/harness-after.log",
+      "bytes": 71,
+      "sha256": "01714306c2fe78460b120ae6d0fb855d4596c05606f1a79ebdc09af1d563e0d8"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract1/harness.sha256",
+      "destination": "raw/build-contract1/harness.sha256",
+      "bytes": 133,
+      "sha256": "a168c3ae7e9761f9537d73bfd0be1ed2deeb4ec927478c9f4d8f7044454f7f89"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract1/source-after.log",
+      "destination": "raw/build-contract1/source-after.log",
+      "bytes": 246,
+      "sha256": "003bf3a792d74d4a4113e5d5531ced1934bd445038044ab52c60d79b90ed5285"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract1/source.sha256",
+      "destination": "raw/build-contract1/source.sha256",
+      "bytes": 618,
+      "sha256": "e75ae0ebf6c3e941dbb3419d860a7b8e0a0305e9536373a7d836eb1a6cd8b2d4"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract1/terminal.log",
+      "destination": "raw/build-contract1/terminal.log",
+      "bytes": 26,
+      "sha256": "a4cfac968def8fff58763da420d48554f86d6b153fa72aa872e3e99a208fc520"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract2.sh",
+      "destination": "raw/build-contract2.sh",
+      "bytes": 1696,
+      "sha256": "5c4ed8faaf48b15c51a5562ebc0722bca5522fd0df38b605a670936656de79fc"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract2/binaries.sha256",
+      "destination": "raw/build-contract2/binaries.sha256",
+      "bytes": 392,
+      "sha256": "89f7fd551f2cbbdd9798fe3366600067f221af752f418b9ccb77cc6748c43b50"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract2/build.log",
+      "destination": "raw/build-contract2/build.log",
+      "bytes": 2082,
+      "sha256": "9afdf21270b335195d2007bf063d059bd188f8d91ecaae78fb68e0d0fd64f17c"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract2/configure.log",
+      "destination": "raw/build-contract2/configure.log",
+      "bytes": 714,
+      "sha256": "74de45150e0d46a1550c9310367e4f32a284df627cb315137af18f40f7f8a85e"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract2/contract.log",
+      "destination": "raw/build-contract2/contract.log",
+      "bytes": 352,
+      "sha256": "146f0d3c99ec4d2cb5fb04e9274e916ced8bbe1fe5e19afd927c9a812b13f48c"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract2/disk.log",
+      "destination": "raw/build-contract2/disk.log",
+      "bytes": 164,
+      "sha256": "52f6a9897cf08f89730490a69041ebe91435d4fc5ccc45ca7b4fa715c80f595c"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract2/harness-after.log",
+      "destination": "raw/build-contract2/harness-after.log",
+      "bytes": 71,
+      "sha256": "d4111112d83519c444014f1f1ad680880c2eaf66de5e5364e16254bcbf85dec4"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract2/harness.sha256",
+      "destination": "raw/build-contract2/harness.sha256",
+      "bytes": 133,
+      "sha256": "613fe410f232e2a4e626fec951fca49e025fd1462c95d28ac145cfa72d9c9385"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract2/source-after.log",
+      "destination": "raw/build-contract2/source-after.log",
+      "bytes": 246,
+      "sha256": "003bf3a792d74d4a4113e5d5531ced1934bd445038044ab52c60d79b90ed5285"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract2/source.sha256",
+      "destination": "raw/build-contract2/source.sha256",
+      "bytes": 618,
+      "sha256": "8a0f83b48ff14da7c4870b0e75ab4e28fe3fa144857116c930ccb1a96e675b11"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract2/terminal.log",
+      "destination": "raw/build-contract2/terminal.log",
+      "bytes": 26,
+      "sha256": "3c3f7026e05cf579e7e75416ab09a42906f6991632a77c466e2a72f48e5e496b"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract3.sh",
+      "destination": "raw/build-contract3.sh",
+      "bytes": 1704,
+      "sha256": "2eba86ab7e25b30faaf7827f21504e2f46b1aabe6eac8f50719ee45564299614"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract3/binaries.sha256",
+      "destination": "raw/build-contract3/binaries.sha256",
+      "bytes": 392,
+      "sha256": "04f263a9e48482503f8e69aeb2e25253962904dc7e92d394c3153f6bd078b0ba"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract3/build.log",
+      "destination": "raw/build-contract3/build.log",
+      "bytes": 2297,
+      "sha256": "97f813bba1e05ca3f15e37ec3dcc042ad435160293d3b692146e68f51c16206f"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract3/configure.log",
+      "destination": "raw/build-contract3/configure.log",
+      "bytes": 714,
+      "sha256": "5217d39831ccddecde10bcb6c67b1eae483439eaa47dd52e822213e3b9ba5907"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract3/contract.log",
+      "destination": "raw/build-contract3/contract.log",
+      "bytes": 184,
+      "sha256": "44a542f389fde0933719ec040fe2414d6132e8a5e4ad8fb0dd64cd99acb550fe"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract3/disk.log",
+      "destination": "raw/build-contract3/disk.log",
+      "bytes": 164,
+      "sha256": "4262eb1c1cd4cb008aa95e28688281d0116c89ff4d82709dc474f9c35de2d71e"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract3/harness-after.log",
+      "destination": "raw/build-contract3/harness-after.log",
+      "bytes": 71,
+      "sha256": "5d558424c070123eb49354fc7a7dc31b07d8b6da7be103c58c541a6365b1477b"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract3/harness.sha256",
+      "destination": "raw/build-contract3/harness.sha256",
+      "bytes": 133,
+      "sha256": "2f7ff1190217ec2f4d18c9e95ae6190de49d5f7103347b386f013440f14043d5"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract3/source-after.log",
+      "destination": "raw/build-contract3/source-after.log",
+      "bytes": 246,
+      "sha256": "003bf3a792d74d4a4113e5d5531ced1934bd445038044ab52c60d79b90ed5285"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract3/source.sha256",
+      "destination": "raw/build-contract3/source.sha256",
+      "bytes": 618,
+      "sha256": "7c8856da43ec9ff069edee406b1b02da967ff2bfef2a1d8e668ae36a981afaa9"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract3/terminal.log",
+      "destination": "raw/build-contract3/terminal.log",
+      "bytes": 26,
+      "sha256": "a4cfac968def8fff58763da420d48554f86d6b153fa72aa872e3e99a208fc520"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract4.sh",
+      "destination": "raw/build-contract4.sh",
+      "bytes": 1704,
+      "sha256": "d7b5dc2a6d1b3a08c1d8c7e7ae182770993e3939630b147d9fa36101b4c36c9c"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract4/binaries.sha256",
+      "destination": "raw/build-contract4/binaries.sha256",
+      "bytes": 392,
+      "sha256": "2949a05fcf70777dafe0998c8cb1441d29ac84a23978de04c49a87495cd314a0"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract4/build.log",
+      "destination": "raw/build-contract4/build.log",
+      "bytes": 2297,
+      "sha256": "42f0db6e957cb47c7ce964c1f9f048ecc5a234bc69e2820be69ebfc9375bdc15"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract4/configure.log",
+      "destination": "raw/build-contract4/configure.log",
+      "bytes": 714,
+      "sha256": "8318c3a2a3dff941f66454822bb8e6c0c9b76af72abc8ff999493fcb3971cd96"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract4/contract.log",
+      "destination": "raw/build-contract4/contract.log",
+      "bytes": 184,
+      "sha256": "44a542f389fde0933719ec040fe2414d6132e8a5e4ad8fb0dd64cd99acb550fe"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract4/disk.log",
+      "destination": "raw/build-contract4/disk.log",
+      "bytes": 164,
+      "sha256": "10d89e90b434b693dec6c656e2ac310fa07a104011f3c8d31b4e37b86bf8f46d"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract4/harness-after.log",
+      "destination": "raw/build-contract4/harness-after.log",
+      "bytes": 71,
+      "sha256": "7b97c0c831a36795aa7647729ff7566da2bdb8a3deff10468d2401024859421a"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract4/harness.sha256",
+      "destination": "raw/build-contract4/harness.sha256",
+      "bytes": 133,
+      "sha256": "e82b60720c2e456bed49794f0f3a18fcb81abc80932916844ca613e9cedc939e"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract4/source-after.log",
+      "destination": "raw/build-contract4/source-after.log",
+      "bytes": 246,
+      "sha256": "003bf3a792d74d4a4113e5d5531ced1934bd445038044ab52c60d79b90ed5285"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract4/source.sha256",
+      "destination": "raw/build-contract4/source.sha256",
+      "bytes": 618,
+      "sha256": "905c0b4afdc61c4e0289353b5135d073412bcb654a045ba7efb6a80f7d862d5c"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/build-contract4/terminal.log",
+      "destination": "raw/build-contract4/terminal.log",
+      "bytes": 26,
+      "sha256": "a4cfac968def8fff58763da420d48554f86d6b153fa72aa872e3e99a208fc520"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu1-source/pgaccel-kernels/include/pgaccel_olap.h",
+      "destination": "raw/gpu1-source/pgaccel-kernels/include/pgaccel_olap.h",
+      "bytes": 40569,
+      "sha256": "cef704f653d26805db84713223a5348772b9be6260eb899d47407b52bfa584f4"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu1-source/pgaccel-kernels/src/grouped_agg.cpp",
+      "destination": "raw/gpu1-source/pgaccel-kernels/src/grouped_agg.cpp",
+      "bytes": 320171,
+      "sha256": "1ca508c6ccfbd50fba6ae8546e3307a04ae602672805395f455986ea302edf49"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu1-source/pgaccel-kernels/test/test_grouped_agg_hash.cpp",
+      "destination": "raw/gpu1-source/pgaccel-kernels/test/test_grouped_agg_hash.cpp",
+      "bytes": 163718,
+      "sha256": "22e66a0ef172403e66b771e17055b6d88f974e7f9a52475430a407d919c1702c"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu1-source/scripts/cpu_cheat_abi_manifest.txt",
+      "destination": "raw/gpu1-source/scripts/cpu_cheat_abi_manifest.txt",
+      "bytes": 13215,
+      "sha256": "a121e9b7305e3c2482df966ed5c63ef0b81e838b012ffd640c56df89a6bd9e01"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu1-source/scripts/cpu_cheat_audit.py",
+      "destination": "raw/gpu1-source/scripts/cpu_cheat_audit.py",
+      "bytes": 482809,
+      "sha256": "6993822ff8f34df9b8ba1b4d9e8fae34c3eb2d3d0c460ec641427e4d03b7045e"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu1-source/scripts/tests/test_cpu_cheat_audit.py",
+      "destination": "raw/gpu1-source/scripts/tests/test_cpu_cheat_audit.py",
+      "bytes": 316440,
+      "sha256": "d2f11ef2c438faf51cbb20e799e0162bf4e4ad0972827fee9f2ec96bd2ab30e6"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu1.sh",
+      "destination": "raw/gpu1.sh",
+      "bytes": 1343,
+      "sha256": "42b76ca3d3fcd5edf4512649c850a91542db1c1b94c2d99ef82cdbfb92906c2d"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu1/binaries-after.log",
+      "destination": "raw/gpu1/binaries-after.log",
+      "bytes": 383,
+      "sha256": "4b2f87adee91e5beecf0945ddf0e5a31ddffbdfa4f925552417037f6bb4ef812"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu1/binaries.sha256",
+      "destination": "raw/gpu1/binaries.sha256",
+      "bytes": 569,
+      "sha256": "04ee0084f6f4593b6132f14ee407289cd93d2099650f6f9a28e4101ab0b9db1a"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu1/disk.log",
+      "destination": "raw/gpu1/disk.log",
+      "bytes": 164,
+      "sha256": "4262eb1c1cd4cb008aa95e28688281d0116c89ff4d82709dc474f9c35de2d71e"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu1/harness-after.log",
+      "destination": "raw/gpu1/harness-after.log",
+      "bytes": 60,
+      "sha256": "71cd387e95894a1b2abd1937bdbc1a29cadaad3f24b5a27e36b885d1ff59488b"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu1/harness.sha256",
+      "destination": "raw/gpu1/harness.sha256",
+      "bytes": 122,
+      "sha256": "fe006ff6478e776df1e8888e1b6762782267978349e74b0ed5e9f18b7a14e942"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu1/hash.log",
+      "destination": "raw/gpu1/hash.log",
+      "bytes": 28766,
+      "sha256": "ee4a5d8435476c3a8772f0015eb8b5cdca55ae771e0f70c70a3dad9ff74b7618"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu1/memory.log",
+      "destination": "raw/gpu1/memory.log",
+      "bytes": 1247,
+      "sha256": "abab87ec1e98a9264937ce5888f2015b8fadb00b3770b50c6518affc40300e46"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu1/source-after.log",
+      "destination": "raw/gpu1/source-after.log",
+      "bytes": 246,
+      "sha256": "003bf3a792d74d4a4113e5d5531ced1934bd445038044ab52c60d79b90ed5285"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu1/source.sha256",
+      "destination": "raw/gpu1/source.sha256",
+      "bytes": 618,
+      "sha256": "7c8856da43ec9ff069edee406b1b02da967ff2bfef2a1d8e668ae36a981afaa9"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu1/terminal.log",
+      "destination": "raw/gpu1/terminal.log",
+      "bytes": 22,
+      "sha256": "ca9b14dbf4471619546160674d894e677c7bbbb8af2147dd852ae6b5d3c596f6"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu2.sh",
+      "destination": "raw/gpu2.sh",
+      "bytes": 1343,
+      "sha256": "444815a12d030ec064d8c0bb31a8269d621e0b2ce2cb1abe9427a503631ed9a2"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu2/binaries-after.log",
+      "destination": "raw/gpu2/binaries-after.log",
+      "bytes": 383,
+      "sha256": "4a1b010ccbc518147409da7ae27e13161d1e402015af7b204f166bca4b621901"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu2/binaries.sha256",
+      "destination": "raw/gpu2/binaries.sha256",
+      "bytes": 569,
+      "sha256": "bb0ece062f2c0f25d282d0fc17729ac51891a0a83c714d08b4d1e955483c5508"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu2/disk.log",
+      "destination": "raw/gpu2/disk.log",
+      "bytes": 164,
+      "sha256": "10d89e90b434b693dec6c656e2ac310fa07a104011f3c8d31b4e37b86bf8f46d"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu2/h3.log",
+      "destination": "raw/gpu2/h3.log",
+      "bytes": 24165,
+      "sha256": "2e2a03ed89a08ab8c1f7fd19094182c54a283464ced08194567c2f679a1a4fa3"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu2/harness-after.log",
+      "destination": "raw/gpu2/harness-after.log",
+      "bytes": 60,
+      "sha256": "07ed73ee4b2cc503cf1fd2f873a82efec3ae67441edf44ac99fdd21b3e76130f"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu2/harness.sha256",
+      "destination": "raw/gpu2/harness.sha256",
+      "bytes": 122,
+      "sha256": "9f903de1c748fa323bcc7d316db9e0a81a80662da482d5adaf08e06c32ad3878"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu2/hash.log",
+      "destination": "raw/gpu2/hash.log",
+      "bytes": 18353,
+      "sha256": "4369d87919108496db12c1535b24491d307744b83ac5dfacebf70ce882e3878a"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu2/memory.log",
+      "destination": "raw/gpu2/memory.log",
+      "bytes": 1247,
+      "sha256": "f192c2cc257be052fc0ee05d0bc4a8a640aedea7f34dd0fc0efcd8235541977b"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu2/source-after.log",
+      "destination": "raw/gpu2/source-after.log",
+      "bytes": 246,
+      "sha256": "003bf3a792d74d4a4113e5d5531ced1934bd445038044ab52c60d79b90ed5285"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu2/source.sha256",
+      "destination": "raw/gpu2/source.sha256",
+      "bytes": 618,
+      "sha256": "905c0b4afdc61c4e0289353b5135d073412bcb654a045ba7efb6a80f7d862d5c"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/gpu2/terminal.log",
+      "destination": "raw/gpu2/terminal.log",
+      "bytes": 26,
+      "sha256": "a4cfac968def8fff58763da420d48554f86d6b153fa72aa872e3e99a208fc520"
+    },
+    {
+      "source": ".codex/scratch/hash-count-where-native-20261030/toolchain-post-run.md",
+      "destination": "raw/toolchain-post-run.md",
+      "bytes": 1082,
+      "sha256": "f8f80ecc1a93f29ce659291fbdcf3363f3568ce3f83a05e66668c5c09b7255ac"
+    }
+  ],
+  "total_bytes": 1461983
+}

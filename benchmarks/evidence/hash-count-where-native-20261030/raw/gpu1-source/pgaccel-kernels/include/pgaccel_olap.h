@@ -1,0 +1,785 @@
+/*
+ * pgaccel_olap.h - descriptor ABI for resident grouped aggregation.
+ *
+ * This is the contract shared by the grouped-aggregate kernel, Rust bridge,
+ * and planner/residency/executor pipeline. It contains no admission thresholds
+ * or launch geometry. Those remain DeviceLimits and kernel implementation
+ * details. Exact semantics and evolution rules live in docs/olap-abi.md.
+ */
+
+#ifndef PGACCEL_OLAP_H
+#define PGACCEL_OLAP_H
+
+#include "pgaccel_expr.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Convert resident BOOL values plus optional NULL bytes into an exact SQL
+ * mask on-device. count <= 65536; all nonempty spans must be same-device USM,
+ * output must be four-byte aligned and disjoint from inputs. Zero count is a
+ * no-op. Output is TRUE/FALSE/UNCERTAIN, or 2 for a malformed evaluated BOOL/
+ * NULL byte. PGACCEL_OK means conversion completed, not that all rows are
+ * canonical: consumers MUST reject 2 (the grouped SQL FILTER does so before
+ * publication). NULL rows do not inspect their value payload. */
+pgaccel_status pgaccel_bool_sql_mask(const uint8_t* values, const uint8_t* nulls,
+                                    size_t count, int8_t* output);
+
+#define PGACCEL_OLAP_ABI_VERSION 1u
+
+#define PGACCEL_GROUPED_AGG_MAX_KEYS 3u
+#define PGACCEL_GROUPED_AGG_MAX_MEASURES 4u
+#define PGACCEL_GROUPED_AGG_MAX_DIMS 4u
+#define PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES 4u
+#define PGACCEL_GROUPED_AGG_FILTER_ACCEPT_NULL (1u << 0)
+
+#define PGACCEL_GROUPED_AGG_LANE_SUM (1u << 0)
+#define PGACCEL_GROUPED_AGG_LANE_MIN (1u << 1)
+#define PGACCEL_GROUPED_AGG_LANE_MAX (1u << 2)
+#define PGACCEL_GROUPED_AGG_LANE_COUNT (1u << 3)
+#define PGACCEL_GROUPED_AGG_LANE_SUMSQ (1u << 4)
+#define PGACCEL_GROUPED_AGG_LANE_RHS_SUM (1u << 5)
+#define PGACCEL_GROUPED_AGG_LANE_RHS_COUNT (1u << 6)
+#define PGACCEL_GROUPED_AGG_LANE_ALL_KNOWN 0x7fu
+
+/* Chunk lifecycle bits. One-shot execution sets all three. A reusable
+ * workspace's first execute must include RESET; it then permits zero or more
+ * ACCUMULATE calls followed by ACCUMULATE|FINALIZE or FINALIZE. Calls after a
+ * failure or FINALIZE also require RESET. */
+#define PGACCEL_GROUPED_AGG_EXEC_RESET (1u << 0)
+#define PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE (1u << 1)
+#define PGACCEL_GROUPED_AGG_EXEC_FINALIZE (1u << 2)
+#define PGACCEL_GROUPED_AGG_EXEC_ALL_KNOWN 0x7u
+
+#define PGACCEL_GROUPED_AGG_KEY_NO_NULL_CODE INT32_MIN
+
+/* Optional exact key transforms performed by the consuming aggregate kernel.
+ * H3_PARENT is valid only for one FACT INT64 HASH key. In that form `_pad0`
+ * carries the target parent resolution (0..15). Keeping the argument in the
+ * formerly reserved word preserves the frozen v1 struct size while flags make
+ * the interpretation explicit and fail-closed. */
+#define PGACCEL_GROUPED_AGG_KEY_FLAG_H3_PARENT (1u << 0)
+#define PGACCEL_GROUPED_AGG_KEY_FLAG_ALL_KNOWN PGACCEL_GROUPED_AGG_KEY_FLAG_H3_PARENT
+
+/* A NUMERIC/INT32 COLUMN or SCALAR may use its inactive rhs for an independent
+ * INT32 aggregate predicate. The matching filter must address that same slot's
+ * RHS. This is not an arithmetic operand and never contributes a value state. */
+#define PGACCEL_GROUPED_AGG_MEASURE_FLAG_FILTER_INPUT (1u << 0)
+
+/* Detailed device failures returned by grouped_agg_execute_ex. These refine
+ * PGACCEL_ERROR only; other pgaccel_status values leave detail as NONE. */
+typedef enum {
+  PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE = 0,
+  PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID = 1,
+  PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW = 2,
+  PGACCEL_GROUPED_AGG_DEVICE_ERROR_DIVISION_BY_ZERO = 3,
+  PGACCEL_GROUPED_AGG_DEVICE_ERROR_DATE_OUT_OF_RANGE = 4,
+  /* Returned only by hash_count_partition_execute_v1 with ERROR. Legacy
+   * execute/_ex preserve UNSUPPORTED/NONE for capacity exhaustion. */
+  PGACCEL_GROUPED_AGG_DEVICE_ERROR_HASH_CAPACITY = 5,
+  PGACCEL_GROUPED_AGG_DEVICE_ERROR_H3_RESOLUTION = 6,
+} pgaccel_grouped_agg_device_error;
+
+#define PGACCEL_HASH_COUNT_PARTITION_VERSION 1u
+#define PGACCEL_HASH_COUNT_PARTITION_ALL 0u
+#define PGACCEL_HASH_COUNT_PARTITION_NONNULL_PREFIX 1u
+#define PGACCEL_HASH_COUNT_PARTITION_NULL_ONLY 2u
+typedef struct {
+  uint32_t version;
+  uint32_t struct_size;
+  uint32_t flags;
+  uint32_t kind;
+  uint32_t prefix_bits;
+  uint32_t reserved;
+  uint64_t prefix;
+} pgaccel_hash_count_partition_v1;
+
+#define PGACCEL_HASH_COUNT_PARTITION_VERSION_V2 2u
+/* Additive WHERE-only contract. Never pass this control to a v1 entry point. */
+typedef struct {
+  uint32_t version;
+  uint32_t struct_size;
+  uint32_t flags;
+  uint32_t kind;
+  uint32_t prefix_bits;
+  uint32_t reserved;
+  uint64_t prefix;
+} pgaccel_hash_count_partition_v2;
+typedef struct {
+  uint32_t version;
+  uint32_t struct_size;
+  uint32_t flags;
+  uint32_t reserved;
+  uint64_t where_rows;
+  uint64_t partition_rows;
+} pgaccel_hash_count_population_v2;
+
+typedef enum {
+  PGACCEL_GROUPED_AGG_MEASURE_COLUMN = 0,
+  PGACCEL_GROUPED_AGG_MEASURE_MUL = 1,
+  PGACCEL_GROUPED_AGG_MEASURE_SUB = 2,
+  PGACCEL_GROUPED_AGG_MEASURE_STATS_PAIR = 3,
+  PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR = 4,
+  PGACCEL_GROUPED_AGG_MEASURE_ADD = 5,
+  PGACCEL_GROUPED_AGG_MEASURE_SCALAR = 6,
+} pgaccel_grouped_agg_measure_op;
+
+typedef enum {
+  PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT = 0,
+  PGACCEL_GROUPED_AGG_KEY_SOURCE_DIM0 = 1,
+  PGACCEL_GROUPED_AGG_KEY_SOURCE_DIM1 = 2,
+  PGACCEL_GROUPED_AGG_KEY_SOURCE_DIM2 = 3,
+  PGACCEL_GROUPED_AGG_KEY_SOURCE_DIM3 = 4,
+} pgaccel_grouped_agg_key_source;
+
+/* SQL masks treat both FALSE (-1) and UNKNOWN (0) as rejected. RECHECK masks
+ * treat 0 as unresolved and increment uncertain_count. Other mask bytes are
+ * descriptor/runtime errors, never truthy-by-nonzero. */
+typedef enum {
+  PGACCEL_GROUPED_AGG_FILTER_NONE = 0,
+  PGACCEL_GROUPED_AGG_FILTER_SQL = 1,
+  PGACCEL_GROUPED_AGG_FILTER_RECHECK = 2,
+} pgaccel_grouped_agg_filter_kind;
+
+typedef enum {
+  PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE = 0,
+  PGACCEL_GROUPED_AGG_PRED_SOURCE_RHS = 1,
+  // SQL TRUE from a validated Boolean SCALAR measure; WHERE only.
+  PGACCEL_GROUPED_AGG_PRED_SOURCE_SCALAR = 2,
+} pgaccel_grouped_agg_pred_source;
+
+typedef enum {
+  PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX = 0,
+  PGACCEL_GROUPED_AGG_GROUPING_HASH = 1,
+} pgaccel_grouped_agg_grouping_mode;
+
+typedef enum {
+  PGACCEL_GROUPED_AGG_OUTPUT_DENSE = 0,
+  PGACCEL_GROUPED_AGG_OUTPUT_COMPACT = 1,
+} pgaccel_grouped_agg_output_mode;
+
+/* Stable physical execution branches. This classification is produced by
+ * the same validated layout and predicates used by grouped_agg_execute_ex;
+ * callers must not infer a branch from the logical descriptor alone. */
+typedef enum {
+  PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_HASH = 1,
+  PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_COUNT = 2,
+  PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_INTEGER = 3,
+  PGACCEL_GROUPED_AGG_KERNEL_MODE_SERIAL_GENERIC = 4,
+  PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_NUMERIC = 5,
+} pgaccel_grouped_agg_kernel_mode_kind;
+
+/* Dedicated accumulator-state kinds. Numeric's packed representation is
+ * explicitly opted into below. Reserved/unsupported shapes return
+ * PGACCEL_UNSUPPORTED without changing existing descriptor layouts. */
+typedef enum {
+  PGACCEL_GROUPED_AGG_ACCUM_I64 = 1,
+  PGACCEL_GROUPED_AGG_ACCUM_F64 = 2,
+  PGACCEL_GROUPED_AGG_ACCUM_NUMERIC = 3,
+  PGACCEL_GROUPED_AGG_ACCUM_INTERVAL = 4,
+} pgaccel_grouped_agg_accum_kind;
+
+/* Physical measure inputs deliberately use an OLAP-owned type domain rather
+ * than pgaccel_val_tag. The latter cannot describe packed NUMERIC digits
+ * or PostgreSQL interval states. INVALID is the canonical zeroed/unused view. */
+typedef enum {
+  PGACCEL_GROUPED_AGG_PHYSICAL_INVALID = 0,
+  PGACCEL_GROUPED_AGG_PHYSICAL_BOOL = 1,
+  PGACCEL_GROUPED_AGG_PHYSICAL_INT32 = 2,
+  PGACCEL_GROUPED_AGG_PHYSICAL_INT64 = 3,
+  PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT32 = 4,
+  PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64 = 5,
+  PGACCEL_GROUPED_AGG_PHYSICAL_DATE = 6,
+  PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP = 7,
+  PGACCEL_GROUPED_AGG_PHYSICAL_NUMERIC = 8,
+  PGACCEL_GROUPED_AGG_PHYSICAL_INTERVAL = 9,
+} pgaccel_grouped_agg_physical_type;
+
+/* Explicit opt-in for the packed decimal view below. Legacy reserved NUMERIC
+ * views with flags=0 remain unsupported. Existing descriptor layouts do not
+ * change. The view itself is host-readable metadata borrowed for the call;
+ * its rows/digits and the measure's NULL sidecar are device-accessible USM.
+ * Only the GPU may inspect row headers/digits or perform numeric aggregation. */
+#define PGACCEL_GROUPED_AGG_NUMERIC_PACKED_VIEW 1u
+#define PGACCEL_GROUPED_AGG_INT64_NUMERIC_STATE_BYTES 40u
+typedef struct {
+  uint64_t digit_offset;
+  uint16_t ndigits;
+  int16_t weight;
+  uint16_t sign;
+  uint16_t dscale;
+} pgaccel_numeric_row;
+
+typedef struct {
+  const pgaccel_numeric_row* rows;
+  const uint16_t* digits;
+  uint64_t digit_count;
+  uint64_t row_count;
+  int32_t min_weight;
+  int32_t max_weight;
+  uint32_t max_ndigits;
+  uint32_t reserved;
+} pgaccel_numeric_view;
+
+/* One fixed-stride SUM result: header followed by native-endian u16 base-10000
+ * digits, most significant first. The stride is 16 + round_up_8(2 *
+ * (max_weight-min_weight+5)); four carry limbs allow exact cancellation before
+ * PostgreSQL's final numeric range check. ndigits=0 represents finite zero or
+ * a special; nonnull_count distinguishes SQL NULL. Sign tags match numeric_send
+ * (0, 0x4000, 0xc000, 0xd000, 0xf000). Inactive/all-NULL headers are zero. */
+typedef struct {
+  int32_t weight;
+  uint32_t ndigits;
+  uint32_t sign;
+  uint32_t dscale;
+} pgaccel_numeric_sum;
+
+/* One logical grouping key. FACT reads values for the current row. Dense
+ * radix mode requires an INT32 dictionary/dense code column. Hash mode also
+ * accepts INT32 and INT64, including INT64 H3 indexes. Raw INT32 hash keys
+ * sign-extend to INT64 compact output; callers must supply an INT64 key-out
+ * lane for either integer input width. DIM sources ignore values and use the
+ * key-owned lookup_by_key map, allowing multiple group attributes from the
+ * same dimension.
+ *
+ * Dense codes lie in [code_min, code_min + cardinality). A FACT NULL maps to
+ * the explicit in-range null_code and therefore forms one SQL NULL group.
+ * An explicit null_code must not equal KEY_NO_NULL_CODE; that sentinel is valid
+ * only when the producer proves the key non-null.
+ * Dimension maps encode a nullable group attribute with the same null_code.
+ * Keys compose in array order, key 0 most significant. Hash grouping ignores
+ * code_min/cardinality but still groups NULL values together. When
+ * KEY_FLAG_H3_PARENT is set, values is the raw h3index lane and `_pad0` is the
+ * exact target parent resolution; validation, transform, grouping, and output
+ * materialization all happen in the hash aggregate pipeline. The single-key
+ * hash path accepts an exact SQL WHERE mask before key/measure evaluation:
+ * rejected rows create no group and consume no group capacity. This differs
+ * from measure FILTER, which retains groups with zero contributions. */
+typedef struct {
+  pgaccel_expr_usm_col values;
+  const int32_t* lookup_by_key;
+  int32_t source;
+  int32_t code_min;
+  uint32_t cardinality;
+  int32_t null_code;
+  uint32_t flags;
+  uint32_t _pad0;
+} pgaccel_grouped_agg_key;
+
+/* One physical measure input. element_bytes is the width of one value, not the
+ * accumulator state. With NUMERIC_PACKED_VIEW, values instead points to one
+ * host-readable pgaccel_numeric_view, element_bytes is sizeof that view, and
+ * scale is zero (each row carries its own scale). SCALAR_VIEW_V1 instead uses
+ * the explicitly versioned host metadata described below. Otherwise flags is zero;
+ * scale is zero for scalars and interval fractional precision for INTERVAL.
+ * nulls may be NULL, meaning every row is non-NULL. */
+typedef struct {
+  const void* values;
+  const uint8_t* nulls;
+  int32_t physical_type;
+  uint32_t element_bytes;
+  int32_t scale;
+  uint32_t flags;
+} pgaccel_grouped_agg_measure_col;
+
+/* Additive, explicitly versioned SPG1 input view. A SCALAR measure's value
+ * points to this HOST metadata, has flags=SCALAR_VIEW_V1, element_bytes=sizeof
+ * the view, nulls=NULL and scale=0. physical_type is the expression result
+ * (INT32, or BOOL for COUNT-only). Programs and input descriptors are host
+ * metadata borrowed through the synchronous call; only input values/nulls are
+ * device-accessible resident lanes. Native validation proves the entire typed
+ * program before copying metadata into sized descriptor workspace. No host
+ * row evaluation or intermediate result column is permitted. Chunk callers
+ * advance the input pointers and keep row_count as their accessible row bound,
+ * at least the current descriptor size (RESET/FINALIZE may consume zero rows).
+ * SCALAR accepts the existing dense integer lanes and FILTER_INPUT RHS.
+ * This native contract alone does not enable planner admission or Rust facade
+ * ownership. Hash/dimension/serial-generic scalar execution is unsupported. */
+#define PGACCEL_GROUPED_AGG_SCALAR_VIEW_V1 2u
+#define PGACCEL_SCALAR_VIEW_VERSION 1u
+#define PGACCEL_SCALAR_MAX_INPUTS 64u
+#define PGACCEL_SCALAR_MAX_WORDS 579u
+typedef struct {
+  const void* values;
+  const uint8_t* nulls;
+  int32_t physical_type;
+  uint32_t reserved;
+} pgaccel_scalar_input;
+
+typedef struct {
+  uint32_t version;
+  uint32_t word_count;
+  uint32_t input_count;
+  uint32_t reserved;
+  uint64_t row_count;
+  const int32_t* words;
+  const pgaccel_scalar_input* inputs;
+} pgaccel_scalar_view;
+
+/* One expression/accumulator slot. ABI v1 supports FLOAT64 -> F64 and
+ * INT32/INT64 -> I64. A COLUMN slot projecting only COUNT also accepts BOOL,
+ * FLOAT32, DATE, and TIMESTAMP because no numeric value state is consumed.
+ * Integer expression results are checked at their input SQL width before any
+ * aggregate lane consumes them, and I64 accumulator arithmetic is checked;
+ * overflow returns PGACCEL_ERROR. Packed NUMERIC supports dense COLUMN SUM
+ * and/or COUNT without dimensions, including mixed INT32/I64 COLUMN states,
+ * up to four value states with an
+ * optional final COUNT_STAR within that limit. Legacy NUMERIC and INTERVAL
+ * representations remain UNSUPPORTED. FILTER_INPUT permits independent exact
+ * INT32 aggregate filters through rhs; unflagged NUMERIC has no aggregate
+ * filter. Global WHERE accepts a SQL mask or up to four exact INT32 VALUE
+ * ranges, evaluated before grouping and aggregate filters. Selected-row
+ * output counts accepted rows; all input rows count toward lifecycle bounds.
+ * COUNT_STAR has canonical zero value/rhs views.
+ * Packed NUMERIC COUNT-only uses state_bytes=8 and consumes only the NULL
+ * sidecar (after any predicate), with no decimal SUM lane or digit buckets.
+ * Mixed INT32 SUM lifecycles are bounded by INT64_MAX / 2^31 input rows so
+ * every possible signed sum prefix fits int64. Pure decimal/count-only
+ * lifecycles retain the INT64_MAX / 10000 bound.
+ * accumulator_kind and state_bytes describe output and workspace state
+ * independently of each input's physical width. */
+typedef struct {
+  pgaccel_grouped_agg_measure_col value;
+  pgaccel_grouped_agg_measure_col rhs;
+  int32_t op;
+  uint32_t agg_mask;
+  int32_t accumulator_kind;
+  uint32_t state_bytes;
+  uint32_t flags;
+  uint32_t _pad0;
+} pgaccel_grouped_agg_measure;
+
+/* A composable predicate. mask is an optional tri-state byte sidecar using
+ * PGACCEL_EXPR_TRUE (+1), PGACCEL_EXPR_FALSE (-1), and
+ * PGACCEL_EXPR_UNCERTAIN (0). Inclusive range pairs are ORed, then ANDed with
+ * mask and the optional compare-constant term. Bounds and constants are
+ * pgaccel_val so INT64 predicates never round through f64. Their tags must
+ * match the referenced source column. ALWAYS_TRUE disables compare-constant.
+ * FILTER_ACCEPT_NULL permits NULL values for an INT32 COLUMN predicate and
+ * requires ALWAYS_TRUE comparison. Its zero-range form is IS NULL; its ranges
+ * describe accepted non-NULL values. SQL masks still reject FALSE/UNKNOWN.
+ * For VALUE/RHS sources, when predicate_range_count is zero, flags is zero and compare is ALWAYS_TRUE,
+ * predicate_source and predicate_measure_slot must both be canonical zero,
+ * including when mask is non-NULL.
+ *
+ * The descriptor has one global where_filter and one independent filter per
+ * measure. WHERE additionally accepts SCALAR source: predicate_measure_slot
+ * names an unfiltered Boolean SCALAR measure; range/compare/flag fields must
+ * be disabled. Its program is evaluated through the existing scalar view
+ * before group activity, accepting only SQL TRUE. A SQL mask may precede it.
+ * Spatial producers still supply mask sidecars; no filter field holds a
+ * program pointer. */
+typedef struct {
+  int32_t kind;
+  int32_t predicate_source;
+  int32_t predicate_measure_slot;
+  int32_t predicate_range_count;
+  pgaccel_val predicate_lo[PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES];
+  pgaccel_val predicate_hi[PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES];
+  uint16_t value_cmp_opcode;
+  uint16_t _pad0;
+  uint32_t flags;
+  pgaccel_val value_cmp_const;
+  const int8_t* mask;
+} pgaccel_grouped_agg_filter;
+
+/* One inner equi-join dimension. Residency converts supported int4/int8/dict
+ * join keys losslessly to a dense resident INT32 key domain before this ABI.
+ * key_min/key_count address lookup arrays; implementations checked-add them
+ * in widened arithmetic before indexing. match_by_key NULL means every
+ * in-domain key matches. multiplicity_by_key NULL means one matching dim row;
+ * otherwise it supplies the exact INNER JOIN row multiplicity. Per-row
+ * multiplicities across dimensions are checked-multiplied as u64. A NULL or
+ * out-of-domain fact join key rejects the row. A key that groups by this dim
+ * requires multiplicity one because one lookup code cannot represent multiple
+ * differently-grouped matches. */
+typedef struct {
+  pgaccel_expr_usm_col fact_key;
+  const uint8_t* match_by_key;
+  const uint64_t* multiplicity_by_key;
+  int32_t key_min;
+  uint32_t key_count;
+  uint32_t flags;
+  uint32_t _pad0;
+} pgaccel_grouped_agg_dim;
+
+/* Versioned execution descriptor. In dense mode, group_capacity equals the
+ * checked product of key cardinalities, or one for an ungrouped aggregate. In
+ * hash mode it is the maximum emitted groups; overflow is UNSUPPORTED, never
+ * truncation. measure_filters[i] applies only to measures[i].
+ *
+ * scratch is either NULL with all scratch metadata zero (one-shot only), or a
+ * caller-owned DEVICE/SHARED_USM allocation from the same AdaptiveCpp context
+ * as all resident inputs. It must satisfy workspace_requirements, remain live
+ * until the call returns, not alias inputs/outputs, and not be reused by
+ * concurrent calls. A non-NULL sufficient workspace forbids hidden device
+ * allocations, including sort/hash temporary storage. */
+typedef struct {
+  uint32_t abi_version;
+  uint32_t size_bytes;
+  size_t row_count;
+
+  int32_t grouping_mode;
+  int32_t output_mode;
+  uint32_t key_count;
+  uint32_t _pad0;
+  size_t group_capacity;
+  pgaccel_grouped_agg_key keys[PGACCEL_GROUPED_AGG_MAX_KEYS];
+
+  uint32_t measure_count;
+  uint32_t execution_flags;
+  uint32_t flags;
+  uint32_t _pad1;
+  pgaccel_grouped_agg_measure measures[PGACCEL_GROUPED_AGG_MAX_MEASURES];
+
+  pgaccel_grouped_agg_filter where_filter;
+  pgaccel_grouped_agg_filter measure_filters[PGACCEL_GROUPED_AGG_MAX_MEASURES];
+
+  uint32_t dim_count;
+  uint32_t _pad2;
+  pgaccel_grouped_agg_dim dims[PGACCEL_GROUPED_AGG_MAX_DIMS];
+
+  void* scratch;
+  size_t scratch_bytes;
+  int32_t scratch_space;
+  uint32_t scratch_alignment;
+} pgaccel_grouped_agg_desc;
+
+/* Workspace query result. alignment is a power of two. space is the minimum
+ * pgaccel_mem_space accepted by execute (SHARED_USM or DEVICE). */
+typedef struct {
+  uint32_t abi_version;
+  uint32_t size_bytes;
+  size_t bytes;
+  size_t alignment;
+  int32_t space;
+  uint32_t flags;
+} pgaccel_grouped_agg_workspace_req;
+
+/* Metadata-only work quantities for one actual dense COUNT lifecycle call.
+ * Initialize the four-field envelope to {1, sizeof(record), 0, 0}.
+ * Every failure leaves the entire record unchanged. No row payload is read. */
+typedef struct {
+  uint32_t abi_version;
+  uint32_t size_bytes;
+  uint32_t reserved0;
+  uint32_t reserved1;
+  uint64_t rows;
+  uint64_t group_capacity;
+  uint64_t row_counter_updates;
+  uint64_t global_counter_clear_entries;
+  uint64_t local_counter_init_entries;
+  uint64_t local_reduction_additions;
+  uint64_t partial_counter_writes;
+  uint64_t serial_reset_group_visits;
+  uint64_t serial_merge_group_visits;
+  uint64_t serial_partial_counter_reads;
+  uint64_t serial_finalize_group_visits;
+  uint64_t persistent_counter_lanes;
+  uint64_t key_columns;
+  uint64_t nullable_key_columns;
+  uint64_t value_null_checks;
+  uint64_t sql_mask_checks;
+} pgaccel_grouped_agg_count_work_v1;
+
+pgaccel_status pgaccel_grouped_agg_count_work_requirements_v1(
+    const pgaccel_grouped_agg_desc* desc, pgaccel_grouped_agg_count_work_v1* out);
+
+PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_count_work_v1) == 144, "count work size");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_count_work_v1, rows) == 16, "count work facts");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_count_work_v1, sql_mask_checks) == 136,
+                "count work last fact");
+
+/* Per-measure output lanes. Value-state pointers use the descriptor's
+ * accumulator kind and state_bytes. count is required iff COUNT is projected.
+ * nonnull_count is always required for SUM/MIN/MAX/SUMSQ, even when COUNT is
+ * not projected, so an all-NULL group is distinguishable from a numeric zero;
+ * a non-COUNT_STAR COUNT slot may also provide it as validity state.
+ * STATS_PAIR uses independent rhs_count/rhs_nonnull_count. All counts are u64
+ * and every weighted addition is checked. */
+typedef struct {
+  void* sum;
+  void* min;
+  void* max;
+  void* sumsq;
+  uint64_t* count;
+  uint64_t* nonnull_count;
+  void* rhs_sum;
+  uint64_t* rhs_count;
+  uint64_t* rhs_nonnull_count;
+} pgaccel_grouped_agg_measure_out;
+
+/* One logical key lane for compact output. */
+typedef struct {
+  void* values;
+  uint8_t* nulls;
+  int32_t type;
+  uint32_t flags;
+} pgaccel_grouped_agg_key_out;
+
+/* Result buffers share output_space, which must be HOST or SHARED_USM. For
+ * execute, out.group_capacity must equal desc.group_capacity exactly; every
+ * provided group/key/measure buffer must have at least that many elements.
+ * Dense output is positional; active_groups is required and has group_capacity
+ * bytes. It records group existence after key/dim/WHERE gating independently
+ * of aggregate validity. Compact output requires typed key lanes. HASH always
+ * uses compact output and requires group_codes == NULL because no stable dense
+ * composite code exists.
+ *
+ * emitted_group_count is the active-group count in both modes and never exceeds
+ * group_capacity; in COMPACT mode only [0, emitted_group_count) is emitted. A
+ * zero-key aggregate always has one active group, even on empty input. A keyed
+ * aggregate on empty input has none. Count and nonnull_count lanes are always
+ * written as zero for inactive/all-NULL groups. SUM/SUMSQ are canonical numeric
+ * zero when nonnull_count is zero; MIN/MAX bytes are unspecified and must not be
+ * read. Buffers may not overlap one another, inputs, or scratch. */
+typedef struct {
+  uint32_t abi_version;
+  uint32_t size_bytes;
+  size_t group_capacity;
+  int32_t output_space;
+  uint32_t flags;
+  size_t* group_codes;
+  uint8_t* active_groups;
+  pgaccel_grouped_agg_key_out keys[PGACCEL_GROUPED_AGG_MAX_KEYS];
+  pgaccel_grouped_agg_measure_out measures[PGACCEL_GROUPED_AGG_MAX_MEASURES];
+  size_t emitted_group_count;
+  uint64_t selected_count;
+  uint64_t uncertain_count;
+} pgaccel_grouped_agg_out;
+
+pgaccel_status pgaccel_grouped_agg_workspace_requirements(const pgaccel_grouped_agg_desc* desc,
+                                                          pgaccel_grouped_agg_workspace_req* out);
+
+/* Return the exact physical branch that execute_ex would submit for this
+ * descriptor transition. This is a validation-only metadata query: it does
+ * not initialize a device, allocate, submit, or mutate descriptor state. */
+pgaccel_status pgaccel_grouped_agg_kernel_mode(const pgaccel_grouped_agg_desc* desc,
+                                               int32_t* out_mode);
+
+/* Allocate/free a zero-initialized aligned workspace in the same AdaptiveCpp context used by
+ * grouped aggregation. `space` accepts SHARED_USM or DEVICE, never HOST.
+ * `alignment` must be a nonzero power of two. A zero-byte request succeeds
+ * with `*out == NULL`; every nonzero successful result satisfies the requested
+ * alignment and is released exactly once with the matching free function. */
+pgaccel_status pgaccel_grouped_agg_workspace_alloc(size_t bytes, size_t alignment, int32_t space,
+                                                   void** out);
+void pgaccel_grouped_agg_workspace_free(void* ptr);
+
+/* Per-thread grouped lifecycle telemetry. A transition launch is one
+ * synchronous RESET/ACCUMULATE/FINALIZE call, not each internal SYCL kernel.
+ * Output bytes are the device-published logical copy spans, including result
+ * metadata. Wait count/time includes every grouped queue/event wait. */
+uint64_t pgaccel_grouped_agg_transition_launch_count(void);
+uint64_t pgaccel_grouped_agg_queue_wait_count(void);
+uint64_t pgaccel_grouped_agg_queue_wait_ns(void);
+uint64_t pgaccel_grouped_agg_output_bytes(void);
+uint64_t pgaccel_grouped_agg_shared_copy_calls(void);
+uint64_t pgaccel_grouped_agg_device_copy_calls(void);
+void pgaccel_reset_grouped_agg_telemetry(void);
+
+/* Invalid descriptors, runtime codes/masks, overflow, or device execution
+ * errors return ERROR and never partial success. The additive _ex entry point
+ * distinguishes numeric overflow from invalid runtime data through `detail`;
+ * the original entry point remains an ABI-compatible wrapper. Well-formed
+ * capabilities not implemented in the current phase return UNSUPPORTED. */
+pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_agg_desc* desc,
+                                              pgaccel_grouped_agg_out* out, int32_t* detail);
+pgaccel_status pgaccel_grouped_agg_execute(const pgaccel_grouped_agg_desc* desc,
+                                           pgaccel_grouped_agg_out* out);
+
+/* Metadata-only control-aware query. Prefix is left aligned with unused low
+ * bits zero; ALL/NULL_ONLY require zero prefix and width. No SQL WHERE, SUM,
+ * dimensions or multi-measure shapes. Existing descriptor layouts unchanged. */
+pgaccel_status pgaccel_hash_count_partition_workspace_requirements_v1(
+    const pgaccel_grouped_agg_desc* desc, const pgaccel_hash_count_partition_v1* partition,
+    pgaccel_grouped_agg_workspace_req* out);
+/* Success selected_count is the partition's population BEFORE aggregate FILTER.
+ * Failure publishes no result, including capacity overflow (ERROR/detail5).
+ * Caller supplies the exactly queried scratch; no hidden allocation. */
+pgaccel_status pgaccel_hash_count_partition_execute_v1(
+    const pgaccel_grouped_agg_desc* desc, const pgaccel_hash_count_partition_v1* partition,
+    pgaccel_grouped_agg_out* out, int32_t* detail);
+
+/* V2 requires exact SQL WHERE. Both populations are before aggregate FILTER;
+ * WHERE precedes key/H3 evaluation. The caller supplies a version2/size32,
+ * flags/reserved0 population control with both counts zero. Counts publish only
+ * on OK; partition_rows equals out->selected_count and is <= where_rows <= rows.
+ * ALL requires equal populations. Invalid controls leave all outputs untouched.
+ * V1 and non-WHERE callers retain their original workspace and dispatch. */
+pgaccel_status pgaccel_hash_count_partition_workspace_requirements_v2(
+    const pgaccel_grouped_agg_desc* desc, const pgaccel_hash_count_partition_v2* partition,
+    pgaccel_grouped_agg_workspace_req* out);
+pgaccel_status pgaccel_hash_count_partition_execute_v2(
+    const pgaccel_grouped_agg_desc* desc, const pgaccel_hash_count_partition_v2* partition,
+    pgaccel_grouped_agg_out* out, pgaccel_hash_count_population_v2* population, int32_t* detail);
+
+PGACCEL_ABI_PIN(sizeof(pgaccel_hash_count_partition_v2) == 32, "partition v2 size");
+PGACCEL_ABI_PIN(sizeof(pgaccel_hash_count_population_v2) == 32, "population v2 size");
+#ifdef __cplusplus
+PGACCEL_ABI_PIN(alignof(pgaccel_hash_count_partition_v2) == 8, "partition v2 alignment");
+PGACCEL_ABI_PIN(alignof(pgaccel_hash_count_population_v2) == 8, "population v2 alignment");
+#else
+PGACCEL_ABI_PIN(_Alignof(pgaccel_hash_count_partition_v2) == 8, "partition v2 alignment");
+PGACCEL_ABI_PIN(_Alignof(pgaccel_hash_count_population_v2) == 8, "population v2 alignment");
+#endif
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v2, version) == 0, "partition v2.version");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v2, struct_size) == 4, "partition v2.size");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v2, flags) == 8, "partition v2.flags");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v2, kind) == 12, "partition v2.kind");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v2, prefix_bits) == 16, "partition v2.bits");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v2, reserved) == 20, "partition v2.reserved");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v2, prefix) == 24, "partition v2.prefix");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_population_v2, version) == 0, "population v2.version");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_population_v2, struct_size) == 4, "population v2.size");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_population_v2, flags) == 8, "population v2.flags");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_population_v2, reserved) == 12, "population v2.reserved");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_population_v2, where_rows) == 16, "population v2.where");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_population_v2, partition_rows) == 24, "population v2.partition");
+
+PGACCEL_ABI_PIN(sizeof(pgaccel_hash_count_partition_v1) == 32, "partition size");
+#ifdef __cplusplus
+PGACCEL_ABI_PIN(alignof(pgaccel_hash_count_partition_v1) == 8, "partition alignment");
+#else
+PGACCEL_ABI_PIN(_Alignof(pgaccel_hash_count_partition_v1) == 8, "partition alignment");
+#endif
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v1, version) == 0, "partition.version");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v1, struct_size) == 4, "partition.size");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v1, flags) == 8, "partition.flags");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v1, kind) == 12, "partition.kind");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v1, prefix_bits) == 16, "partition.bits");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v1, reserved) == 20, "partition.reserved");
+PGACCEL_ABI_PIN(offsetof(pgaccel_hash_count_partition_v1, prefix) == 24, "partition.prefix");
+
+/* LP64 layout pins. pgaccel_val and pgaccel_expr_usm_col are pinned by
+ * pgaccel_expr.h. Every field in every new ABI struct is pinned below. */
+PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_key) == 56, "grouped_agg_key size");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_key, values) == 0, "key.values");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_key, lookup_by_key) == 24, "key.lookup");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_key, source) == 32, "key.source");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_key, code_min) == 36, "key.code_min");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_key, cardinality) == 40, "key.cardinality");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_key, null_code) == 44, "key.null_code");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_key, flags) == 48, "key.flags");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_key, _pad0) == 52, "key._pad0");
+
+PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_measure_col) == 32, "grouped_agg_measure_col size");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_col, values) == 0, "measure_col.values");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_col, nulls) == 8, "measure_col.nulls");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_col, physical_type) == 16,
+                "measure_col.physical_type");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_col, element_bytes) == 20,
+                "measure_col.element_bytes");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_col, scale) == 24, "measure_col.scale");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_col, flags) == 28, "measure_col.flags");
+
+PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_measure) == 88, "grouped_agg_measure size");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, value) == 0, "measure.value");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, rhs) == 32, "measure.rhs");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, op) == 64, "measure.op");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, agg_mask) == 68, "measure.mask");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, accumulator_kind) == 72,
+                "measure.accumulator_kind");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, state_bytes) == 76, "measure.state_bytes");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, flags) == 80, "measure.flags");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, _pad0) == 84, "measure._pad0");
+
+PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_filter) == 176, "grouped_agg_filter size");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, kind) == 0, "filter.kind");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, predicate_source) == 4, "filter.source");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, predicate_measure_slot) == 8, "filter.slot");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, predicate_range_count) == 12,
+                "filter.range_count");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, predicate_lo) == 16, "filter.lo");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, predicate_hi) == 80, "filter.hi");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, value_cmp_opcode) == 144, "filter.opcode");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, _pad0) == 146, "filter._pad0");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, flags) == 148, "filter.flags");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, value_cmp_const) == 152, "filter.constant");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, mask) == 168, "filter.mask");
+
+PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_dim) == 56, "grouped_agg_dim size");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_dim, fact_key) == 0, "dim.fact_key");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_dim, match_by_key) == 24, "dim.match");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_dim, multiplicity_by_key) == 32, "dim.multiplicity");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_dim, key_min) == 40, "dim.key_min");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_dim, key_count) == 44, "dim.key_count");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_dim, flags) == 48, "dim.flags");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_dim, _pad0) == 52, "dim._pad0");
+
+PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_desc) == 1712, "grouped_agg_desc size");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, abi_version) == 0, "desc.version");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, size_bytes) == 4, "desc.size");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, row_count) == 8, "desc.rows");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, grouping_mode) == 16, "desc.grouping_mode");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, output_mode) == 20, "desc.output_mode");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, key_count) == 24, "desc.key_count");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, _pad0) == 28, "desc._pad0");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, group_capacity) == 32, "desc.group_capacity");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, keys) == 40, "desc.keys");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, measure_count) == 208, "desc.measure_count");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, execution_flags) == 212, "desc.execution_flags");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, flags) == 216, "desc.flags");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, _pad1) == 220, "desc._pad1");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, measures) == 224, "desc.measures");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, where_filter) == 576, "desc.where_filter");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, measure_filters) == 752, "desc.measure_filters");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, dim_count) == 1456, "desc.dim_count");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, _pad2) == 1460, "desc._pad2");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, dims) == 1464, "desc.dims");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, scratch) == 1688, "desc.scratch");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, scratch_bytes) == 1696, "desc.scratch_bytes");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, scratch_space) == 1704, "desc.scratch_space");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, scratch_alignment) == 1708,
+                "desc.scratch_alignment");
+
+PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_workspace_req) == 32, "grouped_agg_workspace_req size");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_workspace_req, abi_version) == 0, "workspace.version");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_workspace_req, size_bytes) == 4, "workspace.size");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_workspace_req, bytes) == 8, "workspace.bytes");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_workspace_req, alignment) == 16,
+                "workspace.alignment");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_workspace_req, space) == 24, "workspace.space");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_workspace_req, flags) == 28, "workspace.flags");
+
+PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_measure_out) == 72, "grouped_agg_measure_out size");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_out, sum) == 0, "measure_out.sum");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_out, min) == 8, "measure_out.min");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_out, max) == 16, "measure_out.max");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_out, sumsq) == 24, "measure_out.sumsq");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_out, count) == 32, "measure_out.count");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_out, nonnull_count) == 40,
+                "measure_out.nonnull_count");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_out, rhs_sum) == 48, "measure_out.rhs_sum");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_out, rhs_count) == 56,
+                "measure_out.rhs_count");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_out, rhs_nonnull_count) == 64,
+                "measure_out.rhs_nonnull_count");
+
+PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_key_out) == 24, "grouped_agg_key_out size");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_key_out, values) == 0, "key_out.values");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_key_out, nulls) == 8, "key_out.nulls");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_key_out, type) == 16, "key_out.type");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_key_out, flags) == 20, "key_out.flags");
+
+PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_out) == 424, "grouped_agg_out size");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, abi_version) == 0, "out.version");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, size_bytes) == 4, "out.size");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, group_capacity) == 8, "out.group_capacity");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, output_space) == 16, "out.output_space");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, flags) == 20, "out.flags");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, group_codes) == 24, "out.group_codes");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, active_groups) == 32, "out.active_groups");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, keys) == 40, "out.keys");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, measures) == 112, "out.measures");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, emitted_group_count) == 400,
+                "out.emitted_group_count");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, selected_count) == 408, "out.selected_count");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, uncertain_count) == 416, "out.uncertain_count");
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* PGACCEL_OLAP_H */

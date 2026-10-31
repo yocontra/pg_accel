@@ -2013,6 +2013,18 @@ complete objective is implemented and verified.
     expression predicates, cache reuse, performance, static-proof and normal
     SQL admission gates. Evidence:
     `benchmarks/evidence/hash-live-20261012/README.md`.
+    - [x] Add and qualify native adaptive partition-v2 WHERE COUNT without
+      changing v1 layouts or dispatch. Device-computed whole-WHERE and leaf
+      populations remain distinct before FILTER, with exact publication,
+      alias, empty-input, signed-prefix and fused-H3 contracts. Final native
+      metadata/hash/H3 suites pass 60,424/10,367,205/1,176 checks; all eleven
+      final-source inventory/forwarding audit tests pass. Preserve the earlier
+      fixture failures and the real H3 error-priority failure, now repaired
+      without removing assertions. Both new exports remain statically unproved.
+      This is a native foundation only: Rust adaptive binding/conservation,
+      planner admission, PG18/19 integration, performance and release gates
+      remain open. Evidence:
+      `benchmarks/evidence/hash-count-where-native-20261030/README.md`.
   - [ ] Qualify direct BIGINT fact-key hash aggregation.
 
     - [x] Normally admit and qualify one COUNT(*) or fixed-width COUNT(column)

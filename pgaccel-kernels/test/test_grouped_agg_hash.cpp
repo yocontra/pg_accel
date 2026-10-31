@@ -14,6 +14,9 @@
 #include "pgaccel_ffi.h"
 #include "pgaccel_olap.h"
 
+extern "C" void pgacceltest_grouped_agg_fail_stage_once(unsigned stage);
+extern "C" uint64_t pgacceltest_grouped_agg_hash_row_launches(void);
+
 namespace {
 
 int g_pass = 0;
@@ -2409,6 +2412,598 @@ void test_partition_api_metadata() {
   CHECK(std::all_of(std::begin(misaligned), std::end(misaligned), [](uint8_t b) { return b == 0; }));
 }
 
+pgaccel_grouped_agg_workspace_req query_v2(const pgaccel_grouped_agg_desc& desc,
+                                           const pgaccel_hash_count_partition_v2& partition,
+                                           pgaccel_status* status = nullptr) {
+  pgaccel_grouped_agg_workspace_req req{};
+  req.abi_version = PGACCEL_OLAP_ABI_VERSION;
+  req.size_bytes = sizeof(req);
+  const auto actual = pgaccel_hash_count_partition_workspace_requirements_v2(&desc, &partition, &req);
+  if (status != nullptr) *status = actual;
+  else CHECK_STATUS(actual, PGACCEL_OK);
+  return req;
+}
+
+void test_partition_v2_metadata() {
+  const long page_size = sysconf(_SC_PAGESIZE);
+  void* protected_rows = mmap(nullptr, static_cast<size_t>(page_size), PROT_NONE,
+                              MAP_PRIVATE | MAP_ANON, -1, 0);
+  CHECK(protected_rows != MAP_FAILED);
+  if (protected_rows == MAP_FAILED) return;
+  const auto calls = pgaccel_gpu_exec_count();
+  auto desc = hash_desc(static_cast<const uint64_t*>(protected_rows), nullptr, 17, 17);
+  desc.where_filter = disabled_filter();
+  desc.where_filter.kind = PGACCEL_GROUPED_AGG_FILTER_SQL;
+  desc.where_filter.mask = static_cast<const int8_t*>(protected_rows);
+  const pgaccel_hash_count_partition_v2 control{2, 32, 0, 0, 0, 0, 0};
+  const auto ordinary_where = query_workspace(desc);
+  const auto v2 = query_v2(desc, control);
+  CHECK(v2.bytes > ordinary_where.bytes && v2.alignment == ordinary_where.alignment);
+  // At this small capacity the bank is the final allocation: no final rounding.
+  CHECK(v2.bytes == ordinary_where.bytes + 2088 - 257 * sizeof(uint32_t));
+  auto large = desc;
+  large.row_count = 20001; large.group_capacity = 16385;
+  // Large-capacity sort lanes follow the bank and round the old1028B to1032B.
+  CHECK(query_v2(large, control).bytes == query_workspace(large).bytes + 2088 - 1032);
+  void* guard = mmap(nullptr, static_cast<size_t>(page_size) * 2, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANON, -1, 0);
+  CHECK(guard != MAP_FAILED);
+  if (guard != MAP_FAILED) {
+    CHECK(mprotect(static_cast<uint8_t*>(guard) + page_size, static_cast<size_t>(page_size),
+                   PROT_NONE) == 0);
+    auto* header = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(guard) + page_size - 8);
+    for (uint32_t version : {1u, 2u}) {
+      header[0] = version; header[1] = 8;
+      pgaccel_grouped_agg_workspace_req rejected{};
+      rejected.abi_version = PGACCEL_OLAP_ABI_VERSION; rejected.size_bytes = sizeof(rejected);
+      CHECK_STATUS(pgaccel_hash_count_partition_workspace_requirements_v2(&desc,
+                   reinterpret_cast<const pgaccel_hash_count_partition_v2*>(header), &rejected),
+                   PGACCEL_ERROR);
+      pgaccel_hash_count_population_v2 population{2, 32, 0, 0, 0, 0};
+      pgaccel_grouped_agg_out out{};
+      int32_t detail = 73;
+      CHECK_STATUS(pgaccel_hash_count_partition_execute_v2(&desc,
+                   reinterpret_cast<const pgaccel_hash_count_partition_v2*>(header),
+                   &out, &population, &detail), PGACCEL_ERROR);
+      CHECK(detail == 73 && population.where_rows == 0 && population.partition_rows == 0);
+    }
+    CHECK(munmap(guard, static_cast<size_t>(page_size) * 2) == 0);
+  }
+  for (unsigned alias = 0; alias < 7; ++alias) {
+    auto candidate = desc;
+    pgaccel_grouped_agg_workspace_req overlap{};
+    overlap.abi_version = PGACCEL_OLAP_ABI_VERSION; overlap.size_bytes = sizeof(overlap);
+    switch (alias) {
+      case 0: candidate.keys[0].values.values = &overlap; break;
+      case 1: candidate.keys[0].values.nulls = reinterpret_cast<const uint8_t*>(&overlap); break;
+      case 2: candidate.where_filter.mask = reinterpret_cast<const int8_t*>(&overlap); break;
+      case 3: set_sql_filter(&candidate, reinterpret_cast<const int8_t*>(&overlap)); break;
+      case 4: set_count_column(&candidate, kCountColumnTypes[2], &overlap, nullptr); break;
+      case 5: set_count_column(&candidate, kCountColumnTypes[2], protected_rows,
+                                reinterpret_cast<const uint8_t*>(&overlap)); break;
+      case 6: candidate.scratch = &overlap; candidate.scratch_bytes = sizeof(overlap); break;
+    }
+    const auto before = overlap;
+    CHECK_STATUS(pgaccel_hash_count_partition_workspace_requirements_v2(&candidate, &control,
+                 &overlap), PGACCEL_ERROR);
+    CHECK(std::memcmp(&before, &overlap, sizeof(before)) == 0);
+  }
+  for (unsigned bad = 0; bad < 8; ++bad) {
+    auto invalid = control;
+    switch (bad) {
+      case 0: invalid.version = 1; break;
+      case 1: invalid.struct_size = 31; break;
+      case 2: invalid.flags = 1; break;
+      case 3: invalid.kind = 3; break;
+      case 4: invalid.prefix_bits = 65; break;
+      case 5: invalid.reserved = 1; break;
+      case 6: invalid.prefix = 1; break;
+      case 7: invalid.prefix_bits = 1; break;
+    }
+    pgaccel_status status{};
+    const auto req = query_v2(desc, invalid, &status);
+    CHECK_STATUS(status, PGACCEL_ERROR);
+    CHECK(req.bytes == 0 && req.alignment == 0);
+  }
+  for (uint32_t width : {0u, 1u, 63u, 64u}) {
+    auto prefix = control;
+    prefix.kind = PGACCEL_HASH_COUNT_PARTITION_NONNULL_PREFIX;
+    prefix.prefix_bits = width;
+    prefix.prefix = width == 0 ? 0 : UINT64_MAX << (64 - width);
+    CHECK(query_v2(desc, prefix).bytes == v2.bytes);
+  }
+  for (unsigned bad = 0; bad < 6; ++bad) {
+    pgaccel_hash_count_population_v2 population{2, 32, 0, 0, 0, 0};
+    switch (bad) {
+      case 0: population.version = 1; break;
+      case 1: population.struct_size = 31; break;
+      case 2: population.flags = 1; break;
+      case 3: population.reserved = 1; break;
+      case 4: population.where_rows = 1; break;
+      case 5: population.partition_rows = 1; break;
+    }
+    const auto before = population;
+    pgaccel_grouped_agg_out out{};
+    int32_t detail = 73;
+    CHECK_STATUS(pgaccel_hash_count_partition_execute_v2(&desc, &control, &out, &population,
+                                                         &detail), PGACCEL_ERROR);
+    CHECK(detail == 73 && std::memcmp(&before, &population, sizeof(before)) == 0);
+  }
+  auto no_where = desc;
+  no_where.where_filter = disabled_filter();
+  pgaccel_status status{};
+  CHECK(query_v2(no_where, control, &status).bytes == 0);
+  CHECK_STATUS(status, PGACCEL_ERROR);
+  pgaccel_hash_count_partition_v1 v1{1, 32, 0, 0, 0, 0, 0};
+  pgaccel_grouped_agg_workspace_req req{};
+  req.abi_version = PGACCEL_OLAP_ABI_VERSION;
+  req.size_bytes = sizeof(req);
+  CHECK_STATUS(pgaccel_hash_count_partition_workspace_requirements_v1(&desc, &v1, &req),
+               PGACCEL_ERROR);
+  {
+    auto overlapping = control;
+    const auto before = overlapping;
+    CHECK_STATUS(pgaccel_hash_count_partition_workspace_requirements_v2(&desc, &overlapping,
+                 reinterpret_cast<pgaccel_grouped_agg_workspace_req*>(&overlapping)), PGACCEL_ERROR);
+    CHECK(std::memcmp(&before, &overlapping, sizeof(before)) == 0);
+    auto descriptor = desc;
+    const auto descriptor_before = descriptor;
+    CHECK_STATUS(pgaccel_hash_count_partition_workspace_requirements_v2(&descriptor, &control,
+                 reinterpret_cast<pgaccel_grouped_agg_workspace_req*>(&descriptor)), PGACCEL_ERROR);
+    CHECK(std::memcmp(&descriptor_before, &descriptor, sizeof(descriptor)) == 0);
+  }
+  for (bool filtered : {false, true}) {
+    auto empty = hash_desc(nullptr, nullptr, 0, 1);
+    empty.where_filter.kind = PGACCEL_GROUPED_AGG_FILTER_SQL;
+    if (filtered) empty.measure_filters[0].kind = PGACCEL_GROUPED_AGG_FILTER_SQL;
+    CHECK(query_v2(empty, control).bytes > 0);
+    (void)query_workspace(empty, &status);
+    CHECK_STATUS(status, PGACCEL_ERROR);
+    for (bool measure : {false, true}) {
+      for (unsigned field = 0; field < 8; ++field) {
+        auto invalid = empty;
+        auto& mask = measure ? invalid.measure_filters[0] : invalid.where_filter;
+        mask.kind = PGACCEL_GROUPED_AGG_FILTER_SQL;
+        switch (field) {
+          case 0: mask.flags = 1; break;
+          case 1: mask._pad0 = 1; break;
+          case 2: mask.predicate_source = 1; break;
+          case 3: mask.predicate_measure_slot = 1; break;
+          case 4: mask.predicate_range_count = 1; break;
+          case 5: mask.value_cmp_opcode = 0; break;
+          case 6: mask.value_cmp_const.tag = PGACCEL_VAL_INT64; break;
+          case 7: mask.predicate_lo[0].tag = PGACCEL_VAL_INT64; break;
+        }
+        (void)query_v2(invalid, control, &status);
+        CHECK(status != PGACCEL_OK);
+      }
+    }
+    empty.row_count = 1;
+    empty.keys[0].values.values = protected_rows;
+    (void)query_v2(empty, control, &status);
+    CHECK(status != PGACCEL_OK);
+  }
+  CHECK(pgaccel_gpu_exec_count() == calls);
+  CHECK(munmap(protected_rows, static_cast<size_t>(page_size)) == 0);
+}
+
+void test_partition_v2_device() {
+  SharedArray<uint64_t> keys(std::vector<uint64_t>{0, 1, 1, UINT64_MAX, 0, 7});
+  SharedArray<uint8_t> nulls(std::vector<uint8_t>{0, 0, 0, 0, 1, 2});
+  SharedArray<int8_t> where(std::vector<int8_t>{1, 1, 0, 1, 1, -1});
+  SharedArray<int8_t> filter(std::vector<int8_t>{0, 1, 2, -1, 0, 2});
+  const pgaccel_hash_count_partition_v2 controls[] = {
+      {2, 32, 0, PGACCEL_HASH_COUNT_PARTITION_ALL, 0, 0, 0},
+      {2, 32, 0, PGACCEL_HASH_COUNT_PARTITION_NONNULL_PREFIX, 64, 0, 0},
+      {2, 32, 0, PGACCEL_HASH_COUNT_PARTITION_NONNULL_PREFIX, 64, 0, 1},
+      {2, 32, 0, PGACCEL_HASH_COUNT_PARTITION_NONNULL_PREFIX, 64, 0, UINT64_MAX},
+      {2, 32, 0, PGACCEL_HASH_COUNT_PARTITION_NULL_ONLY, 0, 0, 0}};
+  for (int32_t space : {PGACCEL_MEM_SPACE_SHARED_USM, PGACCEL_MEM_SPACE_DEVICE}) {
+    for (bool filtered : {false, true}) {
+      auto empty = hash_desc(nullptr, nullptr, 0, 1);
+      empty.where_filter.kind = PGACCEL_GROUPED_AGG_FILTER_SQL;
+      if (filtered) empty.measure_filters[0].kind = PGACCEL_GROUPED_AGG_FILTER_SQL;
+      const auto req = query_v2(empty, controls[0]);
+      void* scratch = nullptr;
+      CHECK_STATUS(pgaccel_grouped_agg_workspace_alloc(req.bytes, req.alignment, space, &scratch),
+                   PGACCEL_OK);
+      if (scratch == nullptr) continue;
+      empty.scratch = scratch; empty.scratch_bytes = req.bytes;
+      empty.scratch_space = space; empty.scratch_alignment = static_cast<uint32_t>(req.alignment);
+      HashOutput output(1, false);
+      pgaccel_hash_count_population_v2 population{2, 32, 0, 0, 0, 0};
+      int32_t detail = 0;
+      const auto rows_before = pgacceltest_grouped_agg_hash_row_launches();
+      const auto transitions_before = pgaccel_grouped_agg_transition_launch_count();
+      CHECK_STATUS(pgaccel_hash_count_partition_execute_v2(&empty, &controls[0], &output.out,
+                   &population, &detail), PGACCEL_OK);
+      CHECK(output.out.emitted_group_count == 0 && output.out.selected_count == 0);
+      CHECK(population.where_rows == 0 && population.partition_rows == 0);
+      CHECK(pgacceltest_grouped_agg_hash_row_launches() == rows_before);
+      CHECK(pgaccel_grouped_agg_transition_launch_count() == transitions_before + 1);
+      pgaccel_grouped_agg_workspace_free(scratch);
+    }
+    uint64_t leaf_population = 0;
+    for (size_t index = 0; index < std::size(controls); ++index) {
+      auto desc = hash_desc(keys.data(), nulls.data(), keys.size(), 4);
+      desc.where_filter.kind = PGACCEL_GROUPED_AGG_FILTER_SQL;
+      desc.where_filter.mask = where.data();
+      set_sql_filter(&desc, filter.data());
+      const auto req = query_v2(desc, controls[index]);
+      void* scratch = nullptr;
+      CHECK_STATUS(pgaccel_grouped_agg_workspace_alloc(req.bytes, req.alignment, space, &scratch),
+                   PGACCEL_OK);
+      if (scratch == nullptr) continue;
+      desc.scratch = scratch;
+      desc.scratch_bytes = req.bytes;
+      desc.scratch_alignment = static_cast<uint32_t>(req.alignment);
+      desc.scratch_space = space;
+      HashOutput output(4, true);
+      pgaccel_hash_count_population_v2 population{2, 32, 0, 0, 0, 0};
+      int32_t detail = 0;
+      CHECK_STATUS(pgaccel_hash_count_partition_execute_v2(&desc, &controls[index], &output.out,
+                                                           &population, &detail), PGACCEL_OK);
+      CHECK(detail == 0 && population.where_rows == 4);
+      CHECK(population.partition_rows == (index == 0 ? 4 : 1));
+      CHECK(output.out.selected_count == population.partition_rows);
+      CHECK(output.out.emitted_group_count == population.partition_rows);
+      uint64_t count_sum = 0;
+      for (size_t row = 0; row < output.out.emitted_group_count; ++row) count_sum += output.counts[row];
+      CHECK(count_sum == (index == 0 || index == 2 ? 1 : 0));
+      if (index != 0) leaf_population += population.partition_rows;
+      if (index == 0) {
+        {
+          auto overlapping = controls[index];
+          const auto before = overlapping;
+          HashOutput rejected(4, true);
+          detail = 73;
+          CHECK_STATUS(pgaccel_hash_count_partition_execute_v2(&desc, &overlapping, &rejected.out,
+                       reinterpret_cast<pgaccel_hash_count_population_v2*>(&overlapping), &detail),
+                       PGACCEL_ERROR);
+          CHECK(detail == 73 && rejected.untouched());
+          CHECK(std::memcmp(&before, &overlapping, sizeof(before)) == 0);
+          // Overlapping controls need not themselves form a valid descriptor;
+          // invalid headers must still leave every byte untouched.
+          auto descriptor = desc;
+          const auto descriptor_before = descriptor;
+          CHECK_STATUS(pgaccel_hash_count_partition_execute_v2(&descriptor, &controls[index],
+                       &rejected.out, reinterpret_cast<pgaccel_hash_count_population_v2*>(&descriptor),
+                       &detail), PGACCEL_ERROR);
+          CHECK(std::memcmp(&descriptor_before, &descriptor, sizeof(descriptor)) == 0);
+          const auto out_before = rejected.out;
+          CHECK_STATUS(pgaccel_hash_count_partition_execute_v2(&desc, &controls[index], &rejected.out,
+                       reinterpret_cast<pgaccel_hash_count_population_v2*>(&rejected.out), &detail),
+                       PGACCEL_ERROR);
+          CHECK(std::memcmp(&out_before, &rejected.out, sizeof(out_before)) == 0);
+        }
+        for (unsigned alias = 0; alias < 11; ++alias) {
+          auto candidate = desc;
+          HashOutput rejected(4, true);
+          population = {2, 32, 0, 0, 0, 0};
+          auto* bytes = reinterpret_cast<uint8_t*>(&population.where_rows);
+          switch (alias) {
+            case 0: candidate.keys[0].values.values = bytes; break;
+            case 1: candidate.keys[0].values.nulls = bytes; break;
+            case 2: candidate.where_filter.mask = reinterpret_cast<int8_t*>(bytes); break;
+            case 3: candidate.measure_filters[0].mask = reinterpret_cast<int8_t*>(bytes); break;
+            case 4: set_count_column(&candidate, kCountColumnTypes[2], bytes, nullptr); break;
+            case 5: set_count_column(&candidate, kCountColumnTypes[2], keys.data(), bytes); break;
+            case 6: rejected.out.keys[0].values = bytes; break;
+            case 7: rejected.out.keys[0].nulls = bytes; break;
+            case 8: rejected.out.measures[0].count = &population.where_rows; break;
+            case 9: rejected.out.group_codes = reinterpret_cast<size_t*>(bytes); break;
+            case 10: rejected.out.active_groups = bytes; break;
+          }
+          const auto calls = pgaccel_gpu_exec_count();
+          detail = 73;
+          CHECK_STATUS(pgaccel_hash_count_partition_execute_v2(&candidate, &controls[index],
+                       &rejected.out, &population, &detail), PGACCEL_ERROR);
+          CHECK(detail == 73 && population.where_rows == 0 && population.partition_rows == 0);
+          CHECK(rejected.untouched() && pgaccel_gpu_exec_count() == calls);
+        }
+        if (space == PGACCEL_MEM_SPACE_SHARED_USM) {
+          auto* overlapping = static_cast<pgaccel_hash_count_population_v2*>(scratch);
+          *overlapping = {2, 32, 0, 0, 0, 0};
+          HashOutput rejected(4, true);
+          const auto calls = pgaccel_gpu_exec_count();
+          detail = 73;
+          CHECK_STATUS(pgaccel_hash_count_partition_execute_v2(&desc, &controls[index],
+                       &rejected.out, overlapping, &detail), PGACCEL_ERROR);
+          CHECK(detail == 73 && overlapping->where_rows == 0 && overlapping->partition_rows == 0);
+          CHECK(rejected.untouched() && pgaccel_gpu_exec_count() == calls);
+        }
+        for (unsigned stage : {2u, 3u, 4u, 5u, 6u}) {
+          HashOutput failed(4, true);
+          population = {2, 32, 0, 0, 0, 0};
+          detail = 73;
+          pgacceltest_grouped_agg_fail_stage_once(stage);
+          CHECK_STATUS(pgaccel_hash_count_partition_execute_v2(&desc, &controls[index],
+                       &failed.out, &population, &detail), PGACCEL_ERROR);
+          CHECK(population.where_rows == 0 && population.partition_rows == 0);
+          CHECK(failed.untouched());
+          if (stage == 5 || stage == 6) CHECK(detail == 73);
+        }
+        // Every rejected row may hide malformed key/FILTER bytes; all-rejected
+        // output is still a successful empty population, not a fallback.
+        for (size_t row = 0; row < where.size(); ++row) where[row] = row % 2 == 0 ? 0 : -1;
+        HashOutput empty(4, true);
+        population = {2, 32, 0, 0, 0, 0};
+        CHECK_STATUS(pgaccel_hash_count_partition_execute_v2(&desc, &controls[index], &empty.out,
+                     &population, &detail), PGACCEL_OK);
+        CHECK(population.where_rows == 0 && population.partition_rows == 0);
+        CHECK(empty.out.emitted_group_count == 0 && empty.out.selected_count == 0);
+        const int8_t original_where[] = {1, 1, 0, 1, 1, -1};
+        std::copy(std::begin(original_where), std::end(original_where), where.data());
+        // Malformed WHERE itself must not become SQL NULL.
+        where[5] = 2;
+        HashOutput malformed(4, true);
+        population = {2, 32, 0, 0, 0, 0};
+        CHECK_STATUS(pgaccel_hash_count_partition_execute_v2(&desc, &controls[index],
+                     &malformed.out, &population, &detail), PGACCEL_ERROR);
+        CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID && malformed.untouched());
+        CHECK(population.where_rows == 0 && population.partition_rows == 0);
+        where[5] = -1;
+      }
+      // Every output alias rejects before submissions or even detail writes.
+      for (unsigned alias = 0; alias < 3; ++alias) {
+        HashOutput rejected(4, true);
+        population = {2, 32, 0, 0, 0, 0};
+        auto* aliased = alias == 0 ? reinterpret_cast<int32_t*>(&population.where_rows)
+                      : alias == 1 ? reinterpret_cast<int32_t*>(&population.version)
+                                   : static_cast<int32_t*>(scratch);
+        const auto before_calls = pgaccel_gpu_exec_count();
+        CHECK_STATUS(pgaccel_hash_count_partition_execute_v2(&desc, &controls[index], &rejected.out,
+                                                             &population, aliased), PGACCEL_ERROR);
+        CHECK(population.where_rows == 0 && population.partition_rows == 0);
+        CHECK(rejected.untouched() && pgaccel_gpu_exec_count() == before_calls);
+      }
+      pgaccel_grouped_agg_workspace_free(scratch);
+    }
+    CHECK(leaf_population == 4);
+  }
+}
+
+template <typename Key>
+void test_partition_v2_prefixes(bool h3 = false) {
+  std::vector<Key> host{std::numeric_limits<Key>::min(), -1, 0,
+                        std::numeric_limits<Key>::max(), 7, 7};
+  if (h3) {
+    const int digits[15] = {};
+    for (size_t i = 0; i < host.size(); ++i)
+      host[i] = static_cast<Key>(make_h3_cell(static_cast<int>(i), 1, digits));
+  }
+  SharedArray<Key> keys(host);
+  SharedArray<uint8_t> nulls(std::vector<uint8_t>{0, 0, 0, 0, 0, 1});
+  SharedArray<int8_t> where(std::vector<int8_t>{1, 1, 1, 1, 0, 1});
+  SharedArray<int8_t> filter(std::vector<int8_t>{0, 1, -1, 1, 2, 1});
+  using Group = std::pair<bool, uint64_t>;
+  std::map<Group, uint64_t> expected;
+  for (size_t row = 0; row < host.size(); ++row) {
+    if (where[row] != 1) continue;
+    auto key = static_cast<uint64_t>(static_cast<int64_t>(host[row]));
+    if (h3) key = h3_parent_for_test(key, 0);
+    expected[{nulls[row] != 0, nulls[row] ? 0 : key}] += filter[row] == 1 ? 1 : 0;
+  }
+  for (uint32_t width : {0u, 1u, 63u, 64u}) {
+    const uint64_t mask = width == 0 ? 0 : UINT64_MAX << (64 - width);
+    std::vector<uint64_t> prefixes;
+    for (const auto& group : expected)
+      if (!group.first.first) prefixes.push_back(group.first.second & mask);
+    std::sort(prefixes.begin(), prefixes.end());
+    prefixes.erase(std::unique(prefixes.begin(), prefixes.end()), prefixes.end());
+    std::map<Group, uint64_t> observed;
+    uint64_t selected = 0;
+    for (size_t leaf = 0; leaf <= prefixes.size(); ++leaf) {
+      const bool null_leaf = leaf == prefixes.size();
+      pgaccel_hash_count_partition_v2 control{2, 32, 0,
+        null_leaf ? PGACCEL_HASH_COUNT_PARTITION_NULL_ONLY : PGACCEL_HASH_COUNT_PARTITION_NONNULL_PREFIX,
+        null_leaf ? 0 : width, 0, null_leaf ? 0 : prefixes[leaf]};
+      auto desc = hash_desc(nullptr, nulls.data(), host.size(), host.size());
+      desc.keys[0].values.values = keys.data();
+      desc.keys[0].values.type = sizeof(Key) == 4 ? PGACCEL_VAL_INT32 : PGACCEL_VAL_INT64;
+      if (h3) { desc.keys[0].flags = PGACCEL_GROUPED_AGG_KEY_FLAG_H3_PARENT; desc.keys[0]._pad0 = 0; }
+      desc.where_filter.kind = PGACCEL_GROUPED_AGG_FILTER_SQL;
+      desc.where_filter.mask = where.data();
+      set_sql_filter(&desc, filter.data());
+      const auto req = query_v2(desc, control);
+      SharedWorkspace workspace(req.bytes, req.alignment);
+      desc.scratch = workspace.data(); desc.scratch_bytes = req.bytes;
+      desc.scratch_space = req.space; desc.scratch_alignment = static_cast<uint32_t>(req.alignment);
+      HashOutput output(host.size(), true);
+      pgaccel_hash_count_population_v2 population{2, 32, 0, 0, 0, 0};
+      int32_t detail = 0;
+      CHECK_STATUS(pgaccel_hash_count_partition_execute_v2(&desc, &control, &output.out,
+                   &population, &detail), PGACCEL_OK);
+      CHECK(detail == 0 && population.where_rows == 5);
+      CHECK(population.partition_rows == output.out.selected_count);
+      selected += population.partition_rows;
+      for (size_t row = 0; row < output.out.emitted_group_count; ++row) {
+        const uint64_t key = output.keys[row]; // Compact HASH always widens INT32 keys.
+        const Group group{output.nulls[row] != 0, output.nulls[row] ? 0 : key};
+        CHECK(observed.emplace(group, output.counts[row]).second);
+        CHECK(group.first == null_leaf);
+        if (!null_leaf) CHECK((group.second & mask) == control.prefix);
+      }
+    }
+    CHECK(selected == 5 && observed == expected);
+  }
+}
+
+void test_partition_v2_telemetry() {
+  SharedArray<uint64_t> keys(std::vector<uint64_t>{0, 1, 1, 2});
+  SharedArray<uint8_t> nulls(std::vector<uint8_t>{0, 0, 0, 0});
+  SharedArray<int8_t> where(std::vector<int8_t>{1, 1, 1, 1});
+  struct Metrics { uint64_t bytes, copies; };
+  for (int32_t space : {PGACCEL_MEM_SPACE_SHARED_USM, PGACCEL_MEM_SPACE_DEVICE}) {
+    for (unsigned scenario = 0; scenario < 3; ++scenario) {
+      const size_t capacity = scenario == 0 ? 4 : 1;
+      nulls[3] = scenario == 2 ? 2 : 0; // semantic error must outrank capacity
+      const auto run = [&](bool v2, unsigned corrupt) {
+        auto desc = hash_desc(keys.data(), nulls.data(), keys.size(), capacity);
+        const pgaccel_hash_count_partition_v1 old{1, 32, 0, 0, 0, 0, 0};
+        const pgaccel_hash_count_partition_v2 control{2, 32, 0, 0, 0, 0, 0};
+        pgaccel_grouped_agg_workspace_req req{};
+        req.abi_version = PGACCEL_OLAP_ABI_VERSION; req.size_bytes = sizeof(req);
+        if (v2) {
+          desc.where_filter.kind = PGACCEL_GROUPED_AGG_FILTER_SQL;
+          desc.where_filter.mask = where.data();
+          req = query_v2(desc, control);
+        } else {
+          CHECK_STATUS(pgaccel_hash_count_partition_workspace_requirements_v1(&desc, &old, &req),
+                       PGACCEL_OK);
+        }
+        void* scratch = nullptr;
+        CHECK_STATUS(pgaccel_grouped_agg_workspace_alloc(req.bytes, req.alignment, space, &scratch),
+                     PGACCEL_OK);
+        if (scratch == nullptr) return Metrics{};
+        desc.scratch = scratch; desc.scratch_bytes = req.bytes;
+        desc.scratch_space = space; desc.scratch_alignment = static_cast<uint32_t>(req.alignment);
+        HashOutput output(capacity, true);
+        pgaccel_hash_count_population_v2 population{2, 32, 0, 0, 0, 0};
+        int32_t detail = 73;
+        pgaccel_reset_grouped_agg_telemetry();
+        if (corrupt != 0) pgacceltest_grouped_agg_fail_stage_once(corrupt);
+        const auto status = v2
+          ? pgaccel_hash_count_partition_execute_v2(&desc, &control, &output.out, &population, &detail)
+          : pgaccel_hash_count_partition_execute_v1(&desc, &old, &output.out, &detail);
+        CHECK_STATUS(status, scenario == 0 && corrupt == 0 ? PGACCEL_OK : PGACCEL_ERROR);
+        if (corrupt) CHECK(detail == 73 && output.untouched());
+        else if (scenario != 0) {
+          CHECK(output.untouched());
+          CHECK(detail == (scenario == 1 ? PGACCEL_GROUPED_AGG_DEVICE_ERROR_HASH_CAPACITY
+                                        : PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID));
+        }
+        if (scenario != 0 || corrupt) CHECK(population.where_rows == 0 && population.partition_rows == 0);
+        const auto shared = pgaccel_grouped_agg_shared_copy_calls();
+        const auto device = pgaccel_grouped_agg_device_copy_calls();
+        CHECK(space == PGACCEL_MEM_SPACE_SHARED_USM ? device == 0 : shared == 0);
+        const Metrics result{pgaccel_grouped_agg_output_bytes(), shared + device};
+        pgaccel_grouped_agg_workspace_free(scratch);
+        return result;
+      };
+      const auto old = run(false, 0);
+      const auto current = run(true, 0);
+      CHECK(current.bytes == old.bytes + (scenario == 0 ? 32 : 16));
+      CHECK(current.copies == old.copies + (scenario == 0 ? 2 : 1));
+      const auto invalid = run(true, scenario == 0 ? 6 : 7);
+      CHECK(invalid.bytes == 16 && invalid.copies == 2);
+      const auto offset = run(true, 5);
+      CHECK(offset.bytes == 16 && offset.copies == 2);
+    }
+  }
+}
+
+void test_partition_v2_capacity_and_types() {
+  const pgaccel_hash_count_partition_v2 all{2, 32, 0, 0, 0, 0, 0};
+  for (size_t capacity : {size_t{123}, size_t{7872}}) {
+    const size_t rows = capacity + 17;
+    SharedArray<uint64_t> keys(rows);
+    SharedArray<int8_t> where(rows);
+    for (size_t row = 0; row < rows; ++row) { keys[row] = row; where[row] = 1; }
+    auto desc = hash_desc(keys.data(), nullptr, rows, capacity);
+    desc.where_filter.kind = PGACCEL_GROUPED_AGG_FILTER_SQL;
+    desc.where_filter.mask = where.data();
+    const auto req = query_v2(desc, all);
+    SharedWorkspace workspace(req.bytes, req.alignment);
+    desc.scratch = workspace.data(); desc.scratch_bytes = req.bytes;
+    desc.scratch_space = req.space; desc.scratch_alignment = static_cast<uint32_t>(req.alignment);
+    for (unsigned stage : {0u, 7u}) {
+      HashOutput failed(capacity, false);
+      pgaccel_hash_count_population_v2 population{2, 32, 0, 0, 0, 0};
+      int32_t detail = 73;
+      if (stage) pgacceltest_grouped_agg_fail_stage_once(stage);
+      CHECK_STATUS(pgaccel_hash_count_partition_execute_v2(&desc, &all, &failed.out,
+                   &population, &detail), PGACCEL_ERROR);
+      CHECK(detail == (stage ? 73 : PGACCEL_GROUPED_AGG_DEVICE_ERROR_HASH_CAPACITY));
+      CHECK(failed.untouched() && population.where_rows == 0 && population.partition_rows == 0);
+    }
+    // Retry same workspace, one exact leaf. Whole population must still include
+    // rows outside this leaf, and a failed ALL attempt must not leak its counts.
+    auto leaf = all;
+    leaf.kind = PGACCEL_HASH_COUNT_PARTITION_NONNULL_PREFIX;
+    leaf.prefix_bits = 64; leaf.prefix = rows - 1;
+    HashOutput output(capacity, false);
+    pgaccel_hash_count_population_v2 population{2, 32, 0, 0, 0, 0};
+    int32_t detail = 0;
+    CHECK_STATUS(pgaccel_hash_count_partition_execute_v2(&desc, &leaf, &output.out,
+                 &population, &detail), PGACCEL_OK);
+    CHECK(population.where_rows == rows && population.partition_rows == 1);
+    CHECK(output.out.emitted_group_count == 1 && output.keys[0] == rows - 1 && output.counts[0] == 1);
+    for (size_t row = 0; row < rows; ++row)
+      keys[row] = (UINT64_C(1) << 52) | ((row & 127) << 45) | ((row >> 7) << 56);
+    keys[rows - 1] = 0; // rejected/accepted late resolution error after saturation
+    desc.keys[0].flags = PGACCEL_GROUPED_AGG_KEY_FLAG_H3_PARENT;
+    desc.keys[0]._pad0 = 1;
+    for (bool accepted_bad : {false, true}) {
+      where[rows - 1] = accepted_bad ? 1 : 0;
+      HashOutput failed(capacity, false);
+      population = {2, 32, 0, 0, 0, 0};
+      detail = 0;
+      CHECK_STATUS(pgaccel_hash_count_partition_execute_v2(&desc, &all, &failed.out,
+                   &population, &detail), PGACCEL_ERROR);
+      CHECK(detail == (accepted_bad ? PGACCEL_GROUPED_AGG_DEVICE_ERROR_H3_RESOLUTION
+                                    : PGACCEL_GROUPED_AGG_DEVICE_ERROR_HASH_CAPACITY));
+      CHECK(failed.untouched() && population.where_rows == 0 && population.partition_rows == 0);
+    }
+  }
+  for (bool narrow : {false, true}) {
+    SharedArray<uint64_t> wide(std::vector<uint64_t>{0, 1, 0, 3});
+    SharedArray<int32_t> small(std::vector<int32_t>{0, 1, 0, 3});
+    SharedArray<int8_t> where(std::vector<int8_t>{1, 1, 1, 0});
+    SharedArray<uint8_t> value_nulls(std::vector<uint8_t>{0, 1, 0, 2});
+    SharedArray<uint64_t> values(4);
+    for (auto type : kCountColumnTypes) {
+      auto desc = hash_desc(wide.data(), nullptr, 4, 4);
+      if (narrow) { desc.keys[0].values.type = PGACCEL_VAL_INT32; desc.keys[0].values.values = small.data(); }
+      desc.where_filter.kind = PGACCEL_GROUPED_AGG_FILTER_SQL;
+      desc.where_filter.mask = where.data();
+      set_sql_filter(&desc, where.data()); // Native read/read alias remains legal.
+      set_count_column(&desc, type, values.data(), value_nulls.data());
+      const auto req = query_v2(desc, all);
+      SharedWorkspace workspace(req.bytes, req.alignment);
+      desc.scratch = workspace.data(); desc.scratch_bytes = req.bytes;
+      desc.scratch_space = req.space; desc.scratch_alignment = static_cast<uint32_t>(req.alignment);
+      HashOutput output(4, false);
+      pgaccel_hash_count_population_v2 population{2, 32, 0, 0, 0, 0};
+      int32_t detail = 0;
+      CHECK_STATUS(pgaccel_hash_count_partition_execute_v2(&desc, &all, &output.out,
+                   &population, &detail), PGACCEL_OK);
+      CHECK(population.where_rows == 3 && population.partition_rows == 3);
+      CHECK(output.out.emitted_group_count == 2 && output.counts[0] + output.counts[1] == 2);
+      for (size_t row = 0; row < output.out.emitted_group_count; ++row) {
+        const auto key = output.keys[row];
+        CHECK((key == 0 && output.counts[row] == 2) || (key == 1 && output.counts[row] == 0));
+      }
+    }
+  }
+  SharedArray<uint64_t> cells(std::vector<uint64_t>{UINT64_C(1) << 52, 0});
+  SharedArray<int8_t> where(std::vector<int8_t>{1, 0});
+  auto desc = hash_desc(cells.data(), nullptr, 2, 2);
+  desc.keys[0].flags = PGACCEL_GROUPED_AGG_KEY_FLAG_H3_PARENT;
+  desc.keys[0]._pad0 = 1;
+  desc.where_filter.kind = PGACCEL_GROUPED_AGG_FILTER_SQL;
+  desc.where_filter.mask = where.data();
+  const auto req = query_v2(desc, all);
+  SharedWorkspace workspace(req.bytes, req.alignment);
+  desc.scratch = workspace.data(); desc.scratch_bytes = req.bytes;
+  desc.scratch_space = req.space; desc.scratch_alignment = static_cast<uint32_t>(req.alignment);
+  for (bool accepted_bad : {false, true, false}) {
+    where[1] = accepted_bad ? 1 : 0;
+    HashOutput output(2, false);
+    pgaccel_hash_count_population_v2 population{2, 32, 0, 0, 0, 0};
+    int32_t detail = 0;
+    CHECK_STATUS(pgaccel_hash_count_partition_execute_v2(&desc, &all, &output.out,
+                 &population, &detail), accepted_bad ? PGACCEL_ERROR : PGACCEL_OK);
+    if (accepted_bad) {
+      CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_H3_RESOLUTION && output.untouched());
+      CHECK(population.where_rows == 0 && population.partition_rows == 0);
+    } else {
+      CHECK(population.where_rows == 1 && population.partition_rows == 1);
+      CHECK(output.out.emitted_group_count == 1 && output.counts[0] == 1);
+    }
+  }
+}
+
 void test_partition_api_device() {
   SharedArray<uint64_t> keys(std::vector<uint64_t>{0, 1, 1, UINT64_MAX, 0});
   SharedArray<uint8_t> nulls(std::vector<uint8_t>{0, 0, 0, 0, 1});
@@ -2678,6 +3273,7 @@ void test_partition_saturated_tail_preserves_semantic_errors(size_t capacity) {
 int main(int argc, char** argv) {
   test_dense_count_work_metadata();
   test_partition_api_metadata();
+  test_partition_v2_metadata();
   test_bool_mask_metadata();
   test_count_column_metadata_contract();
   test_filtered_count_metadata_contract();
@@ -2690,6 +3286,12 @@ int main(int argc, char** argv) {
   try {
     CHECK_STATUS(pgaccel_init(), PGACCEL_OK);
     test_partition_api_device();
+    test_partition_v2_device();
+    test_partition_v2_capacity_and_types();
+    test_partition_v2_telemetry();
+    test_partition_v2_prefixes<int32_t>();
+    test_partition_v2_prefixes<int64_t>();
+    test_partition_v2_prefixes<int64_t>(true);
     test_adaptive_large_capacity_finalization();
     test_raw_partition_signed_keys<int32_t>();
     test_raw_partition_signed_keys<int64_t>();

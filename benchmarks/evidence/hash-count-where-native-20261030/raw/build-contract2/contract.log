@@ -1,0 +1,4 @@
+FAIL: /Users/contra/Projects/pg_accel/pgaccel-kernels/test/test_grouped_agg_hash.cpp:2447: query_v2(large, control).bytes == query_workspace(large).bytes + 2088 - 1032
+--- hash COUNT(column) metadata contracts (no device initialization) ---
+--- hash FILTER metadata contracts (protected row storage) ---
+hash metadata contracts: 60423 passed, 1 failed

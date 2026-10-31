@@ -1,0 +1,13 @@
+test_checked_in_manifest_has_literal_integrity_anchor (scripts.tests.test_cpu_cheat_audit.AbiInventoryTests.test_checked_in_manifest_has_literal_integrity_anchor) ... ok
+test_actual_source_preserves_forwarding_obligations (scripts.tests.test_cpu_cheat_audit.PartitionForwardingObligationTests.test_actual_source_preserves_forwarding_obligations) ... ok
+test_each_nullable_forwarding_arm_is_required (scripts.tests.test_cpu_cheat_audit.PartitionForwardingObligationTests.test_each_nullable_forwarding_arm_is_required) ... ok
+test_each_nullable_snapshot_arm_is_required (scripts.tests.test_cpu_cheat_audit.PartitionForwardingObligationTests.test_each_nullable_snapshot_arm_is_required) ... ok
+test_forwarding_rejection_preserves_underlying_proof_failures (scripts.tests.test_cpu_cheat_audit.PartitionForwardingObligationTests.test_forwarding_rejection_preserves_underlying_proof_failures) ... ok
+test_legacy_execute_cannot_redirect_output_or_hide_failure (scripts.tests.test_cpu_cheat_audit.PartitionForwardingObligationTests.test_legacy_execute_cannot_redirect_output_or_hide_failure) ... ok
+test_legacy_wrapper_cannot_forward_partition_or_discard_status (scripts.tests.test_cpu_cheat_audit.PartitionForwardingObligationTests.test_legacy_wrapper_cannot_forward_partition_or_discard_status) ... ok
+test_wrapper_cannot_redirect_arguments_or_status (scripts.tests.test_cpu_cheat_audit.PartitionForwardingObligationTests.test_wrapper_cannot_redirect_arguments_or_status) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 1.466s
+
+OK
