@@ -1,0 +1,17 @@
+16f43e2dd97010b2523d97d3a39594794bfeba8c1385d4dbd2f64aadfe3c63c6  .codex/scratch/hash-count-where-rust-20261030/run-paired-measurement-qualified1.sh
+8b1206e1d3e2093ffba8d0df063ec58dac39528b30df7f6da3bb01473a66dee7  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/paired-run.sql
+ecd5a861f562c8b05072996dac80ae9a013516c1601829022280ce024fa6cd1f  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/check-paired.py
+7a9d679f0bf43c8be5e77dd904444dd9a6231bd0e18b1cfde61c6390c6f22e55  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/paired-exit-status.sh
+d9445aba994c1cbdee8c64f1e1b9d7a6c1c76b58aa09365ff0830e91db8e4f28  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/pgtests18-paired-correctness3/terminal.log
+55a84fe23df8818cd15f44c89865f5e67f24beb2f2564aab9120e14a23a8f981  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/pgtests18-paired-correctness3/source.sha256
+106fa518f16b577d26f496a9df936a35b128f4d63935b4d04efeed035c49fb9c  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/pgtests18-paired-correctness3/pg-test-module.sha256
+00bd91c7c1602adfdfec8d4bdef37c6dc48cff9011095b94ab661334974d4143  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/pgtests18-paired-correctness3/protected.sha256
+32d93ed0806cd4dbc5b59d72ab9548d04df3d9a71c4f8ee9e83fb94c6d7914e1  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/pgtests18-paired-correctness3/harness.sha256
+d9445aba994c1cbdee8c64f1e1b9d7a6c1c76b58aa09365ff0830e91db8e4f28  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/pgtests19-paired-correctness3/terminal.log
+55a84fe23df8818cd15f44c89865f5e67f24beb2f2564aab9120e14a23a8f981  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/pgtests19-paired-correctness3/source.sha256
+bfd54b9b7a5b3ec64c4d4b2f69e28b0faad1b94ccae3810090d96ba054f3c753  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/pgtests19-paired-correctness3/pg-test-module.sha256
+00bd91c7c1602adfdfec8d4bdef37c6dc48cff9011095b94ab661334974d4143  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/pgtests19-paired-correctness3/protected.sha256
+32d93ed0806cd4dbc5b59d72ab9548d04df3d9a71c4f8ee9e83fb94c6d7914e1  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/pgtests19-paired-correctness3/harness.sha256
+b610f3def10045669267e1f7218ebc82b6a23d97a4e90fe82b8d6fc3f01b27b1  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/paired-validate7/terminal.log
+f74cbe9cd7a541ec7b5efd6cc730dbc57930fb36cc45e8dbc3706034f90e3f6b  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/paired-validate7/source.sha256
+dd2ebd3b07c4b11904b917d2c85d9fa0e3013fe1a182f62c029f1b6648c49242  /Users/contra/Projects/pg_accel/.codex/scratch/hash-count-where-rust-20261030/paired-validate7/harness.sha256

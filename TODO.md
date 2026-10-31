@@ -2029,15 +2029,22 @@ complete objective is implemented and verified.
       `89da8dba` wires partition-v2 population conservation, query-owned masks,
       fused H3 admission and direct Boolean WHERE into normal planning. It also
       accounts for previously omitted dense WHERE consumer reads without changing
-      coefficients or suppressing competing dense paths. Paired candidate
-      measurements, the full WHERE performance matrix, unchanged released-workload
+      coefficients or suppressing competing dense paths. The full WHERE
+      performance matrix, unchanged released-workload
       controls and release/source-proof gates remain open.
       The paired diagnostic harness is now correctness-qualified on PG18/19:
       installed-owner cleanup/recovery, full result parity, actual kernel mode,
       exact lifecycle counts, bounded durable receipts and primary-error
       preservation pass. Preserve the original registration and completion-
-      telemetry test failures. No paired timings or ranking conclusions yet.
+      telemetry test failures.
       Evidence: `benchmarks/evidence/paired-where-harness-20261030/README.md`.
+      The fixed PG18 internal candidate diagnostic also passed all 442 receipts
+      and 100 scheduled executions plus four JIT probes. Raw beat Legacy in
+      every paired sample; warm descriptor-interval median ratios were 2.924x
+      and 54.260x for the two original fixtures, with both default plans choosing
+      raw hash. These are not whole-SQL timings or comparisons with PostgreSQL;
+      the unchanged 32-cell WHERE and released-workload gates remain required.
+      Evidence: `benchmarks/evidence/paired-where-diagnostic-20261031/README.md`.
       - [x] Qualify adaptive WHERE COUNT correctness on PG18 and PG19. The final
         source passes 1,365 ordinary tests, strict Clippy, formatting, both-major
         test builds and 35 focused live tests per major (70 total), with exact

@@ -1,0 +1,1 @@
+{"ordinal":0,"kind":"header","payload":{"file_limit":4194304,"jit_probes":4,"record_limit":512,"row_limit":32768,"scheduled_executions":100,"schema":1,"timer":"descriptor executor including setup/EOF/close/frees; excludes SQL planning; diagnostic capture overhead included","total_limit":536870912}}
