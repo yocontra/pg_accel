@@ -151,11 +151,18 @@ pub struct AggExecState {
 
 impl AggExecState {
     #[cfg(feature = "pg_test")]
+    // Dispatch completion only: callers must separately consume actual EOF.
+    // `descriptor.completed` belongs to the adaptive branch; ordinary output
+    // is published only after successful dispatch and lifecycle validation.
     pub(crate) fn paired_completion_identity(
         &self,
     ) -> (bool, crate::engine::residency::DerivedArtifactIdentity) {
         (
-            self.descriptor.completed,
+            if self.descriptor.adaptive.is_some() {
+                self.descriptor.completed
+            } else {
+                self.gpu_dispatched && self.descriptor.output.is_some()
+            },
             self.descriptor.plan.paired_identity(),
         )
     }

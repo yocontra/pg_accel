@@ -207,6 +207,37 @@ pub const ORDER: [[Arm; 2]; 10] = [
     [Arm::Raw, Arm::Legacy],
 ];
 
+/// Receipt failures reject otherwise successful work, but never replace an
+/// already established execution/validation error. A failed sink is not retried.
+pub fn preserve_primary(
+    primary: Result<(), String>,
+    receipt: Result<(), String>,
+) -> Result<(), String> {
+    preserve_primary_with(primary, receipt, |secondary| {
+        report_secondary_best_effort(&mut std::io::stderr().lock(), secondary);
+    })
+}
+
+fn report_secondary_best_effort(writer: &mut impl std::io::Write, secondary: &str) {
+    let _ = writeln!(writer, "paired secondary receipt failure: {secondary}");
+}
+
+fn preserve_primary_with(
+    primary: Result<(), String>,
+    receipt: Result<(), String>,
+    report_secondary: impl FnOnce(&str),
+) -> Result<(), String> {
+    match (primary, receipt) {
+        (Err(primary), Err(secondary)) => {
+            let bounded: String = secondary.chars().take(512).collect();
+            report_secondary(&bounded);
+            Err(primary)
+        }
+        (Err(primary), Ok(())) => Err(primary),
+        (Ok(()), receipt) => receipt,
+    }
+}
+
 pub fn run_fixture<B: Backend>(
     backend: &mut B,
     fixture: &'static str,
@@ -228,14 +259,16 @@ pub fn run_fixture<B: Backend>(
                 if phase == Phase::FreshArtifact
                     && let Err(error) = backend.invalidate_owned_derived_only(recipe)
                 {
-                    backend.retain_error(fixture, phase, pair, position, *arm, &error)?;
-                    return Err(error);
+                    let receipt =
+                        backend.retain_error(fixture, phase, pair, position, *arm, &error);
+                    return preserve_primary(Err(error), receipt);
                 }
                 let run = match backend.execute_owned_to_eof(recipe) {
                     Ok(run) => run,
                     Err(error) => {
-                        backend.retain_error(fixture, phase, pair, position, *arm, &error)?;
-                        return Err(error);
+                        let receipt =
+                            backend.retain_error(fixture, phase, pair, position, *arm, &error);
+                        return preserve_primary(Err(error), receipt);
                     }
                 };
                 // Persist unvalidated full output and evidence first. Failure
@@ -264,16 +297,72 @@ pub fn run_fixture<B: Backend>(
                     }
                     backend.verify_closed_owner_and_raw_residency()
                 })();
-                backend.retain_verdict(
+                let receipt = backend.retain_verdict(
                     fixture,
                     phase,
                     pair,
                     position,
                     verdict.as_ref().err().map(String::as_str),
-                )?;
-                verdict?;
+                );
+                preserve_primary(verdict, receipt)?;
             }
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::{preserve_primary_with, report_secondary_best_effort};
+
+    #[test]
+    fn failed_secondary_writer_does_not_replace_primary() {
+        struct FailedWriter;
+        impl std::io::Write for FailedWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("stderr unavailable"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::other("stderr unavailable"))
+            }
+        }
+        let result =
+            preserve_primary_with(Err("original".into()), Err("receipt".into()), |error| {
+                report_secondary_best_effort(&mut FailedWriter, error);
+            });
+        assert_eq!(result, Err("original".into()));
+    }
+
+    #[test]
+    fn receipt_failure_preserves_each_primary_and_rejects_success() {
+        for stage in ["invalidation", "execution", "validation", "jit"] {
+            let primary = format!("{stage} primary");
+            let mut secondary = Vec::new();
+            let result =
+                preserve_primary_with(Err(primary.clone()), Err("sink failed".into()), |value| {
+                    secondary.push(value.to_owned());
+                });
+            assert_eq!(result, Err(primary));
+            assert_eq!(secondary, ["sink failed"]);
+        }
+        assert_eq!(
+            preserve_primary_with(Ok(()), Err("sink failed".into()), |_| panic!("no primary")),
+            Err("sink failed".into())
+        );
+        assert_eq!(
+            preserve_primary_with(Ok(()), Ok(()), |_| panic!("no error")),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn secondary_receipt_is_bounded_and_never_retried() {
+        let mut reports = 0;
+        let result = preserve_primary_with(Err("primary".into()), Err("x".repeat(8192)), |error| {
+            reports += 1;
+            assert_eq!(error.len(), 512);
+        });
+        assert_eq!(result, Err("primary".into()));
+        assert_eq!(reports, 1);
+    }
 }

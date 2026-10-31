@@ -155,14 +155,25 @@ impl Backend for PgBackend {
             self.context =
                 serde_json::json!({"fixture":self.fixture,"phase":"Jit","arm":recipe.arm});
             self.sink.borrow_mut().record("begin", &self.context)?;
-            let run = self.execute_owned_to_eof(recipe)?;
+            let run = match self.execute_owned_to_eof(recipe) {
+                Ok(run) => run,
+                Err(error) => {
+                    let receipt = self.sink.borrow_mut().record(
+                        "result_error",
+                        &serde_json::json!({
+                            "context": self.context, "error": error
+                        }),
+                    );
+                    return super::paired_driver::preserve_primary(Err(error), receipt);
+                }
+            };
             let verdict = super::paired_driver::validate(recipe, &run, &self.oracle)
                 .and_then(|()| self.verify_closed_owner_and_raw_residency());
-            self.sink.borrow_mut().record(
+            let receipt = self.sink.borrow_mut().record(
                 "verdict",
                 &serde_json::json!({"context":self.context,"error":verdict.as_ref().err()}),
-            )?;
-            verdict?;
+            );
+            super::paired_driver::preserve_primary(verdict, receipt)?;
         }
         Ok(())
     }
